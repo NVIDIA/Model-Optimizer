@@ -71,17 +71,14 @@ merged into the `aa/` multi-task list.
   apples-to-apples comparison.
 - **IFBench** is the least quant-sensitive in the set but still useful as a
   regression check for aggressive formats (NVFP4, INT4-AWQ).
-- **MRCR** is **not** an AA benchmark — never add it to an "AA" request. Reach
-  for it when long-context behaviour matters: it is the longest-context task in
-  this skill (up to 1M tokens) and, unlike AA-LCR, has no judge in the loop, so
-  the score is deterministic. It runs as its **own standalone `gym` config**
-  (`recipes/tasks/gym/mrcr.md`). Two comparability traps: the three upstream
-  variants (`config_n3_1m` / `config_n3_128k` / `config`) use different datasets
-  and are **not** comparable to each other, and the golden's
-  `--kv-cache-dtype fp8` must be held identical across baseline and candidate or
-  the delta also measures KV-cache quantization. Report the per-needle-count
-  strata (2/4/8) alongside the aggregate — precision loss shows up in the
-  8-needle stratum while the aggregate still looks flat.
+- **MRCR** is **not** AA — never add it to an "AA" request. Use it when
+  long-context matters: the longest-context task here (1M tokens) and, unlike
+  AA-LCR, no judge, so the score is deterministic. Standalone `gym` config
+  (`recipes/tasks/gym/mrcr.md`). Two comparability traps: the three variants use
+  different datasets and are **not** comparable to each other, and
+  `--kv-cache-dtype fp8` must match across baseline and candidate or the delta
+  also measures KV-cache quantization. Report the 2/4/8 needle strata — precision
+  loss hits the 8-needle stratum while the aggregate still looks flat.
 - **GDPVal** is part of the AA suite but the heaviest task and a separate
   harness: it runs as its **own standalone `gym` config** (never in the `aa/`
   `tasks` list), needs the Apptainer SIF sandbox + judge, and is multi-hour /

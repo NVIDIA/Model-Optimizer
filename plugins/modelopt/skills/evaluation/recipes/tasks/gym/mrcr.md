@@ -2,198 +2,132 @@
 
 ## Task Details
 
-- Upstream benchmark: <https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mrcr>
+- Benchmark: <https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/mrcr>
 - Resource server: <https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mrcr/configs/mrcr.yaml>
-- Dataset: `openai/mrcr` (HF, gated → `HF_TOKEN` required)
+- Dataset: `openai/mrcr` (HF, gated → `HF_TOKEN`)
 
-MRCR is a **long-context retrieval** benchmark. Each task is a long synthetic
-multi-turn conversation containing N near-identical "needle" responses; the final
-user turn asks the model to *reproduce the Nth occurrence verbatim, prefixed with
-a random string*. Scoring is deterministic: `SequenceMatcher.ratio()` between the
-stripped response and the reference answer, **gated on the response starting with
-the required random prefix** (wrong prefix → 0). Results are stratified by needle
-count (2 / 4 / 8) — accuracy falls sharply as N rises.
+Long-context retrieval. Each task is a long multi-turn conversation with N
+near-identical "needle" responses; the model must reproduce the Nth verbatim
+behind a random prefix. Deterministic scoring: `SequenceMatcher.ratio()`, **0
+unless the response starts with the required prefix**. Stratified by needle count
+(2/4/8); accuracy falls sharply as N rises.
+
+A 0.2.6 `nel` `nemo_gym` task (not nel-next), so Steps 1–9 apply. **Standalone** —
+one gym eval per config, never mixed with other tasks.
 
 **Not an AA benchmark** — never generate it for an "AA" request. It shares
-`recipes/tasks/gym/` with GDPVal, which *is* part of the AA suite: the directory
-groups tasks by **harness** (NeMo Gym), not by suite membership, so read that
-per-task, not from the path.
+`recipes/tasks/gym/` with GDPVal, which *is* AA: the dir groups by **harness**,
+not suite, so read membership per task.
 
-It runs on the **0.2.6 `nel` launcher** as a `nemo_gym` task (NOT nel-next), so
-Steps 1–9 apply — with the branch differences below.
-
-## What makes MRCR different from GDPVal (the other gym task)
-
-MRCR is **much simpler to configure** than GDPVal — most of the GDPVal machinery
-does not apply:
-
-| | GDPVal | MRCR |
-| --- | --- | --- |
-| Gym agent | `stirrup_agent` | **`simple_agent`** |
-| Apptainer SIF sandbox | required | **none** |
-| LLM judge | Gemini 3.1 Pro, 4 trials | **none** — deterministic string grading |
-| External secrets | `INFERENCE_API_KEY`, `TAVILY_API_KEY`, judge URL | **`HF_TOKEN` only** |
-| Dominant cost | agent turns + judge | **context length** (up to 1M tokens/prompt) |
-
-What it shares with GDPVal: it is **standalone** (one gym eval per config — never
-add MRCR to a multi-task `evaluation.tasks` list, and never add other tasks to an
-MRCR config), it needs `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
-`pre_cmd`), and `limit_samples` behaves differently from the normal task path.
+Much lighter than GDPVal: `simple_agent`, **no SIF sandbox, no judge, no Tavily** —
+`HF_TOKEN` is the only secret, and the cost is context length rather than agent
+turns. Like GDPVal it needs `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
+`pre_cmd`).
 
 ## Config
 
-Start from the self-contained example and edit it — **do not** copy a fragment
-into another config:
+Start from the self-contained example — do **not** copy fragments into another
+config:
 
 ```text
-recipes/examples/gym/example_mrcr.yaml   # SLURM + vLLM, 1M variant, self-contained
+recipes/examples/gym/example_mrcr.yaml   # SLURM + vLLM, 1M variant
 ```
 
-### Variant selection — pick before anything else
+### Variant — pick first
 
-Three upstream variants; the choice sets the context envelope, the dataset file,
-**and the metric key prefix**. The reviewed golden uses the **1M** variant.
+Sets the context cap, the dataset, **and the metric prefix**. The golden uses 1M.
 
-| Gym config path | Tokenizer / cap | Agent + metric prefix | `num_repeats` |
+| Gym config | Cap (tokenizer) | Metric prefix | `num_repeats` |
 | --- | --- | --- | --- |
-| `benchmarks/mrcr/config_n3_1m.yaml` | NVIDIA Nemotron (gated), ≤ 1,048,576 tok | `mrcr_n3_1m_benchmark_simple_agent` | 1 |
-| `benchmarks/mrcr/config_n3_128k.yaml` | NVIDIA Nemotron (gated), ≤ 131,072 tok | `mrcr_n3_128k_benchmark_simple_agent` | 1 |
-| `benchmarks/mrcr/config.yaml` | `o200k_base`, **no cap** | `mrcr_benchmark_simple_agent` | 4 |
+| `benchmarks/mrcr/config_n3_1m.yaml` | 1,048,576 (gated NVIDIA) | `mrcr_n3_1m_benchmark_simple_agent` | 1 |
+| `benchmarks/mrcr/config_n3_128k.yaml` | 131,072 (gated NVIDIA) | `mrcr_n3_128k_benchmark_simple_agent` | 1 |
+| `benchmarks/mrcr/config.yaml` | none (`o200k_base`) | `mrcr_benchmark_simple_agent` | 4 |
 
-The n3 variants *drop* samples whose tokenized conversation exceeds the cap, so
-the two n3 datasets are different sizes and **their scores are not comparable to
-each other or to the plain variant**. Pick one and keep it fixed across baseline
-and candidate.
+The n3 variants drop over-long samples, so all three are different datasets and
+**not comparable to each other**. Pick one, keep it fixed across baseline and
+candidate, and set it in **both** `data_prep_params` and `collect_rollout_params`
+— changing one prepares one dataset and rolls out another.
 
-Change the variant in **both** `data_prep_params` and `collect_rollout_params`
-(`+config_paths=[...]`) — changing only one silently prepares one dataset and
-rolls out another.
+`num_repeats` comes from the variant; the template does not override it (1M
+reports `pass@1`). Upstream it is a placeholder for `type: benchmark` datasets —
+the real count comes from the runner. **Do not change repeat counts when aligning
+to a golden.**
 
-`num_repeats` comes from the chosen variant's upstream config and the template
-does not override it. Per the upstream README, for `type: benchmark` datasets the
-in-config `num_repeats` is a **placeholder** that only duplicates rows for
-`train`/`validation` splits — the real repeat count comes from the runner. The 1M
-golden reports `pass@1`, i.e. one rollout per task. **Do not change repeat counts
-when aligning a run to a golden.**
+### Serving envelope (1M)
 
-### Serving envelope (1M variant)
+- `--max-model-len 1100000` **+** `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` in
+  `deployment.env_vars` — vLLM otherwise refuses a len above the checkpoint's
+  `max_position_embeddings`.
+- `gpu_memory_utilization: 0.95` (vs the usual 0.85) for the KV cache.
+- `--enable-prefix-caching`, `--enable-chunked-prefill`,
+  `--max-num-batched-tokens 131072`.
+- `--kv-cache-dtype fp8` — **itself a precision choice**; keep identical across
+  baseline and candidate or the delta also measures KV-cache quantization.
+- Fan out via `execution.num_nodes` / `num_instances` (golden **4 / 4**, HAProxy
+  pattern A — `references/multi-node.md`). `parallelism` is the total across
+  instances, so `--max-num-seqs = ceil(parallelism / num_instances / DP)`
+  (256/4/1 = 64).
+- **Never cap output.** Answers reproduce a whole earlier turn; a cap truncates it
+  and craters the ratio. Golden: `max_new_tokens: null` +
+  `++responses_create_params.max_output_tokens=null`.
 
-The long-context envelope, not the model, drives these:
+### Gym pin ↔ container — verify before trusting a score
 
-- `--max-model-len 1100000` **plus** `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` in
-  `deployment.env_vars` — vLLM refuses a `--max-model-len` above the checkpoint's
-  declared `max_position_embeddings` without it.
-- `gpu_memory_utilization: 0.95` (up from the usual 0.85) to fit the KV cache.
-- `--enable-prefix-caching` + `--enable-chunked-prefill` + a large
-  `--max-num-batched-tokens` (golden: 131072).
-- `--kv-cache-dtype fp8` is part of the golden envelope. **It is itself a
-  precision choice** — keep it identical between baseline and quantized runs or
-  the delta also measures KV-cache quantization.
-- Fan out with `execution.num_nodes` / `num_instances` (golden: **4 / 4**,
-  HAProxy pattern A — see `references/multi-node.md`). `parallelism` is the
-  **total** gym client concurrency across all instances, so
-  `--max-num-seqs = ceil(parallelism / num_instances / DP)` (golden: 256/4/1 = 64).
+The template pins Gym to `a431501a` (the golden's commit), which carries the N3 1M
+prepare path `config_n3_1m.yaml` needs and is **newer than the Gym baked into any
+image**. `install_on_the_fly` applies it by `git checkout` in `/opt/Gym`, so it
+works only where that is a git repo:
 
-### Output length — do not cap it
+| Image | Pin behaviour |
+| --- | --- |
+| Public `nvcr.io/nvidia/eval-factory/nemo-gym:*` (template default) | often **silently ignored** — logs `/opt/Gym is not a git repo`, runs baked Gym |
+| Internal core-evals `ci-llm/nemo-gym` (≥ 2026-07-05) | applies, or **hard-fails** on mismatch |
 
-MRCR answers **reproduce an entire earlier assistant turn verbatim**. Any output
-cap truncates the reproduction and craters `SequenceMatcher.ratio()`. The golden
-sets `max_new_tokens: null` and passes
-`++responses_create_params.max_output_tokens=null`. Leave both uncapped.
-
-### `pre_cmd` — required
-
-The pinned Gym commit's MRCR prepare imports `tiktoken` at module load and falls
-back to `transformers.AutoTokenizer` for the N3 tokenizer path; **neither is a
-declared dep of that commit's Gym venv**, so prepare dies with `ModuleNotFoundError`
-without the `pre_cmd` that installs them. Needs `NEMO_EVALUATOR_TRUST_PRE_CMD=1`
-in the launching shell.
-
-### Gym commit ↔ container coupling — read before trusting a score
-
-The template pins Gym to `a431501aa294f3237d472aaf58dd1e5026156ea8`, the commit
-the golden validated. **MRCR depends on the pin actually applying**: the N3 1M
-preparation path that `config_n3_1m.yaml` needs landed in that commit, and it is
-*newer* than the Gym baked into every image below. A run where the pin didn't
-apply is not "slightly older Gym" — it is a different benchmark or no benchmark.
-
-`install_on_the_fly` applies the pin by `git remote add / fetch / checkout` inside
-`/opt/Gym`. **That only works if `/opt/Gym` is a git repo**, which differs by
-image family:
-
-| Image | `/opt/Gym` | Pin behaviour |
-| --- | --- | --- |
-| Public `nvcr.io/nvidia/eval-factory/nemo-gym:*` (this template's default) | often **not** a git repo | **Silently ignored** — logs `/opt/Gym is not a git repo; using baked-in Gym version` and runs the baked Gym |
-| Internal core-evals gym image (`ci-llm/nemo-gym`, ≥ 2026-07-05 build) | git repo, **build-guarded** | Applies, or **hard-fails** — the build asserts `test -d /opt/Gym/.git`, and the integration layer exits 1 when `HEAD != pin` |
-
-The internal image bakes upstream `NVIDIA-NeMo/Gym` @ `14630a2e` and deliberately
-preserves `/opt/Gym/.git` (its CVE-scan `.git` cleanup excludes that one path)
-after an earlier build stripped it and broke pinning — the failure mode they
-describe is "wrong-but-green eval results."
-
-So on the public image, **verify the pin every run** rather than assuming it:
+An inert pin gives either a loud failure (missing `config_n3_1m.yaml`) or — worse
+— an older variant that scores green and non-comparable. Verify every run:
 
 ```bash
-grep -c "=== NeMo Gym commit ==="  $RD/logs/client-*.log   # pin applied
-grep -c "not a git repo"           $RD/logs/client-*.log   # pin INERT -> baked Gym
+grep -c "=== NeMo Gym commit ==="  $RD/logs/client-*.log   # applied
+grep -c "not a git repo"           $RD/logs/client-*.log   # INERT
 ```
 
-If the pin is inert, the good case is a loud failure — prepare dies on a missing
-`benchmarks/mrcr/config_n3_1m.yaml` because the baked Gym predates the N3
-variants. The dangerous case is a baked Gym that has an *older* `config_n3_1m.yaml`
-with a different prepare path: it runs green and scores something not comparable
-to the golden. If you cannot confirm the `=== NeMo Gym commit ===` SHA, use an
-image whose `/opt/Gym` is a git repo instead of trusting the number.
-NVIDIA-internal users: `modelopttools:eval-config` Step 3d names one (and how to
-pull it); external users should verify the log line on whatever image they have.
+NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
 ## Canary
 
-Unlike GDPVal, MRCR's gym path **does** accept a sample limit in the golden
-lineage (`++limit=N`, wired from `limit_samples`). The template omits it; add it
-explicitly for a canary rather than assuming the launcher-level
-`++…params.limit_samples=N` reaches the gym:
+MRCR's gym path accepts `++limit=N` (unlike GDPVal). Append it explicitly — the
+launcher-level `limit_samples` does not reach the gym:
 
 ```bash
 nel run --config example_mrcr.yaml -o \
-  ++evaluation.tasks.0.nemo_evaluator_config.config.params.extra.nemo_gym.collect_rollout_params="<existing string> ++limit=5"
+  ++evaluation.tasks.0.nemo_evaluator_config.config.params.extra.nemo_gym.collect_rollout_params="<existing> ++limit=5"
 ```
 
-Either way, treat the first ~30 minutes of the real run as the canary and check:
+Then watch the first ~30 min of the real run:
 
 ```bash
 RD=<output_dir>/<run>/nemo_gym.0
-grep -c "=== NeMo Gym commit ==="   $RD/logs/client-*.log   # pin actually applied
-grep -c "not a git repo"            $RD/logs/client-*.log   # pin inert -> baked Gym
-grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log  # pre_cmd didn't take
-wc -l $RD/artifacts/evaluator_rollouts.jsonl                # rollouts flowing
+grep -c "=== NeMo Gym commit ==="        $RD/logs/client-*.log   # pin applied
+grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log   # pre_cmd didn't take
+wc -l $RD/artifacts/evaluator_rollouts.jsonl                     # rollouts flowing
 ```
 
-A run that produces rollouts but scores ~0 across the board almost always means
-the **prefix gate** is failing (responses not starting with the required random
-prefix) — check a few raw completions before blaming the checkpoint. On a
-reasoning model that usually means the reasoning trace is leaking into the graded
-answer: verify `--reasoning-parser` is set on the server and
+Rollouts flowing but scores ~0 = the **prefix gate** failing, not a bad
+checkpoint. On a reasoning model that is usually the reasoning trace leaking into
+the graded answer — check `--reasoning-parser` on the server and
 `process_reasoning_traces: true` in the adapter.
 
 ## Score Extraction
 
-The headline metric is **`<agent_prefix>/pass@1/accuracy`**, where the prefix is
-the variant's agent name (see the variant table). For the 1M template:
+Headline: **`<prefix>/pass@1/accuracy`** (prefix per the variant table). Metrics
+are in `artifacts/results.yml`, mirrored to MLflow as `nemo_gym_…` plus a
+`key_metrics/` copy.
 
-```text
-mrcr_n3_1m_benchmark_simple_agent/pass@1/accuracy
-```
-
-Metrics live in `artifacts/results.yml` (authoritative, local) and are mirrored to
-MLflow (prefixed `nemo_gym_`, duplicated under a `key_metrics/` path).
-
-| Metric | Meaning |
+| Metric | |
 | --- | --- |
-| `<prefix>/pass@1/accuracy` | **REPORT THIS** — mean prefix-gated SequenceMatcher ratio |
-| `<prefix>/pass@k/accuracy` | only meaningful when repeats > 1 |
-| `<prefix>/pass@1[avg-of-k]/accuracy` | majority-vote variant, repeats > 1 |
-| `<prefix>/n_needles=2\|4\|8/pass@1/accuracy` | per-stratum breakdown — **always quote these too** |
+| `<prefix>/pass@1/accuracy` | **REPORT THIS** — mean prefix-gated ratio |
+| `<prefix>/n_needles=2\|4\|8/pass@1/accuracy` | per-stratum — **always quote too** |
+| `<prefix>/pass@k/…`, `<prefix>/pass@1[avg-of-k]/…` | only meaningful when repeats > 1 |
 
 ```bash
 python3 -c "
@@ -204,21 +138,11 @@ for k in [f'{p}/pass@1/accuracy'] + [f'{p}/n_needles={n}/pass@1/accuracy' for n 
     if k in m: print(k, '=', m[k]['scores'][k]['value'])"
 ```
 
-**Always report the needle-count strata alongside the headline.** Long-context
-degradation from quantization shows up in the 8-needle stratum first while the
-aggregate barely moves — the aggregate alone can hide a real regression.
+Quantization damage shows in the **8-needle stratum first** while the aggregate
+barely moves — the aggregate alone hides it.
 
-### Reference point (reviewed golden, BF16 Nemotron Nano 3.5, 1M variant)
-
-```text
-mrcr_n3_1m_benchmark_simple_agent/pass@1/accuracy = 26.91
-  n_needles=2  36.81
-  n_needles=4  27.12
-  n_needles=8  16.74
-2363/2363 rollouts, 0 failures   (parallelism 256, 4 nodes / 4 instances)
-```
-
-Use this to sanity-check a run's shape, not as a pass/fail bar for a different
-model. A **rollout count materially below 2363** on the 1M variant means tasks
-were lost (e.g. across a walltime resume) and the accuracy is computed over fewer
-tasks than the reference — re-check before quoting.
+Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
+needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /
+4 instances. Use it to sanity-check shape, not as a bar for another model — a
+rollout count well below 2363 means tasks were lost (e.g. a walltime resume) and
+the score covers fewer tasks than the reference.

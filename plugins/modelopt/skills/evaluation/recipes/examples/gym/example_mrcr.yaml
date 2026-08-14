@@ -14,21 +14,16 @@
 # limitations under the License.
 #
 # =============================================================================
-# MRCR (OpenAI Multi-Round Co-reference Resolution) — STANDALONE gym eval.
-# NeMo Gym `simple_agent` (NOT the GDPVal Stirrup agent): no Apptainer SIF, no
-# code-exec sandbox, no LLM judge, no Tavily. Grading is deterministic
-# (prefix-gated SequenceMatcher.ratio), so the only external secret is HF_TOKEN.
+# MRCR (Multi-Round Co-reference Resolution) — STANDALONE gym eval.
+# NeMo Gym `simple_agent`: no SIF, no code-exec sandbox, no judge, no Tavily.
+# Grading is deterministic (prefix-gated SequenceMatcher.ratio) — HF_TOKEN is the
+# only secret. Targets the 1M-context N3 variant like the reviewed golden; prompts
+# up to 1,048,576 tokens drive every unusual setting below.
 #
-# This template targets the **1M-context N3 variant** (`config_n3_1m`), matching
-# the reviewed golden. It is a LONG-CONTEXT benchmark: prompts run up to
-# 1,048,576 tokens, which drives every unusual setting below.
+# Read recipes/tasks/gym/mrcr.md first (variant choice, Gym pin/container
+# coupling, score extraction, failure modes).
 #
-# Read recipes/tasks/gym/mrcr.md first — it covers variant choice, the Gym
-# commit/container coupling, score extraction, and failure modes.
-#
-# Before running: `.env` needs HF_TOKEN and NEMO_EVALUATOR_TRUST_PRE_CMD=1
-# (this config has a `pre_cmd`).
-#
+# `.env` needs HF_TOKEN + NEMO_EVALUATOR_TRUST_PRE_CMD=1 (this config has a pre_cmd).
 #   nel run --config example_mrcr.yaml --env-file .env
 #
 # =============================================================================
@@ -49,10 +44,9 @@ execution:
   account: ???
   output_dir: ???        # absolute host path; keeps the response cache across resumes
   walltime: "04:00:00"
-  # 1M-context rollouts are slow. The golden fans out across 4 independent
-  # single-node instances (HAProxy pattern A, see references/multi-node.md) so
-  # the run fits the walltime. `parallelism` below is the TOTAL across all
-  # instances, not per-instance. Halve/double both together.
+  # 1M rollouts are slow; the golden fans out over 4 single-node instances
+  # (HAProxy pattern A, references/multi-node.md). `parallelism` below is the
+  # TOTAL across instances — halve/double both together.
   num_nodes: 4
   num_instances: 4
   # gres: a predefined internal/slurm/<cluster> config sets this. On slurm/default
@@ -89,16 +83,12 @@ deployment:
   served_model_name: ???
   image: vllm/vllm-openai:v0.26.0   # bump to the EXACT model's recipes.vllm.ai minimum (SKILL Step 3)
   gpu_memory_utilization: 0.95      # golden raises this from 0.85 to fit the 1M KV cache
-  # MRCR is a REASONING-mode run in the golden (thinking forced on via the
-  # adapter_config chat_template_kwargs below); serve with the model's
-  # --reasoning-parser so vLLM emits a separate reasoning channel.
-  # --max-num-seqs: on the GYM path derive it from the gym client concurrency,
-  # NOT from the generic SKILL rule. N = ceil(parallelism / num_instances / DP).
-  # With parallelism=256, num_instances=4, DP=1 -> 64.
-  #
-  # --kv-cache-dtype fp8 is part of the golden's 1M serving envelope. It is
-  # itself a precision choice: keep it IDENTICAL between baseline and quantized
-  # runs, or the comparison measures KV-cache quantization too.
+  # Golden serves in REASONING mode (thinking forced on via chat_template_kwargs
+  # below), so set the model's --reasoning-parser.
+  # --max-num-seqs on the GYM path = ceil(parallelism / num_instances / DP), NOT
+  # the generic SKILL rule; here ceil(256/4/1) = 64.
+  # --kv-cache-dtype fp8 is itself a precision choice — keep it IDENTICAL across
+  # baseline and quantized runs or the delta measures KV-cache quantization too.
   command: >-
     vllm serve /checkpoint
     --served-model-name ${deployment.served_model_name}
@@ -122,10 +112,8 @@ evaluation:
     DUMMY_API_KEY: lit:dummy        # the deployed vLLM endpoint's (policy) key
     UV_CACHE_DIR: lit:/cache/uv
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
-  # The pinned Gym commit's MRCR prepare imports tiktoken at module load and
-  # falls back to transformers.AutoTokenizer for the N3 HF-tokenizer path;
-  # neither is declared as a dep of that commit's Gym venv. Needs
-  # NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the launching shell.
+  # The pinned Gym commit's MRCR prepare needs tiktoken + transformers, neither
+  # declared in its venv. Needs NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the shell.
   pre_cmd: |-
     set -ex
     command -v uv >/dev/null 2>&1 || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="/root/.local/bin:$PATH"; }
@@ -135,14 +123,12 @@ evaluation:
       params:
         temperature: 1.0
         top_p: 0.95
-        # Gym client concurrency, TOTAL across all instances (see execution above).
-        # NOT a per-server in-flight cap.
+        # Gym client concurrency, TOTAL across instances — not a per-server cap.
         parallelism: 256
         request_timeout: 36000      # 1M-token prefills are slow
         max_retries: 10
-        # MRCR answers REPRODUCE a full earlier assistant turn verbatim. Any
-        # output cap truncates the reproduction and craters SequenceMatcher.ratio,
-        # so the golden leaves it uncapped (see max_output_tokens=null below).
+        # Uncapped: answers reproduce a full earlier turn, and any cap truncates
+        # it and craters SequenceMatcher.ratio (see max_output_tokens=null below).
         max_new_tokens:
     target:
       api_endpoint:
@@ -181,20 +167,12 @@ evaluation:
               nemo_gym:
                 install_on_the_fly:
                   url: https://github.com/NVIDIA-NeMo/Gym
-                  # Gym pin from the reviewed golden. This commit carries the N3 1M
-                  # preparation path that `config_n3_1m.yaml` depends on, and it is
-                  # NEWER than the Gym baked into the images below — so this pin MUST
-                  # apply for the run to mean anything.
-                  # The pin is applied by `git checkout` inside /opt/Gym, so it only
-                  # works when /opt/Gym is a git repo:
-                  #   public eval-factory image  -> often NOT a git repo; the pin is
-                  #     SILENTLY ignored ("/opt/Gym is not a git repo") and you get
-                  #     whatever Gym the image shipped.
-                  #   internal core-evals image  -> git repo, build-guarded; the pin
-                  #     applies or the run hard-fails.
-                  # On the public image, confirm the "=== NeMo Gym commit ===" + SHA
-                  # line in the client log before trusting a score.
-                  # See recipes/tasks/gym/mrcr.md "Gym commit <-> container coupling".
+                  # Golden's pin. Carries the N3 1M prepare path config_n3_1m.yaml
+                  # needs, and is NEWER than the Gym baked into any image — so it
+                  # MUST apply. Applied by `git checkout` in /opt/Gym, so it is
+                  # SILENTLY ignored where that is not a git repo (public image).
+                  # Confirm "=== NeMo Gym commit ===" + SHA in the client log before
+                  # trusting a score. See recipes/tasks/gym/mrcr.md.
                   commit: a431501aa294f3237d472aaf58dd1e5026156ea8  # pragma: allowlist secret
                 command: |
                   set -ex
@@ -262,15 +240,12 @@ evaluation:
                   pkill -9 -u "$(id -u)" -f gcs_server >/dev/null 2>&1 || true
                   pkill -9 -u "$(id -u)" -f plasma_store >/dev/null 2>&1 || true
                   exit $__rc
-                # VARIANT SELECTOR — this pair of `config_paths` picks the context
-                # envelope, the dataset file, AND the metric key prefix. Change BOTH
-                # lines together, and update the metric name you harvest:
-                #   benchmarks/mrcr/config_n3_1m.yaml   -> mrcr_n3_1m_benchmark_simple_agent   (this template)
-                #   benchmarks/mrcr/config_n3_128k.yaml -> mrcr_n3_128k_benchmark_simple_agent
-                #   benchmarks/mrcr/config.yaml         -> mrcr_benchmark_simple_agent
-                # The n3 variants tokenize with the gated NVIDIA tokenizer (HF_TOKEN
-                # required) and drop over-long samples; the plain variant uses
-                # o200k_base with no cap.
+                # VARIANT SELECTOR — picks the context cap, the dataset AND the
+                # metric prefix. Change BOTH config_paths lines together, and update
+                # the metric name you harvest:
+                #   config_n3_1m.yaml   -> mrcr_n3_1m_benchmark_simple_agent   (this template)
+                #   config_n3_128k.yaml -> mrcr_n3_128k_benchmark_simple_agent
+                #   config.yaml         -> mrcr_benchmark_simple_agent
                 data_prep_params: >-
                   "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,benchmarks/mrcr/config_n3_1m.yaml]"
                   +hf_token=$HF_TOKEN

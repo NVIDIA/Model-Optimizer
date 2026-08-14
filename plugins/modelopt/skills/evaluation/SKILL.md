@@ -82,35 +82,26 @@ tasks). If the user asks for GDPVal:
 
 ### MRCR (NeMo Gym `simple_agent`) path — branch here too
 
-MRCR is a **long-context** gym benchmark and, like GDPVal, a 0.2.6 `nemo_gym`
-task that is **standalone** (one gym eval per config). It is **not** an AA
-benchmark — never generate it as part of an "AA" request. It is far simpler than
-GDPVal: `simple_agent`, **no SIF sandbox, no judge, no Tavily** — deterministic
-prefix-gated `SequenceMatcher` grading, so `HF_TOKEN` is the only secret. If the
-user asks for MRCR:
+A 0.2.6 `nemo_gym` task like GDPVal and equally **standalone**, but far simpler:
+`simple_agent`, **no SIF, no judge, no Tavily** — deterministic prefix-gated
+grading, `HF_TOKEN` the only secret. **Not an AA benchmark** — never generate it
+for an "AA" request. If the user asks for MRCR:
 
-1. Read **`recipes/tasks/gym/mrcr.md`** (variant table, serving envelope, score
-   extraction, failure modes).
-2. Start from **`recipes/examples/gym/example_mrcr.yaml`** — a single
-   self-contained file, targeting the 1M variant like the reviewed golden.
-3. **Pick the variant first** — `config_n3_1m` / `config_n3_128k` / `config`. It
-   sets the context cap, the dataset size, *and* the metric key prefix, and the
-   three are not comparable to each other. Change it in **both**
-   `data_prep_params` and `collect_rollout_params`.
-4. `.env` needs `HF_TOKEN` (the dataset and the n3 tokenizer are both gated) and
-   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a `pre_cmd` that installs
-   `tiktoken` + `transformers` into the Gym venv — prepare fails without it).
-   The template's Gym pin is **newer than any image's baked Gym**, so it must
-   actually apply: on images where `/opt/Gym` is not a git repo it is silently
-   ignored. NVIDIA-internal: `modelopttools:eval-config` **Step 3d** names a
-   container where pinning works (and how to pull it).
-5. Long-context envelope, not the model, drives the deploy:
-   `--max-model-len 1100000` + `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`,
-   `gpu_memory_utilization: 0.95`, prefix caching + chunked prefill, and a
-   multi-instance fan-out (golden: 4 nodes / 4 instances). **Never cap output
-   tokens** — answers reproduce a full earlier turn verbatim.
-6. Report the **needle-count strata** (2/4/8) alongside the headline
-   `pass@1/accuracy`; quantization damage shows up in the 8-needle stratum first.
+1. Read **`recipes/tasks/gym/mrcr.md`**; start from
+   **`recipes/examples/gym/example_mrcr.yaml`** (1M variant, like the golden).
+2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
+   sets the context cap, dataset *and* metric prefix; the three are not
+   comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
+   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
+   `transformers`; prepare fails without it).
+4. The Gym pin is **newer than any image's baked Gym** and is silently ignored
+   where `/opt/Gym` is not a git repo — verify it applied before quoting a score.
+   NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
+5. Long-context deploy (`--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
+   multi-instance fan-out); **never cap output tokens**; report the needle-count
+   strata alongside `pass@1/accuracy`.
 
 ---
 
