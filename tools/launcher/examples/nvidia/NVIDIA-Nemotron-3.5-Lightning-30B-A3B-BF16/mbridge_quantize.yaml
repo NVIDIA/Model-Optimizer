@@ -40,6 +40,7 @@ pipeline:
       container: nvcr.io/nvidia/nemo:26.08
       modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
       docker_user: root
+      nodes: 1
       ntasks_per_node: 4
       gpus_per_node: 4
 

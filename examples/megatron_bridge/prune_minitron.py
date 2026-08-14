@@ -728,12 +728,18 @@ def main(args: argparse.Namespace):
                 )
                 exported_config_only = True
             except ValueError as e:
-                # Some Megatron-Bridge versions expose from_hf_config but reject config-only
-                # save_hf_pretrained; fall back to the dummy-model path below.
+                # nemo:26.06+ exposes from_hf_config but rejects config-only save_hf_pretrained;
+                # fall back to the dummy-model path below.
+                if "requires a pretrained HuggingFace model" not in str(e):
+                    raise
                 warn_rank_0(f"Config-only HF export unsupported ({e}); using dummy-model export.")
 
         if not exported_config_only:
-            if isinstance(provider, _HYBRID_PROVIDER_TYPES) and not is_vlm:
+            if (
+                not hasattr(AutoBridge, "from_hf_config")
+                and isinstance(provider, _HYBRID_PROVIDER_TYPES)
+                and not is_vlm
+            ):
                 warn_rank_0(
                     "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
                     "path, which cannot round-trip a pruned native NemotronH config. Use "
