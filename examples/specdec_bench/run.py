@@ -242,6 +242,7 @@ def run_simple(args):
     )
 
     runner.clear_metrics()
+    model.stop()
 
 
 if __name__ == "__main__":
