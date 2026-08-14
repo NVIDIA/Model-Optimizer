@@ -604,6 +604,7 @@ class VisionLanguageDataCollator(LanguageDataCollator):
             tokenize=True,
             return_tensors="pt",
             return_dict=True,
+            padding=True,
             add_generation_prompt=self.add_generation_prompt,
             return_assistant_tokens_mask=self.answer_only_loss and not derive_masks_from_markers,
         )

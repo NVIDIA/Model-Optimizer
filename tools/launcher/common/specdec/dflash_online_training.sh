@@ -40,6 +40,11 @@ source ${SCRIPT_DIR}/../service_utils.sh
 
 pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install huggingface-hub>=1.2.1
+# Multimodal datasets containing videos require TorchCodec. Keep this opt-in so
+# text-only launcher examples do not acquire an unnecessary runtime dependency.
+if [ "${INSTALL_TORCHCODEC:-0}" = "1" ]; then
+    pip install torchcodec
+fi
 export PATH=$PATH:/workspace/.local/bin
 
 # Some trust_remote_code MoE models pin an older transformers (e.g. MiniMax-M2.7
@@ -48,6 +53,16 @@ export PATH=$PATH:/workspace/.local/bin
 if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
     pip install "transformers==${OVERRIDE_TRANSFORMERS}"
 fi
+
+# Export must follow the training configuration: loading a checkpoint with
+# remote code is opt-in and defaults to disabled. The command-line model option
+# takes precedence so one launcher task has a single source of truth.
+TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-false}
+for arg in "$@"; do
+    if [[ "$arg" == model.trust_remote_code=* ]]; then
+        TRUST_REMOTE_CODE=${arg#*=}
+    fi
+done
 
 ###################################################################################################
 
@@ -123,6 +138,11 @@ set +x
 
 # Export last checkpoint to deployment format (rank 0 only, single GPU)
 if [ "${SLURM_PROCID:-0}" = "0" ]; then
+    EXPORT_TRUST_REMOTE_CODE=()
+    if [[ "${TRUST_REMOTE_CODE,,}" == "true" || "$TRUST_REMOTE_CODE" == "1" ]]; then
+        EXPORT_TRUST_REMOTE_CODE+=(--trust_remote_code)
+    fi
+
     OUTPUT_DIR=$(python3 -c "
 import sys
 for arg in sys.argv[1:]:
@@ -145,7 +165,7 @@ for arg in sys.argv[1:]:
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
                 --model_path "${CKPT}" \
                 --export_path "${EXPORT_DIR}" \
-                --trust_remote_code
+                "${EXPORT_TRUST_REMOTE_CODE[@]}"
             EXPORTED=$((EXPORTED + 1))
         done
         # Also export final model if saved directly to output_dir
@@ -154,7 +174,7 @@ for arg in sys.argv[1:]:
             CUDA_VISIBLE_DEVICES=0 python3 modules/Model-Optimizer/examples/speculative_decoding/scripts/export_hf_checkpoint.py \
                 --model_path "${OUTPUT_DIR}" \
                 --export_path "${OUTPUT_DIR}/exported-checkpoint-final" \
-                --trust_remote_code
+                "${EXPORT_TRUST_REMOTE_CODE[@]}"
             EXPORTED=$((EXPORTED + 1))
         fi
         if [ "$EXPORTED" -eq 0 ]; then
