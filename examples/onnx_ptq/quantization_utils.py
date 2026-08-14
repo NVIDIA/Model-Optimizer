@@ -81,6 +81,61 @@ def _read_npy_header(array_file, batch_path):
     return tuple(shape), np.dtype(dtype)
 
 
+def _validate_array(
+    shape,
+    dtype,
+    expected_shape,
+    expected_dtype,
+    payload_bytes,
+    max_elements,
+    max_payload_bytes,
+    path,
+    allow_safe_cast=False,
+):
+    element_count = prod(shape)
+    if element_count > max_elements:
+        raise ValueError(f"{path} exceeds the tensor-element limit")
+    expected_bytes = element_count * dtype.itemsize
+    if expected_bytes > max_payload_bytes:
+        raise ValueError(f"{path} exceeds the array byte limit")
+    if expected_bytes != payload_bytes:
+        raise ValueError(f"{path} array payload size does not match its header")
+    converted_bytes = element_count * expected_dtype.itemsize
+    if converted_bytes > max_payload_bytes:
+        raise ValueError(f"{path} exceeds the converted array byte limit")
+    if expected_shape is not None and (
+        len(shape) != len(expected_shape)
+        or any(
+            expected is not None and actual != expected
+            for actual, expected in zip(shape, expected_shape)
+        )
+    ):
+        raise ValueError(f"{path} shape {shape} does not match ONNX input shape {expected_shape}")
+    if dtype != expected_dtype and not (
+        allow_safe_cast and np.can_cast(dtype, expected_dtype, casting="safe")
+    ):
+        raise ValueError(f"{path} dtype {dtype} does not match ONNX input dtype {expected_dtype}")
+    return converted_bytes
+
+
+def _onnx_inputs(graph):
+    inputs = {}
+    for value in graph.input:
+        tensor_type = value.type.tensor_type
+        inputs[value.name] = (
+            (
+                tuple(
+                    dim.dim_value if dim.HasField("dim_value") else None
+                    for dim in tensor_type.shape.dim
+                )
+                if tensor_type.HasField("shape")
+                else None
+            ),
+            np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type)),
+        )
+    return inputs
+
+
 class FileCalibrationReader(CalibrationDataReader):
     def __init__(self, calibration_dir, pattern, max_batches=MAX_CALIBRATION_BATCHES):
         if max_batches < 1:
@@ -123,15 +178,11 @@ class NpyCalibrationReader(FileCalibrationReader):
         if max_batch_bytes < 1 or max_tensor_elements < 1:
             raise ValueError("NPY byte and tensor-element limits must be positive")
         graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
-        inputs = [value for value in graph.input if value.name == input_name]
-        if len(inputs) != 1:
-            raise ValueError(f"Expected one ONNX input named {input_name}, found {len(inputs)}")
-        tensor_type = inputs[0].type.tensor_type
+        inputs = _onnx_inputs(graph)
+        if input_name not in inputs:
+            raise ValueError(f"ONNX model has no input named {input_name}")
         self.input_name = input_name
-        self.input_dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type))
-        self.input_shape = tuple(
-            dim.dim_value if dim.HasField("dim_value") else None for dim in tensor_type.shape.dim
-        )
+        self.input_shape, self.input_dtype = inputs[input_name]
         self.max_batch_bytes = max_batch_bytes
         self.max_tensor_elements = max_tensor_elements
         super().__init__(calibration_dir, "*.npy", max_batches)
@@ -139,20 +190,17 @@ class NpyCalibrationReader(FileCalibrationReader):
     def load(self, batch_path):
         with _open_regular_file(batch_path, "NPY", self.max_batch_bytes) as array_file:
             shape, dtype = _read_npy_header(array_file, batch_path)
-            element_count = prod(shape)
-            if element_count > self.max_tensor_elements:
-                raise ValueError(f"{batch_path} exceeds the tensor-element limit")
-            if len(shape) != len(self.input_shape) or any(
-                expected is not None and actual != expected
-                for actual, expected in zip(shape, self.input_shape)
-            ):
-                raise ValueError(
-                    f"{batch_path} shape {shape} does not match ONNX input shape {self.input_shape}"
-                )
-            if dtype != self.input_dtype:
-                raise ValueError(
-                    f"{batch_path} dtype {dtype} does not match ONNX input dtype {self.input_dtype}"
-                )
+            payload_bytes = os.fstat(array_file.fileno()).st_size - array_file.tell()
+            _validate_array(
+                shape,
+                dtype,
+                self.input_shape,
+                self.input_dtype,
+                payload_bytes,
+                self.max_tensor_elements,
+                self.max_batch_bytes,
+                batch_path,
+            )
             array_file.seek(0)
             return {self.input_name: np.load(array_file, allow_pickle=False)}
 
@@ -166,14 +214,15 @@ class NpzCalibrationReader(FileCalibrationReader):
         max_archive_bytes=MAX_CALIBRATION_BYTES,
         max_tensor_elements=MAX_TENSOR_ELEMENTS,
         max_onnx_bytes=MAX_ONNX_BYTES,
+        safe_cast_inputs=(),
     ):
         if max_archive_bytes < 1 or max_tensor_elements < 1:
             raise ValueError("NPZ byte and tensor-element limits must be positive")
         graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
-        self.input_dtypes = {
-            value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
-            for value in graph.input
-        }
+        self.inputs = _onnx_inputs(graph)
+        self.safe_cast_inputs = set(safe_cast_inputs)
+        if not self.safe_cast_inputs <= self.inputs.keys():
+            raise ValueError("Safe-cast inputs must be ONNX input names")
         self.max_archive_bytes = max_archive_bytes
         self.max_tensor_elements = max_tensor_elements
         super().__init__(calibration_dir, "*.npz", max_batches)
@@ -184,30 +233,45 @@ class NpzCalibrationReader(FileCalibrationReader):
             if sum(member.file_size for member in members) > self.max_archive_bytes:
                 raise ValueError(f"{batch_path} exceeds the expanded NPZ byte limit")
             element_count = 0
+            converted_bytes = 0
+            names = set()
             for member in members:
                 if member.is_dir() or not member.filename.endswith(".npy"):
                     raise ValueError(f"{batch_path} contains an unexpected archive member")
+                name = member.filename[:-4]
+                if name in names or name not in self.inputs:
+                    raise ValueError(f"{batch_path} contains an unexpected archive member")
+                names.add(name)
                 with archive.open(member) as array_file:
-                    shape, _ = _read_npy_header(array_file, batch_path)
-                element_count += prod(shape)
-                if element_count > self.max_tensor_elements:
-                    raise ValueError(f"{batch_path} exceeds the tensor-element limit")
+                    shape, dtype = _read_npy_header(array_file, batch_path)
+                    payload_bytes = member.file_size - array_file.tell()
+                    input_shape, input_dtype = self.inputs[name]
+                    converted_bytes += _validate_array(
+                        shape,
+                        dtype,
+                        input_shape,
+                        input_dtype,
+                        payload_bytes,
+                        self.max_tensor_elements - element_count,
+                        self.max_archive_bytes - converted_bytes,
+                        batch_path,
+                        name in self.safe_cast_inputs,
+                    )
+                    element_count += prod(shape)
+                    while array_file.read(1 << 20):
+                        pass
+            missing = self.inputs.keys() - names
+            if missing:
+                raise ValueError(f"{batch_path} input mismatch; missing={sorted(missing)}")
 
     def load(self, batch_path):
         with _open_regular_file(batch_path, "NPZ", self.max_archive_bytes) as batch_file:
             self.validate_archive(batch_file, batch_path)
             batch_file.seek(0)
             with np.load(batch_file, allow_pickle=False) as batch:
-                missing = self.input_dtypes.keys() - batch.files
-                unexpected = set(batch.files) - self.input_dtypes.keys()
-                if missing or unexpected:
-                    raise ValueError(
-                        f"{batch_path} input mismatch; missing={sorted(missing)}, "
-                        f"unexpected={sorted(unexpected)}"
-                    )
                 return {
                     name: batch[name].astype(dtype, copy=False)
-                    for name, dtype in self.input_dtypes.items()
+                    for name, (_, dtype) in self.inputs.items()
                 }
 
 
