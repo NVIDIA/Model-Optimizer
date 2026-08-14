@@ -17,6 +17,8 @@
 
 import torch
 
+from modelopt.torch.utils import same_device_as
+
 from ..backends.utils import fp4_compatible
 from ..qtensor.base_qtensor import BaseQuantizedTensor
 from ..utils import reduce_amax, reduce_block_amax, reduce_block_padding
@@ -275,71 +277,72 @@ class NVFP4QTensor(BaseQuantizedTensor):
         input_shape = input.shape
         input_dtype = input.dtype
 
-        # pad the input if needed
-        input = reduce_block_padding(input, block_sizes={-1: block_size})
+        with same_device_as(input):
+            # pad the input if needed
+            input = reduce_block_padding(input, block_sizes={-1: block_size})
 
-        if weights_scaling_factor_2 is None:
-            weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(input)
+            if weights_scaling_factor_2 is None:
+                weights_scaling_factor_2 = cls.get_weights_scaling_factor_2(input)
 
-        # try call trtllm fp4 quantization if possible
-        if (
-            fp4_compatible()
-            and weights_scaling_factor is None
-            and try_tensorrt
-            and block_size == 16
-            and input.is_cuda
-            and input.dtype in [torch.half, torch.bfloat16]
-        ):
-            try:
-                import tensorrt_llm  # noqa: F401
+            # try call trtllm fp4 quantization if possible
+            if (
+                fp4_compatible()
+                and weights_scaling_factor is None
+                and try_tensorrt
+                and block_size == 16
+                and input.is_cuda
+                and input.dtype in [torch.half, torch.bfloat16]
+            ):
+                try:
+                    import tensorrt_llm  # noqa: F401
 
-                # Make sure this utils is available for dequantize
-                from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
-                    cutlass_fp4_scale_to_modelopt_fp4_scale,  # noqa: F401
+                    # Make sure this utils is available for dequantize
+                    from tensorrt_llm._torch.auto_deploy.utils.quantization_utils import (
+                        cutlass_fp4_scale_to_modelopt_fp4_scale,  # noqa: F401
+                    )
+
+                    packed_weight, weights_scaling_factor = torch.ops.trtllm.fp4_quantize(
+                        input, 1.0 / weights_scaling_factor_2, block_size, False
+                    )
+                    # weights_scaling_factor is ready for nvfp4_gemm to use;
+                    # however, it is different from the non trtllm version, so when dequantize,
+                    # it will be converted.
+                    return (
+                        cls(input_shape, input_dtype, packed_weight),
+                        weights_scaling_factor,
+                        weights_scaling_factor_2,
+                    )
+                except ImportError:
+                    pass
+
+            if weights_scaling_factor is None:
+                weights_scaling_factor, _ = cls.get_weights_scaling_factor(
+                    input, block_size, weights_scaling_factor_2
                 )
 
-                packed_weight, weights_scaling_factor = torch.ops.trtllm.fp4_quantize(
-                    input, 1.0 / weights_scaling_factor_2, block_size, False
-                )
-                # weights_scaling_factor is ready for nvfp4_gemm to use;
-                # however, it is different from the non trtllm version, so when dequantize,
-                # it will be converted.
-                return (
-                    cls(input_shape, input_dtype, packed_weight),
-                    weights_scaling_factor,
-                    weights_scaling_factor_2,
-                )
-            except ImportError:
-                pass
+            # Reshape the weight and scale factors
+            original_shape = input.shape
+            input = input.view((*tuple(input.shape[:-1]), -1, block_size))
 
-        if weights_scaling_factor is None:
-            weights_scaling_factor, _ = cls.get_weights_scaling_factor(
-                input, block_size, weights_scaling_factor_2
+            # Scale weights
+            scaled_weight = input / (
+                (weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2).unsqueeze(-1)
             )
 
-        # Reshape the weight and scale factors
-        original_shape = input.shape
-        input = input.view((*tuple(input.shape[:-1]), -1, block_size))
+            # Reshape weights to original
+            scaled_weight = scaled_weight.view(original_shape)
 
-        # Scale weights
-        scaled_weight = input / (
-            (weights_scaling_factor.to(torch.float32) * weights_scaling_factor_2).unsqueeze(-1)
-        )
-
-        # Reshape weights to original
-        scaled_weight = scaled_weight.view(original_shape)
-
-        if keep_high_precision:
-            return scaled_weight
-        # Cast weights to fp4
-        q_weight = cls._cast_fp4(scaled_weight)
-        # Pack weights
-        packed_weight = (q_weight[..., 1::2] << 4) | q_weight[..., 0::2]
-        return (
-            cls(input_shape, input_dtype, packed_weight),
-            weights_scaling_factor,
-            weights_scaling_factor_2,
-        )
+            if keep_high_precision:
+                return scaled_weight
+            # Cast weights to fp4
+            q_weight = cls._cast_fp4(scaled_weight)
+            # Pack weights
+            packed_weight = (q_weight[..., 1::2] << 4) | q_weight[..., 0::2]
+            return (
+                cls(input_shape, input_dtype, packed_weight),
+                weights_scaling_factor,
+                weights_scaling_factor_2,
+            )
 
     def dequantize(self, dtype: torch.dtype = None, fast=False, **kwarg):
         """Dequantze NVFP4 packed tensor to a target dtype."""

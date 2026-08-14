@@ -697,7 +697,7 @@ def _export_quantized_weight(
 
         if (
             input_quantizer is not None
-            and "disabled" not in repr(input_quantizer)
+            and input_quantizer.is_enabled
             and input_quantizer.amax is not None
         ):
             sub_module.register_buffer(

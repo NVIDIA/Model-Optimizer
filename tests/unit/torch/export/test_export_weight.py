@@ -102,6 +102,21 @@ def test_export_per_block_quantized_weight():
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
 
 
+def test_export_quantized_weight_does_not_repr_input_quantizer(monkeypatch):
+    model = ToyModel(dims=[32, 256, 32])
+    mtq.quantize(model, partial_fp8_config, lambda x: x(torch.randn(1, 4, 32)))
+    input_quantizer = model.linears[1].input_quantizer
+
+    monkeypatch.setattr(
+        input_quantizer,
+        "extra_repr",
+        lambda: pytest.fail("export should inspect is_enabled without formatting the quantizer"),
+    )
+
+    _export_quantized_weight(model.linears[1], torch.float32, "weight")
+    assert hasattr(model.linears[1], "input_scale")
+
+
 class QuantMoELinear(nn.Module):
     def __init__(self):
         super().__init__()
