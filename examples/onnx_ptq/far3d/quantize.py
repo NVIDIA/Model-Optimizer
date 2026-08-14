@@ -30,11 +30,11 @@ from quantization_utils import (
 
 
 class EncoderCalibrationReader(FileCalibrationReader):
-    def __init__(self, calibration_dir):
-        super().__init__(calibration_dir, "*.npy")
+    def __init__(self, calibration_dir, max_batches=512):
+        super().__init__(calibration_dir, "*.npy", max_batches)
 
     def load(self, batch_path):
-        return {"img": np.load(batch_path)}
+        return {"img": np.load(batch_path, allow_pickle=False)}
 
 
 def parse_args():
@@ -45,6 +45,12 @@ def parse_args():
         "--calibration-dir", required=True, help="Directory created by prepare_calibration.py"
     )
     parser.add_argument("--quantization-mode", choices=("int8", "fp8"), default="int8")
+    parser.add_argument(
+        "--max-calibration-batches",
+        type=int,
+        default=512,
+        help="Maximum number of calibration batches to load",
+    )
     parser.add_argument("--encoder-output")
     parser.add_argument("--decoder-output")
     parser.add_argument(
@@ -64,7 +70,9 @@ def quantize_encoder(args):
     quantize(
         onnx_path=args.encoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=EncoderCalibrationReader(encoder_dir),
+        calibration_data_reader=EncoderCalibrationReader(
+            encoder_dir, max_batches=args.max_calibration_batches
+        ),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=excluded_nodes,
@@ -78,7 +86,9 @@ def quantize_decoder(args):
     quantize(
         onnx_path=args.decoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=NpzCalibrationReader(decoder_dir, args.decoder_onnx),
+        calibration_data_reader=NpzCalibrationReader(
+            decoder_dir, args.decoder_onnx, max_batches=args.max_calibration_batches
+        ),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         high_precision_dtype="fp16" if args.quantization_mode == "fp8" else "fp32",
@@ -88,6 +98,8 @@ def quantize_decoder(args):
 
 def main():
     args = parse_args()
+    if args.max_calibration_batches < 1:
+        raise ValueError("--max-calibration-batches must be positive")
     if args.encoder_output is None:
         args.encoder_output = f"far3d.encoder.{args.quantization_mode}.onnx"
     if args.decoder_output is None:

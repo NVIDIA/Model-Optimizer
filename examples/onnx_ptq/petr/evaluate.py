@@ -38,6 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from examples.onnx_ptq.trt_runner import TensorRTRunner
 
+__all__ = ["PETRPipeline", "build_runtime"]
+
 
 def import_plugin(cfg):
     if cfg.get("custom_imports"):
@@ -132,6 +134,7 @@ class PETRPipeline:
                 "enc_bbox_preds": None,
             }
             boxes = self.model.pts_bbox_head.get_bboxes(head_outputs, img_metas, rescale=True)
+        torch.cuda.current_stream().wait_stream(stream)
         return [
             {"pts_bbox": bbox3d2result(boxes_3d, scores_3d, labels_3d)}
             for boxes_3d, scores_3d, labels_3d in boxes
