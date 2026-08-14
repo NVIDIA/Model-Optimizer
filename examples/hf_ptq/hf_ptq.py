@@ -855,11 +855,12 @@ def export_quantized(
                 print("This is normal for some VLM architectures that don't use AutoProcessor")
 
         start_time = time.time()
-        if (
+        is_tensorrt_llm_export = (
             model_type in ["t5", "bart", "whisper"]
             or args.sparsity_fmt != "dense"
             or "int8_sq" in args.qformat
-        ):
+        )
+        if is_tensorrt_llm_export:
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -931,7 +932,13 @@ def export_quantized(
         # from the source checkpoint take precedence over regenerated ones (which may
         # differ in format due to newer transformers versions).
         if args.dist_state.is_main:
-            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+            exclude_files = None if is_tensorrt_llm_export else {"generation_config.json"}
+            copy_custom_model_files(
+                args.pyt_ckpt_path,
+                export_path,
+                args.trust_remote_code,
+                exclude_files=exclude_files,
+            )
 
         end_time = time.time()
         print_rank_0(

@@ -24,7 +24,59 @@ pytest.importorskip("huggingface_hub")
 hf_hub_errors = pytest.importorskip("huggingface_hub.errors")
 LocalEntryNotFoundError = hf_hub_errors.LocalEntryNotFoundError
 
-from modelopt.torch.export import copy_hf_ckpt_remote_code, sanitize_hf_config_for_deployment
+from modelopt.torch.export import (
+    copy_hf_ckpt_remote_code,
+    copy_non_safetensor_files_from_ckpt,
+    sanitize_hf_config_for_deployment,
+)
+from modelopt.torch.export.plugins import hf_checkpoint_utils
+
+
+def test_copy_non_safetensor_files_from_ckpt_supports_additional_exclusions(tmp_path):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "model.safetensors").write_text("weights")
+    (src_dir / "model.safetensors.index.json").write_text('{"weight_map": {}}')
+    (src_dir / "pytorch_model.bin").write_text("weights")
+    (src_dir / "stats.npy").write_text("stats")
+    (src_dir / "reasoning_parser.py").write_text("parser")
+
+    default_dst = tmp_path / "default"
+    copy_non_safetensor_files_from_ckpt(src_dir, default_dst)
+    assert not (default_dst / "model.safetensors").exists()
+    assert not (default_dst / "model.safetensors.index.json").exists()
+    assert (default_dst / "pytorch_model.bin").exists()
+    assert (default_dst / "stats.npy").exists()
+
+    filtered_dst = tmp_path / "filtered"
+    copy_non_safetensor_files_from_ckpt(
+        src_dir,
+        filtered_dst,
+        exclude_patterns=("*.bin", "*.npy"),
+    )
+    assert (filtered_dst / "reasoning_parser.py").exists()
+    assert not (filtered_dst / "pytorch_model.bin").exists()
+    assert not (filtered_dst / "stats.npy").exists()
+
+
+def test_copy_non_safetensor_files_from_ckpt_continues_after_copy_failure(tmp_path, monkeypatch):
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "bad.py").write_text("bad")
+    (src_dir / "good.py").write_text("good")
+
+    original_copy2 = hf_checkpoint_utils.shutil.copy2
+
+    def copy2(source, *args, **kwargs):
+        if source.endswith("bad.py"):
+            raise PermissionError("unreadable")
+        return original_copy2(source, *args, **kwargs)
+
+    monkeypatch.setattr(hf_checkpoint_utils.shutil, "copy2", copy2)
+    with pytest.warns(UserWarning, match="bad.py"):
+        copied_files = copy_non_safetensor_files_from_ckpt(src_dir, tmp_path / "dst")
+
+    assert copied_files == ["good.py"]
 
 
 def test_copy_hf_ckpt_remote_code_local_dir(tmp_path):
