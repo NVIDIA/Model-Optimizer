@@ -16,6 +16,7 @@
 import copy
 import math
 
+import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_w4a8_config
@@ -123,6 +124,33 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Test requires two CUDA devices")
+def test_export_nvfp4_modules_uses_each_weight_device():
+    modules = []
+    for device_idx in range(2):
+        device = torch.device("cuda", device_idx)
+        with torch.cuda.device(device):
+            module = nn.Linear(32, 32, bias=False, device=device, dtype=torch.bfloat16)
+            mtq.quantize(
+                module,
+                mtq.NVFP4_DEFAULT_CFG,
+                lambda m: m(torch.randn(2, 32, device=device, dtype=torch.bfloat16)),
+            )
+            modules.append(module)
+
+    for expected_device, module in enumerate(modules):
+        wrong_device = 1 - expected_device
+        with torch.cuda.device(wrong_device):
+            _export_quantized_weight(module, torch.bfloat16)
+
+            assert torch.cuda.current_device() == wrong_device
+            assert module.weight.device.index == expected_device
+            assert module.weight_scale.device.index == expected_device
+            assert module.weight_scale_2.device.index == expected_device
+            assert module.input_scale.device.index == expected_device
+            torch.cuda.synchronize(expected_device)
 
 
 def test_export_compressed_nvfp4_weight():

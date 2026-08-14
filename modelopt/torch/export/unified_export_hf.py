@@ -61,6 +61,7 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import same_device_as
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
@@ -567,6 +568,17 @@ def _compressed_per_block_scale(
 
 
 def _export_quantized_weight(
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+    _tied_cache: dict[int, nn.Module] | None = None,
+):
+    """Export one quantized weight while its device is current."""
+    with same_device_as(getattr(sub_module, weight_name)):
+        return _export_quantized_weight_impl(sub_module, dtype, weight_name, _tied_cache)
+
+
+def _export_quantized_weight_impl(
     sub_module: nn.Module,
     dtype: torch.dtype,
     weight_name: str = "weight",
