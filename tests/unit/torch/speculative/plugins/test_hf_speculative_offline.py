@@ -273,6 +273,7 @@ def test_vlm_collator_pads_template_output_and_builds_unshifted_labels():
         tokenize=True,
         return_tensors="pt",
         return_dict=True,
+        padding=True,
         add_generation_prompt=False,
         return_assistant_tokens_mask=True,
     )

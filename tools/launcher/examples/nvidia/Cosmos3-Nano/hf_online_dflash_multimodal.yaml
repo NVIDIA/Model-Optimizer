@@ -3,12 +3,12 @@
 # Unlike the text-only DFlash examples, the draft here is trained on image and
 # video conversations, so the pipeline first synthesizes its own training data.
 #
-# 6-step pipeline:
+# 9-step pipeline:
 #   task_0..2: Prepare prompt shards for three sources (download + reshape)
-#   task_3:    Generate target completions for those shards
-#   task_4:    Merge + deduplicate into one training JSONL
-#   task_5:    Online DFlash training (exports every checkpoint)
-#   task_6:    vLLM smoke test with DFlash speculative decoding
+#   task_3..5: Generate target completions for each source
+#   task_6:    Merge + deduplicate into one training JSONL
+#   task_7:    Online DFlash training (exports every checkpoint)
+#   task_8:    vLLM smoke test with DFlash speculative decoding
 #
 # Data sources — DFlash learns from the target model's own completions, not from
 # human-written answers, so every source contributes prompts that are replayed
@@ -79,17 +79,33 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 1
 
-  # Step 4: generate target completions. Shards are split across the allocated
+  # Steps 4-6: generate target completions. Shards are split across the allocated
   # nodes automatically; each node serves the target locally.
   #
   # SGLANG_TP_SIZE=1 runs one server per GPU, one temperature each, so a node
   # sweeps NUM_TEMPERATURES in parallel. Raise TP (and drop NUM_TEMPERATURES to
   # match) only if the target does not fit on a single GPU.
   #
-  # Media sources need SGLang's native image/video client; text uses vLLM. Run
-  # this task once per source, overriding --dataset/--shard-path/--output-path
-  # (and --media-root for the media sources).
+  # Media sources use SGLang's native image/video client; text uses vLLM.
   task_3:
+    script: common/specdec/multimodal_synthetic_generation.sh
+    args:
+      - --dataset pai_understanding
+      - --shard-path <<global_vars.data_root>>/pai_shards
+      - --output-path <<global_vars.data_root>>/pai_outputs
+      - --media-root <<global_vars.data_root>>/pai_understanding
+    environment:
+      - MODEL_PATH: <<global_vars.hf_model>>
+      - SGLANG_TP_SIZE: "1"
+      - NUM_TEMPERATURES: "8"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: lmsysorg/sglang:v0.5.3-cu129
+
+  task_4:
     script: common/specdec/multimodal_synthetic_generation.sh
     args:
       - --dataset vqa_v2
@@ -107,10 +123,28 @@ pipeline:
       gpus_per_node: 8
       container: lmsysorg/sglang:v0.5.3-cu129
 
-  # Step 5: merge. Media paths are resolved to absolute here, which is why
+  task_5:
+    script: common/specdec/multimodal_synthetic_generation.sh
+    args:
+      - --dataset specdec_multilingual_prompt
+      - --shard-path <<global_vars.data_root>>/text_shards
+      - --output-path <<global_vars.data_root>>/text_outputs
+    environment:
+      - MODEL_PATH: <<global_vars.hf_model>>
+      - BACKEND: vllm
+      - SGLANG_TP_SIZE: "1"
+      - NUM_TEMPERATURES: "8"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:v0.24.0
+
+  # Step 7: merge. Media paths are resolved to absolute here, which is why
   # training below can pass data.vlm_img_dir=/. The temperature sweep emits many
   # near-identical completions per prompt, so dedup runs over the merged set.
-  task_4:
+  task_6:
     script: common/specdec/merge_dflash_datasets.sh
     args:
       - --source pai_understanding=<<global_vars.data_root>>/pai_outputs
@@ -128,11 +162,11 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 1
 
-  # Step 6: online DFlash training. The VLM_* limits below cap text and visual
+  # Step 8: online DFlash training. The VLM_* limits below cap text and visual
   # token growth *before* tokenization; without them a high-resolution video can
   # expand past training_seq_len, which the collator rejects rather than
   # silently truncating.
-  task_5:
+  task_7:
     script: common/specdec/dflash_online_training.sh
     args:
       - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
@@ -188,8 +222,8 @@ pipeline:
       ntasks_per_node: 1
       gpus_per_node: 8
 
-  # Step 7: smoke test the exported draft under vLLM.
-  task_6:
+  # Step 9: smoke test the exported draft under vLLM.
+  task_8:
     script: common/specdec/vllm_smoke_test.sh
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
