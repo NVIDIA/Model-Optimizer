@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import re
+import stat
 import zipfile
 from itertools import islice
 from math import prod
@@ -25,11 +27,58 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.utils import topologically_sort_graph_nodes
 
-__all__ = ["FileCalibrationReader", "NpzCalibrationReader", "find_vovnet_nodes_to_exclude"]
+__all__ = [
+    "FileCalibrationReader",
+    "NpyCalibrationReader",
+    "NpzCalibrationReader",
+    "find_vovnet_nodes_to_exclude",
+]
 
 MAX_CALIBRATION_BATCHES = 512
-MAX_NPZ_BYTES = 128 << 20
+MAX_CALIBRATION_BYTES = 128 << 20
+MAX_ONNX_BYTES = 512 << 20
 MAX_TENSOR_ELEMENTS = 32_000_000
+
+
+def _open_regular_file(path, file_type, max_bytes):
+    path = Path(path)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as error:
+        raise ValueError(f"Unable to open {path} as a {file_type} file") from error
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(f"{path} is not a regular {file_type} file")
+        if file_stat.st_size > max_bytes:
+            raise ValueError(f"{path} exceeds the {file_type} byte limit")
+        return os.fdopen(descriptor, "rb")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _load_onnx_graph(onnx_path, max_onnx_bytes=MAX_ONNX_BYTES):
+    if max_onnx_bytes < 1:
+        raise ValueError("ONNX byte limit must be positive")
+    with _open_regular_file(onnx_path, "ONNX", max_onnx_bytes) as onnx_file:
+        model_bytes = onnx_file.read(max_onnx_bytes + 1)
+        if len(model_bytes) > max_onnx_bytes:
+            raise ValueError(f"{onnx_path} exceeds the ONNX byte limit")
+        return onnx.load_model_from_string(model_bytes).graph
+
+
+def _read_npy_header(array_file, batch_path):
+    version = np.lib.format.read_magic(array_file)
+    if version == (1, 0):
+        shape, _, dtype = np.lib.format.read_array_header_1_0(array_file)
+    elif version == (2, 0):
+        shape, _, dtype = np.lib.format.read_array_header_2_0(array_file)
+    else:
+        raise ValueError(f"{batch_path} uses unsupported NPY version {version}")
+    if dtype.hasobject:
+        raise ValueError(f"{batch_path} contains an object array")
+    return tuple(shape), np.dtype(dtype)
 
 
 class FileCalibrationReader(CalibrationDataReader):
@@ -60,18 +109,67 @@ class FileCalibrationReader(CalibrationDataReader):
         raise NotImplementedError
 
 
+class NpyCalibrationReader(FileCalibrationReader):
+    def __init__(
+        self,
+        calibration_dir,
+        onnx_path,
+        input_name,
+        max_batches=MAX_CALIBRATION_BATCHES,
+        max_batch_bytes=MAX_CALIBRATION_BYTES,
+        max_tensor_elements=MAX_TENSOR_ELEMENTS,
+        max_onnx_bytes=MAX_ONNX_BYTES,
+    ):
+        if max_batch_bytes < 1 or max_tensor_elements < 1:
+            raise ValueError("NPY byte and tensor-element limits must be positive")
+        graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
+        inputs = [value for value in graph.input if value.name == input_name]
+        if len(inputs) != 1:
+            raise ValueError(f"Expected one ONNX input named {input_name}, found {len(inputs)}")
+        tensor_type = inputs[0].type.tensor_type
+        self.input_name = input_name
+        self.input_dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type))
+        self.input_shape = tuple(
+            dim.dim_value if dim.HasField("dim_value") else None for dim in tensor_type.shape.dim
+        )
+        self.max_batch_bytes = max_batch_bytes
+        self.max_tensor_elements = max_tensor_elements
+        super().__init__(calibration_dir, "*.npy", max_batches)
+
+    def load(self, batch_path):
+        with _open_regular_file(batch_path, "NPY", self.max_batch_bytes) as array_file:
+            shape, dtype = _read_npy_header(array_file, batch_path)
+            element_count = prod(shape)
+            if element_count > self.max_tensor_elements:
+                raise ValueError(f"{batch_path} exceeds the tensor-element limit")
+            if len(shape) != len(self.input_shape) or any(
+                expected is not None and actual != expected
+                for actual, expected in zip(shape, self.input_shape)
+            ):
+                raise ValueError(
+                    f"{batch_path} shape {shape} does not match ONNX input shape {self.input_shape}"
+                )
+            if dtype != self.input_dtype:
+                raise ValueError(
+                    f"{batch_path} dtype {dtype} does not match ONNX input dtype {self.input_dtype}"
+                )
+            array_file.seek(0)
+            return {self.input_name: np.load(array_file, allow_pickle=False)}
+
+
 class NpzCalibrationReader(FileCalibrationReader):
     def __init__(
         self,
         calibration_dir,
         onnx_path,
         max_batches=MAX_CALIBRATION_BATCHES,
-        max_archive_bytes=MAX_NPZ_BYTES,
+        max_archive_bytes=MAX_CALIBRATION_BYTES,
         max_tensor_elements=MAX_TENSOR_ELEMENTS,
+        max_onnx_bytes=MAX_ONNX_BYTES,
     ):
         if max_archive_bytes < 1 or max_tensor_elements < 1:
             raise ValueError("NPZ byte and tensor-element limits must be positive")
-        graph = onnx.load(onnx_path, load_external_data=False).graph
+        graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
         self.input_dtypes = {
             value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
             for value in graph.input
@@ -80,11 +178,8 @@ class NpzCalibrationReader(FileCalibrationReader):
         self.max_tensor_elements = max_tensor_elements
         super().__init__(calibration_dir, "*.npz", max_batches)
 
-    def validate_archive(self, batch_path):
-        if batch_path.stat().st_size > self.max_archive_bytes:
-            raise ValueError(f"{batch_path} exceeds the compressed NPZ byte limit")
-
-        with zipfile.ZipFile(batch_path) as archive:
+    def validate_archive(self, batch_file, batch_path):
+        with zipfile.ZipFile(batch_file) as archive:
             members = archive.infolist()
             if sum(member.file_size for member in members) > self.max_archive_bytes:
                 raise ValueError(f"{batch_path} exceeds the expanded NPZ byte limit")
@@ -93,38 +188,32 @@ class NpzCalibrationReader(FileCalibrationReader):
                 if member.is_dir() or not member.filename.endswith(".npy"):
                     raise ValueError(f"{batch_path} contains an unexpected archive member")
                 with archive.open(member) as array_file:
-                    version = np.lib.format.read_magic(array_file)
-                    if version == (1, 0):
-                        shape, _, dtype = np.lib.format.read_array_header_1_0(array_file)
-                    elif version == (2, 0):
-                        shape, _, dtype = np.lib.format.read_array_header_2_0(array_file)
-                    else:
-                        raise ValueError(f"{batch_path} uses unsupported NPY version {version}")
-                if dtype.hasobject:
-                    raise ValueError(f"{batch_path} contains an object array")
+                    shape, _ = _read_npy_header(array_file, batch_path)
                 element_count += prod(shape)
                 if element_count > self.max_tensor_elements:
                     raise ValueError(f"{batch_path} exceeds the tensor-element limit")
 
     def load(self, batch_path):
-        self.validate_archive(batch_path)
-        with np.load(batch_path, allow_pickle=False) as batch:
-            missing = self.input_dtypes.keys() - batch.files
-            unexpected = set(batch.files) - self.input_dtypes.keys()
-            if missing or unexpected:
-                raise ValueError(
-                    f"{batch_path} input mismatch; missing={sorted(missing)}, "
-                    f"unexpected={sorted(unexpected)}"
-                )
-            return {
-                name: batch[name].astype(dtype, copy=False)
-                for name, dtype in self.input_dtypes.items()
-            }
+        with _open_regular_file(batch_path, "NPZ", self.max_archive_bytes) as batch_file:
+            self.validate_archive(batch_file, batch_path)
+            batch_file.seek(0)
+            with np.load(batch_file, allow_pickle=False) as batch:
+                missing = self.input_dtypes.keys() - batch.files
+                unexpected = set(batch.files) - self.input_dtypes.keys()
+                if missing or unexpected:
+                    raise ValueError(
+                        f"{batch_path} input mismatch; missing={sorted(missing)}, "
+                        f"unexpected={sorted(unexpected)}"
+                    )
+                return {
+                    name: batch[name].astype(dtype, copy=False)
+                    for name, dtype in self.input_dtypes.items()
+                }
 
 
-def find_vovnet_nodes_to_exclude(onnx_path):
+def find_vovnet_nodes_to_exclude(onnx_path, max_onnx_bytes=MAX_ONNX_BYTES):
     """Find the VoVNet OSA4_5 stage and nodes downstream of FPN lateral_convs."""
-    graph = onnx.load(onnx_path, load_external_data=False).graph
+    graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
     topologically_sort_graph_nodes(graph)
 
     excluded = set()
