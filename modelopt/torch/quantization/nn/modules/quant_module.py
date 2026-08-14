@@ -157,6 +157,14 @@ class QuantModule(DynamicModule):
         transform is baked into the stored weight and then disabled, so subsequent forwards use
         the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
         dropped unless ``keep_attrs``.
+
+        Quantizers whose weight attribute is not a tensor are skipped and left untouched:
+        modules such as Megatron tied-embedding output layers (built with
+        ``skip_weight_param_allocation``) store ``weight = None`` and receive the shared
+        weight as a forward-time argument, so there is nothing stored to fold. Such quantizers
+        stay enabled after folding, so callers that assert all weight quantizers are disabled
+        once folding completes (e.g. ``_check_all_weight_quantizers_disabled`` in the vLLM
+        fakequant export plugin) must account for them.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
@@ -173,6 +181,10 @@ class QuantModule(DynamicModule):
                     f"{name} doesn't have a corresponding {weight_name} in {self.__class__.__name__}"
                 )
                 weight = getattr(self, weight_name)
+                if not isinstance(weight, torch.Tensor):
+                    # e.g. Megatron tied-embedding output_layer: weight is None and
+                    # borrowed at forward time, so there is nothing stored to fold.
+                    continue
                 self._fold_weight_quantizer(attr, (weight,), keep_attrs)
 
 
