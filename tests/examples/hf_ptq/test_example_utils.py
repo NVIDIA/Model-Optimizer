@@ -49,6 +49,95 @@ def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
+def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
+    source_dir = tmp_path / "source"
+    export_dir = tmp_path / "export"
+    source_dir.mkdir()
+    export_dir.mkdir()
+
+    source_files = {
+        "super_v3_reasoning_parser.py": "class Parser: pass\n",
+        "modeling_custom.py": "class Model: pass\n",
+        "README.md": "# Source model\n",
+        "LICENSE": "license text\n",
+        "chat_template.jinja": "{{ messages }}\n",
+        "tokenizer_config.json": '{"chat_template": "source"}\n',
+        "generation_config.json": '{"source": "generation"}\n',
+        "config.json": '{"source": "config"}\n',
+        "hf_quant_config.json": '{"source": "quant"}\n',
+        "quant_config.json": '{"source": "stale quant"}\n',
+        "quantize_config.json": '{"source": "stale quant"}\n',
+        "recipe.yaml": "quantize: {}\n",
+        "model.safetensors.index.json": '{"weight_map": {}}\n',
+        "model-00001-of-00001.safetensors": "source weights\n",
+        "model.gguf": "source weights\n",
+    }
+    for file_name, contents in source_files.items():
+        (source_dir / file_name).write_text(contents)
+
+    (export_dir / "config.json").write_text('{"export": "config"}\n')
+    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
+    (export_dir / "hf_quant_config.json").write_text('{"export": "quant"}\n')
+    (export_dir / "chat_template.jinja").write_text("{{ exported_messages }}\n")
+    (export_dir / "tokenizer_config.json").write_text('{"chat_template": "export"}\n')
+
+    example_utils.copy_custom_model_files(str(source_dir), str(export_dir), trust_remote_code=False)
+
+    for file_name in [
+        "super_v3_reasoning_parser.py",
+        "modeling_custom.py",
+        "README.md",
+        "LICENSE",
+        "chat_template.jinja",
+        "generation_config.json",
+    ]:
+        assert (export_dir / file_name).read_text() == source_files[file_name]
+
+    assert (export_dir / "config.json").read_text() == '{"export": "config"}\n'
+    assert (export_dir / "hf_quant_config.json").read_text() == '{"export": "quant"}\n'
+    assert (export_dir / "tokenizer_config.json").read_text() == '{"chat_template": "export"}\n'
+    assert not (export_dir / "quant_config.json").exists()
+    assert not (export_dir / "quantize_config.json").exists()
+    assert not (export_dir / "recipe.yaml").exists()
+    assert not (export_dir / "model.safetensors.index.json").exists()
+    assert not (export_dir / "model-00001-of-00001.safetensors").exists()
+    assert not (export_dir / "model.gguf").exists()
+
+    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
+    example_utils.copy_custom_model_files(
+        str(source_dir),
+        str(export_dir),
+        exclude_files={"generation_config.json"},
+    )
+    assert (export_dir / "generation_config.json").read_text() == '{"export": "generation"}\n'
+
+
+def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp_path):
+    snapshot_dir = tmp_path / "snapshot"
+
+    def fake_snapshot_download(**kwargs):
+        assert kwargs == {
+            "repo_id": "org/model",
+            "allow_patterns": example_utils._HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
+        }
+        return str(snapshot_dir)
+
+    def fake_from_pretrained(*args, **kwargs):
+        assert (args, kwargs) == (("org/model",), {"trust_remote_code": False})
+        return SimpleNamespace(_name_or_path="org/model")
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        fake_from_pretrained,
+    )
+    monkeypatch.setattr(example_utils, "snapshot_download", fake_snapshot_download)
+
+    assert example_utils._resolve_model_path("org/model", trust_remote_code=False) == str(
+        snapshot_dir
+    )
+
+
 def test_load_mtp_weights_inlined_orphaned(tmp_path):
     # GLM-5.1: HF builds only num_hidden decoders → MTP keys orphaned.
     main_keys = ["model.embed_tokens.weight", "model.layers.0.x.weight"]
@@ -419,3 +508,55 @@ def test_get_model_device_map_for_diffusion_gemma(
 )
 def test_is_diffusion_gemma(hf_config, expected):
     assert example_utils.is_diffusion_gemma(hf_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("trust_remote_code", "expect_bundled_code"),
+    [(True, True), (False, False)],
+)
+def test_get_model_deepseek_honors_trust_remote_code(
+    monkeypatch, trust_remote_code, expect_bundled_code
+):
+    """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
+    used = {}
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV3ForCausalLM"],
+        dtype=torch.bfloat16,
+        model_type="deepseek_v3",
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            return None
+
+    def _record(tag):
+        class Fake:
+            @staticmethod
+            def from_config(config, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+            _from_config = from_config
+
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+        return Fake
+
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: hf_config)
+    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
+    monkeypatch.setattr(
+        example_utils.transformers, "DeepseekV3ForCausalLM", _record("builtin"), raising=False
+    )
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+
+    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+
+    assert used["path"] == ("bundled" if expect_bundled_code else "builtin")

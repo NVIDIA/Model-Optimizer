@@ -20,7 +20,6 @@ import inspect
 import json
 import logging
 import os
-import shutil
 import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -44,6 +43,7 @@ from transformers import (
 )
 
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
 
 try:
     from huggingface_hub import snapshot_download
@@ -55,6 +55,52 @@ from modelopt.torch.utils import distributed as dist_utils
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
+    "*.jinja",
+    "*.json",
+    "*.md",
+    "*.model",
+    "*.py",
+    "*.tiktoken",
+    "*.txt",
+    "LICENSE*",
+    "NOTICE*",
+]
+_HF_PTQ_WEIGHT_FILE_PATTERNS = (
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.bin.index.json",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.npy",
+    "*.npz",
+    "*.onnx",
+    "*.pb",
+    "*.pickle",
+    "*.pkl",
+    "*.pt",
+    "*.pth",
+    "*.tar",
+    "*.tar.bz2",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tflite",
+    "*.tgz",
+    "*.zip",
+)
+_HF_PTQ_EXPORT_OWNED_FILES = {
+    "config.json",
+    "hf_quant_config.json",
+    "quant_config.json",
+    "quantization_config.json",
+    "quantize_config.json",
+    "recipe.yaml",
+    "recipe.yml",
+}
 
 
 @dataclass
@@ -667,6 +713,17 @@ def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_confi
     return model_kwargs
 
 
+def _fmt_max_memory(max_memory: dict) -> str:
+    """Format a ``{device: bytes}`` budget dict into a human-readable string."""
+    parts = []
+    for key in sorted(max_memory.keys(), key=lambda k: (isinstance(k, str), k)):
+        val = max_memory[key]
+        label = f"{val / 1024**3:.1f} GiB" if isinstance(val, int) else str(val)
+        key_str = f"GPU {key}" if isinstance(key, int) else str(key)
+        parts.append(f"  {key_str}: {label}")
+    return "\n".join(parts)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -674,8 +731,20 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    offload_folder=None,
+    max_cpu_memory_gb=None,
+    max_gpu_memory_gb=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    _disk_offload = offload_folder is not None
+    if _disk_offload and max_cpu_memory_gb is None:
+        warnings.warn(
+            "offload_folder is set but max_cpu_memory_gb is not specified. "
+            "CPU memory usage during model load will be unbounded. "
+            "Pass max_cpu_memory_gb to cap CPU usage.",
+            UserWarning,
+        )
 
     device_map = "auto"
     if device == "cpu":
@@ -749,6 +818,20 @@ def get_model(
                 return True
         return False
 
+    # Only the general load path below threads max_memory/offload_folder into
+    # from_pretrained; the specialized loaders build their own calls.
+    if _disk_offload and (
+        is_speculative(hf_config)
+        or has_pack_quantized_config(hf_config)
+        or get_original_hf_quant_method(hf_config) == "mxfp4"
+    ):
+        warnings.warn(
+            "offload_folder is ignored for speculative, pack-quantized, and MXFP4 "
+            "checkpoints: these use dedicated load paths that cannot offload. The model "
+            "will be loaded fully resident.",
+            UserWarning,
+        )
+
     if is_speculative(hf_config):
         model = AutoModelForCausalLM.from_pretrained(
             ckpt_path,
@@ -793,7 +876,11 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+        # DeepSeek ships bundled modeling code, but the built-in class is what the
+        # disk-offload and streaming-export paths are validated against.
+        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+
+        if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):
                 warnings.warn(
                     f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
@@ -830,24 +917,41 @@ def get_model(
             model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
-        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
 
-        on_cpu = "cpu" in inferred_device_map.values()
-
-        if on_cpu:
-            for _device in max_memory:
-                if isinstance(_device, int):
-                    max_memory[_device] *= gpu_mem_percentage
-
-            print(
-                "Model does not fit to the GPU mem. "
-                f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                "reduce the calibration `batch_size` manually."
-            )
+        if _disk_offload:
+            for _k in max_memory:
+                if isinstance(_k, int):
+                    if max_gpu_memory_gb is not None:
+                        max_memory[_k] = int(max_gpu_memory_gb * 1024**3)
+                    else:
+                        max_memory[_k] = int(max_memory[_k] * gpu_mem_percentage)
+            if max_cpu_memory_gb is not None:
+                max_memory["cpu"] = int(max_cpu_memory_gb * 1024**3)
             model_kwargs["max_memory"] = max_memory
+            print(
+                "Disk-offload mode enabled. "
+                f"Memory budgets: {_fmt_max_memory(max_memory)}\n"
+                f"Offload folder: {offload_folder}\n"
+                "Weights exceeding GPU+CPU budgets will be streamed from disk."
+            )
+        else:
+            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+            if "cpu" in inferred_device_map.values():
+                for _device in max_memory:
+                    if isinstance(_device, int):
+                        max_memory[_device] *= gpu_mem_percentage
+
+                print(
+                    "Model does not fit to the GPU mem. "
+                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                    "reduce the calibration `batch_size` manually."
+                )
+                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        if _disk_offload:
+            model_kwargs2["offload_folder"] = offload_folder
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -916,11 +1020,13 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
             try:
                 local_path = snapshot_download(
                     repo_id=model_name_or_path,
-                    allow_patterns=["*.py", "*.json"],  # Only download Python files and config
+                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
                 )
                 return local_path
             except Exception as e:
-                print(f"Warning: Could not download model files using snapshot_download: {e}")
+                print(
+                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
+                )
 
         # Fallback: try to find in HuggingFace cache
         from transformers.utils import TRANSFORMERS_CACHE
@@ -955,49 +1061,31 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
     return model_name_or_path
 
 
-def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
-    """Copy processor/tokenizer artifacts (and, with trust_remote_code, custom code) to export.
+def copy_custom_model_files(
+    source_path: str,
+    export_path: str,
+    trust_remote_code: bool = False,
+    exclude_files: Iterable[str] | None = None,
+):
+    """Copy source checkpoint sidecar files to an HF PTQ export.
 
-    Processor and tokenizer *data* artifacts -- e.g. a VLM's ``preprocessor_config.json``,
-    ``merges.txt``/``vocab.json``, and the processor helper modules -- are needed by the
-    deployment stack (vLLM/SGLang) even when the model itself runs on native (non-remote)
-    transformers code. transformers 5.x restructured many VLM configs and no longer
-    re-saves these on ``save_pretrained`` for models loaded natively, so without copying
-    them a native-path export is missing e.g. ``preprocessor_config.json`` and fails to
-    load (``Can't load image processor``). These are copied regardless of
-    ``trust_remote_code``. Executable model/config code (``modeling*.py``,
-    ``configuration_*.py``, ``tokenization_*.py``, and other custom JSON) is only meaningful
-    with ``trust_remote_code`` and is copied only then. ``config.json`` and
-    ``model.safetensors.index.json`` are always skipped (handled by the export itself).
+    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
+    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
+    README assets, parser plugins, and similar deployment files are preserved for both
+    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
+    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
+    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
+    Source tokenizer and processor files intentionally still win because Transformers may
+    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
+    wins when it has a separate chat template. Callers that write a generation config can
+    exclude it; the TensorRT-LLM export retains the source generation config.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used (gates the executable code files)
+        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
+        exclude_files: Additional source file names to skip.
     """
-    # Deployment-critical processor/tokenizer artifacts: safe to copy regardless of
-    # trust_remote_code (data + processor helpers, not model code).
-    always_copy_patterns = [
-        "preprocessor_config.json",
-        "processor_config.json",
-        "image_processing*.py",
-        "processing_*.py",
-        "video_processing*.py",
-        "feature_extraction_*.py",
-        "added_tokens.json",
-        "special_tokens_map.json",
-        "vocab.json",
-        "merges.txt",
-        "tokenizer.model",
-    ]
-    # Executable custom model/config code + other custom JSON: only used with trust_remote_code.
-    code_patterns = [
-        "configuration_*.py",
-        "modeling*.py",
-        "tokenization_*.py",
-        "*.json",
-    ]
-
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
 
@@ -1018,29 +1106,23 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
-    patterns = [*always_copy_patterns, *(code_patterns if trust_remote_code else [])]
+    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
+    if (export_dir / "chat_template.jinja").is_file():
+        exclude_files.add("tokenizer_config.json")
 
-    copied_files: list[str] = []
-    for pattern in patterns:
-        for file_path in source_dir.glob(pattern):
-            if file_path.is_file():
-                # Skip config.json and model.safetensors.index.json as they're handled separately
-                if file_path.name in ["config.json", "model.safetensors.index.json"]:
-                    continue
-                if file_path.name in copied_files:  # e.g. matched by both pattern lists
-                    continue
-                dest_path = export_dir / file_path.name
-                try:
-                    shutil.copy2(file_path, dest_path)
-                    copied_files.append(file_path.name)
-                    print(f"Copied custom model file: {file_path.name}")
-                except Exception as e:
-                    print(f"Warning: Failed to copy {file_path.name}: {e}")
+    copied_files = copy_non_safetensor_files_from_ckpt(
+        source_dir,
+        export_dir,
+        exclude_files=exclude_files,
+        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
+    )
 
     if copied_files:
-        print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
+        for file_name in copied_files:
+            print(f"Copied checkpoint sidecar file: {file_name}")
+        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
     else:
-        print("No custom model files found to copy")
+        print("No checkpoint sidecar files found to copy")
 
 
 def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:

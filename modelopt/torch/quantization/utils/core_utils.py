@@ -16,6 +16,7 @@
 """Quantization utilities."""
 
 import copy
+import itertools
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -25,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
-from torch.distributed.tensor import Replicate
+from torch.distributed.tensor import DTensor, Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
@@ -619,6 +620,45 @@ def enable_weight_access_and_writeback(
         yield
 
 
+def requires_weight_materialization(module, root_model, name_to_module: dict | None = None) -> bool:
+    """Whether ``module``'s own weights are currently unreadable and need a window.
+
+    Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
+    deciding *whether* to open a window agree with what opening one would do. Two things
+    must hold: the module owns tensors that are not directly readable right now
+    (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
+    materialize them. Modules already materialized are excluded -- re-entering a window
+    would re-run export handlers over already-packed weights.
+    """
+    if not any(
+        t is not None and (t.is_meta or isinstance(t, DTensor))
+        for t in itertools.chain(module._parameters.values(), module._buffers.values())
+    ):
+        return False
+    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
+        return True
+    if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+        return True
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return False
+    from ..plugins.accelerate import _get_offload_hook
+
+    return _get_offload_hook(hook) is not None
+
+
+def has_accelerate_offload(module: nn.Module) -> bool:
+    """Return True if any module in ``module`` has a CPU- or disk-offload accelerate hook."""
+    try:
+        from ..plugins.accelerate import _get_offload_hook
+    except ImportError:
+        return False
+
+    return any(
+        _get_offload_hook(getattr(m, "_hf_hook", None)) is not None for m in module.modules()
+    )
+
+
 @contextmanager
 def persistent_materialization(layer, writeback: bool = True):
     """Keep all layer weights materialized on GPU for the duration.
@@ -770,22 +810,30 @@ def _disable_fsdp_unshard_reshard(layer):
         yield
 
 
-def get_prefixed_param_names(parent_model, target_module):
+def build_param_index(model):
+    """Map ``id(param)`` to its ``(position, name)`` in ``model.named_parameters()``.
+
+    Lets callers resolve many modules against one walk of the parameters instead of one walk
+    each; the position keeps "first in ``named_parameters()`` order" resolvable.
+    """
+    return {id(param): (i, name) for i, (name, param) in enumerate(model.named_parameters())}
+
+
+def get_prefixed_param_names(parent_model, target_module, param_index=None):
     """Get parameter names for a target module prefixed with the parent model name.
 
     This function is used to get full parameter name from FSDPParam module_info which stores the
     unprefixed parameter name.
 
+    Pass ``param_index`` (see :func:`build_param_index`) when resolving many target modules
+    against the same parent, so the parent's parameters are walked once rather than per module.
     """
+    if param_index is None:
+        param_index = build_param_index(parent_model)
     target_ids = {id(p) for p in target_module.parameters()}
-    return next(
-        (
-            name.rsplit(".", 1)[0]
-            for name, param in parent_model.named_parameters()
-            if id(param) in target_ids
-        ),
-        None,  # default value if no match
-    )
+    # Lowest position == first in named_parameters() order, matching a linear scan's result.
+    match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
+    return match[1].rsplit(".", 1)[0] if match is not None else None
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -798,10 +846,14 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
     Returns:
         dict: Full parameter name → FSDP parameter.
     """
+    # Built once per call, not once per FSDPParam: export resolves every quantized module, so the
+    # per-param walk made this quadratic in (params x modules) and stalled MoE exports for hours.
+    # It cannot be cached across calls -- callers swap in quantized params between them.
+    param_index = build_param_index(model)
     mapping = {}
     for param in fsdp_param_list:
         # Get the module name
-        module_name = get_prefixed_param_names(model, param._module_info.module)
+        module_name = get_prefixed_param_names(model, param._module_info.module, param_index)
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name
