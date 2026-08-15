@@ -265,6 +265,11 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
     if quant_algo_value:
         new_config["quant_algo"] = quant_algo_value
 
+    group_size = original_quantization_details.get("group_size")
+    if group_size is not None:
+        # ModelOpt consumers use this top-level value to size block scales.
+        new_config["group_size"] = group_size
+
     kv_cache_quant_algo = original_quantization_details.get("kv_cache_quant_algo")
     if kv_cache_quant_algo:
         if kv_cache_quant_algo == "FP8":

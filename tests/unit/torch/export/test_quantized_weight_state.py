@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.quant_utils import (
     build_hf_quantization_config,
     capture_quantized_weight_export_state,
@@ -231,6 +232,20 @@ def test_capture_uses_the_requested_weight_format_and_transposed_layout():
     with pytest.raises(ValueError, match="complete quantization blocks"):
         select_quantized_weight_export_state(down_state, 1, (0,))
     select_quantized_weight_export_state(down_state, 2, (0, 2))
+
+
+def test_converted_hf_config_preserves_nvfp4_group_size():
+    config = convert_hf_quant_config_format(
+        {
+            "quantization": {
+                "quant_algo": "W4A16_NVFP4",
+                "group_size": 32,
+            }
+        }
+    )
+
+    assert config["group_size"] == 32
+    assert config["config_groups"]["group_0"]["weights"]["group_size"] == 32
 
 
 def test_mixed_config_groups_moe_experts_by_projection_family():
