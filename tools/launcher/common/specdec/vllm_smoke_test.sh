@@ -28,6 +28,8 @@
 #   VLLM_PORT       — server port (default: 8000)
 #   REASONING_PARSER — reasoning parser (e.g., "qwen3" for Qwen3.5)
 #   DISABLE_PREFIX_CACHING — set to "1" to disable prefix caching
+#   SMOKE_PROFILE — profile label printed in results (default: "greedy")
+#   SMOKE_SAMPLING_FIELDS — JSON sampling fields appended to each request
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source ${SCRIPT_DIR}/../service_utils.sh 2>/dev/null || true
@@ -122,8 +124,11 @@ fi
 
 # Run quick test prompts using chat completions API
 MAX_TOKENS=${MAX_OUTPUT_TOKENS:-1024}
+SMOKE_PROFILE=${SMOKE_PROFILE:-greedy}
+SMOKE_SAMPLING_FIELDS=${SMOKE_SAMPLING_FIELDS:-'"temperature": 0'}
 echo ""
-echo "=== Test Prompts (max_tokens=${MAX_TOKENS}) ==="
+echo "=== Test Prompts (${SMOKE_PROFILE}, max_tokens=${MAX_TOKENS}) ==="
+echo "Sampling: {${SMOKE_SAMPLING_FIELDS}}"
 PASS=0
 FAIL=0
 TOTAL_TOKENS=0
@@ -142,17 +147,17 @@ for PROMPT in \
     START=$(date +%s%N)
     RESULT=$(curl -s http://localhost:${PORT}/v1/chat/completions \
         -H "Content-Type: application/json" \
-        -d "{\"model\": \"${MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"${PROMPT}\"}], \"max_tokens\": ${MAX_TOKENS}, \"temperature\": 0}" \
+        -d "{\"model\": \"${MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"${PROMPT}\"}], \"max_tokens\": ${MAX_TOKENS}, ${SMOKE_SAMPLING_FIELDS}}" \
         2>/dev/null)
     END=$(date +%s%N)
-    ELAPSED=$(echo "scale=2; ($END - $START) / 1000000000" | bc 2>/dev/null || echo "0")
+    ELAPSED=$(awk "BEGIN {printf \"%.2f\", ($END - $START) / 1000000000}")
     TOKENS=$(echo "$RESULT" | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('usage',{}).get('completion_tokens',0))" 2>/dev/null)
     if [ -n "$TOKENS" ] && [ "$TOKENS" -gt 0 ] 2>/dev/null; then
-        TPS=$(echo "scale=1; $TOKENS / $ELAPSED" | bc 2>/dev/null || echo "?")
+        TPS=$(awk "BEGIN {printf \"%.1f\", $TOKENS / $ELAPSED}")
         echo "  PASS: ${TOKENS} tokens in ${ELAPSED}s (${TPS} tok/s) — \"${PROMPT:0:50}...\""
         PASS=$((PASS + 1))
         TOTAL_TOKENS=$((TOTAL_TOKENS + TOKENS))
-        TOTAL_TIME=$(echo "$TOTAL_TIME + $ELAPSED" | bc 2>/dev/null || echo "0")
+        TOTAL_TIME=$(awk "BEGIN {printf \"%.2f\", $TOTAL_TIME + $ELAPSED}")
     else
         echo "  FAIL: \"${PROMPT}\""
         echo "  Response: $(echo "$RESULT" | head -c 200)"
@@ -163,7 +168,7 @@ done
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 if [ "$TOTAL_TOKENS" -gt 0 ] 2>/dev/null; then
-    AVG_TPS=$(echo "scale=1; $TOTAL_TOKENS / $TOTAL_TIME" | bc 2>/dev/null || echo "?")
+    AVG_TPS=$(awk "BEGIN {printf \"%.1f\", $TOTAL_TOKENS / $TOTAL_TIME}")
     echo "Total: ${TOTAL_TOKENS} tokens in ${TOTAL_TIME}s (${AVG_TPS} tok/s avg)"
 fi
 

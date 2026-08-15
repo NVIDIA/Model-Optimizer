@@ -151,6 +151,7 @@ class VLLMModel(Model):
             temperature=sampling_kwargs.get("temperature", 1.0),
             top_p=sampling_kwargs.get("top_p", 1.0),
             top_k=sampling_kwargs.get("top_k", 0),
+            presence_penalty=sampling_kwargs.get("presence_penalty", 0.0),
         )
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)

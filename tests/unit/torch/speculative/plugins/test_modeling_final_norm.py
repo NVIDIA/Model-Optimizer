@@ -21,6 +21,7 @@ import torch
 pytest.importorskip("transformers")
 
 from modelopt.torch.speculative.plugins.modeling_final_norm import (
+    _FinalGemmaRMSNorm,
     _FinalRMSNorm,
     _maybe_apply_base_final_norm,
     _select_final_norm_type,
@@ -34,6 +35,7 @@ _HIDDEN_SIZE = 16
     [
         ("llama", "rmsnorm"),
         ("qwen3", "rmsnorm"),
+        ("qwen3_5_text", "gemma_rmsnorm"),
         ("deepseek_v3", "rmsnorm"),
         ("kimi_k2", "rmsnorm"),
         ("kimi_k25", "rmsnorm"),
@@ -58,6 +60,18 @@ def test_final_rmsnorm_dtype_and_shape():
     out = norm(x)
     assert out.dtype == torch.bfloat16
     assert out.shape == x.shape
+
+
+def test_qwen35_final_norm_matches_transformers():
+    qwen35 = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
+    reference = qwen35.Qwen3_5RMSNorm(_HIDDEN_SIZE, eps=1e-6).to(torch.bfloat16)
+    actual = _FinalGemmaRMSNorm(_HIDDEN_SIZE, eps=1e-6, dtype=torch.bfloat16)
+    weight = torch.randn(_HIDDEN_SIZE, dtype=torch.bfloat16)
+    with torch.no_grad():
+        reference.weight.copy_(weight)
+        actual.weight.copy_(weight)
+    hidden = torch.randn(2, 4, _HIDDEN_SIZE, dtype=torch.bfloat16)
+    torch.testing.assert_close(actual(hidden), reference(hidden), rtol=0, atol=0)
 
 
 def test_maybe_apply_norm_postnorm_is_noop():

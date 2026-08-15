@@ -191,6 +191,10 @@ class FakeBaseModel(PreTrainedModel):
             ),
             orig_config,
         )
+        rope_theta = getattr(base_cfg, "rope_theta", None)
+        rope_parameters = getattr(base_cfg, "rope_parameters", {})
+        if rope_theta is None and isinstance(rope_parameters, dict):
+            rope_theta = rope_parameters.get("rope_theta")
         # Extract necessary info for spec training from base config
         config = FakeBaseConfig(
             num_hidden_layers=getattr(base_cfg, "num_hidden_layers", None),
@@ -203,7 +207,7 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(base_cfg, "rope_theta", None),
+            rope_theta=rope_theta,
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

@@ -34,7 +34,7 @@ from safetensors.torch import load_file
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _accuracy_counts
 from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
 from modelopt.torch.speculative.plugins.modeling_dspark import DSparkModule
 
@@ -70,6 +70,21 @@ def _get_dspark_config(
         "shift_label": True,
     }
     return config
+
+
+def test_accuracy_counts_per_position():
+    """Accuracy is represented as raw correct/valid counts for each block position."""
+    pred_ids = torch.tensor([[[0, 1, 2, 0], [1, 1, 0, 2]]])
+    target_ids = torch.tensor([[[0, 2, 2, 1], [1, 0, 0, 2]]])
+    eval_mask = torch.tensor([[[1, 1, 1, 0], [1, 0, 1, 1]]])
+    logits = torch.nn.functional.one_hot(pred_ids, num_classes=3).float()
+
+    correct, valid = _accuracy_counts(logits, target_ids, eval_mask)
+
+    torch.testing.assert_close(correct, torch.tensor([2.0, 0.0, 2.0, 1.0]))
+    torch.testing.assert_close(valid, torch.tensor([2.0, 1.0, 2.0, 1.0]))
+    assert correct.sum() == 5
+    assert valid.sum() == 6
 
 
 class TestDSparkConvert:
@@ -163,6 +178,9 @@ class TestDSparkForward:
 
         assert out.loss.requires_grad
         assert out.loss.dim() == 0
+        assert out.train_acc_correct.shape == (BLOCK_SIZE,)
+        assert out.train_acc_valid.shape == (BLOCK_SIZE,)
+        assert torch.all(out.train_acc_correct <= out.train_acc_valid)
         # three-term loss bookkeeping
         for key in ("ce_loss", "l1_loss", "confidence_loss", "base_accuracy"):
             assert key in out.dspark_metrics
