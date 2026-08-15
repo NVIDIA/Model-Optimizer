@@ -82,6 +82,7 @@ from .layer_utils import (
 from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -100,6 +101,8 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
+    capture_quantized_weight_export_state,
+    export_quantized_weight_tensors,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -606,6 +609,26 @@ def _export_quantized_weight(
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
     )
+
+    if not isinstance(weight, QTensorWrapper) and quantization_format in {
+        QUANTIZATION_FP8,
+        QUANTIZATION_FP8_PB_WO,
+        QUANTIZATION_FP8_PC_PT,
+        QUANTIZATION_MXFP8,
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_W4A16_NVFP4,
+    }:
+        state = capture_quantized_weight_export_state(sub_module, weight_name)
+        exported = export_quantized_weight_tensors(weight, state, dtype, weight_name)
+        setattr(
+            sub_module,
+            weight_name,
+            nn.Parameter(exported.pop(weight_name), requires_grad=False),
+        )
+        for name, value in exported.items():
+            sub_module.register_buffer(name, value)
+        torch.cuda.empty_cache()
+        return
 
     # Already real-quantized weights (``mtq.compress`` / ``hf_ptq --low_memory_mode``) hold packed
     # nibbles -- half the logical last dim -- so per-block scales cannot be recomputed from them.
