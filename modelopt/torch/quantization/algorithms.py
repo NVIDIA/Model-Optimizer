@@ -46,7 +46,6 @@ from ._auto_quantize_cost import (
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
     COST_MODEL_ACTIVE_MOE,
     COST_MODEL_WEIGHT,
-    EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
@@ -1114,25 +1113,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             )
         restored_cost_model = getattr(self, "cost_model", "weight")
         restored_active_moe_expert_ratio = getattr(self, "active_moe_expert_ratio", None)
-        # Cost-excluded patterns are baked into candidate_stats["costs"] by
-        # initialize_candidate_stats(), which is skipped entirely on a restored checkpoint. A
-        # changed exclusion set must therefore reject the checkpoint rather than be silently
-        # ignored. Normalize None/[] so an older checkpoint without the key still compares equal
-        # to a recipe that excludes nothing.
-        restored_cost_excluded = (getattr(self, "cost", None) or {}).get(
-            EXCLUDED_MODULE_NAME_PATTERNS_KEY
-        ) or []
-        current_cost_excluded = self.config["cost"].get(EXCLUDED_MODULE_NAME_PATTERNS_KEY) or []
         if self.candidate_stats and (
             restored_cost_model != self.config["cost_model"]
             or restored_active_moe_expert_ratio != self.config["active_moe_expert_ratio"]
-            or restored_cost_excluded != current_cost_excluded
         ):
             raise ValueError(
                 "Checkpoint AutoQuantize cost model does not match current search config: "
-                f"checkpoint=({restored_cost_model}, {restored_active_moe_expert_ratio}, "
-                f"{restored_cost_excluded}), current=({self.config['cost_model']}, "
-                f"{self.config['active_moe_expert_ratio']}, {current_cost_excluded}). "
+                f"checkpoint=({restored_cost_model}, {restored_active_moe_expert_ratio}), "
+                f"current=({self.config['cost_model']}, {self.config['active_moe_expert_ratio']}). "
                 "Use a different checkpoint path."
             )
         self.method = self.method_name
