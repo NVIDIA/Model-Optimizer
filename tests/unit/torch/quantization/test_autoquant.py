@@ -1536,3 +1536,60 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+def test_auto_quantize_checkpoint_rejects_changed_cost_excluded_layers(tmp_path):
+    """A changed cost-exclusion set must reject the checkpoint instead of being ignored.
+
+    ``initialize_candidate_stats()`` — where ``hparam.cost_weight`` is baked into
+    ``candidate_stats["costs"]`` — is skipped entirely once ``candidate_stats`` is restored, so
+    without this guard a recipe that gained ``cost_excluded_layers`` would silently keep the old
+    costs and the exclusions would have no effect.
+    """
+    checkpoint_path = str(tmp_path / "autoquant_cost_excluded_checkpoint.pth")
+
+    def run(excluded_patterns):
+        model = TransformerBlock()
+        constraints = {"effective_bits": 8.0}
+        if excluded_patterns is not None:
+            constraints["cost"] = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: excluded_patterns}
+        return mtq.auto_quantize(
+            model,
+            constraints=constraints,
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    run(None)
+    with pytest.raises(ValueError, match="cost model does not match current search config"):
+        run(["*mlp*"])
+
+
+def test_auto_quantize_checkpoint_accepts_unchanged_cost_excluded_layers(tmp_path):
+    """None and [] both mean "exclude nothing", so an older checkpoint still resumes."""
+    checkpoint_path = str(tmp_path / "autoquant_cost_excluded_noop_checkpoint.pth")
+
+    def run(constraints_cost):
+        model = TransformerBlock()
+        constraints = {"effective_bits": 8.0}
+        if constraints_cost is not None:
+            constraints["cost"] = constraints_cost
+        return mtq.auto_quantize(
+            model,
+            constraints=constraints,
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    run(None)
+    run({EXCLUDED_MODULE_NAME_PATTERNS_KEY: []})  # must not raise
