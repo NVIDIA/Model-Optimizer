@@ -1019,9 +1019,10 @@ def _state_tensor(
     *,
     axes: tuple[int, ...] = (),
     block_sizes: tuple[int, ...] = (),
+    cpu: bool = True,
 ) -> _ExportStateTensor:
-    value = value.detach().clone()
-    if value.numel() == 1:
+    value = value.detach().cpu().clone() if cpu else value.detach()
+    if value.numel() == 1 and not axes and not block_sizes:
         return _ExportStateTensor(name, value.reshape(()))
     if len(axes) != value.ndim or len(block_sizes) != value.ndim:
         raise ValueError(
@@ -1200,11 +1201,16 @@ def _select_state_tensor(
     if block_size == 1:
         selected = indices
     else:
-        selected = torch.div(indices, block_size, rounding_mode="floor")
-        unique, counts = selected.unique_consecutive(return_counts=True)
-        if not torch.all(counts == block_size):
+        if indices.numel() % block_size:
             raise ValueError("Weight selection must preserve complete quantization blocks")
-        selected = unique
+        blocks = indices.reshape(-1, block_size)
+        block_indices = torch.div(blocks, block_size, rounding_mode="floor")
+        selected = block_indices[:, 0]
+        expected = selected[:, None] * block_size + torch.arange(block_size)
+        if not torch.all(block_indices == selected[:, None]) or not torch.equal(
+            blocks.sort(dim=1).values, expected
+        ):
+            raise ValueError("Weight selection must preserve complete quantization blocks")
     value = record.value.index_select(tensor_dim, selected.to(record.value.device))
     return _ExportStateTensor(record.name, value, record.axes, record.block_sizes)
 
@@ -1320,6 +1326,10 @@ def export_quantized_weight_tensors(
     else:
         weight_scale = records["weight_scale"].value
 
+    weight_scale = weight_scale.to(packed_weight.device)
+    if weight_scale_2 is not None:
+        weight_scale_2 = weight_scale_2.to(packed_weight.device)
+
     quantized_weight = to_quantized_weight(
         packed_weight.to(dtype),
         weight_scale,
@@ -1332,14 +1342,16 @@ def export_quantized_weight_tensors(
         ((weight_name, _restore_packing_permutation(quantized_weight, state.packing_permutation)),)
     )
 
-    weight_scale_record = _state_tensor(
-        "weight_scale",
-        weight_scale,
-        axes=tuple(range(packed_weight.ndim)),
-        block_sizes=(1,) * (packed_weight.ndim - 1) + (state.block_size,)
-        if state.quantization_format in _NVFP4_EXPORT_FORMATS
-        else (1,) * packed_weight.ndim,
-    )
+    if state.quantization_format in _NVFP4_EXPORT_FORMATS:
+        weight_scale_record = _state_tensor(
+            "weight_scale",
+            weight_scale,
+            axes=tuple(range(packed_weight.ndim)),
+            block_sizes=(1,) * (packed_weight.ndim - 1) + (state.block_size,),
+            cpu=False,
+        )
+    else:
+        weight_scale_record = _state_tensor("weight_scale", weight_scale, cpu=False)
     output[attrs.weight_scale] = _restore_state_tensor(
         weight_scale_record, state.packing_permutation
     )
@@ -1355,9 +1367,11 @@ def export_quantized_weight_tensors(
             state.packing_permutation,
         )
     if "input_scale" in records:
-        output[attrs.input_scale] = _restore_state_tensor(
-            records["input_scale"], state.packing_permutation
-        ).squeeze()
+        output[attrs.input_scale] = (
+            _restore_state_tensor(records["input_scale"], state.packing_permutation)
+            .squeeze()
+            .to(weight.device)
+        )
     return output
 
 

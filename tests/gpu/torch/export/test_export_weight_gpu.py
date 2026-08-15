@@ -175,6 +175,32 @@ def test_functional_nvfp4_export_matches_existing_helpers_without_mutation(quant
         torch.testing.assert_close(value, original_buffers[name])
 
 
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
+        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
+        mtq.MXFP8_DEFAULT_CFG,
+    ],
+)
+def test_unqualified_formats_keep_existing_export_path(monkeypatch, quant_cfg):
+    in_features = 256
+    module = nn.Linear(in_features, in_features, bias=False, device="cuda", dtype=torch.bfloat16)
+    calib_input = torch.randn(2, 4, in_features, device="cuda", dtype=torch.bfloat16)
+    module = mtq.quantize(module, copy.deepcopy(quant_cfg), lambda model: model(calib_input))
+
+    def fail_functional_capture(*args, **kwargs):
+        raise AssertionError("unqualified format entered the functional export path")
+
+    monkeypatch.setattr(
+        "modelopt.torch.export.unified_export_hf.capture_quantized_weight_export_state",
+        fail_functional_capture,
+    )
+    _export_quantized_weight(module, torch.float16)
+
+    assert hasattr(module, "weight_scale")
+
+
 def test_export_compressed_nvfp4_weight():
     """``mtq.compress`` (used by ``hf_ptq --low_memory_mode``) leaves the weight as packed NVFP4
     nibbles, so per-block scales cannot be recomputed from it. The export must reuse the scales

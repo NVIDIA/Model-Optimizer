@@ -82,7 +82,6 @@ from .layer_utils import (
 from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
-    QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
@@ -610,14 +609,9 @@ def _export_quantized_weight(
         sub_module, quantizer_attrs.output_quantizer, None
     )
 
-    if not isinstance(weight, QTensorWrapper) and quantization_format in {
-        QUANTIZATION_FP8,
-        QUANTIZATION_FP8_PB_WO,
-        QUANTIZATION_FP8_PC_PT,
-        QUANTIZATION_MXFP8,
-        QUANTIZATION_NVFP4,
-        QUANTIZATION_W4A16_NVFP4,
-    }:
+    from .quant_utils import _FUNCTIONAL_EXPORT_FORMATS
+
+    if not isinstance(weight, QTensorWrapper) and quantization_format in _FUNCTIONAL_EXPORT_FORMATS:
         state = capture_quantized_weight_export_state(sub_module, weight_name)
         exported = export_quantized_weight_tensors(weight, state, dtype, weight_name)
         setattr(

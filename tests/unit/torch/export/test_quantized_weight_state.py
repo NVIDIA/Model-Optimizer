@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import pickle
 
 import pytest
 import torch
@@ -110,6 +111,15 @@ def test_functional_fp8_export_is_repeatable_and_supports_permutation():
     torch.testing.assert_close(transposed["weight"], base["weight"].T)
 
 
+def test_export_state_round_trips_through_object_transport():
+    module = _fp8_linear()
+    state = pickle.loads(pickle.dumps(capture_quantized_weight_export_state(module)))
+
+    exported = export_quantized_weight_tensors(module.weight, state, torch.float32)
+
+    assert exported["weight"].shape == module.weight.shape
+
+
 def test_static_nvfp4_merge_recomputes_scales_from_merged_amax():
     left_weight = torch.arange(32, dtype=torch.float32).reshape(2, 16) / 32
     right_weight = torch.arange(32, 64, dtype=torch.float32).reshape(2, 16) / 16
@@ -165,6 +175,35 @@ def test_static_nvfp4_noncontiguous_selection_tracks_block_amax():
     )
     for name in actual:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+
+def test_static_nvfp4_single_block_preserves_scale_shape():
+    weight = torch.arange(16, dtype=torch.float32).reshape(1, 16)
+    module = _static_w4a16_linear(weight, weight.abs().amax().reshape(1, 1), torch.tensor(1.0))
+
+    exported = export_quantized_weight_tensors(
+        module.weight,
+        capture_quantized_weight_export_state(module),
+        torch.float32,
+    )
+
+    assert exported["weight_scale"].shape == (1, 1)
+
+
+def test_static_nvfp4_selection_rejects_duplicate_block_members():
+    weight = torch.arange(32, dtype=torch.float32).reshape(2, 16)
+    module = _static_w4a16_linear(
+        weight,
+        weight.abs().amax(dim=1, keepdim=True),
+        torch.tensor(1.0),
+    )
+
+    with pytest.raises(ValueError, match="complete quantization blocks"):
+        select_quantized_weight_export_state(
+            capture_quantized_weight_export_state(module),
+            1,
+            (0,) * 16,
+        )
 
 
 def test_state_rejects_invalid_dimensions():
