@@ -47,6 +47,33 @@ def _static_w4a16_linear(
     return module
 
 
+class _SquareTransposedExperts(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.arange(512, dtype=torch.float32).reshape(2, 16, 16))
+        self.down_proj = nn.Parameter(torch.arange(512, dtype=torch.float32).reshape(2, 16, 16))
+
+        fp8_cfg = QuantizerAttributeConfig(num_bits=(4, 3))
+        self.gate_up_proj_weight_quantizer = TensorQuantizer(fp8_cfg)
+        self.gate_up_proj_weight_quantizer._amax = torch.tensor(2.0)
+        self.gate_up_proj_input_quantizer = TensorQuantizer(fp8_cfg)
+        self.gate_up_proj_input_quantizer._amax = torch.tensor(1.0)
+
+        nvfp4_cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+        )
+        self.down_proj_weight_quantizer = NVFP4StaticQuantizer(quant_attribute_cfg=nvfp4_cfg)
+        self.down_proj_weight_quantizer.amax = torch.arange(32, dtype=torch.float32) + 1
+        self.down_proj_weight_quantizer.global_amax = torch.tensor(32.0)
+        self.down_proj_input_quantizer = TensorQuantizer()
+        self.down_proj_input_quantizer.disable()
+
+    def iter_weights_for_calibration(self):
+        for name in ("gate_up_proj", "down_proj"):
+            yield getattr(self, name).transpose(-1, -2), getattr(self, f"{name}_weight_quantizer")
+
+
 def test_capture_does_not_modify_zero_amax():
     module = _fp8_linear()
     module.weight_quantizer._amax.zero_()
@@ -146,6 +173,25 @@ def test_state_rejects_invalid_dimensions():
         merge_quantized_weight_export_states((state, state), 2)
     with pytest.raises(IndexError, match="invalid"):
         select_quantized_weight_export_state(state, -3, (0,))
+
+
+def test_capture_uses_the_requested_weight_format_and_transposed_layout():
+    module = _SquareTransposedExperts()
+    gate_state = capture_quantized_weight_export_state(module, "gate_up_proj")
+    down_state = capture_quantized_weight_export_state(module, "down_proj")
+
+    config = build_hf_quantization_config(
+        {
+            "model.layers.0.mlp.gate_proj.weight": gate_state,
+            "model.layers.0.mlp.down_proj.weight": down_state,
+        }
+    )
+    assert config["quantized_layers"]["model.layers.0.mlp.gate_proj"]["quant_algo"] == "FP8"
+    assert config["quantized_layers"]["model.layers.0.mlp.down_proj"]["quant_algo"] == "W4A16_NVFP4"
+
+    with pytest.raises(ValueError, match="complete quantization blocks"):
+        select_quantized_weight_export_state(down_state, 1, (0,))
+    select_quantized_weight_export_state(down_state, 2, (0, 2))
 
 
 def test_mixed_config_groups_moe_experts_by_projection_family():

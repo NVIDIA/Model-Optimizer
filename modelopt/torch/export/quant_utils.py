@@ -42,7 +42,6 @@ from modelopt.torch.quantization.qtensor import (
     QTensorWrapper,
 )
 from modelopt.torch.quantization.utils import (
-    QuantizerAttrNames,
     quantizer_attr_names,
     representative_weight_quantizer,
     weight_attr_names,
@@ -484,116 +483,102 @@ def get_weight_block_size(module: nn.Module, weight_name: str = "weight") -> int
     return 0
 
 
-def get_quantization_format(module) -> str | None:
-    """Gets the quantization string.
+def _get_quantization_from_quantizers(
+    layer: nn.Module,
+    weight_quantizer: TensorQuantizer | SequentialQuantizer | None,
+    input_quantizer: TensorQuantizer | SequentialQuantizer | None,
+) -> str:
+    if weight_quantizer is None or not weight_quantizer.is_enabled:
+        return QUANTIZATION_NONE
 
-    Gets the quantization string by iterating through the module and its children.
-    The first non-None quantization string is returned.
-    """
+    if isinstance(weight_quantizer, SequentialQuantizer):
+        assert (
+            len(weight_quantizer) == 2
+            and weight_quantizer[0].num_bits == 4
+            and weight_quantizer[1].num_bits == (4, 3)
+        ), "Unsupported SequentialQuantizer configuration"
+        assert (
+            weight_quantizer[0].block_sizes
+            and len(weight_quantizer[0].block_sizes) > 0
+            and weight_quantizer[0].block_sizes[-1] > 0
+        ), "Invalid block_sizes for SequentialQuantizer"
+        return QUANTIZATION_W4A8_AWQ
 
-    def _get_quantization_from_layer(layer, quantizer_attr_names: QuantizerAttrNames):
-        # Singular form first, plural ModuleList fallback (fused-experts).
-        # Strip the "_weight_quantizer" suffix to recover the weight attr name.
-        weight_attr = quantizer_attr_names.weight_quantizer
-        weight_name = weight_attr[: -len("_weight_quantizer")].rstrip("_") or "weight"
-        weight_quantizer = representative_weight_quantizer(layer, weight_name)
-        input_quantizer = getattr(layer, quantizer_attr_names.input_quantizer, None)
-
-        if weight_quantizer is None or not weight_quantizer.is_enabled:
-            return QUANTIZATION_NONE
-
-        # Handle SequentialQuantizer
-        if isinstance(weight_quantizer, SequentialQuantizer):
-            assert (
-                len(weight_quantizer) == 2
-                and weight_quantizer[0].num_bits == 4
-                and weight_quantizer[1].num_bits == (4, 3)
-            ), "Unsupported SequentialQuantizer configuration"
-            assert (
-                weight_quantizer[0].block_sizes
-                and len(weight_quantizer[0].block_sizes) > 0
-                and weight_quantizer[0].block_sizes[-1] > 0
-            ), "Invalid block_sizes for SequentialQuantizer"
-
-            return QUANTIZATION_W4A8_AWQ
-
-        # Handle individual num_bits cases
-        if weight_quantizer.num_bits == 4:
-            assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
-                "Invalid block_sizes for INT4 quantizer"
-            )
-            return QUANTIZATION_INT4_AWQ
-
-        if weight_quantizer.num_bits == 8:
-            if input_quantizer is not None and input_quantizer.is_enabled:
-                return QUANTIZATION_INT8_SQ
-            else:
-                return QUANTIZATION_INT8_WO
-
-        if weight_quantizer.num_bits == (4, 3):
-            if weight_quantizer.block_sizes:
-                assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
-                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
-                block_sizes = getattr(weight_quantizer, "block_sizes")
-                if (
-                    isinstance(block_sizes, dict)
-                    and block_sizes.get("type", "static") == "dynamic"
-                    and block_sizes.get("scale_bits") == (8, 0)
-                ):
-                    return QUANTIZATION_MXFP8
-                if weight_quantizer.fake_quant:
-                    return QUANTIZATION_FP8_PB_WO
-                else:
-                    return QUANTIZATION_FP8_PB_REAL
-            if weight_quantizer.axis == 0:
-                return QUANTIZATION_FP8_PC_PT
-            return QUANTIZATION_FP8
-
-        if weight_quantizer.num_bits == (2, 1):
-            # FP4 formats are all block quantization
-            block_sizes = getattr(weight_quantizer, "block_sizes")
-            scale_bits = block_sizes.get("scale_bits")
-
-            if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
-                return QUANTIZATION_NVFP4_SVDQUANT
-            if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
-                return QUANTIZATION_NVFP4_AWQ
-            if getattr(layer, "fused_with_prequant", False):
-                return QUANTIZATION_NVFP4_AWQ
-            if input_quantizer is None or not input_quantizer.is_enabled:
-                if scale_bits == (4, 3):
-                    return QUANTIZATION_W4A16_NVFP4
-            assert input_quantizer is not None, (
-                f"input_quantizer is None for {quantizer_attr_names}"
-            )
-            if (
-                block_sizes.get("type", "static") == "dynamic"
-                and scale_bits == (8, 0)
-                and input_quantizer.is_enabled
-                and input_quantizer.num_bits == (4, 3)
-                and input_quantizer.block_sizes is None
-            ):
-                return QUANTIZATION_W4A8_MXFP4_FP8
-            if (
-                block_sizes.get("type", "static") == "dynamic"
-                and scale_bits == (4, 3)
-                and input_quantizer.is_enabled
-                and input_quantizer.num_bits == (4, 3)
-                and input_quantizer.block_sizes is None
-            ):
-                return QUANTIZATION_W4A8_NVFP4_FP8
-            if scale_bits == (4, 3):
-                return QUANTIZATION_NVFP4
-            elif scale_bits == (8, 0):
-                return QUANTIZATION_MXFP4
-
-        # Raise error for unsupported num_bits
-        raise NotImplementedError(
-            f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}"
+    if weight_quantizer.num_bits == 4:
+        assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
+            "Invalid block_sizes for INT4 quantizer"
         )
+        return QUANTIZATION_INT4_AWQ
 
+    if weight_quantizer.num_bits == 8:
+        if input_quantizer is not None and input_quantizer.is_enabled:
+            return QUANTIZATION_INT8_SQ
+        return QUANTIZATION_INT8_WO
+
+    if weight_quantizer.num_bits == (4, 3):
+        if weight_quantizer.block_sizes:
+            assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
+            block_sizes = getattr(weight_quantizer, "block_sizes")
+            if (
+                isinstance(block_sizes, dict)
+                and block_sizes.get("type", "static") == "dynamic"
+                and block_sizes.get("scale_bits") == (8, 0)
+            ):
+                return QUANTIZATION_MXFP8
+            if weight_quantizer.fake_quant:
+                return QUANTIZATION_FP8_PB_WO
+            return QUANTIZATION_FP8_PB_REAL
+        if weight_quantizer.axis == 0:
+            return QUANTIZATION_FP8_PC_PT
+        return QUANTIZATION_FP8
+
+    if weight_quantizer.num_bits == (2, 1):
+        block_sizes = getattr(weight_quantizer, "block_sizes")
+        scale_bits = block_sizes.get("scale_bits")
+
+        if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
+            return QUANTIZATION_NVFP4_SVDQUANT
+        if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
+            return QUANTIZATION_NVFP4_AWQ
+        if getattr(layer, "fused_with_prequant", False):
+            return QUANTIZATION_NVFP4_AWQ
+        if input_quantizer is None or not input_quantizer.is_enabled:
+            if scale_bits == (4, 3):
+                return QUANTIZATION_W4A16_NVFP4
+        assert input_quantizer is not None, "input_quantizer is required for weight-activation FP4"
+        if (
+            block_sizes.get("type", "static") == "dynamic"
+            and scale_bits == (8, 0)
+            and input_quantizer.is_enabled
+            and input_quantizer.num_bits == (4, 3)
+            and input_quantizer.block_sizes is None
+        ):
+            return QUANTIZATION_W4A8_MXFP4_FP8
+        if (
+            block_sizes.get("type", "static") == "dynamic"
+            and scale_bits == (4, 3)
+            and input_quantizer.is_enabled
+            and input_quantizer.num_bits == (4, 3)
+            and input_quantizer.block_sizes is None
+        ):
+            return QUANTIZATION_W4A8_NVFP4_FP8
+        if scale_bits == (4, 3):
+            return QUANTIZATION_NVFP4
+        if scale_bits == (8, 0):
+            return QUANTIZATION_MXFP4
+
+    raise NotImplementedError(f"Unsupported quantizer with num_bits: {weight_quantizer.num_bits}")
+
+
+def get_quantization_format(module) -> str | None:
+    """Return the first enabled weight quantization format in a module tree."""
     for weight_name in weight_attr_names(module):
-        quantization = _get_quantization_from_layer(module, quantizer_attr_names(weight_name))
+        attr_names = quantizer_attr_names(weight_name)
+        quantization = _get_quantization_from_quantizers(
+            module,
+            representative_weight_quantizer(module, weight_name),
+            getattr(module, attr_names.input_quantizer, None),
+        )
         if quantization != QUANTIZATION_NONE:
             return quantization
 
@@ -947,9 +932,6 @@ def to_quantized_weight(
 
 _FUNCTIONAL_EXPORT_FORMATS = {
     QUANTIZATION_FP8,
-    QUANTIZATION_FP8_PB_WO,
-    QUANTIZATION_FP8_PC_PT,
-    QUANTIZATION_MXFP8,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A16_NVFP4,
 }
@@ -965,7 +947,7 @@ class _ExportStateTensor:
 
 
 @dataclass(frozen=True)
-class QuantizedWeightExportState:
+class _QuantizedWeightExportState:
     """Opaque state required to export one logical quantized weight."""
 
     quantization_format: str
@@ -1012,44 +994,40 @@ def _resolve_weight_quantizer(
 def _packing_permutation(weight: torch.Tensor, quantized_view: torch.Tensor) -> tuple[int, ...]:
     ndim = weight.ndim
     identity = tuple(range(ndim))
-    if tuple(quantized_view.shape) == tuple(weight.shape):
-        return identity
     if ndim >= 2:
-        transposed = (*weight.shape[:-2], weight.shape[-1], weight.shape[-2])
-        if tuple(quantized_view.shape) == transposed:
+        transposed = weight.transpose(-1, -2)
+        if (
+            tuple(quantized_view.shape) == tuple(transposed.shape)
+            and quantized_view.stride() == transposed.stride()
+        ):
             return (*range(ndim - 2), ndim - 1, ndim - 2)
+    if (
+        tuple(quantized_view.shape) == tuple(weight.shape)
+        and quantized_view.stride() == weight.stride()
+    ):
+        return identity
     raise NotImplementedError(
-        f"Unsupported quantized weight view {tuple(quantized_view.shape)} for {tuple(weight.shape)}"
+        "Unsupported quantized weight view "
+        f"shape/stride={tuple(quantized_view.shape)}/{quantized_view.stride()} for "
+        f"shape/stride={tuple(weight.shape)}/{weight.stride()}"
     )
 
 
 def _state_tensor(
     name: str,
     value: torch.Tensor,
-    packed_shape: tuple[int, ...],
     *,
-    block_sizes: tuple[int, ...] | None = None,
+    axes: tuple[int, ...] = (),
+    block_sizes: tuple[int, ...] = (),
 ) -> _ExportStateTensor:
     value = value.detach().clone()
     if value.numel() == 1:
         return _ExportStateTensor(name, value.reshape(()))
-    if value.ndim > len(packed_shape):
-        raise NotImplementedError(
-            f"Cannot relate {name} shape {tuple(value.shape)} to weight shape {packed_shape}"
+    if len(axes) != value.ndim or len(block_sizes) != value.ndim:
+        raise ValueError(
+            f"Explicit axis and block metadata is required for non-scalar {name}: "
+            f"shape={tuple(value.shape)}, axes={axes}, block_sizes={block_sizes}"
         )
-
-    axes = tuple(range(value.ndim))
-    if block_sizes is None:
-        inferred = []
-        for axis, size in enumerate(value.shape):
-            if packed_shape[axis] % size:
-                raise NotImplementedError(
-                    f"Cannot relate {name} shape {tuple(value.shape)} to weight shape {packed_shape}"
-                )
-            inferred.append(packed_shape[axis] // size)
-        block_sizes = tuple(inferred)
-    if len(block_sizes) != value.ndim:
-        raise ValueError(f"Invalid block layout for {name}: {block_sizes}")
     return _ExportStateTensor(name, value, axes, block_sizes)
 
 
@@ -1063,14 +1041,17 @@ def _input_quantizer(module: nn.Module, weight_name: str):
 def capture_quantized_weight_export_state(
     module: nn.Module,
     weight_name: str = "weight",
-) -> QuantizedWeightExportState:
+) -> _QuantizedWeightExportState:
     """Capture detached export state without mutating the quantized module."""
     weight = getattr(module, weight_name)
     if isinstance(weight, QTensorWrapper):
         raise NotImplementedError("Functional export requires an uncompressed source weight")
 
     quantized_view, weight_quantizer = _resolve_weight_quantizer(module, weight_name)
-    quantization_format = get_quantization_format(module)
+    input_quantizer = _input_quantizer(module, weight_name)
+    quantization_format = _get_quantization_from_quantizers(
+        module, weight_quantizer, input_quantizer
+    )
     if quantization_format not in _FUNCTIONAL_EXPORT_FORMATS:
         raise NotImplementedError(f"Functional export does not support {quantization_format!r}")
     if isinstance(weight_quantizer, SequentialQuantizer):
@@ -1100,33 +1081,20 @@ def capture_quantized_weight_export_state(
             _state_tensor(
                 "weight_block_amax",
                 per_block_amax.reshape(block_shape),
-                packed_shape,
+                axes=tuple(range(len(packed_shape))),
                 block_sizes=(1,) * (len(packed_shape) - 1) + (block_size,),
             )
         )
-        tensors.append(_state_tensor("weight_global_amax", global_amax, packed_shape))
+        tensors.append(_state_tensor("weight_global_amax", global_amax))
     elif quantization_format in _NVFP4_EXPORT_FORMATS:
         weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
-        tensors.append(_state_tensor("weight_scale_2", weight_scale_2, packed_shape))
-    elif quantization_format == QUANTIZATION_MXFP8:
-        weight_scale = MXFP8QTensor.get_weights_scaling_factor_from_quantizer(
-            quantized_view, weight_quantizer
-        )
-        tensors.append(
-            _state_tensor(
-                "weight_scale",
-                weight_scale,
-                packed_shape,
-                block_sizes=(1,) * (len(packed_shape) - 1) + (block_size,),
-            )
-        )
+        tensors.append(_state_tensor("weight_scale_2", weight_scale_2))
     else:
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None:
             raise RuntimeError(f"Missing calibrated weight scale for {weight_name!r}")
-        tensors.append(_state_tensor("weight_scale", weight_scale, packed_shape))
+        tensors.append(_state_tensor("weight_scale", weight_scale))
 
-    input_quantizer = _input_quantizer(module, weight_name)
     if input_quantizer is not None and input_quantizer.is_enabled:
         if input_quantizer.export_amax() is None:
             raise RuntimeError(f"Missing calibrated input scale for {weight_name!r}")
@@ -1135,9 +1103,9 @@ def capture_quantized_weight_export_state(
             if quantization_format == QUANTIZATION_NVFP4
             else get_scaling_factor(input_quantizer)
         )
-        tensors.append(_state_tensor("input_scale", input_scale, packed_shape))
+        tensors.append(_state_tensor("input_scale", input_scale))
 
-    return QuantizedWeightExportState(
+    return _QuantizedWeightExportState(
         quantization_format=quantization_format,
         block_size=block_size,
         weight_shape=tuple(weight.shape),
@@ -1176,9 +1144,9 @@ def _merge_state_tensors(
 
 
 def merge_quantized_weight_export_states(
-    states: Sequence[QuantizedWeightExportState],
+    states: Sequence[_QuantizedWeightExportState],
     weight_dim: int,
-) -> QuantizedWeightExportState:
+) -> _QuantizedWeightExportState:
     """Merge state for logical weight shards concatenated along ``weight_dim``."""
     if not states:
         raise ValueError("At least one quantized weight state is required")
@@ -1209,7 +1177,7 @@ def merge_quantized_weight_export_states(
         _merge_state_tensors([state.tensors[index] for state in states], packed_dim)
         for index in range(len(reference.tensors))
     )
-    return QuantizedWeightExportState(
+    return _QuantizedWeightExportState(
         reference.quantization_format,
         reference.block_size,
         tuple(shape),
@@ -1242,11 +1210,11 @@ def _select_state_tensor(
 
 
 def select_quantized_weight_export_state(
-    state: QuantizedWeightExportState,
+    state: _QuantizedWeightExportState,
     weight_dim: int,
     indices: Iterable[int] | torch.Tensor,
-) -> QuantizedWeightExportState:
-    """Select logical weight indices and their corresponding opaque export state."""
+) -> _QuantizedWeightExportState:
+    """Select logical indices that preserve complete quantization blocks."""
     ndim = len(state.weight_shape)
     weight_dim = _normalize_weight_dim(weight_dim, ndim)
     indices = torch.as_tensor(list(indices) if not isinstance(indices, torch.Tensor) else indices)
@@ -1259,7 +1227,7 @@ def select_quantized_weight_export_state(
     shape = list(state.weight_shape)
     shape[weight_dim] = indices.numel()
     packed_dim = state.packing_permutation.index(weight_dim)
-    return QuantizedWeightExportState(
+    return _QuantizedWeightExportState(
         state.quantization_format,
         state.block_size,
         tuple(shape),
@@ -1271,16 +1239,16 @@ def select_quantized_weight_export_state(
 
 
 def permute_quantized_weight_export_state(
-    state: QuantizedWeightExportState,
+    state: _QuantizedWeightExportState,
     dims: Sequence[int],
-) -> QuantizedWeightExportState:
+) -> _QuantizedWeightExportState:
     """Permute logical weight dimensions while retaining quantizer packing axes."""
     dims = tuple(dims)
     ndim = len(state.weight_shape)
     if sorted(dims) != list(range(ndim)):
         raise ValueError(f"Invalid permutation {dims} for a rank-{ndim} weight")
     inverse = {old_dim: new_dim for new_dim, old_dim in enumerate(dims)}
-    return QuantizedWeightExportState(
+    return _QuantizedWeightExportState(
         state.quantization_format,
         state.block_size,
         tuple(state.weight_shape[dim] for dim in dims),
@@ -1312,7 +1280,7 @@ def _restore_state_tensor(
 
 def export_quantized_weight_tensors(
     weight: torch.Tensor,
-    state: QuantizedWeightExportState,
+    state: _QuantizedWeightExportState,
     dtype: torch.dtype,
     weight_name: str = "weight",
 ) -> OrderedDict[str, torch.Tensor]:
@@ -1367,10 +1335,10 @@ def export_quantized_weight_tensors(
     weight_scale_record = _state_tensor(
         "weight_scale",
         weight_scale,
-        tuple(packed_weight.shape),
+        axes=tuple(range(packed_weight.ndim)),
         block_sizes=(1,) * (packed_weight.ndim - 1) + (state.block_size,)
         if state.quantization_format in _NVFP4_EXPORT_FORMATS
-        else None,
+        else (1,) * packed_weight.ndim,
     )
     output[attrs.weight_scale] = _restore_state_tensor(
         weight_scale_record, state.packing_permutation
@@ -1399,8 +1367,8 @@ def _quantized_layer_name(weight_name: str) -> str:
 
 
 def build_hf_quantization_config(
-    named_states: Mapping[str, QuantizedWeightExportState | None]
-    | Iterable[tuple[str, QuantizedWeightExportState | None]],
+    named_states: Mapping[str, _QuantizedWeightExportState | None]
+    | Iterable[tuple[str, _QuantizedWeightExportState | None]],
 ) -> dict[str, Any]:
     """Build canonical ModelOpt HF configuration from named opaque states."""
     layers: dict[str, tuple[str, int] | None] = {}
