@@ -487,7 +487,7 @@ def _get_quantization_from_quantizers(
     layer: nn.Module,
     weight_quantizer: TensorQuantizer | SequentialQuantizer | None,
     input_quantizer: TensorQuantizer | SequentialQuantizer | None,
-) -> str:
+) -> str | None:
     if weight_quantizer is None or not weight_quantizer.is_enabled:
         return QUANTIZATION_NONE
 
@@ -938,7 +938,7 @@ _NVFP4_EXPORT_FORMATS = {
 _MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
 
 
-class _UnsupportedQuantizedWeightExportFormat(NotImplementedError):
+class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
     pass
 
 
@@ -1072,8 +1072,7 @@ def _block_scale_state(
         if isinstance(dim, int) and block_size is not None:
             block_sizes[_normalize_weight_dim(dim, ndim)] = int(block_size)
     expected_shape = tuple(
-        (size + block_size - 1) // block_size
-        for size, block_size in zip(packed_shape, block_sizes)
+        (size + block_size - 1) // block_size for size, block_size in zip(packed_shape, block_sizes)
     )
     if value.numel() != torch.Size(expected_shape).numel():
         raise RuntimeError(
@@ -1127,15 +1126,17 @@ def capture_quantized_weight_export_state(
 
     quantized_view, weight_quantizer = _resolve_weight_quantizer(module, weight_name)
     input_quantizer = _input_quantizer(module, weight_name)
+    if not weight_quantizer.is_enabled:
+        raise RuntimeError(f"Weight quantizer for {weight_name!r} is disabled")
     quantization_format = _get_quantization_from_quantizers(
         module, weight_quantizer, input_quantizer
     )
+    if quantization_format is None:
+        raise RuntimeError(f"Unable to resolve quantization format for {weight_name!r}")
     if isinstance(weight_quantizer, SequentialQuantizer):
-        raise _UnsupportedQuantizedWeightExportFormat(
+        raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
-    if not weight_quantizer.is_enabled:
-        raise RuntimeError(f"Weight quantizer for {weight_name!r} is disabled")
 
     permutation = _packing_permutation(weight, quantized_view)
     packed_shape = tuple(weight.shape[axis] for axis in permutation)
@@ -1192,9 +1193,7 @@ def capture_quantized_weight_export_state(
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None:
             raise RuntimeError(f"Missing calibrated block scale for {weight_name!r}")
-        tensors.append(
-            _block_scale_state("weight_scale", weight_scale, packed_shape, block_config)
-        )
+        tensors.append(_block_scale_state("weight_scale", weight_scale, packed_shape, block_config))
     elif quantization_format == QUANTIZATION_MXFP8:
         cached_scale = getattr(weight_quantizer, "_scale", None)
         if cached_scale is not None:
@@ -1202,7 +1201,7 @@ def capture_quantized_weight_export_state(
                 _block_scale_state("weight_scale", cached_scale, packed_shape, block_config)
             )
     elif quantization_format not in _MXFP4_EXPORT_FORMATS:
-        raise _UnsupportedQuantizedWeightExportFormat(
+        raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
 
@@ -1450,7 +1449,7 @@ def export_quantized_weight_tensors(
         )
         quantized_weight = quantized_weight._quantized_data
     else:
-        raise _UnsupportedQuantizedWeightExportFormat(
+        raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {state.quantization_format!r}"
         )
 
@@ -1479,9 +1478,14 @@ def export_quantized_weight_tensors(
             scale_state.axes,
             scale_state.block_sizes,
         )
-    elif state.quantization_format in _NVFP4_EXPORT_FORMATS | {
-        QUANTIZATION_MXFP8,
-    } | _MXFP4_EXPORT_FORMATS:
+    elif (
+        state.quantization_format
+        in _NVFP4_EXPORT_FORMATS
+        | {
+            QUANTIZATION_MXFP8,
+        }
+        | _MXFP4_EXPORT_FORMATS
+    ):
         weight_scale_record = _block_scale_state(
             "weight_scale",
             weight_scale,

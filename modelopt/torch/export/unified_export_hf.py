@@ -100,7 +100,7 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
-    _UnsupportedQuantizedWeightExportFormat,
+    _UnsupportedQuantizedWeightExportFormatError,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
     fuse_prequant_layernorm,
@@ -613,7 +613,7 @@ def _export_quantized_weight(
     if not isinstance(weight, QTensorWrapper):
         try:
             state = capture_quantized_weight_export_state(sub_module, weight_name)
-        except _UnsupportedQuantizedWeightExportFormat:
+        except _UnsupportedQuantizedWeightExportFormatError:
             pass
         else:
             exported = export_quantized_weight_tensors(weight, state, dtype, weight_name)
