@@ -28,6 +28,7 @@ from _test_utils.torch.quantization.quantize_common import (
     save_restore_test,
 )
 from pydantic import ValidationError
+from torch import nn
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -462,6 +463,60 @@ def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
             assert module.axis == default_axis, (
                 f"axis should revert to default ({default_axis}), not inherit 0 from earlier entry"
             )
+
+
+class _HybridLinearAttnModel(nn.Module):
+    """Minimal Qwen3.5/3.6-style hybrid layer with GatedDeltaNet module names."""
+
+    def __init__(self, h=64):
+        super().__init__()
+        linear_attn = nn.Module()
+        linear_attn.in_proj_qkv = nn.Linear(h, 3 * h, bias=False)
+        linear_attn.in_proj_z = nn.Linear(h, h, bias=False)
+        linear_attn.in_proj_a = nn.Linear(h, 4, bias=False)
+        linear_attn.in_proj_b = nn.Linear(h, 4, bias=False)
+        linear_attn.out_proj = nn.Linear(h, h, bias=False)
+        self_attn = nn.Module()
+        self_attn.q_proj = nn.Linear(h, h, bias=False)
+        layer = nn.Module()
+        layer.linear_attn = linear_attn
+        layer.self_attn = self_attn
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList([layer])
+
+    def forward(self, x):
+        attn = self.model.layers[0].linear_attn
+        h = x.shape[-1]
+        out = attn.out_proj(attn.in_proj_qkv(x)[..., :h] * attn.in_proj_z(x))
+        out = out + attn.in_proj_a(x).sum() + attn.in_proj_b(x).sum()
+        return out + self.model.layers[0].self_attn.q_proj(x)
+
+    def get_input(self):
+        return torch.randn(2, 64)
+
+
+@pytest.mark.parametrize("config", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG])
+def test_default_presets_disable_packed_linear_attn_projections(config):
+    """Generic presets must not quantize GatedDeltaNet packed projections (issue #1933).
+
+    TRT-LLM's Qwen3.5/3.6 weight mapper repacks ``linear_attn.in_proj_qkv`` /
+    ``in_proj_z`` by splitting every checkpoint tensor along dim 0; the scalar
+    per-tensor scales of quantized modules (``input_scale``, ``weight_scale_2``)
+    are 0-dim and crash the split. This exercises the fnmatch patterns from
+    ``default_disabled_quantizers`` against real module names via ``mtq.quantize``.
+    """
+    model = mtq.quantize(_HybridLinearAttnModel(), config, lambda m: m(m.get_input()))
+
+    prefix = "model.layers.0.linear_attn"
+    for module_name in ("in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"):
+        quantized = model.get_submodule(f"{prefix}.{module_name}")
+        assert not quantized.weight_quantizer.is_enabled, f"{module_name} must stay unquantized"
+        assert not quantized.input_quantizer.is_enabled, f"{module_name} must stay unquantized"
+    # out_proj is not repacked by the deployment mapper and self_attn projections
+    # are per-module in the checkpoint; both stay quantized.
+    for module_name in ("linear_attn.out_proj", "self_attn.q_proj"):
+        quantized = model.get_submodule(f"model.layers.0.{module_name}")
+        assert quantized.weight_quantizer.is_enabled, f"{module_name} should be quantized"
 
 
 def test_legacy_dict_format_end_to_end():

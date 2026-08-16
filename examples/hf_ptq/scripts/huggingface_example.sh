@@ -204,7 +204,8 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
             $PTQ_ARGS \
             $AWQ_ARGS
     else
-        echo "Quantized model config $MODEL_CONFIG exists, skipping the quantization stage"
+        echo "Quantized model config $MODEL_CONFIG exists, skipping the quantization stage."
+        echo "The previously exported checkpoint in $SAVE_PATH is reused as-is; delete that directory to re-quantize (required to pick up ModelOpt or quantization config changes)."
     fi
 
     # for enc-dec model, users need to refer TRT-LLM example for deployment

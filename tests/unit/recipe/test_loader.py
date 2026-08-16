@@ -203,6 +203,41 @@ def test_nvfp4_weight_only_recipe_disables_vllm_marlin_incompatible_projections(
     } <= disabled_quantizers
 
 
+def _effective_enable(quant_cfg: list[dict], quantizer_name: str) -> bool:
+    """Resolve the final enable state of ``quantizer_name`` (entries apply in order)."""
+    enabled = False
+    for entry in quant_cfg:
+        # parent_class entries constrain by module class (BatchNorm, Embedding,
+        # ...); they never target the Linear quantizers probed here.
+        if entry.get("parent_class"):
+            continue
+        if fnmatch(quantizer_name, entry["quantizer_name"]):
+            enabled = entry.get("enable", True) is not False
+    return enabled
+
+
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast",
+        "huggingface/qwen3_5_moe/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast",
+    ],
+)
+def test_qwen3_5_recipes_keep_fp8_on_packed_linear_attn_projections(recipe_path):
+    # default_disabled_quantizers now disables linear_attn.in_proj_qkv/in_proj_z
+    # (TRT-LLM cannot split their scalar per-tensor scales, GitHub issue #1933);
+    # the curated Qwen3.5/3.6 recipes intentionally re-enable them with FP8
+    # after that import. Guard the entry ordering.
+    quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+
+    for module in ("in_proj_qkv", "in_proj_z"):
+        name = f"model.layers.0.linear_attn.{module}.weight_quantizer"
+        assert _effective_enable(quant_cfg, name), f"{name} should stay FP8-quantized"
+    for module in ("in_proj_a", "in_proj_b", "conv1d"):
+        name = f"model.layers.0.linear_attn.{module}.weight_quantizer"
+        assert not _effective_enable(quant_cfg, name), f"{name} should stay unquantized"
+
+
 def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
     recipe = load_recipe("general/ptq/nvfp4_mlp_only-novit-kv_fp8")
     disabled_quantizers = {
