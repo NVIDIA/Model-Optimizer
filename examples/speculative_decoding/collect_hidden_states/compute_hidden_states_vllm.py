@@ -144,7 +144,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of conversations to generate before saving and freeing their staged "
         "hidden states. Bounds how much the KV connector stages at once (its shared_storage_path "
         "defaults to /dev/shm, i.e. RAM); larger values amortize generate() calls, smaller ones "
-        "use less staging space.",
+        "use less staging space. Peak staging is roughly "
+        "chunk_size * max_seq_len * num_extracted_layers * hidden_size * 2 bytes; lower this if "
+        "you hit 'No space left on device' on the staging path (e.g. a small container --shm-size).",
     )
     parser.add_argument(
         "--debug-max-num-conversations", type=int, default=None, help="Limit conversations."
@@ -332,7 +334,14 @@ def main(args: argparse.Namespace) -> None:
     progress = tqdm(total=len(prompts), desc="Dumping")
     for chunk_start in range(0, len(prompts), chunk_size):
         chunk = slice(chunk_start, chunk_start + chunk_size)
-        outputs = llm.generate(prompts[chunk], sampling_params)
+        # use_tqdm=False: we already drive the outer "Dumping" bar, and one vLLM bar per
+        # chunk would otherwise flood the log (~one per save-chunk over the whole dataset).
+        outputs = llm.generate(prompts[chunk], sampling_params, use_tqdm=False)
+        # generate() returns one output per prompt in input order; assert it so a short or
+        # reordered result can't silently pair hidden states with the wrong id / loss_mask.
+        assert len(outputs) == len(conversation_ids[chunk]), (
+            f"vLLM returned {len(outputs)} outputs for {len(conversation_ids[chunk])} prompts"
+        )
         for conv_id, loss_mask, output in zip(conversation_ids[chunk], loss_masks[chunk], outputs):
             progress.update(1)
             hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
@@ -368,18 +377,28 @@ def main(args: argparse.Namespace) -> None:
                     )
                     continue
 
+                # Write-then-rename: the resume filter (keep_conversation) treats any existing
+                # <id>.pt as finished work, so a partial file from a run killed mid-torch.save
+                # would be skipped forever and then fail in torch.load at training time.
+                # os.replace is atomic within the same directory.
                 output_file = output_dir / f"{conv_id}.pt"
-                with open(output_file, "wb") as f:
-                    torch.save(
-                        {
-                            "input_ids": token_ids.cpu(),
-                            "hidden_states": output_hidden_states,
-                            "aux_hidden_states": aux_hidden_states,
-                            "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
-                            "conversation_id": conv_id,
-                        },
-                        f,
-                    )
+                tmp_file = output_file.with_suffix(".pt.tmp")
+                try:
+                    with open(tmp_file, "wb") as f:
+                        torch.save(
+                            {
+                                "input_ids": token_ids.cpu(),
+                                "hidden_states": output_hidden_states,
+                                "aux_hidden_states": aux_hidden_states,
+                                "loss_mask": loss_mask[: output_hidden_states.shape[0]].cpu(),
+                                "conversation_id": conv_id,
+                            },
+                            f,
+                        )
+                    os.replace(tmp_file, output_file)
+                except BaseException:
+                    tmp_file.unlink(missing_ok=True)
+                    raise
                 num_success += 1
             finally:
                 example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
