@@ -286,11 +286,12 @@ def train():
     print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
     # A draft whose top aux layer already is the base's last layer (e.g. the released
-    # Nemotron-3.5 DSpark draft: aux ids [2,6,20,30,42,52] on a 52-layer base) cannot get a
-    # distinct extra capture plane for the base hidden — vLLM captures each layer once — so
-    # the streaming dataset must reuse the final plane for both roles. Derived from the
-    # model rather than configured by hand: it is a property of the draft, and a wrong
-    # manual value fails as a confusing matmul shape error deep in the draft's `fc`.
+    # Nemotron-3.5 DSpark draft: aux ids [1,5,19,29,41,51], zero-based, on a 52-layer base)
+    # cannot get a distinct extra capture plane for the base hidden — vLLM captures each
+    # layer once — so the streaming dataset must reuse the final plane for both roles.
+    # Derived from the model rather than configured by hand: it is a property of the
+    # draft, and a wrong manual value fails as a confusing matmul shape error deep in
+    # the draft's `fc`.
     # Read the base depth the same way HFDFlashModel.modify does: offline/streaming loads
     # the base with num_hidden_layers=0 (or a fake base) and stashes the real count in
     # num_orig_hidden_layers, so num_hidden_layers alone would compare against 0 here.
