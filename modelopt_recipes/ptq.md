@@ -314,6 +314,15 @@ A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is clo
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).
 
+**`step3p7/ptq/{nvfp4_experts_only-kv_fp8_cast,nvfp4_mlp_only-kv_fp8}`** are the
+Step-3.7 equivalents, and the reason they exist is **module naming**: Step calls
+the MoE block `moe` and the dense sibling `share_expert`, so the general
+recipes' `*.experts.*`, `*block_sparse_moe*` and `*mlp*` patterns match nothing
+on the routed experts — the general recipe would quantize *nothing* and export a
+checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
+router (`moe.gate`) and `share_expert` on top. Use them, not the general
+recipes, for any Step checkpoint.
+
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 
 These quantize the **same layers** as the general recipes; only the
