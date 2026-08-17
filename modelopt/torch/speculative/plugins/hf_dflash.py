@@ -472,6 +472,14 @@ class HFDFlashModel(DFlashModel):
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
                     f"references a layer beyond the base model's {num_target_layers} layers."
                 )
+            # Reject negatives explicitly: forward() indexes hidden_states[lid + 1], where a
+            # negative id silently wraps to a valid layer instead of raising, and the draft
+            # then trains on features from a layer it was never meant to see.
+            if min(user_target_layer_ids) < 0:
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    "must be non-negative base-layer indices."
+                )
             self.target_layer_ids = list(user_target_layer_ids)
             logger.info("DFlash: using explicit target_layer_ids %s", self.target_layer_ids)
         else:
