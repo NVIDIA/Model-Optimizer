@@ -157,8 +157,11 @@ def build_linear_view(state_dict: dict[str, torch.Tensor], dtype: torch.dtype) -
                 node[part] = nn.ModuleDict()
             node = node[part]
         out_features, in_features = weight.shape
-        linear = nn.Linear(in_features, out_features, bias=False, dtype=dtype)
-        linear.weight.data = weight.to(dtype)
+        # On meta, so nn.Linear skips allocating and randomly initializing a weight that
+        # the next line replaces anyway.
+        with torch.device("meta"):
+            linear = nn.Linear(in_features, out_features, bias=False, dtype=dtype)
+        linear.weight = nn.Parameter(weight.to(dtype), requires_grad=False)
         node[leaf] = linear
     return root
 
