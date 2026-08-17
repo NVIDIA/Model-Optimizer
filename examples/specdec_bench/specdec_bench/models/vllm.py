@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import asyncio
+import json
+import os
 import time
 
 from .base import Model
@@ -116,6 +118,24 @@ class VLLMModel(Model):
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+
+        # A quantized draft checkpoint has to declare its own quantization. vLLM otherwise
+        # copies the target's onto the draft (config/speculative.py, "Align the
+        # quantization of draft model"), so a quantized drafter under a bf16 target is
+        # built as if it were bf16 and dies loading the packed weights. The drafter's
+        # config.json already records the format, so read it back rather than making the
+        # caller repeat it; --draft_quantization overrides.
+        if specdec is not None and specdec.get("model"):
+            draft_quantization = kwargs.get("draft_quantization")
+            if draft_quantization is None:
+                draft_config = os.path.join(specdec["model"], "config.json")
+                if os.path.isfile(draft_config):
+                    with open(draft_config) as f:
+                        quant_config = json.load(f).get("quantization_config") or {}
+                    draft_quantization = quant_config.get("quant_method")
+            if draft_quantization:
+                specdec["quantization"] = draft_quantization
+                print(f"Draft model quantization: {draft_quantization}")
 
         if specdec is None:
             num_speculative_tokens = 1
