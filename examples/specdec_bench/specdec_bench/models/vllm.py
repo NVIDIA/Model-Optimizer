@@ -116,6 +116,17 @@ class VLLMModel(Model):
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
             }
+        elif kwargs.get("speculative_algorithm") == "DSPARK":
+            # Match draft sampling to the target's verify mode: a greedy target with a
+            # probabilistic draft (or the reverse) crushes acceptance at temp > 0.
+            temperature = sampling_kwargs.get("temperature", 1.0)
+            specdec = {
+                "method": "dspark",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
+                "draft_sample_method": kwargs.get("dspark_draft_sample_method")
+                or ("greedy" if temperature == 0 else "probabilistic"),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
@@ -139,6 +150,14 @@ class VLLMModel(Model):
         else:
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
 
+        # DSpark's block-parallel draft can outgrow the pre-allocated workspace during
+        # CUDA-graph capture; acceptance length is unaffected by graph capture, so skip it.
+        # SPECDEC_ENFORCE_EAGER=1 forces the same for other algorithms.
+        enforce_eager = (
+            kwargs.get("speculative_algorithm") == "DSPARK"
+            or os.environ.get("SPECDEC_ENFORCE_EAGER") == "1"
+        )
+
         engine_args = AsyncEngineArgs(
             model=model_dir,
             tokenizer=kwargs.get("tokenizer_path"),
@@ -150,7 +169,7 @@ class VLLMModel(Model):
             max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            enforce_eager=enforce_eager,
             max_model_len=kwargs.get("max_model_len"),
         )
         self.engine_args = engine_args

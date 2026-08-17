@@ -50,16 +50,14 @@ pipeline:
     script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/export_quantized
-      # DFLASH reads --block_size, not --draft_length; must match the drafter's
-      # dflash_block_size.
+      # DSPARK/DFLASH read --block_size, not --draft_length; must match the
+      # drafter's dflash_block_size.
       - --block_size 16
       - --output_length 4096
       - --engine VLLM
       - --tp_size 1
       - --ep_size 1
-      # DSpark runs through the DFLASH path; the drafter's own config carries the
-      # DSpark heads.
-      - --speculative_algorithm DFLASH
+      - --speculative_algorithm DSPARK
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 32
     environment:
