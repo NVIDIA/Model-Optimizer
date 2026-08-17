@@ -26,15 +26,18 @@ pipeline:
 
   # Step 1: Quantize. w4a16_nvfp4 keeps activations in bf16; use --qformat nvfp4
   # for weight+activation (fixed input_scale 1.0, ~3.9% AL on Qwen3-8B).
-  # DFlash-family drafters read qkv_proj.weight raw for their fused context-KV
-  # projection, so those layers must stay unquantized; o_proj and the MLP still
-  # quantize.
+  #
+  # The q/k/v exclusions are mandatory, not a tuning choice: DFlash-family
+  # drafters build their fused context-KV projection by reading qkv_proj.weight
+  # raw, which cannot be a packed tensor. o_proj and the MLP still quantize.
+  # `fc` is optional -- quantizing it saves ~12% more size for ~0.7% AL on
+  # Qwen3-8B (3.0186 vs 3.0392); add '*fc*' to keep it in bf16.
   task_0:
     script: common/specdec/quantize_drafter.sh
     args:
       - --qformat w4a16_nvfp4
       - --export_path /scratchspace/export_quantized
-      - --exclude '*q_proj*' '*k_proj*' '*v_proj*' '*qkv_proj*' '*fc*'
+      - --exclude '*q_proj*' '*k_proj*' '*v_proj*' '*qkv_proj*'
     environment:
       - DRAFTER_CKPT: <<global_vars.draft_model>>
     slurm_config:
