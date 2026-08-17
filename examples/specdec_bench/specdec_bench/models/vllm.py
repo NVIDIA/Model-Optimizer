@@ -119,12 +119,9 @@ class VLLMModel(Model):
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
 
-        # A quantized draft checkpoint has to declare its own quantization. vLLM otherwise
-        # copies the target's onto the draft (config/speculative.py, "Align the
-        # quantization of draft model"), so a quantized drafter under a bf16 target is
-        # built as if it were bf16 and dies loading the packed weights. The drafter's
-        # config.json already records the format, so read it back rather than making the
-        # caller repeat it; --draft_quantization overrides.
+        # vLLM copies the target's quantization onto the draft, so a quantized drafter under
+        # a bf16 target is built as bf16 and dies loading the packed weights. Read the format
+        # from the drafter's own config.json; --draft_quantization overrides.
         if specdec is not None and specdec.get("model"):
             draft_quantization = kwargs.get("draft_quantization")
             if draft_quantization is None:
