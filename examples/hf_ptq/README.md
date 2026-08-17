@@ -111,6 +111,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3, 3.5 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| Kimi K3<sup>14</sup> | - | - | - | - | ✅ |
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | MiniMax M2.1 | - | - | - | - | ✅ |
@@ -137,7 +138,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
 > *<sup>11.</sup>Vision-language model (VLM): only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
 > *<sup>12.</sup>For VLMs, `int8_sq` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
+> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
+> *<sup>14.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
@@ -255,6 +257,12 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 #### Deepseek R1
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
+
+#### Kimi K3
+
+[PTQ for Kimi K3](../kimi/README.md) shows how to cast the source MXFP4 routed
+experts to NVFP4 and quantize KDA/MLA attention weights to 128x128 block FP8
+without loading the full model or running calibration.
 
 #### VLM quantization
 

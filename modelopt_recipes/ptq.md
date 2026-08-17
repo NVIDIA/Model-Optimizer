@@ -340,6 +340,14 @@ everything else matches the general recipe.
 The `huggingface/models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
+- **`models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention`** mirrors
+  `nvidia/Kimi-K3-NVFP4`: the source MXFP4 routed experts are cast to NVFP4,
+  with activation `input_scale=1.0`, while KDA and MLA projection weights use
+  128x128 block FP8. Attention activations are dynamic; shared and latent
+  experts, routers, convolutions, norms, the vision tower, `lm_head`, and KV
+  cache remain BF16. Because the 2.8T source uses packed MXFP4 expert tensors,
+  use the calibration-free streaming converter in `examples/kimi/` rather than
+  the in-memory `hf_ptq.py` flow.
 - **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
