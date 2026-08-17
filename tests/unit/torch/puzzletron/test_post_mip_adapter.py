@@ -19,7 +19,11 @@ import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import puzzletron_orchestrator.adapters.post_mip as post_mip_adapter
 from puzzletron_orchestrator.adapters.post_mip import PostMIPAdapter
 from puzzletron_orchestrator.schema import (
     CampaignPlan,
@@ -68,6 +72,66 @@ def _plan(tmp_path: Path, *, stage_id: str, node_type: str) -> tuple[CampaignPla
         contract_hash="contract",
     )
     return plan, node
+
+
+class _PostMIPExecutionContractUnavailableError(RuntimeError):
+    pass
+
+
+def _candidate_count_api(candidate_count: int | Exception):
+    def expected_post_mip_candidate_count(_config, _stage_id):
+        if isinstance(candidate_count, Exception):
+            raise candidate_count
+        return candidate_count
+
+    return SimpleNamespace(
+        PostMIPExecutionContractUnavailable=_PostMIPExecutionContractUnavailableError,
+        expected_post_mip_candidate_count=expected_post_mip_candidate_count,
+    )
+
+
+def test_post_mip_evaluation_preserves_pre_ledger_dry_run_fallback(tmp_path: Path, monkeypatch):
+    plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    identity_api = _candidate_count_api(
+        _PostMIPExecutionContractUnavailableError("post-MIP candidate registry is unavailable")
+    )
+    monkeypatch.setattr(post_mip_adapter, "_post_mip_identity_api", lambda: identity_api)
+
+    work_plan = PostMIPAdapter().plan(plan, node)
+
+    assert work_plan.items[0].metadata["logical_shard_count"] == node.instances
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "post-MIP candidate registry does not reflect the active MIP execution",
+        "post-MIP inputs for 'post.params.online_eval' are unavailable",
+    ],
+    ids=("stale-registry", "missing-input"),
+)
+def test_post_mip_evaluation_with_existing_registry_fails_closed(
+    tmp_path: Path, monkeypatch, message: str
+):
+    plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    registry = plan.puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("{}\n")
+    identity_api = _candidate_count_api(_PostMIPExecutionContractUnavailableError(message))
+    monkeypatch.setattr(post_mip_adapter, "_post_mip_identity_api", lambda: identity_api)
+
+    with pytest.raises(_PostMIPExecutionContractUnavailableError, match=message):
+        PostMIPAdapter().plan(plan, node)
+
+
+def test_post_mip_evaluation_clamps_workers_to_available_candidates(tmp_path: Path, monkeypatch):
+    plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    identity_api = _candidate_count_api(1)
+    monkeypatch.setattr(post_mip_adapter, "_post_mip_identity_api", lambda: identity_api)
+
+    work_plan = PostMIPAdapter().plan(plan, node)
+
+    assert [item.work_id for item in work_plan.items] == [f"{node.stage_id}:0"]
 
 
 def test_post_mip_evaluation_uses_torchrun_for_single_gpu_workers(tmp_path: Path):

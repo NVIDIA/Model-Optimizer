@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import math
 import signal
 import time
 import uuid
@@ -31,7 +32,7 @@ from .adapters.base import ExecutionIdentityProjectionUnavailable
 from .adapters.post_mip import ManualInputRequired
 from .adapters.registry import adapter_for_stage
 from .adapters.stage_compat import stage_is_complete
-from .compiler import plan_to_dict
+from .compiler import _resolve_artifact_settling_timeout_seconds, plan_to_dict
 from .dashboard import StageView, format_duration, progress_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
 from .identity import stable_hash
@@ -65,9 +66,6 @@ from .terminal import InteractiveControlRequest, ShutdownAction, TerminalControl
 __all__ = ["CampaignController", "create_executor", "dry_run_plan"]
 
 
-_ARTIFACT_SETTLING_TIMEOUT_SECONDS = 300.0
-
-
 def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
     if local:
         return LocalExecutor(plan.runner)
@@ -78,6 +76,17 @@ def create_executor(plan: CampaignPlan, *, local: bool = False) -> Executor:
         executor.preflight()
         return executor
     raise ValueError(f"Unsupported runner kind: {plan.runner.kind}")
+
+
+def _persisted_completion_timestamp(attempt: Mapping[str, Any]) -> float | None:
+    for field in ("completed_at", "submitted_at"):
+        value = attempt.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        timestamp = float(value)
+        if math.isfinite(timestamp):
+            return timestamp
+    return None
 
 
 def _stage_dashboard_display_name(
@@ -215,6 +224,9 @@ class CampaignController:
         )
         self._stage_execution_identity_cache: dict[str, str] | None = None
         defaults = dict(plan.execution_defaults or {})
+        self.artifact_settling_timeout_seconds = _resolve_artifact_settling_timeout_seconds(
+            defaults
+        )
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
 
     def _recover_active_attempts(self) -> None:
@@ -360,11 +372,7 @@ class CampaignController:
                 return None
 
             def _completion_time(attempt: dict[str, Any]) -> float:
-                completed_at = attempt.get("completed_at")
-                if isinstance(completed_at, (int, float)):
-                    return float(completed_at)
-                submitted_at = attempt.get("submitted_at")
-                return float(submitted_at) if isinstance(submitted_at, (int, float)) else 0.0
+                return _persisted_completion_timestamp(attempt) or 0.0
 
             completed.append(
                 max(
@@ -442,15 +450,9 @@ class CampaignController:
         completed = self._required_completed_attempts(node, attempts)
         if completed is None:
             return None
-        completed_at: list[float] = []
-        for attempt in completed:
-            value = attempt.get("completed_at")
-            if not isinstance(value, (int, float)):
-                return _ARTIFACT_SETTLING_TIMEOUT_SECONDS
-            completed_at.append(float(value))
-        now = time.time()
+        now = time.monotonic()
         first_observed = self._first_completion_observed.setdefault(node.stage_id, now)
-        return max(0.0, now - max(max(completed_at), first_observed))
+        return max(0.0, now - first_observed)
 
     def _policy_allows_retry(self, node: StagePlanNode, failure: FailureClass) -> bool:
         if failure in {FailureClass.SUCCESS, FailureClass.CANCELLED}:
@@ -764,7 +766,7 @@ class CampaignController:
         if node.stage_id in self._failed_stages:
             return True
         elapsed = self._completed_work_artifact_settling_elapsed(node, attempts)
-        if elapsed is None or elapsed < _ARTIFACT_SETTLING_TIMEOUT_SECONDS:
+        if elapsed is None or elapsed < self.artifact_settling_timeout_seconds:
             return False
         failure = self._finalization_failures.get(node.stage_id)
         reason = failure.reason if failure is not None else "required artifacts are incomplete"
@@ -807,14 +809,14 @@ class CampaignController:
                 "stage_execution_identity": self._stage_execution_identity(node),
                 "attempt_ids": [attempt.attempt_id for attempt in persisted_attempts],
                 "elapsed_seconds": elapsed,
-                "timeout_seconds": _ARTIFACT_SETTLING_TIMEOUT_SECONDS,
+                "timeout_seconds": self.artifact_settling_timeout_seconds,
                 "reason": reason,
                 "expected_artifacts": expected_artifacts,
             },
         )
         self.logger.error(
             f"{node.stage_id}: completed work outputs did not settle within "
-            f"{_ARTIFACT_SETTLING_TIMEOUT_SECONDS:g}s: {reason}"
+            f"{self.artifact_settling_timeout_seconds:g}s: {reason}"
         )
         return True
 

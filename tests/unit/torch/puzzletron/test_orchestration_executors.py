@@ -781,6 +781,49 @@ def test_post_mip_workers_share_one_packed_allocation(tmp_path: Path):
     assert attempt.command.argv[-2:] == ("--shard-count", "8")
 
 
+def test_sharded_aiperf_defaults_omit_security_opt_ins(tmp_path: Path):
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="aiperf",
+        strategy=ExecutionStrategy.SHARDED,
+        instances=1,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=1,
+        gpus_per_node=8,
+        nodes=1,
+        total_gpus=1,
+        exclusive=False,
+        parents=("mip",),
+        distributed=False,
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    adapter = adapter_for_stage(node)
+
+    attempt = adapter.command(
+        plan=plan,
+        node=node,
+        item=adapter.plan(plan, node).items[0],
+        attempt_id="a1",
+        runner=runner,
+    )
+
+    assert "--trust-remote-code" not in attempt.command.argv
+    assert "--allow-aiperf-v011-online-tokenizer-resolution" not in attempt.command.argv
+
+
 def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
@@ -937,6 +980,44 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
         changed_attempt.command.env["FINALIZE_COMPLETION_DIR"]
         != attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
     )
+    changed_widths_plan = CampaignPlan(
+        experiment_config_path=plan.experiment_config_path,
+        puzzle_dir=plan.puzzle_dir,
+        experiment_config={
+            **plan.experiment_config,
+            "embedding_pruning": {
+                "enabled": True,
+                "widths": [2048, 1792, 1536, 1280],
+            },
+        },
+        runner=runner,
+        execution_defaults=plan.execution_defaults,
+        stages=(node,),
+        contract_hash=plan.contract_hash,
+    )
+    changed_widths_work_plan = adapter.plan(changed_widths_plan, node)
+    changed_widths_attempts = [
+        adapter.command(
+            plan=changed_widths_plan,
+            node=node,
+            item=item,
+            attempt_id=f"changed-widths-{index}",
+            runner=runner,
+            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+        )
+        for index, item in enumerate(changed_widths_work_plan.items)
+    ]
+    changed_completion_dirs = {
+        attempt.command.env["FINALIZE_COMPLETION_DIR"] for attempt in changed_widths_attempts
+    }
+    assert len(changed_completion_dirs) == 1
+    assert changed_completion_dirs != {attempts[0].command.env["FINALIZE_COMPLETION_DIR"]}
+    assert [
+        attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in changed_widths_attempts
+    ] == ["width-2048", "width-1792", "width-1536", "width-1280"]
+    assert [
+        attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in changed_widths_attempts
+    ] == ["4", "4", "4", "4"]
     assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
     assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
 

@@ -660,6 +660,8 @@ cancel-and-quit behavior. A detached controller preserves durable handles, so th
 same command recovers the running jobs.
 Use `--color always` when piping through `tee`, `--color never` for plain logs,
 and `--poll-interval SECONDS` to change the default five-second scheduler poll.
+Set `execution.defaults.artifact_settling_timeout_seconds` to control how long
+completed work may take to publish valid stage artifacts (default: 300 seconds).
 
 Durable controller state is written under `${puzzle_dir}/orchestration/`. The
 controller supports `single`, `sharded`, and `persistent_pool` strategies,

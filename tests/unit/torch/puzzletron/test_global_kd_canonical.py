@@ -430,6 +430,130 @@ def test_global_kd_config_preserves_per_model_dtype_overrides(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("descriptor", "expected_trust"),
+    [("llama", False), ("nemotron_h", True)],
+)
+def test_global_kd_config_defaults_trust_policy_from_descriptors(
+    tmp_path, descriptor, expected_trust
+):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": descriptor},
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    kd = build_global_kd_config(config)
+
+    assert kd.trust_remote_code is expected_trust
+
+
+@pytest.mark.parametrize("configured_trust", [False, True])
+def test_global_kd_config_explicit_trust_policy_wins(tmp_path, configured_trust):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {
+            "descriptor_override": "nemotron_h",
+            "trust_remote_code": not configured_trust,
+        },
+        "distillation": {
+            "trust_remote_code": configured_trust,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    assert build_global_kd_config(config).trust_remote_code is configured_trust
+
+
+def test_global_kd_config_rejects_non_boolean_trust_policy(tmp_path):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {
+            "descriptor_override": "nemotron_h",
+            "trust_remote_code": "false",
+        },
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="model.trust_remote_code must be a boolean"):
+        build_global_kd_config(config)
+
+
+def test_global_kd_config_object_rejects_non_boolean_trust_policy(tmp_path):
+    with pytest.raises(ValueError, match="distillation.trust_remote_code must be a boolean"):
+        GlobalKDConfig(
+            teacher_dir=tmp_path / "teacher",
+            student_dir=tmp_path / "student",
+            output_dir=tmp_path / "output",
+            descriptor="llama",
+            trust_remote_code="false",
+        )
+
+
+@pytest.mark.parametrize("teacher", [False, True], ids=("student", "teacher"))
+def test_global_kd_model_kwargs_cannot_bypass_trust_policy(tmp_path, teacher):
+    from modelopt.torch.puzzletron.distillation import global_automodel
+
+    kd = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="llama",
+        trust_remote_code=False,
+    )
+    model_kwargs = kd.teacher_model_kwargs if teacher else kd.student_model_kwargs
+    model_kwargs["trust_remote_code"] = "false"
+
+    with pytest.raises(ValueError, match="trust_remote_code must be a boolean"):
+        global_automodel._model_recipe(kd, teacher=teacher, domain="llm")
+
+
+def test_global_kd_recipe_overrides_cannot_bypass_trust_policy(tmp_path):
+    kd = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="llama",
+        domain="llm",
+        validation_enabled=False,
+        metadata={"recipe_overrides": {"model": {"trust_remote_code": "false"}}},
+    )
+
+    with pytest.raises(ValueError, match="trust_remote_code must be a boolean"):
+        build_automodel_global_kd_recipe(kd)
+
+
 def test_global_kd_load_checkpoint_honors_resume_policy():
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
@@ -785,6 +909,62 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
         )
     ]
     assert (tmp_path / "epoch_2_step_17" / "saving_completed").is_file()
+
+
+def test_global_kd_checkpoint_trust_policy_defaults_to_descriptor(monkeypatch):
+    # Lazy imports keep the optional NeMo AutoModel runtime out of test collection.
+    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+        _checkpoint_trust_remote_code,
+    )
+
+    class Descriptor:
+        @staticmethod
+        def requires_trust_remote_code():
+            return True
+
+    monkeypatch.setattr(ModelDescriptorFactory, "get", lambda name: Descriptor)
+
+    assert _checkpoint_trust_remote_code({"anymodel_descriptor": "nemotron_h"}) is True
+
+
+@pytest.mark.parametrize("configured_trust", [False, True])
+def test_global_kd_checkpoint_explicit_trust_policy_wins(configured_trust, monkeypatch):
+    # Lazy imports keep the optional NeMo AutoModel runtime out of test collection.
+    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+        _checkpoint_trust_remote_code,
+    )
+
+    def fail_descriptor_lookup(name):
+        raise AssertionError(f"explicit trust policy should win before descriptor lookup: {name}")
+
+    monkeypatch.setattr(ModelDescriptorFactory, "get", fail_descriptor_lookup)
+
+    assert (
+        _checkpoint_trust_remote_code(
+            {
+                "anymodel_descriptor": "nemotron_h",
+                "trust_remote_code": configured_trust,
+            }
+        )
+        is configured_trust
+    )
+
+
+@pytest.mark.parametrize("configured_trust", [None, "false"], ids=("null", "string"))
+def test_global_kd_checkpoint_rejects_invalid_explicit_trust_policy(configured_trust):
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+        _checkpoint_trust_remote_code,
+    )
+
+    with pytest.raises(ValueError, match="model.trust_remote_code must be a boolean"):
+        _checkpoint_trust_remote_code(
+            {
+                "anymodel_descriptor": "nemotron_h",
+                "trust_remote_code": configured_trust,
+            }
+        )
 
 
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):

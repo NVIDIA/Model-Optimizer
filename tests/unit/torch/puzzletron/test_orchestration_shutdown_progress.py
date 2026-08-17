@@ -650,7 +650,7 @@ def test_controller_revalidates_recent_completed_work_before_resubmitting(
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=45.0)
     attempt = controller._bind_attempt_to_stage_execution(node, delegate.plan(plan, node), attempt)
     now = [1000.0]
-    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.monotonic", lambda: now[0])
     monkeypatch.setattr(
         controller,
         "_interruptible_sleep",
@@ -706,20 +706,69 @@ def test_controller_revalidates_recent_completed_work_before_resubmitting(
     assert controller.store.stage_is_complete("convert")
 
 
+@pytest.mark.parametrize(
+    "completed_at",
+    [None, "not-a-timestamp", float("nan"), 10_000.0],
+    ids=("missing", "string", "nan", "future"),
+)
+def test_controller_starts_settling_window_when_completed_timestamp_is_invalid(
+    tmp_path: Path, monkeypatch, completed_at
+):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    execution = load_execution_config(execution_path)
+    execution["defaults"]["artifact_settling_timeout_seconds"] = 5
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=execution,
+        stage_filter="convert",
+    )
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    work_plan = delegate.plan(plan, node)
+    item = work_plan.items[0]
+    controller = CampaignController(plan, executor=_TrackingFakeExecutor())
+    attempt = delegate.command(
+        plan=plan,
+        node=node,
+        item=item,
+        attempt_id="completed-attempt",
+        runner=plan.runner,
+    )
+    attempt = controller._bind_attempt_to_stage_execution(node, work_plan, attempt)
+    now = [1000.0]
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.monotonic", lambda: now[0])
+    controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
+    attempts = controller.store.list_attempts("convert")
+    attempts[0]["submitted_at"] = 1.0
+    if completed_at is None:
+        attempts[0].pop("completed_at", None)
+    else:
+        attempts[0]["completed_at"] = completed_at
+
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 0.0
+    now[0] = 1004.0
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 4.0
+    now[0] = 1005.0
+    assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 5.0
+
+
 @pytest.mark.parametrize("aggregation_failure", [False, True])
 def test_controller_fails_when_completed_work_artifacts_do_not_settle(
     tmp_path: Path, monkeypatch, aggregation_failure: bool
 ):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
+    execution = load_execution_config(execution_path)
+    execution["defaults"]["artifact_settling_timeout_seconds"] = 120
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
+        execution=execution,
         stage_filter="convert",
     )
     node = plan.stages[0]
     executor = _TrackingFakeExecutor()
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=150.0)
+    controller = CampaignController(plan, executor=executor, poll_interval_seconds=60.0)
     now = [1000.0]
     delegate = adapter_for_stage(node)
     item = delegate.plan(plan, node).items[0]
@@ -731,7 +780,7 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
         runner=plan.runner,
     )
     attempt = controller._bind_attempt_to_stage_execution(node, delegate.plan(plan, node), attempt)
-    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.monotonic", lambda: now[0])
     monkeypatch.setattr(
         controller,
         "_interruptible_sleep",
@@ -803,7 +852,8 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
         "FileNotFoundError" if aggregation_failure else None
     )
     assert event["payload"]["attempt_ids"] == ["completed-attempt"]
-    assert event["payload"]["elapsed_seconds"] == 300.0
+    assert event["payload"]["elapsed_seconds"] == 120.0
+    assert event["payload"]["timeout_seconds"] == 120.0
     expected_reason = (
         "stage aggregation failed: FileNotFoundError: shards are still publishing"
         if aggregation_failure

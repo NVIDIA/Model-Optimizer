@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -12,10 +27,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from ..dataset.config import DataLayout, Modality, PuzzletronDataSpec
 from ..identity import cache_key, canonicalize
+from ..security_policy import require_boolean_policy
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +119,10 @@ class GlobalKDConfig:
     )
 
     def __post_init__(self):
+        require_boolean_policy(
+            self.trust_remote_code,
+            path="distillation.trust_remote_code",
+        )
         if self.domain not in ("auto", "llm", "vlm"):
             raise ValueError("distillation.domain must be auto, llm, or vlm")
         if self.pp_schedule not in ("1f1b", "interleaved1f1b"):
@@ -205,6 +225,50 @@ def _loss_term(node: dict[str, Any], *, legacy_temperature: float) -> KDLossTerm
     )
 
 
+def _descriptor_trust_remote_code(*descriptor_names: str) -> bool:
+    """Return whether any selected model descriptor requires remote code."""
+
+    # Loading the descriptor catalog imports every supported HF model module.
+    # Keep that work on the config-building path that needs the fallback.
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+
+    for descriptor_name in dict.fromkeys(descriptor_names):
+        descriptor = ModelDescriptorFactory.get(descriptor_name)
+        requires_trust_remote_code = getattr(descriptor, "requires_trust_remote_code", None)
+        if not callable(requires_trust_remote_code):
+            raise ValueError(f"unknown Puzzletron model descriptor: {descriptor_name}")
+        if require_boolean_policy(
+            requires_trust_remote_code(),
+            path=f"descriptor {descriptor_name}.requires_trust_remote_code",
+        ):
+            return True
+    return False
+
+
+def _global_kd_trust_remote_code(
+    kd_config: dict[str, Any],
+    model_config: dict[str, Any],
+    *,
+    student_descriptor: str,
+    teacher_descriptor: str,
+) -> bool:
+    """Resolve explicit global-KD trust policy before descriptor fallback."""
+
+    for config, path in (
+        (kd_config, "distillation.trust_remote_code"),
+        (model_config, "model.trust_remote_code"),
+    ):
+        if "trust_remote_code" in config:
+            return require_boolean_policy(config["trust_remote_code"], path=path)
+    return _descriptor_trust_remote_code(student_descriptor, teacher_descriptor)
+
+
+def _require_matching_trust_policy(value: Any, *, path: str, expected: bool) -> None:
+    configured = require_boolean_policy(value, path=path)
+    if configured is not expected:
+        raise ValueError(f"{path} conflicts with the resolved global KD trust policy")
+
+
 def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     kd_cfg = dict(config.get("distillation") or {})
     student = dict(kd_cfg.get("student") or {})
@@ -254,6 +318,12 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     )
     if not student_descriptor or not teacher_descriptor:
         raise ValueError("Global KD requires student and teacher Puzzletron descriptors")
+    trust_remote_code = _global_kd_trust_remote_code(
+        kd_cfg,
+        model_cfg,
+        student_descriptor=str(student_descriptor),
+        teacher_descriptor=str(teacher_descriptor),
+    )
 
     legacy_force_hf = bool(kd_cfg.get("force_hf", model_cfg.get("force_hf", True)))
     legacy_temperature = float(kd_cfg.get("temperature", 1.0))
@@ -295,7 +365,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             **dict(teacher.get("model_kwargs") or {}),
         },
         domain=str(kd_cfg.get("domain", "auto")).lower(),
-        trust_remote_code=bool(kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", True))),
+        trust_remote_code=trust_remote_code,
         torch_dtype=str(kd_cfg.get("torch_dtype") or model_cfg.get("torch_dtype") or "bf16"),
         attn_implementation=kd_cfg.get("attn_implementation") or model_cfg.get("attn_implementation"),
         tp=_int_value((parallel, "tp")),
@@ -394,7 +464,16 @@ def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> d
         "torch_dtype": kd_config.torch_dtype,
         "trust_remote_code": kd_config.trust_remote_code,
     }
-    model.update(kd_config.teacher_model_kwargs if teacher else kd_config.student_model_kwargs)
+    model_role = "teacher" if teacher else "student"
+    model_kwargs = kd_config.teacher_model_kwargs if teacher else kd_config.student_model_kwargs
+    if "trust_remote_code" in model_kwargs:
+        _require_matching_trust_policy(
+            model_kwargs["trust_remote_code"],
+            path=f"distillation.{model_role}_model_kwargs.trust_remote_code",
+            expected=kd_config.trust_remote_code,
+        )
+    model.update(model_kwargs)
+    model["trust_remote_code"] = kd_config.trust_remote_code
     if kd_config.mtp_ce_weight <= 0 and kd_config.mtp_kd_weight <= 0:
         model.setdefault("num_nextn_predict_layers", 0)
     if kd_config.attn_implementation:
@@ -890,7 +969,19 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
 
     overrides = kd_config.metadata.get("recipe_overrides")
     if overrides:
-        _deep_update(recipe, dict(overrides))
+        recipe_overrides = dict(overrides)
+        for model_key in ("model", "teacher_model"):
+            model_overrides = recipe_overrides.get(model_key)
+            if isinstance(model_overrides, Mapping) and "trust_remote_code" in model_overrides:
+                _require_matching_trust_policy(
+                    model_overrides["trust_remote_code"],
+                    path=(
+                        "distillation.metadata.recipe_overrides."
+                        f"{model_key}.trust_remote_code"
+                    ),
+                    expected=kd_config.trust_remote_code,
+                )
+        _deep_update(recipe, recipe_overrides)
 
     from ..plugins.automodel.config import inject_descriptor_model_kwargs
 

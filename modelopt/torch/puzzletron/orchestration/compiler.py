@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
@@ -62,6 +63,7 @@ __all__ = [
 ]
 
 _CONTROLLER_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+_DEFAULT_ARTIFACT_SETTLING_TIMEOUT_SECONDS = 300.0
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -370,6 +372,29 @@ def load_execution_config(path: str | Path) -> dict[str, Any]:
     return _mapping(payload.get("execution"))
 
 
+def _resolve_artifact_settling_timeout_seconds(
+    execution_defaults: Mapping[str, Any],
+) -> float:
+    """Resolve the finite positive timeout for publishing completed-stage artifacts."""
+
+    value = execution_defaults.get(
+        "artifact_settling_timeout_seconds",
+        _DEFAULT_ARTIFACT_SETTLING_TIMEOUT_SECONDS,
+    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(
+            "execution.defaults.artifact_settling_timeout_seconds must be a positive "
+            f"finite number, got {value!r}"
+        )
+    timeout_seconds = float(value)
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError(
+            "execution.defaults.artifact_settling_timeout_seconds must be a positive "
+            f"finite number, got {value!r}"
+        )
+    return timeout_seconds
+
+
 def _parse_mesh_override(payload: Mapping[str, Any] | None) -> ParallelMeshOverride | None:
     if not payload:
         return None
@@ -408,6 +433,7 @@ def resolve_stage_execution_specs(
     """Resolve per-stage execution specs with defaults."""
 
     defaults = _mapping(execution.get("defaults"))
+    _resolve_artifact_settling_timeout_seconds(defaults)
     default_gpus_per_node = int(defaults.get("gpus_per_node", 8))
     default_policy = FailurePolicy(str(defaults.get("failure_policy", FailurePolicy.STRICT.value)))
     stage_payload = _mapping(execution.get("stages"))

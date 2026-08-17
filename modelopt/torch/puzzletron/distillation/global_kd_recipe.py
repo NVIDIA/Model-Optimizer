@@ -80,6 +80,7 @@ from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
 from ..security_policy import require_boolean_policy
 from .flash_kld import TrainingFlashKLD
+from .global_automodel import _descriptor_trust_remote_code
 
 
 def _config_value(config: Any, name: str) -> Any:
@@ -93,6 +94,32 @@ def _config_value(config: Any, name: str) -> Any:
         if value is not None:
             return value
     return getattr(config, name, None)
+
+
+def _config_contains(config: Any, name: str) -> bool:
+    """Return whether a config node explicitly contains one field."""
+
+    if config is None:
+        return False
+    try:
+        return name in config
+    except TypeError:
+        return hasattr(config, name)
+
+
+def _checkpoint_trust_remote_code(model_config: Any) -> bool:
+    """Resolve checkpoint publication trust from config or the model descriptor."""
+
+    if _config_contains(model_config, "trust_remote_code"):
+        return require_boolean_policy(
+            _config_value(model_config, "trust_remote_code"),
+            path="model.trust_remote_code",
+        )
+
+    descriptor_name = _config_value(model_config, "anymodel_descriptor")
+    if descriptor_name is None:
+        return False
+    return _descriptor_trust_remote_code(str(descriptor_name))
 
 
 def _global_kd_checkpoint_adapter_context(model_parts, descriptor_name: str | None = None):
@@ -675,14 +702,9 @@ class _WeightedObjectiveMixin:
                     from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
                     model_config = _config_value(getattr(self, "cfg", None), "model")
-                    configured_trust = _config_value(model_config, "trust_remote_code")
                     refresh_realized_checkpoint_config(
                         consolidated,
-                        trust_remote_code=require_boolean_policy(
-                            configured_trust,
-                            path="model.trust_remote_code",
-                            default=False,
-                        ),
+                        trust_remote_code=_checkpoint_trust_remote_code(model_config),
                     )
                 Path(checkpoint_path, "saving_completed").touch()
             except Exception as error:  # noqa: BLE001 - all ranks must reach the collective

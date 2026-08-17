@@ -97,6 +97,9 @@ def _available_evaluation_candidates(plan: CampaignPlan, stage_id: str) -> int |
     try:
         return identity_api.expected_post_mip_candidate_count(_identity_config(plan), stage_id)
     except identity_api.PostMIPExecutionContractUnavailable:
+        registry = plan.puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json"
+        if registry.exists():
+            raise
         return None
 
 

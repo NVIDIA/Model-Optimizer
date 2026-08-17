@@ -16,6 +16,7 @@
 """Tests for Puzzletron CI environment provenance checks."""
 
 import json
+import subprocess
 
 import pytest
 
@@ -23,11 +24,13 @@ from examples.puzzletron import ci_environment
 
 
 class _Distribution:
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict | list | str | None):
         self.payload = payload
 
     def read_text(self, filename: str) -> str | None:
         assert filename == "direct_url.json"
+        if isinstance(self.payload, str) or self.payload is None:
+            return self.payload
         return json.dumps(self.payload)
 
 
@@ -90,14 +93,74 @@ def test_editable_pinned_dependency_must_be_clean(monkeypatch):
             " M nemo_automodel/model.py\n",
         ]
     )
-    monkeypatch.setattr(
-        ci_environment.subprocess,
-        "check_output",
-        lambda *_args, **_kwargs: next(outputs),
-    )
+
+    def check_output(*_args, **kwargs):
+        assert kwargs["timeout"] == ci_environment._GIT_TIMEOUT_SECONDS
+        return next(outputs)
+
+    monkeypatch.setattr(ci_environment.subprocess, "check_output", check_output)
 
     with pytest.raises(RuntimeError, match="dependency 'nemo-automodel' is dirty"):
         ci_environment.verify_installed_vcs_source(
             "nemo-automodel",
             _EXPECTED_SOURCE,
         )
+
+
+def test_missing_package_has_package_named_error(monkeypatch):
+    def missing(package: str):
+        raise ci_environment.metadata.PackageNotFoundError(package)
+
+    monkeypatch.setattr(ci_environment.metadata, "distribution", missing)
+
+    with pytest.raises(RuntimeError, match="dependency 'nemo-automodel' is not installed"):
+        ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "no direct URL metadata"),
+        ("{", "malformed direct URL metadata"),
+        ([], "invalid direct URL metadata"),
+        ({"url": _EXPECTED_SOURCE["repository"], "vcs_info": "git"}, "invalid direct URL metadata"),
+    ],
+    ids=("absent", "malformed-json", "non-mapping", "invalid-vcs-info"),
+)
+def test_invalid_direct_url_metadata_has_package_named_error(monkeypatch, payload, reason):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(payload),
+    )
+
+    with pytest.raises(RuntimeError, match=rf"dependency 'nemo-automodel'.*{reason}"):
+        ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        subprocess.CalledProcessError(1, ["git"]),
+        subprocess.TimeoutExpired(["git"], 10),
+        OSError("git unavailable"),
+    ],
+    ids=("failure", "timeout", "os-error"),
+)
+def test_editable_git_inspection_failure_has_package_named_error(monkeypatch, error):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(
+            {"url": "file:///src/automodel", "dir_info": {"editable": True}}
+        ),
+    )
+
+    def fail(*_args, **kwargs):
+        assert kwargs["timeout"] == ci_environment._GIT_TIMEOUT_SECONDS
+        raise error
+
+    monkeypatch.setattr(ci_environment.subprocess, "check_output", fail)
+
+    with pytest.raises(RuntimeError, match="dependency 'nemo-automodel'.*could not be inspected"):
+        ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)
