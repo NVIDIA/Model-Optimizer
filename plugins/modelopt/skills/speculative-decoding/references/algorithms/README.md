@@ -4,6 +4,11 @@ One file per draft-model algorithm. A sheet holds only what differs between
 algorithms; the procedure lives in `../stages/`. `eagle3.md` and `dflash.md` are the
 worked examples — read one before writing a new sheet.
 
+When an algorithm is a **variant** of another (DSpark and Domino are both DFlash
+backbones with a different head), its sheet documents only the delta and points at the
+parent sheet. Don't restate the parent's pipeline, dump flags, or shared failures.
+`dspark.md` and `domino.md` are the worked examples for that shape.
+
 Keep sheets short. If something is true for every algorithm, it belongs in the
 stage file instead.
 
@@ -34,4 +39,5 @@ Source the facts from the repo rather than from memory:
 
 Then add a row to the algorithm table in `../../SKILL.md`.
 
-Algorithms with launcher examples but no sheet yet: DSpark, Domino.
+Every algorithm with a recipe in
+`modelopt_recipes/general/speculative_decoding/` currently has a sheet.

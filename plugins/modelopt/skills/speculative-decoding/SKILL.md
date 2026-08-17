@@ -51,12 +51,19 @@ the user already knows which task broke.
 
 ## Algorithms
 
-| Algorithm | Sheet | Recipe |
+All recipes live in `modelopt_recipes/general/speculative_decoding/<algorithm>.yaml`.
+
+| Algorithm | Sheet | Family |
 | --- | --- | --- |
-| EAGLE3 | `references/algorithms/eagle3.md` | `modelopt_recipes/general/speculative_decoding/eagle3.yaml` |
-| DFlash | `references/algorithms/dflash.md` | `modelopt_recipes/general/speculative_decoding/dflash.yaml` |
-| DSpark | not yet written — see `references/algorithms/README.md` | `modelopt_recipes/general/speculative_decoding/dspark.yaml` |
-| Domino | not yet written — see `references/algorithms/README.md` | `modelopt_recipes/general/speculative_decoding/domino.yaml` |
+| EAGLE3 | `references/algorithms/eagle3.md` | Autoregressive draft head |
+| DFlash | `references/algorithms/dflash.md` | Block diffusion |
+| DSpark | `references/algorithms/dspark.md` | DFlash backbone + Markov head + confidence head |
+| Domino | `references/algorithms/domino.md` | DFlash backbone + GRU causal correction head |
+
+DSpark and Domino are **DFlash variants**, not separate pipelines: same
+`recipe_type: speculative_dflash`, same training script, same `dflash.*` config
+namespace, selected by `dflash_architecture_config.projector_type`. Read
+`references/algorithms/dflash.md` first, then the variant's sheet for the delta.
 
 If the user's algorithm has no sheet yet, the stage procedures still apply — derive
 the missing values from an existing launcher example for that algorithm
