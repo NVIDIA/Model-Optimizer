@@ -156,12 +156,51 @@ class AutoQuantizeCost(ModeloptBaseConfig):
         title="Active MoE expert ratio",
         description="Routed experts active per token, in (0, 1]. Used by the 'active_moe' cost model.",
     )
+    lut_path: str | None = ModeloptField(
+        default=None,
+        title="Latency LUT path",
+        description="Path to a haq_latency_v1 CSV cost table. Required by the 'latency' cost model.",
+    )
+    deployment_profile: str | None = ModeloptField(
+        default=None,
+        title="Deployment profile",
+        description="LUT deployment_profile key (hardware/TP/EP/phase). Required by 'latency'.",
+    )
+    m: int | None = ModeloptField(
+        default=None,
+        title="Latency GEMM token count M",
+        description="Exact flattened token count for the latency lookup. Required by 'latency'.",
+    )
 
     @field_validator("active_moe_expert_ratio")
     @classmethod
     def _validate_active_moe_expert_ratio(cls, v: float | None) -> float | None:
         if v is not None and not (0 < v <= 1):
             raise ValueError(f"active_moe_expert_ratio must be in (0, 1], got {v}")
+        return v
+
+    @field_validator("m")
+    @classmethod
+    def _validate_m(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError(f"cost.m must be a positive integer, got {v}")
+        return v
+
+
+class AutoQuantizeLatencyBudget(ModeloptBaseConfig):
+    """Top-level ``latency`` budget block for the 'latency' cost model."""
+
+    relative_to_min: float = ModeloptField(
+        default=1.2,
+        title="Latency budget relative to minimum",
+        description="Latency budget = relative_to_min * minimum achievable accounted latency; >= 1.0.",
+    )
+
+    @field_validator("relative_to_min")
+    @classmethod
+    def _validate_relative_to_min(cls, v: float) -> float:
+        if v < 1.0:
+            raise ValueError(f"latency.relative_to_min must be >= 1.0, got {v}")
         return v
 
 
@@ -171,17 +210,24 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
     effective_bits: float = ModeloptField(
         default=4.8,
         title="Effective bits per weight",
-        description="Average weight-storage bits target for the LP, in (0, 16].",
+        description="Average weight-storage bits target for the LP, in (0, 16]. Ignored (and "
+        "mutually exclusive) when cost_model is 'latency'.",
     )
-    cost_model: Literal["weight", "active_moe"] = ModeloptField(
+    cost_model: Literal["weight", "active_moe", "latency"] = ModeloptField(
         default="weight",
         title="Cost model",
-        description="'weight' counts all weights equally; 'active_moe' scales routed-expert weights.",
+        description="'weight' counts all weights equally; 'active_moe' scales routed-expert "
+        "weights; 'latency' prices candidates by measured kernel latency from a LUT.",
     )
     cost: AutoQuantizeCost | None = ModeloptField(
         default=None,
         title="Cost-model parameters",
         description="Extra cost-model parameters; omit for the 'weight' cost model.",
+    )
+    latency: AutoQuantizeLatencyBudget | None = ModeloptField(
+        default=None,
+        title="Latency budget",
+        description="Latency budget block; required by and exclusive to the 'latency' cost model.",
     )
 
     @field_validator("effective_bits")
@@ -190,6 +236,53 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         if not (0 < v <= 16):
             raise ValueError(f"effective_bits must be in (0, 16], got {v}")
         return v
+
+    @model_validator(mode="after")
+    def _validate_latency_cost_model(self):
+        if self.cost_model == "latency":
+            if self.latency is None:
+                raise ValueError("cost_model: latency requires a 'latency' budget block.")
+            missing = [
+                key
+                for key in ("lut_path", "deployment_profile", "m")
+                if self.cost is None or getattr(self.cost, key) is None
+            ]
+            if missing:
+                raise ValueError(
+                    f"cost_model: latency requires cost.{{{', '.join(missing)}}} to be set."
+                )
+        elif self.latency is not None:
+            raise ValueError(
+                f"The 'latency' budget block is only valid with cost_model: latency, "
+                f"got cost_model={self.cost_model!r}."
+            )
+        return self
+
+    def to_mtq_constraints(self) -> dict:
+        """Serialize to the dict passed to ``mtq.auto_quantize(constraints=...)``.
+
+        The 'latency' cost model drops ``effective_bits`` (mutually exclusive) and
+        emits the ``latency`` budget plus the latency ``cost`` keys; other cost
+        models keep the historical effective-bits dict.
+        """
+        if self.cost_model == "latency":
+            assert self.latency is not None  # guaranteed by _validate_latency_cost_model
+            cost = {
+                key: getattr(self.cost, key)
+                for key in ("lut_path", "deployment_profile", "m")
+                if self.cost is not None and getattr(self.cost, key) is not None
+            }
+            return {
+                "cost_model": "latency",
+                "latency": {"relative_to_min": self.latency.relative_to_min},
+                "cost": cost,
+            }
+        out: dict = {"effective_bits": self.effective_bits, "cost_model": self.cost_model}
+        if self.cost is not None:
+            cost = self.cost.model_dump(exclude_none=True)
+            if cost:
+                out["cost"] = cost
+        return out
 
 
 class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):

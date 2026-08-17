@@ -45,11 +45,17 @@ from ._auto_quantize_cost import (
     ACTIVE_MOE_EXPERT_RATIO_KEY,
     AUTO_QUANTIZE_CONSTRAINT_KEYS,
     COST_MODEL_ACTIVE_MOE,
+    COST_MODEL_LATENCY,
     COST_MODEL_WEIGHT,
+    LATENCY_DEPLOYMENT_PROFILE_KEY,
+    LATENCY_LUT_PATH_KEY,
+    LATENCY_M_KEY,
+    LATENCY_RELATIVE_TO_MIN_KEY,
     _get_module_weight_numel,
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
+from ._auto_quantize_latency import LatencyCoverageError, LatencyLUT
 from .config import QuantizeConfig, QuantizerAttributeConfig, QuantizerCfgEntry
 from .conversion import set_quantizer_by_cfg
 from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
@@ -280,6 +286,10 @@ class QuantRecipe(CustomHPType):
     def __init__(self, quant_cfg: str | dict[str, Any] | None = None, name: str | None = None):
         """Initialize the QuantRecipe with the quantization configuration."""
         name = self.get_auto_name_for_config(quant_cfg) or name
+        # Stable format name used as the latency-LUT ``recipe_id`` join key (e.g.
+        # ``NONE``, ``FP8_DEFAULT_CFG``, ``W4A16_NVFP4_CFG``). May be None for a
+        # custom config that matches no named ``mtq_config`` choice.
+        self.name = name
 
         if quant_cfg is None:
             quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
@@ -636,6 +646,8 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
+    # Loaded only for cost_model: latency (see _load_latency_cost_model).
+    _latency_lut: LatencyLUT | None = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -986,6 +998,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         return weight_compression
 
     def _verify_constraint(self, search_recipes):
+        # Latency budgets are validated against the LUT (per-group min latency), not
+        # against an effective-bits floor, so the bit-width feasibility check is
+        # effective-bits only.
+        if self.config["cost_model"] == COST_MODEL_LATENCY:
+            return
         assert self.constraints["effective_bits"] >= search_recipes[0].num_bits, (
             f"The effective_bits {self.constraints['effective_bits']} constraint cannot be lower than the "
             f"num_bits of most aggressive quantization format for this search which is "
@@ -1023,6 +1040,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def _verify_resolved_constraint(self, quant_recipe_hparams) -> None:
         """Fail before calibration when resolved per-group choices cannot meet the budget."""
+        if self.config["cost_model"] == COST_MODEL_LATENCY:
+            self._verify_latency_coverage(quant_recipe_hparams)
+            return
         no_quant_recipe = QuantRecipe(quant_cfg=None)
         uncompressed_cost = sum(hparam.get_cost(no_quant_recipe) for hparam in quant_recipe_hparams)
         if uncompressed_cost <= 0:
@@ -1062,7 +1082,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 formats.append(recipe)
 
                 score = hparam.get_score(recipe)
-                cost = hparam.get_cost(recipe)
+                cost = self._candidate_cost(hparam, recipe)
 
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
@@ -1079,7 +1099,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["is_fixed"] = hparam.is_fixed
             # Keep the no-quant cost as denominator metadata even when no-quant is not
             # solver-selectable for this hparam. Fixed formats must remain in the cost model.
-            self.candidate_stats[name]["uncompressed_cost"] = hparam.get_cost(no_quant_recipe)
+            self.candidate_stats[name]["uncompressed_cost"] = self._candidate_cost(
+                hparam, no_quant_recipe
+            )
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -1129,6 +1151,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.active_moe_expert_ratio = self.config["active_moe_expert_ratio"]
         self.disabled_layers = self.config["disabled_layers"]
         self.cost_denominator = getattr(self, "cost_denominator", None)
+        self._load_latency_cost_model()
 
         module_search_spaces = self._normalize_module_search_spaces(
             self.config["module_search_spaces"]
@@ -1354,9 +1377,101 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def _get_search_lower_bounds(self):
         cost_model = getattr(self, "cost_model", getattr(self, "config", {}).get("cost_model"))
+        if cost_model == COST_MODEL_LATENCY:
+            # Latency is an upper bound, not a target to fill: no near-budget lower
+            # bound. The budget = relative_to_min * min already guarantees feasibility.
+            return [None]
         if cost_model == COST_MODEL_ACTIVE_MOE:
             return [0.99, 0.90, None]
         return [None, 0.99, 0.90]
+
+    # ------------------------------------------------------------------
+    # Latency cost model (haq_latency_v1 LUT). All methods below no-op or are
+    # unused unless constraints['cost_model'] == 'latency'.
+    # ------------------------------------------------------------------
+
+    def _load_latency_cost_model(self) -> None:
+        """Load and validate the latency LUT when the latency cost model is active."""
+        if self.config["cost_model"] != COST_MODEL_LATENCY:
+            self._latency_lut = None
+            return
+        if self.method_name not in (None, "gradient"):
+            raise ValueError(
+                "cost_model: latency is only supported for gradient AutoQuantize, not "
+                f"{self.method_name!r} (latency + kl_div is rejected)."
+            )
+        cost = self.config["cost"]
+        latency_budget = self.constraints["latency"]
+        assert isinstance(cost, dict) and isinstance(latency_budget, dict)
+        lut = LatencyLUT.from_csv(cost[LATENCY_LUT_PATH_KEY])
+        self._latency_lut = lut
+        self._latency_profile = cost[LATENCY_DEPLOYMENT_PROFILE_KEY]
+        self._latency_m = cost[LATENCY_M_KEY]
+        self._latency_relative_to_min = float(latency_budget[LATENCY_RELATIVE_TO_MIN_KEY])
+        self._lut_digest = lut.digest
+
+    def _candidate_cost(self, hparam, recipe) -> float:
+        """Return the per-``(group, recipe)`` cost feeding the LP.
+
+        Weight and active-MoE cost models keep the historical weight-based cost;
+        the latency cost model looks up measured kernel latency from the LUT and
+        charges 0 to cost-excluded groups.
+        """
+        if self.config["cost_model"] != COST_MODEL_LATENCY:
+            return hparam.get_cost(recipe)
+        if hparam.cost_weight == 0.0:  # cost-excluded group
+            return 0.0
+        assert self._latency_lut is not None
+        group_pattern = self._latency_lut.match_group_pattern(
+            self._latency_profile, self._latency_m, hparam.quant_module_names
+        )
+        return self._latency_lut.lookup(
+            self._latency_profile, self._latency_m, group_pattern, recipe.name
+        ).latency_us
+
+    def _verify_latency_coverage(self, quant_recipe_hparams) -> None:
+        """Aggregate every missing latency row into one pre-calibration error.
+
+        Prices each non-excluded group's solver choices plus its no-quant baseline
+        so coverage gaps surface before expensive calibration/scoring. Never
+        substitutes a backend or synthesizes a cost.
+        """
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        assert self._latency_lut is not None
+        problems: list[str] = []
+        for hparam in quant_recipe_hparams:
+            if hparam.cost_weight == 0.0:  # cost-excluded: no LUT row required
+                continue
+            try:
+                group_pattern = self._latency_lut.match_group_pattern(
+                    self._latency_profile, self._latency_m, hparam.quant_module_names
+                )
+            except LatencyCoverageError as exc:
+                problems.extend(exc.problems)
+                continue
+            for recipe in {*hparam.solver_choices, no_quant_recipe}:
+                if recipe.name is None:
+                    problems.append(
+                        f"Group {hparam.name!r} candidate {recipe} has no stable recipe_id "
+                        "(custom config not equal to a named quantization format); it cannot "
+                        "join the latency LUT."
+                    )
+                    continue
+                try:
+                    self._latency_lut.lookup(
+                        self._latency_profile, self._latency_m, group_pattern, recipe.name
+                    )
+                except LatencyCoverageError as exc:
+                    problems.extend(exc.problems)
+        if problems:
+            raise LatencyCoverageError(problems)
+
+    def _latency_budget(self) -> tuple[float, float]:
+        """Return ``(minimum_latency, budget_latency)`` from the candidate stats."""
+        minimum_latency = float(
+            sum(min(stat["costs"]) for stat in self.candidate_stats.values() if stat["costs"])
+        )
+        return minimum_latency, minimum_latency * self._latency_relative_to_min
 
     @abstractmethod
     def run_search_with_stats(self, max_weight_size, verbose=False):
@@ -1365,20 +1480,33 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
         verbose = self.config["verbose"]
-        assert "effective_bits" in self.constraints and (
+        is_latency = self.config.get("cost_model") == COST_MODEL_LATENCY
+        assert (is_latency or "effective_bits" in self.constraints) and (
             set(self.constraints) <= AUTO_QUANTIZE_CONSTRAINT_KEYS
         ), (
-            "`constraints` must contain 'effective_bits' and may contain 'cost_model' and 'cost'. "
-            f"Got {self.constraints.keys()}."
+            "`constraints` must contain 'effective_bits' (or use cost_model: latency) and may "
+            f"contain 'cost_model', 'cost', and 'latency'. Got {self.constraints.keys()}."
         )
-
-        compression = self._get_formatted_weight_compression_constraint()
         assert self.candidate_stats, (
             "candidate_stats must be populated by before_search() before run_search()"
         )
-        total_weight_size = self._get_total_weight_size_from_candidate_stats(self.candidate_stats)
-        self.cost_denominator = total_weight_size
-        max_weight_size = total_weight_size * compression
+
+        # The LP budget dimension differs by cost model: effective-bits searches
+        # cap total weight cost at target compression; latency caps the summed
+        # accounted kernel latency at relative_to_min * the minimum achievable.
+        total_weight_size = None
+        if is_latency:
+            minimum_latency, budget = self._latency_budget()
+            self.cost_denominator = minimum_latency
+            max_budget = budget
+        else:
+            compression = self._get_formatted_weight_compression_constraint()
+            total_weight_size = self._get_total_weight_size_from_candidate_stats(
+                self.candidate_stats
+            )
+            self.cost_denominator = total_weight_size
+            max_budget = total_weight_size * compression
+
         if verbose:
             print_rank_0(
                 "AutoQuantize cost model: "
@@ -1388,10 +1516,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     if self.config["cost_model"] == COST_MODEL_ACTIVE_MOE
                     else ""
                 )
+                + (
+                    f" (profile={self._latency_profile}, M={self._latency_m}, "
+                    f"budget={max_budget:.3f}us, relative_to_min={self._latency_relative_to_min})"
+                    if is_latency
+                    else ""
+                )
             )
 
         # Run the search with stats to get the best recipe and whether the constraints are satisfied
-        best_recipe_info, is_satisfied = self.run_search_with_stats(max_weight_size, verbose)
+        best_recipe_info, is_satisfied = self.run_search_with_stats(max_budget, verbose)
         self.best["is_satisfied"] = is_satisfied
 
         best_recipe = {}
@@ -1415,18 +1549,61 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             best_constraints += best_hparam_recipe_info["costs"]
             best_scores += best_hparam_recipe_info["scores"]
 
-        if verbose:
-            effective_bits_from_search = self._print_recipe_summary(
-                best_recipe, best_constraints, total_weight_size
+        if is_latency:
+            self.best["constraints"] = self._latency_resolution(
+                best_constraints, minimum_latency, budget
             )
+            if verbose:
+                self._print_latency_summary(best_recipe, best_constraints, minimum_latency, budget)
         else:
-            effective_bits_from_search = (best_constraints / total_weight_size) * 16
+            if verbose:
+                effective_bits_from_search = self._print_recipe_summary(
+                    best_recipe, best_constraints, total_weight_size
+                )
+            else:
+                effective_bits_from_search = (best_constraints / total_weight_size) * 16
+            self.best["constraints"] = {"effective_bits": effective_bits_from_search}
 
         self.best["recipe"] = best_recipe
-        self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
 
         QuantRecipe.fold_pqs_to_weights(self.model)
+
+    def _latency_resolution(self, selected_latency, minimum_latency, budget_latency) -> dict:
+        """Assemble the latency search-resolution record stored in ``best['constraints']``."""
+        assert self._latency_lut is not None
+        resolution = {
+            "cost_model": COST_MODEL_LATENCY,
+            "deployment_profile": self._latency_profile,
+            "m": self._latency_m,
+            "selected_latency_us": selected_latency,
+            "minimum_latency_us": minimum_latency,
+            "budget_latency_us": budget_latency,
+            "relative_to_min": self._latency_relative_to_min,
+            "lut_digest": self._lut_digest,
+            "selection_policy": self._latency_lut.selection_policy,
+            "kernel_policy_id": self._latency_lut.kernel_policy_id,
+        }
+        if self._latency_lut.has_proxy_costs:
+            resolution["cost_is_proxy_warning"] = (
+                "Some accounted latencies are proxy costs (e.g. W4A4 measured for a W4A16 target); "
+                "validate with actual target-format measurements before a production claim."
+            )
+        return resolution
+
+    def _print_latency_summary(
+        self, best_recipe, selected_latency, minimum_latency, budget_latency
+    ) -> None:
+        for name, recipe in best_recipe.items():
+            print_rank_0(
+                f"AutoQuantize best recipe for {name.replace('.quant_recipe', '')}: {recipe}"
+            )
+        print_rank_0(
+            f"AutoQuantize accounted latency: selected={selected_latency:.3f}us "
+            f"minimum={minimum_latency:.3f}us budget={budget_latency:.3f}us "
+            f"(profile={self._latency_profile}, M={self._latency_m}, "
+            f"relative_to_min={self._latency_relative_to_min})"
+        )
 
 
 def _get_auto_quantize_score(grad_output, output_diff):

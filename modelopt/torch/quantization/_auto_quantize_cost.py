@@ -26,11 +26,21 @@ import torch.nn as nn
 # constraint is supplied. The value is intentionally kept for backward compatibility.
 DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS: Final = 4.8
 
-AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset({"effective_bits", "cost_model", "cost"})
+AUTO_QUANTIZE_CONSTRAINT_KEYS: Final = frozenset(
+    {"effective_bits", "cost_model", "cost", "latency"}
+)
 ACTIVE_MOE_EXPERT_RATIO_KEY: Final = "active_moe_expert_ratio"
 EXCLUDED_MODULE_NAME_PATTERNS_KEY: Final = "excluded_module_name_patterns"
 COST_MODEL_WEIGHT: Final = "weight"
 COST_MODEL_ACTIVE_MOE: Final = "active_moe"
+COST_MODEL_LATENCY: Final = "latency"
+
+# Keys inside constraints['cost'] for the latency cost model.
+LATENCY_LUT_PATH_KEY: Final = "lut_path"
+LATENCY_DEPLOYMENT_PROFILE_KEY: Final = "deployment_profile"
+LATENCY_M_KEY: Final = "m"
+# Key inside the top-level constraints['latency'] block.
+LATENCY_RELATIVE_TO_MIN_KEY: Final = "relative_to_min"
 
 _ROUTED_MOE_EXPERT_NAME_RE = re.compile(r"(^|\.)experts(\.|$)")
 _ACTIVE_MOE_TOP_K_ATTRS = (
@@ -206,9 +216,56 @@ class ActiveMoECostModel(AutoQuantizeCostModel):
         return base_weight
 
 
+class LatencyCostModel(AutoQuantizeCostModel):
+    """Price candidates by measured kernel latency from a ``haq_latency_v1`` LUT.
+
+    Unlike the weight-based cost models, latency is a per-``(group, recipe)`` cost
+    looked up from the LUT by the searcher; this class only validates the
+    latency-specific ``constraints['cost']`` block (``lut_path``,
+    ``deployment_profile``, ``m``) and continues to support
+    ``excluded_module_name_patterns`` for cost-excluded groups. The top-level
+    ``constraints['latency']`` block (``relative_to_min``) is validated in
+    :func:`normalize_auto_quantize_constraints`.
+    """
+
+    name = COST_MODEL_LATENCY
+    supported_cost_keys = frozenset(
+        {
+            LATENCY_LUT_PATH_KEY,
+            LATENCY_DEPLOYMENT_PROFILE_KEY,
+            LATENCY_M_KEY,
+            EXCLUDED_MODULE_NAME_PATTERNS_KEY,
+        }
+    )
+
+    def normalize_cost_constraints(
+        self, model: nn.Module, cost_constraints: dict[str, Any]
+    ) -> dict[str, Any]:
+        cost_constraints = super().normalize_cost_constraints(model, cost_constraints)
+        lut_path = cost_constraints.get(LATENCY_LUT_PATH_KEY)
+        if not isinstance(lut_path, str) or not lut_path:
+            raise ValueError(
+                "constraints['cost']['lut_path'] must be a non-empty path to a "
+                "haq_latency_v1 CSV for cost_model: latency."
+            )
+        deployment_profile = cost_constraints.get(LATENCY_DEPLOYMENT_PROFILE_KEY)
+        if not isinstance(deployment_profile, str) or not deployment_profile:
+            raise ValueError(
+                "constraints['cost']['deployment_profile'] must be a non-empty string "
+                "for cost_model: latency."
+            )
+        m = cost_constraints.get(LATENCY_M_KEY)
+        if not (isinstance(m, int) and not isinstance(m, bool) and m > 0):
+            raise ValueError(
+                "constraints['cost']['m'] must be a positive integer for cost_model: latency."
+            )
+        return cost_constraints
+
+
 _COST_MODELS: Final = {
     COST_MODEL_WEIGHT: WeightCostModel(),
     COST_MODEL_ACTIVE_MOE: ActiveMoECostModel(),
+    COST_MODEL_LATENCY: LatencyCostModel(),
 }
 
 
@@ -234,8 +291,8 @@ def normalize_auto_quantize_constraints(
     unexpected_constraint_keys = set(constraints) - AUTO_QUANTIZE_CONSTRAINT_KEYS
     if unexpected_constraint_keys:
         raise ValueError(
-            f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. "
-            "Supported constraints are 'effective_bits', 'cost_model', and 'cost'."
+            f"Unsupported auto_quantize constraints: {unexpected_constraint_keys}. Supported "
+            "constraints are 'effective_bits', 'cost_model', 'cost', and 'latency'."
         )
 
     cost_model_name = constraints.get("cost_model", COST_MODEL_WEIGHT)
@@ -250,9 +307,48 @@ def normalize_auto_quantize_constraints(
         raise ValueError("constraints['cost'] must be a dict when provided.")
     cost_constraints = cost_model.normalize_cost_constraints(model, dict(cost_constraints))
 
+    # The latency cost model uses measured latency as the budget dimension and is
+    # mutually exclusive with the effective-bits target. It requires the top-level
+    # 'latency' block; every other cost model forbids it.
+    if cost_model.name == COST_MODEL_LATENCY:
+        if "effective_bits" in constraints:
+            raise ValueError(
+                "'effective_bits' and cost_model: latency are mutually exclusive. Provide the "
+                "latency budget via constraints['latency']['relative_to_min'] instead."
+            )
+        constraints["latency"] = _normalize_latency_budget(constraints.get("latency"))
+    elif constraints.get("latency") is not None:
+        raise ValueError(
+            "constraints['latency'] is only valid with cost_model: latency; "
+            f"got cost_model={cost_model.name!r}."
+        )
+
     constraints["cost_model"] = cost_model.name
-    if cost_constraints or cost_model.name == COST_MODEL_ACTIVE_MOE:
+    if cost_constraints or cost_model.name in (COST_MODEL_ACTIVE_MOE, COST_MODEL_LATENCY):
         constraints["cost"] = cost_constraints
     else:
         constraints.pop("cost", None)
     return constraints
+
+
+def _normalize_latency_budget(latency_block: Any) -> dict[str, float]:
+    """Validate the top-level ``constraints['latency']`` block for cost_model: latency."""
+    if not isinstance(latency_block, dict):
+        raise ValueError(
+            "cost_model: latency requires a 'latency' block, e.g. "
+            "constraints['latency'] = {'relative_to_min': 1.2}."
+        )
+    unknown = set(latency_block) - {LATENCY_RELATIVE_TO_MIN_KEY}
+    if unknown:
+        raise ValueError(f"Unsupported constraints['latency'] keys: {sorted(unknown)}.")
+    relative_to_min = latency_block.get(LATENCY_RELATIVE_TO_MIN_KEY)
+    if not (
+        isinstance(relative_to_min, (int, float))
+        and not isinstance(relative_to_min, bool)
+        and relative_to_min >= 1.0
+    ):
+        raise ValueError(
+            "constraints['latency']['relative_to_min'] must be a number >= 1.0 (the latency "
+            "budget is relative_to_min * minimum achievable latency)."
+        )
+    return {LATENCY_RELATIVE_TO_MIN_KEY: float(relative_to_min)}

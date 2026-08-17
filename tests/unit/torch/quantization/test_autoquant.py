@@ -26,11 +26,14 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.torch.quantization._auto_quantize_cost import (
+    DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS,
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
     _get_module_weight_numel,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
+    normalize_auto_quantize_constraints,
 )
+from modelopt.torch.quantization._auto_quantize_latency import LatencyRow, write_canonical_csv
 from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
@@ -1536,3 +1539,217 @@ def test_get_auto_quantize_config_emits_fused_expert_quantizer_names(with_persis
     assert f"{module_name}.gate_up_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.down_proj_weight_quantizer" in quantizer_names
     assert f"{module_name}.weight_quantizer" not in quantizer_names
+
+
+# ---------------------------------------------------------------------------
+# Latency cost-model constraint validation
+# ---------------------------------------------------------------------------
+
+
+def _latency_constraints(**overrides):
+    constraints = {
+        "cost_model": "latency",
+        "latency": {"relative_to_min": 1.2},
+        "cost": {
+            "lut_path": "/tmp/haq_latency_v1.csv",
+            "deployment_profile": "b100_tp1_ep1_decode",
+            "m": 1,
+        },
+    }
+    constraints.update(overrides)
+    return constraints
+
+
+def test_latency_constraints_normalize_ok():
+    model = torch.nn.Module()
+    out = normalize_auto_quantize_constraints(model, _latency_constraints())
+    assert out["cost_model"] == "latency"
+    assert out["latency"] == {"relative_to_min": 1.2}
+    assert out["cost"]["m"] == 1
+    assert out["cost"]["deployment_profile"] == "b100_tp1_ep1_decode"
+    assert "effective_bits" not in out
+
+
+def test_latency_and_effective_bits_mutually_exclusive():
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        normalize_auto_quantize_constraints(model, _latency_constraints(effective_bits=6.0))
+
+
+def test_latency_requires_relative_to_min_block():
+    model = torch.nn.Module()
+    bad = _latency_constraints()
+    del bad["latency"]
+    with pytest.raises(ValueError, match="latency"):
+        normalize_auto_quantize_constraints(model, bad)
+
+
+@pytest.mark.parametrize("rel", [0.9, 0.0, -1.0])
+def test_latency_relative_to_min_must_be_at_least_one(rel):
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="relative_to_min"):
+        normalize_auto_quantize_constraints(
+            model, _latency_constraints(latency={"relative_to_min": rel})
+        )
+
+
+@pytest.mark.parametrize("bad_m", [0, -1, 1.5, True])
+def test_latency_m_must_be_positive_int(bad_m):
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    c["cost"]["m"] = bad_m
+    with pytest.raises(ValueError, match="positive integer"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_latency_requires_lut_path_and_profile():
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    del c["cost"]["lut_path"]
+    with pytest.raises(ValueError, match="lut_path"):
+        normalize_auto_quantize_constraints(model, c)
+    c = _latency_constraints()
+    del c["cost"]["deployment_profile"]
+    with pytest.raises(ValueError, match="deployment_profile"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_latency_block_rejected_for_non_latency_cost_model():
+    model = torch.nn.Module()
+    with pytest.raises(ValueError, match="only valid with cost_model: latency"):
+        normalize_auto_quantize_constraints(
+            model, {"effective_bits": 6.0, "latency": {"relative_to_min": 1.2}}
+        )
+
+
+def test_latency_rejects_unknown_cost_keys():
+    model = torch.nn.Module()
+    c = _latency_constraints()
+    c["cost"]["active_moe_expert_ratio"] = 0.25
+    with pytest.raises(ValueError, match="Unsupported auto_quantize cost constraints"):
+        normalize_auto_quantize_constraints(model, c)
+
+
+def test_default_constraints_unchanged_for_effective_bits():
+    model = torch.nn.Module()
+    out = normalize_auto_quantize_constraints(model, None)
+    assert out["effective_bits"] == DEFAULT_AUTO_QUANTIZE_EFFECTIVE_BITS
+    assert out["cost_model"] == "weight"
+    assert "latency" not in out
+
+
+# ---------------------------------------------------------------------------
+# Latency cost-model end-to-end (LP selects by measured latency, not bit width)
+# ---------------------------------------------------------------------------
+
+
+def _latency_row(group, recipe_id, m, latency_us):
+    with_quant = recipe_id != "NONE"
+    return LatencyRow(
+        schema_version="haq_latency_v1",
+        deployment_profile="test",
+        group_pattern=group,
+        source_module_patterns=[group],
+        recipe_id=recipe_id,
+        runtime_format=recipe_id,
+        m=m,
+        latency_us=latency_us,
+        backend="synthetic",
+        with_quant=with_quant,
+        op_kind="gemm",
+        timing_scope="gemm",
+        selection_policy="fixed_kernel",
+        kernel_policy_id="synthetic_v1",
+        tp=1,
+        ep=1,
+        hardware="test",
+    )
+
+
+def test_auto_quantize_latency_cost_model_selects_min_latency_recipe(tmp_path):
+    """With relative_to_min=1.0 the LP must pick each group's argmin-latency recipe.
+
+    Latencies are set so the fastest recipe differs per layer AND is not always the
+    lowest-bit one: net.0 -> INT4, net.2 -> INT8 (higher bits, but faster here),
+    net.4 -> NONE (no-quant fastest). This is the behaviour an effective-bits search
+    cannot produce, proving the LP prices by measured latency.
+    """
+    int8 = "INT8_DEFAULT_CFG"
+    int4 = "INT4_BLOCKWISE_WEIGHT_ONLY_CFG"
+    latencies = {
+        "net.0": {int4: 1.0, int8: 5.0, "NONE": 9.0},
+        "net.2": {int8: 1.0, int4: 5.0, "NONE": 9.0},
+        "net.4": {"NONE": 1.0, int4: 5.0, int8: 9.0},
+    }
+    rows = [
+        _latency_row(group, recipe_id, 1, latency)
+        for group, per_recipe in latencies.items()
+        for recipe_id, latency in per_recipe.items()
+    ]
+    lut_path = tmp_path / "haq_latency_v1.csv"
+    write_canonical_csv(rows, lut_path)
+
+    model = SimpleLinear()
+    _, search_history = mtq.auto_quantize(
+        model,
+        constraints={
+            "cost_model": "latency",
+            "latency": {"relative_to_min": 1.0},
+            "cost": {"lut_path": str(lut_path), "deployment_profile": "test", "m": 1},
+        },
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[SimpleLinear.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    assert search_history["cost_model"] == "latency"
+    selected = {
+        name.replace(".quant_recipe", ""): str(recipe).split("(")[0]
+        for name, recipe in search_history["best"]["recipe"].items()
+    }
+    assert selected["net.0"] == int4
+    assert selected["net.2"] == int8
+    assert selected["net.4"] == "NONE"
+
+    resolution = search_history["best"]["constraints"]
+    assert resolution["cost_model"] == "latency"
+    assert resolution["deployment_profile"] == "test" and resolution["m"] == 1
+    assert resolution["minimum_latency_us"] == pytest.approx(3.0)
+    assert resolution["budget_latency_us"] == pytest.approx(3.0)
+    assert resolution["selected_latency_us"] == pytest.approx(3.0)
+    assert resolution["relative_to_min"] == pytest.approx(1.0)
+    assert len(resolution["lut_digest"]) == 64
+    assert resolution["kernel_policy_id"] == "synthetic_v1"
+
+
+def test_auto_quantize_latency_missing_coverage_fails_before_calibration(tmp_path):
+    """A LUT missing a required group row fails with an aggregated coverage error."""
+    int8 = "INT8_DEFAULT_CFG"
+    int4 = "INT4_BLOCKWISE_WEIGHT_ONLY_CFG"
+    # Omit all rows for net.4 -> coverage error.
+    rows = [
+        _latency_row(group, recipe_id, 1, 1.0)
+        for group in ("net.0", "net.2")
+        for recipe_id in (int4, int8, "NONE")
+    ]
+    lut_path = tmp_path / "haq_latency_v1.csv"
+    write_canonical_csv(rows, lut_path)
+
+    with pytest.raises(ValueError, match=r"coverage|net\.4"):
+        mtq.auto_quantize(
+            SimpleLinear(),
+            constraints={
+                "cost_model": "latency",
+                "latency": {"relative_to_min": 1.2},
+                "cost": {"lut_path": str(lut_path), "deployment_profile": "test", "m": 1},
+            },
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+            data_loader=[SimpleLinear.get_input() for _ in range(2)],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
