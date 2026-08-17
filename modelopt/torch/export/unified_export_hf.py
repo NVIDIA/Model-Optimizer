@@ -871,6 +871,16 @@ def _add_mtp_exclusions(model: nn.Module, quant_config: dict) -> None:
     if mtp_layer_prefixes:
         exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
         for prefix in mtp_layer_prefixes:
+            # ``load_mtp_weights`` returns BOTH the MTP layer prefixes and the *container* prefix the
+            # MTP weights are inlined under (``get_inlined_mtp_prefixes``). For this VLM that container
+            # is ``language_model``, so emitting f"{prefix}*" produced the glob ``language_model*`` --
+            # which matches the ENTIRE language model, i.e. every layer the recipe just quantized.
+            # Deployment then treats all of them as excluded, builds them unquantized, and fails to
+            # load the packed weights. Only emit a wildcard for prefixes that actually denote an MTP
+            # subtree; a bare container prefix would exclude far more than the MTP head.
+            if ".mtp" not in prefix and not prefix.startswith("mtp"):
+                print(f"Skipping non-MTP container prefix for ignore list: {prefix}")
+                continue
             # Add wildcard pattern to exclude all submodules under this MTP layer
             pattern = f"{prefix}*"
             if pattern not in exclude_modules:
