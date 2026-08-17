@@ -1,7 +1,8 @@
 # Algorithm sheets
 
 One file per draft-model algorithm. A sheet holds only what differs between
-algorithms; the procedure lives in `../stages/`. `eagle3.md` is the worked example.
+algorithms; the procedure lives in `../stages/`. `eagle3.md` and `dflash.md` are the
+worked examples — read one before writing a new sheet.
 
 Keep sheets short. If something is true for every algorithm, it belongs in the
 stage file instead.
@@ -33,4 +34,4 @@ Source the facts from the repo rather than from memory:
 
 Then add a row to the algorithm table in `../../SKILL.md`.
 
-Algorithms with launcher examples but no sheet yet: DFlash, DSpark, Domino.
+Algorithms with launcher examples but no sheet yet: DSpark, Domino.

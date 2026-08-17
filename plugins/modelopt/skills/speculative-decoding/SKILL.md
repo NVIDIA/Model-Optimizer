@@ -54,7 +54,7 @@ the user already knows which task broke.
 | Algorithm | Sheet | Recipe |
 | --- | --- | --- |
 | EAGLE3 | `references/algorithms/eagle3.md` | `modelopt_recipes/general/speculative_decoding/eagle3.yaml` |
-| DFlash | not yet written — see `references/algorithms/README.md` | `modelopt_recipes/general/speculative_decoding/dflash.yaml` |
+| DFlash | `references/algorithms/dflash.md` | `modelopt_recipes/general/speculative_decoding/dflash.yaml` |
 | DSpark | not yet written — see `references/algorithms/README.md` | `modelopt_recipes/general/speculative_decoding/dspark.yaml` |
 | Domino | not yet written — see `references/algorithms/README.md` | `modelopt_recipes/general/speculative_decoding/domino.yaml` |
 
