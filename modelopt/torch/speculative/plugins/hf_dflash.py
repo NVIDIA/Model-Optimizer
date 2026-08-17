@@ -472,6 +472,17 @@ class HFDFlashModel(DFlashModel):
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
                     f"references a layer beyond the base model's {num_target_layers} layers."
                 )
+            # Duplicates pass both checks above -- the count is right, so `fc` gets the
+            # expected input width and training proceeds -- while feeding one layer's
+            # features twice and dropping a capture point entirely. Streaming makes it
+            # worse: the producer captures each base layer at most once, so a duplicated id
+            # also yields fewer planes than `fc` expects.
+            if len(set(user_target_layer_ids)) != len(user_target_layer_ids):
+                raise ValueError(
+                    f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
+                    "contains duplicates; each draft layer needs a distinct capture layer "
+                    "(the streaming producer captures each base layer at most once)."
+                )
             # Reject negatives explicitly: forward() indexes hidden_states[lid + 1], where a
             # negative id silently wraps to a valid layer instead of raising, and the draft
             # then trains on features from a layer it was never meant to see.

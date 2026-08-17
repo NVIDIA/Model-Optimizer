@@ -742,6 +742,16 @@ class TestExplicitTargetLayerIds:
         with pytest.raises(ValueError, match="beyond the base model"):
             self._make_model(target_layer_ids=[0, 99])
 
+    def test_duplicate_ids_raise(self):
+        """Duplicates pass the count and range checks but silently corrupt the features.
+
+        ``fc`` still gets its expected input width, so training proceeds with one layer fed
+        twice and a capture point missing; under streaming the producer also yields fewer
+        planes than ``fc`` expects.
+        """
+        with pytest.raises(ValueError, match="duplicates"):
+            self._make_model(target_layer_ids=[3, 3])
+
     def test_negative_id_raises(self):
         """A negative id would wrap to a valid layer in ``hidden_states[lid + 1]``.
 
