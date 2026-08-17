@@ -441,6 +441,59 @@ def test_enable_only_entry_preserves_attributes():
             assert module.axis == 0, "axis should be preserved by enable-only entry"
 
 
+def test_weight_patterns_matching_nothing_raise():
+    """A config whose weight patterns match no module must fail, not quantize nothing.
+
+    Otherwise calibration and export run to completion and produce a checkpoint that is
+    silently unquantized (``"quant_algo": null``).
+    """
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            # No module in this model is named `experts`.
+            {"quantizer_name": "*.experts.*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        ],
+        "algorithm": "max",
+    }
+    with pytest.raises(RuntimeError, match="no weight quantizer was enabled"):
+        mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+
+def test_config_without_weight_quantization_is_allowed():
+    """Activation-only configs quantize no weight on purpose and must still run."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled
+
+
+def test_weight_quantizers_disabled_by_a_later_entry_are_allowed():
+    """Patterns that match and are then switched off are a choice, not a mismatch."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_name": "*weight_quantizer", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled
+
+
 def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
     """When two cfg-bearing entries match the same quantizer, the second fully replaces the first."""
     model = SimpleLinear()
