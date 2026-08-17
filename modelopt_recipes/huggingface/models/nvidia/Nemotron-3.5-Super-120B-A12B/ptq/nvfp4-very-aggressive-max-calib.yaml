@@ -35,38 +35,32 @@ quantize:
     layerwise:
       enable: false
   quant_cfg:
-    # --- base_disable_all ---
     - quantizer_name: '*'
       enable: false
-    # --- experts_nvfp4 ---
     - quantizer_name: '*.experts.*weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*.experts.*input_quantizer'
       cfg:
         $import: nvfp4
-    # --- shared_experts_nvfp4 ---
     - quantizer_name: '*shared_experts*weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*shared_experts*input_quantizer'
       cfg:
         $import: nvfp4
-    # --- attention_proj_nvfp4 ---
     - quantizer_name: '*[qkvo]_proj.weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*[qkvo]_proj.input_quantizer'
       cfg:
         $import: nvfp4
-    # --- latent_proj_nvfp4 ---
     - quantizer_name: '*latent_proj.weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*latent_proj.input_quantizer'
       cfg:
         $import: nvfp4
-    # --- mamba_proj_nvfp4 ---
     - quantizer_name: '*mixer.in_proj.weight_quantizer'
       cfg:
         $import: nvfp4
@@ -79,79 +73,27 @@ quantize:
     - quantizer_name: '*mixer.out_proj.input_quantizer'
       cfg:
         $import: nvfp4
-    # --- attention_bmm_nvfp4 ---
     - quantizer_name: '*q_bmm_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*p_bmm_quantizer'
       cfg:
         $import: nvfp4
-    # --- kv_nvfp4 ---
     - quantizer_name: '*[kv]_bmm_quantizer'
       cfg:
         $import: nvfp4
-    # --- default_disabled_quantizers ---
-    - quantizer_name: '*block_sparse_moe.gate*'
-      enable: false
-    - quantizer_name: '*linear_attn.conv1d*'
-      enable: false
-    - quantizer_name: '*linear_attn.in_proj_a*'
-      enable: false
-    - quantizer_name: '*linear_attn.in_proj_b*'
-      enable: false
-    - quantizer_name: '*lm_head*'
-      enable: false
-    - quantizer_name: '*mixer.conv1d*'
-      enable: false
-    - quantizer_name: '*mlp.gate.*'
-      enable: false
-    - quantizer_name: '*mlp.shared_expert_gate.*'
-      enable: false
-    - quantizer_name: '*output_layer*'
-      enable: false
-    - quantizer_name: '*proj_out.*'
-      enable: false
-    - quantizer_name: '*router*'
-      enable: false
     - quantizer_name: 'mtp.*'
       enable: false
     - quantizer_name: '*mtp.*'
       enable: false
-    - quantizer_name: 'output.*'
-      enable: false
     - quantizer_name: '*embed_vision*'
       enable: false
-    - quantizer_name: '*vision_tower*'
-      enable: false
-    - quantizer_name: '*visual*'
-      enable: false
-    - quantizer_name: '*vision_model*'
-      enable: false
-    - quantizer_name: '*multi_modal_projector*'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm1d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm2d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm3d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.LeakyReLU'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.Embedding'
-      enable: false
-    # --- lm_head_w4a16_nvfp4 ---
     - quantizer_name: '*lm_head*weight_quantizer'
       enable: true
       cfg:
         $import: nvfp4
     - quantizer_name: '*lm_head*input_quantizer'
       enable: false
-    # --- vision_never_quantize ---
     - quantizer_name: '*vision_model*'
       enable: false
     - quantizer_name: '*vision_projector*'

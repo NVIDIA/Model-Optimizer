@@ -32,24 +32,20 @@ quantize:
     layerwise:
       enable: false
   quant_cfg:
-    # --- base_disable_all ---
     - quantizer_name: '*'
       enable: false
-    # --- experts_nvfp4 ---
     - quantizer_name: '*.experts.*weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*.experts.*input_quantizer'
       cfg:
         $import: nvfp4
-    # --- shared_experts_nvfp4 ---
     - quantizer_name: '*shared_experts*weight_quantizer'
       cfg:
         $import: nvfp4
     - quantizer_name: '*shared_experts*input_quantizer'
       cfg:
         $import: nvfp4
-    # --- attention_qkv_fp8 ---
     - quantizer_name: '*[qkv]_bmm_quantizer'
       cfg:
         $import: fp8
@@ -59,65 +55,15 @@ quantize:
     - quantizer_name: '*p_bmm_quantizer'
       cfg:
         $import: fp8
-    # --- kv_fp8 ---
     - quantizer_name: '*[kv]_bmm_quantizer'
       cfg:
         $import: fp8
-    # --- default_disabled_quantizers ---
-    - quantizer_name: '*block_sparse_moe.gate*'
-      enable: false
-    - quantizer_name: '*linear_attn.conv1d*'
-      enable: false
-    - quantizer_name: '*linear_attn.in_proj_a*'
-      enable: false
-    - quantizer_name: '*linear_attn.in_proj_b*'
-      enable: false
-    - quantizer_name: '*lm_head*'
-      enable: false
-    - quantizer_name: '*mixer.conv1d*'
-      enable: false
-    - quantizer_name: '*mlp.gate.*'
-      enable: false
-    - quantizer_name: '*mlp.shared_expert_gate.*'
-      enable: false
-    - quantizer_name: '*output_layer*'
-      enable: false
-    - quantizer_name: '*proj_out.*'
-      enable: false
-    - quantizer_name: '*router*'
-      enable: false
     - quantizer_name: 'mtp.*'
       enable: false
     - quantizer_name: '*mtp.*'
       enable: false
-    - quantizer_name: 'output.*'
-      enable: false
     - quantizer_name: '*embed_vision*'
       enable: false
-    - quantizer_name: '*vision_tower*'
-      enable: false
-    - quantizer_name: '*visual*'
-      enable: false
-    - quantizer_name: '*vision_model*'
-      enable: false
-    - quantizer_name: '*multi_modal_projector*'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm1d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm2d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.BatchNorm3d'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.LeakyReLU'
-      enable: false
-    - quantizer_name: '*'
-      parent_class: 'nn.Embedding'
-      enable: false
-    # --- vision_never_quantize ---
     - quantizer_name: '*vision_model*'
       enable: false
     - quantizer_name: '*vision_projector*'
