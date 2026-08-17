@@ -66,7 +66,6 @@ SUPPORTED_QFORMATS = [
     "nvfp4",
     "fp8",
     "fp8_pc_pt",
-    "fp8_pb_wo",
 ]
 
 # All 2-D, so the flat view treats them as GEMMs, but none is one: markov_w1/embed_tokens
@@ -173,7 +172,9 @@ def set_static_activation_amax(root: nn.Module, amax: float = STATIC_ACT_AMAX) -
             continue
         if getattr(input_quantizer, "amax", None) is not None:
             continue
-        input_quantizer.amax = torch.tensor(amax, dtype=torch.float32).to(module.weight.dtype)
+        # Keep amax in fp32, as ModelOpt does everywhere else -- casting to the weight
+        # dtype would round a measured amax through bf16's 8-bit mantissa.
+        input_quantizer.amax = torch.tensor(amax, dtype=torch.float32)
         count += 1
     return count
 
@@ -194,9 +195,13 @@ def build_quant_cfg(qformat: str, exclude: list[str], quantize_lm_head: bool) ->
     """Take the shipped preset and layer the drafter-specific exclusions on top."""
     quant_cfg = copy.deepcopy(QUANT_CFG_CHOICES[qformat])
     if quantize_lm_head:
-        quant_cfg["quant_cfg"].append(
-            {"quantizer_name": "*lm_head*weight_quantizer", "enable": True}
-        )
+        # The preset disables *all* of lm_head's quantizers. Re-enabling only the weight
+        # one would leave a W+A format exporting lm_head with no input_scale while the
+        # config still advertises it as fully quantized, which a runtime fails to load.
+        for quantizer in ("weight_quantizer", "input_quantizer"):
+            quant_cfg["quant_cfg"].append(
+                {"quantizer_name": f"*lm_head*{quantizer}", "enable": True}
+            )
     for pattern in DEFAULT_EXCLUDE + exclude:
         quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
     return quant_cfg
