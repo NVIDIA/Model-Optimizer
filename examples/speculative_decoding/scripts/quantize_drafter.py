@@ -34,8 +34,8 @@ Two families of format are supported:
 * **Weight-only / dynamic-activation** (``w4a16_nvfp4``, ``fp8_pc_pt``, ``fp8_pb_wo``) --
   every scale is either derived from the weight or computed at runtime per token.
 * **Static-activation** (``fp8``, ``nvfp4``) -- these need an ``input_quantizer`` amax,
-  normally measured with calibration data. Instead one fixed amax is applied to every
-  layer (``--act_scale_amax``, default 448 = input_scale 1.0 for FP8).
+  normally measured with calibration data. Instead a fixed ``input_scale`` of 1.0 is
+  applied to every layer.
 
 A fixed activation scale sounds crude but measures well, because acceptance length is
 governed almost entirely by *clipping* rather than by resolution. Sweeping input_scale over
@@ -54,12 +54,13 @@ input_scale  FP8 AL          NVFP4 AL
 (bf16 baseline 3.142.) Both formats fall off a cliff below ~0.03, where the declared range
 is far under the activations' true magnitude and most of the tensor is clipped, and both
 sit on a flat plateau from ~0.3 to 4.0 with no drop-off at the top -- so the scale needs to
-be big enough, and little else. NVFP4 trails FP8 by a roughly constant 3.5% across the
+be big enough, and little else. 1.0 sits in the middle of that plateau, which is why it is
+fixed rather than exposed as a knob. NVFP4 trails FP8 by a roughly constant 3.5% across the
 plateau: that gap is the 4-bit resolution cost itself and no choice of scale recovers it.
 
-Two weight-derived estimators (``weight_amax``, ``weight_rms``) are kept for reference.
-They land 1-2 orders of magnitude below the activation range and measure -31% to -46% AL;
-they are not recommended.
+Estimating the amax from the weights instead was tried and does not work: max|W| averages
+0.79 while a RMSNorm'd activation is O(1) with outlier channels in the tens, so the range
+lands 1-2 orders of magnitude low and clips. That measured -31% to -46% AL.
 
 AWQ formats are deliberately not offered: ``awq_lite`` silently degrades to plain RTN when
 no ``forward_loop`` is supplied.
@@ -136,10 +137,14 @@ SUPPORTED_QFORMATS = [
 # target, and vLLM's loader then fails with ``KeyError: 'embed_tokens.weight_scale'``.
 DEFAULT_EXCLUDE = ["*markov_head*", "*confidence_head*", "*embed_tokens*"]
 
-# Largest value FP8 E4M3 can represent, and the default static activation amax. The
-# exported input_scale is amax/448 for FP8 but amax/(6*448) for NVFP4 -- the amax is what
-# both formats share, which is why the CLI takes it rather than an input_scale.
+# Static activation amax applied to every layer of a static-activation format, expressed as
+# the amax that yields input_scale 1.0. The exported input_scale is amax/448 for FP8 but
+# amax/(6*448) for NVFP4, so this is the FP8 convention; an NVFP4 checkpoint built from the
+# same amax records input_scale 0.1667. See the module docstring for why 1.0 and why this is
+# not a CLI knob: the usable plateau spans ~0.3 to 4.0, so the value only has to be big
+# enough, and 1.0 sits in the middle of it.
 FP8_E4M3_MAX = 448.0
+STATIC_ACT_AMAX = FP8_E4M3_MAX
 
 
 def parse_args():
@@ -152,38 +157,10 @@ def parse_args():
         "--qformat",
         default="w4a16_nvfp4",
         choices=SUPPORTED_QFORMATS,
-        help="Quantization format. Weight-only and dynamic-activation formats are fully "
-        "calibration-free; static-activation formats (fp8, nvfp4) additionally need "
-        "--act_scale_heuristic.",
-    )
-    parser.add_argument(
-        "--act_scale_heuristic",
-        default="fixed",
-        choices=["fixed", "none", "weight_amax", "weight_rms"],
-        help="How to set the static activation amax for formats that need one, without "
-        "calibration data. 'fixed' (default) applies --act_scale_amax to every "
-        "layer. 'none' refuses to guess and errors out. The two weight-derived estimators "
-        "are kept for reference only -- they were measured at -31%% to -46%% acceptance "
-        "length; see estimate_activation_amax.",
-    )
-    parser.add_argument(
-        "--act_scale_amax",
-        type=float,
-        default=FP8_E4M3_MAX,
-        help="Static activation amax applied to every layer with --act_scale_heuristic "
-        "fixed, i.e. the largest activation the quantizer will represent without clipping. "
-        "Default 448 corresponds to input_scale 1.0 for FP8; it is lossless for FP8 and "
-        "within 4%% for NVFP4 on Qwen3-8B, and anything from ~134 (scale 0.3) upward sits "
-        "on the same plateau. Below ~13 the activations get clipped and acceptance length "
-        "falls off a cliff. Note the exported input_scale is amax/448 for FP8 but "
-        "amax/(6*448) for NVFP4, so the same amax yields different input_scale values.",
-    )
-    parser.add_argument(
-        "--act_scale_multiplier",
-        type=float,
-        default=1.0,
-        help="Extra factor on the estimated activation amax. >1 clips less and quantizes "
-        "coarser; <1 the reverse. Only used with --act_scale_heuristic.",
+        help="Quantization format. All are calibration-free: weight-only and "
+        "dynamic-activation formats derive every scale from the weights or per token at "
+        "runtime, and the static-activation formats (fp8, nvfp4) use a fixed input_scale "
+        "of 1.0.",
     )
     parser.add_argument(
         "--dtype",
@@ -248,60 +225,19 @@ def build_linear_view(state_dict: dict[str, torch.Tensor], dtype: torch.dtype) -
     return root
 
 
-def estimate_activation_amax(
-    module: nn.Linear, method: str, multiplier: float, fixed_value: float = 1.0
-) -> torch.Tensor | None:
-    """Estimate a static activation amax for ``module`` from its weight alone.
+def set_static_activation_amax(root: nn.Module, amax: float = STATIC_ACT_AMAX) -> int:
+    """Give every static ``input_quantizer`` the same fixed amax. Returns how many were set.
 
     Static-activation formats (fp8, nvfp4) need an ``input_quantizer`` amax, which is
-    normally measured by pushing calibration data through the model. A drafter cannot be
-    driven that way here (no importable modeling code, and its real forward takes hidden
-    states rather than token ids), so these estimators stand in for the measurement.
+    normally *measured* by pushing calibration data through the model. A drafter cannot be
+    driven that way here: it has no importable modeling code, and its real forward takes
+    hidden states rather than token ids. See the module docstring for why one fixed value
+    stands in for that measurement, and why 1.0.
 
-    Both assume the layer's input is roughly unit-scale -- true for a transformer's linear
-    inputs, which are RMSNorm outputs -- and use the weight only to set the dynamic range:
-
-    ``weight_amax``
-        amax = max |W|. An upper-ish bound: activations feeding a layer with large weights
-        are assumed to span a comparable range. Errs toward clipping less, quantizing
-        coarser.
-    ``weight_rms``
-        amax = 4 * rms(W), i.e. a 4-sigma range for a roughly Gaussian weight. Tighter than
-        weight_amax on layers with a few outlier weights, so it usually preserves more
-        resolution -- at the cost of clipping genuine activation outliers.
-
-    ``fixed``
-        amax = ``--act_scale_amax``, the same value for every layer,
-        ignoring the weight
-        entirely. Measured on Qwen3-8B the weight-derived estimators land 1-2 orders of
-        magnitude below the activations they are meant to bound (max|W| averages 0.79 while
-        a RMSNorm'd activation is O(1) with outlier channels in the tens), so most values
-        are clipped. A fixed amax lets the range be set directly on the scale the
-        activations actually live on.
-
-    None is a substitute for calibration. All are deliberately crude, and which one wins is
-    model-dependent; measure acceptance length rather than trusting any of them.
-    """
-    weight = module.weight.detach().float()
-    if method == "weight_amax":
-        amax = weight.abs().max()
-    elif method == "weight_rms":
-        amax = 4.0 * weight.pow(2).mean().sqrt()
-    elif method == "fixed":
-        amax = torch.tensor(fixed_value, dtype=torch.float32)
-    else:
-        return None
-    return (amax * multiplier).to(module.weight.dtype)
-
-
-def apply_activation_scale_heuristic(
-    root: nn.Module, method: str, multiplier: float, fixed_value: float = 1.0
-) -> int:
-    """Set every enabled ``input_quantizer``'s amax from the weight heuristic.
-
-    Returns the number of quantizers that were given a scale. Only quantizers that are
-    both enabled and still missing an amax are touched, so dynamic-activation formats
-    (whose scales are computed per token at runtime) are left alone.
+    Only quantizers that are enabled and still missing an amax are touched, so
+    dynamic-activation formats -- whose scales are computed per token at runtime -- are left
+    alone, and any amax already established (by a future calibration pass, see
+    ``resolve_activation_scales``) wins over the fixed default.
     """
     count = 0
     for _, module in root.named_modules():
@@ -315,12 +251,32 @@ def apply_activation_scale_heuristic(
             continue
         if getattr(input_quantizer, "amax", None) is not None:
             continue
-        amax = estimate_activation_amax(module, method, multiplier, fixed_value)
-        if amax is None:
-            continue
-        input_quantizer.amax = amax
+        input_quantizer.amax = torch.tensor(amax, dtype=torch.float32).to(module.weight.dtype)
         count += 1
     return count
+
+
+def resolve_activation_scales(root: nn.Module, quant_cfg: dict) -> None:
+    """Establish activation scales for a format that quantizes activations statically.
+
+    The single place that decides *where* a static activation amax comes from. Today there
+    is one source -- a fixed value applied uniformly -- because the drafter cannot be run
+    forward without its modeling code. Real calibration would slot in here as a second
+    source ahead of the fixed fallback::
+
+        if calib_forward_loop is not None:
+            mtq.calibrate(root, quant_cfg["algorithm"], forward_loop=calib_forward_loop)
+        set_static_activation_amax(root)  # fills in whatever calibration did not reach
+
+    ``set_static_activation_amax`` deliberately skips quantizers that already have an amax,
+    so it composes as a fallback rather than overwriting measured values, and the callers
+    below do not change when that day comes.
+    """
+    if not need_calibration(quant_cfg):
+        # Weight-only, or activations scaled per token at runtime -- nothing to establish.
+        return
+    n = set_static_activation_amax(root)
+    print(f"Set {n} static activation amax values (fixed, input_scale 1.0) -- not calibrated.")
 
 
 def build_quant_cfg(qformat: str, exclude: list[str], quantize_lm_head: bool) -> dict:
@@ -384,34 +340,9 @@ def main():
     root = build_linear_view(state_dict, dtype)
 
     quant_cfg = build_quant_cfg(args.qformat, args.exclude, args.quantize_lm_head)
-    needs_static_act = need_calibration(quant_cfg)
-    if needs_static_act and args.act_scale_heuristic == "none":
-        raise SystemExit(
-            f"--qformat {args.qformat} quantizes activations with a static scale, which is "
-            "normally measured with calibration data. This script has none, so pass "
-            "--act_scale_heuristic {weight_amax,weight_rms} to estimate it from the weights "
-            "(approximate -- verify acceptance length), or pick a calibration-free format "
-            "such as w4a16_nvfp4 (weight-only) or fp8_pc_pt (dynamic per-token activations)."
-        )
 
     mtq.quantize(root, quant_cfg)  # no forward_loop: scales come from the weights
-
-    if needs_static_act:
-        n = apply_activation_scale_heuristic(
-            root,
-            args.act_scale_heuristic,
-            args.act_scale_multiplier,
-            args.act_scale_amax,
-        )
-        detail = (
-            f"amax={args.act_scale_amax:g}"
-            if args.act_scale_heuristic == "fixed"
-            else f"derived from weights (x{args.act_scale_multiplier:g})"
-        )
-        print(
-            f"Set {n} static activation amax values via '{args.act_scale_heuristic}' "
-            f"({detail}) -- not calibrated."
-        )
+    resolve_activation_scales(root, quant_cfg)
 
     mtq.print_quant_summary(root)
 
