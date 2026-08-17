@@ -28,7 +28,10 @@ metadata:
 quantize:
   algorithm:
     method: max
-    layerwise: false
+    # layerwise.enable=false is required for VLMs: the decoder layers sit under
+    # `model.language_model.layers`, where layerwise_calibrate cannot find them.
+    layerwise:
+      enable: false
   quant_cfg:
     - $import: base_disable_all
     - $import: experts_nvfp4

@@ -40,6 +40,13 @@
     enable: false
   - quantizer_name: 'mtp.*'
     enable: false
+  # 'mtp.*' above is MCore-shaped: it only matches names that START with 'mtp.'. Under HF naming
+  # this model's head is 'language_model.mtp.layers.N....', which that glob misses, so a broad
+  # enable such as attention_proj_fp8's '*[qkvo]_proj.*' would switch MTP attention back on
+  # (verified with probe/verify_recipes.py). '*mtp.*' covers BOTH namings: the leading '*' absorbs
+  # the HF prefix and may also match empty, so MCore's 'mtp.layers.*' still matches.
+  - quantizer_name: '*mtp.*'
+    enable: false
   - quantizer_name: 'output.*'
     enable: false
   # Multimodal vision branch: keep the vision encoder (SigLIP / ViT) and any

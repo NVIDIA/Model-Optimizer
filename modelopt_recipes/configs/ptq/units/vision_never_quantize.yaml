@@ -26,3 +26,12 @@
     enable: false
   - quantizer_name: '*multi_modal_projector*'
     enable: false
+  # The HF checkpoint exposes the projector as TOP-LEVEL `mlp1.*` (mlp1.0/1/3). The header above
+  # noted this but no RULE covered it, so the guard documented the gap without closing it.
+  # Caught by probe/verify_recipes.py: nemotron35vl_fp8_base imports the broad w8a8_fp8_fp8 unit,
+  # whose '*input_quantizer' rule enabled mlp1.0/1/3 -- the vision projector was quantized in that
+  # tier even though this unit is imported last.
+  - quantizer_name: 'mlp1.*'
+    enable: false
+  - quantizer_name: '*.mlp1.*'
+    enable: false
