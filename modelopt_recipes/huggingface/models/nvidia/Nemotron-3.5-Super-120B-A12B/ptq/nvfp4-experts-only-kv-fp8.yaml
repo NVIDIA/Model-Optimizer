@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# NVFP4 on the MoE experts plus FP8 KV cache, with the C-RADIO vision branch held in BF16.
+# Rule-for-rule equivalent to general/ptq/nvfp4_experts_only-kv_fp8 with the VL vision guard added.
+#
+# Style: per-model recipe with INLINE rules, matching the other huggingface/models/nvidia/*/ptq
+# recipes. Only configs/numerics/* is imported. quant_cfg is ORDERED and the LAST match wins,
+# which is why the blanket disable comes first and the vision / MTP guards come last.
+#
+# Measured: GSM8K 92.50% with experts-only NVFP4 (bf16 reference 91.50%).
+
+imports:
+  nvfp4: configs/numerics/nvfp4
+  fp8: configs/numerics/fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    NVFP4 on MoE expert weight/input quantizers plus FP8 KV cache, with the C-RADIO vision branch held i
+    n BF16. Upstream nvfp4_experts_only-kv_fp8 plus the VL vision guard.
+quantize:
+  algorithm:
+    method: max
+    # layerwise.enable=false is required for VLMs: the decoder layers sit under
+    # `model.language_model.layers`, where layerwise_calibrate cannot find them.
+    layerwise:
+      enable: false
+  quant_cfg:
+    # --- base_disable_all ---
+    - quantizer_name: '*'
+      enable: false
+    # --- experts_nvfp4 ---
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # --- block_sparse_moe_nvfp4 ---
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    # --- kv_fp8 ---
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      cfg:
+        $import: fp8
+    # --- default_disabled_quantizers ---
+    - quantizer_name: '*block_sparse_moe.gate*'
+      enable: false
+    - quantizer_name: '*linear_attn.conv1d*'
+      enable: false
+    - quantizer_name: '*linear_attn.in_proj_a*'
+      enable: false
+    - quantizer_name: '*linear_attn.in_proj_b*'
+      enable: false
+    - quantizer_name: '*lm_head*'
+      enable: false
+    - quantizer_name: '*mixer.conv1d*'
+      enable: false
+    - quantizer_name: '*mlp.gate.*'
+      enable: false
+    - quantizer_name: '*mlp.shared_expert_gate.*'
+      enable: false
+    - quantizer_name: '*output_layer*'
+      enable: false
+    - quantizer_name: '*proj_out.*'
+      enable: false
+    - quantizer_name: '*router*'
+      enable: false
+    - quantizer_name: 'mtp.*'
+      enable: false
+    - quantizer_name: '*mtp.*'
+      enable: false
+    - quantizer_name: 'output.*'
+      enable: false
+    - quantizer_name: '*embed_vision*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*vision_model*'
+      enable: false
+    - quantizer_name: '*multi_modal_projector*'
+      enable: false
+    - quantizer_name: '*'
+      parent_class: 'nn.BatchNorm1d'
+      enable: false
+    - quantizer_name: '*'
+      parent_class: 'nn.BatchNorm2d'
+      enable: false
+    - quantizer_name: '*'
+      parent_class: 'nn.BatchNorm3d'
+      enable: false
+    - quantizer_name: '*'
+      parent_class: 'nn.LeakyReLU'
+      enable: false
+    - quantizer_name: '*'
+      parent_class: 'nn.Embedding'
+      enable: false
+    # --- vision_never_quantize ---
+    - quantizer_name: '*vision_model*'
+      enable: false
+    - quantizer_name: '*vision_projector*'
+      enable: false
+    - quantizer_name: '*radio_model*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*multi_modal_projector*'
+      enable: false
+    - quantizer_name: 'mlp1.*'
+      enable: false
+    - quantizer_name: '*.mlp1.*'
+      enable: false
