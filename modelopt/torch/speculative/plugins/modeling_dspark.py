@@ -66,12 +66,16 @@ the bias computation is fully self-contained on this module. Submodule names
 checkpoints stay portable.
 """
 
+import logging
+
 import torch
 from torch import nn
 
 from .modeling_dflash import DFlashModule
 
 __all__ = ["DSparkModule"]
+
+logger = logging.getLogger(__name__)
 
 
 class DSparkModule(DFlashModule):
@@ -140,9 +144,20 @@ class DSparkModule(DFlashModule):
         nested = prefix + cls._NESTED_HEAD_PREFIX
         for key in [k for k in state_dict if k.startswith(nested)]:
             flat = prefix + key[len(nested) :]
-            # A flat key already present wins: never clobber an explicit match.
-            state_dict.setdefault(flat, state_dict.pop(key))
-            state_dict.pop(key, None)
+            nested_value = state_dict.pop(key)
+            # A flat key already present wins: never clobber an explicit match. That case
+            # means a partially-converted checkpoint carrying both layouts; the Markov
+            # tables are ~14% of the draft's parameters and loading the wrong one is
+            # invisible at runtime, so say which copy was dropped rather than picking
+            # silently.
+            if flat in state_dict:
+                logger.warning(
+                    "DSpark: ignoring nested %s because %s is also present in the checkpoint.",
+                    key,
+                    flat,
+                )
+            else:
+                state_dict[flat] = nested_value
 
     def _init_head_weights(self, config):
         """Initialize the head Linear/Embedding layers (matching HF _init_weights std)."""
