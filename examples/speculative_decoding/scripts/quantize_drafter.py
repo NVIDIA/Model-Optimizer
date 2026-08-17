@@ -15,52 +15,26 @@
 
 """Calibration-free PTQ for a speculative-decoding drafter.
 
-Block-wise ``max`` quantization derives every scale from the weight tensor itself, so
-this needs neither a dataset nor a forward pass -- only the drafter's safetensors file.
-That in turn means we never have to import the drafter's modeling code: each 2-D weight
-is wrapped in a throwaway ``nn.Linear`` under its checkpoint name, and ModelOpt's normal
-``quantizer_name`` patterns select over those names exactly as they would on the real
-module tree. Works for any drafter layout (DSpark / DFlash / EAGLE3 / Medusa).
+Every scale is derived from the weights, so this needs no dataset and no forward pass --
+only the drafter's safetensors file. That also means the drafter's modeling code is never
+imported: each 2-D weight is wrapped in a throwaway ``nn.Linear`` under its checkpoint
+name, and ModelOpt's usual ``quantizer_name`` patterns select over those names. Works for
+any drafter layout (DSpark / DFlash / EAGLE3 / Medusa).
 
-Avoiding the modeling code is what makes this work at all for DFlash-family drafters. An
+Avoiding the modeling code is what makes this work for DFlash-family drafters at all: an
 exported drafter declares ``architectures: ["DFlashDraftModel"]`` but ships no importable
-class, so ``AutoModelForCausalLM`` silently loads it as a plain Qwen3 and drops ``fc`` /
-``hidden_norm`` / the DSpark heads; and the real draft module's ``forward`` takes
-``(noise_embedding, target_hidden, ...)``, not ``input_ids``, so the stock ``hf_ptq.py``
-calibration loop cannot drive it either. The flat-linear view sidesteps both problems.
+class, so ``AutoModelForCausalLM`` silently loads it as a plain Qwen3 and drops the draft
+tensors, and the real draft ``forward`` takes hidden states rather than ``input_ids``, so
+the stock ``hf_ptq.py`` calibration loop cannot drive it either.
 
-Two families of format are supported:
-
-* **Weight-only / dynamic-activation** (``w4a16_nvfp4``, ``fp8_pc_pt``, ``fp8_pb_wo``) --
-  every scale is either derived from the weight or computed at runtime per token.
-* **Static-activation** (``fp8``, ``nvfp4``) -- these need an ``input_quantizer`` amax,
-  normally measured with calibration data. Instead a fixed ``input_scale`` of 1.0 is
-  applied to every layer.
-
-A fixed activation scale sounds crude but measures well, because acceptance length is
-governed almost entirely by *clipping* rather than by resolution. Sweeping input_scale over
-three decades on Qwen3-8B + a DSpark drafter (MT-Bench, 80 questions):
-
-===========  ==============  ==============
-input_scale  FP8 AL          NVFP4 AL
-===========  ==============  ==============
-0.003        2.220 (-29.3%)  2.208 (-29.8%)
-0.03         2.975  (-5.3%)  2.926  (-6.9%)
-0.3          3.137  (-0.2%)  3.022  (-3.8%)
-1.0          3.146  (+0.1%)  3.019  (-3.9%)
-4.0          3.125  (-0.6%)  3.003  (-4.4%)
-===========  ==============  ==============
-
-(bf16 baseline 3.142.) Both formats fall off a cliff below ~0.03, where the declared range
-is far under the activations' true magnitude and most of the tensor is clipped, and both
-sit on a flat plateau from ~0.3 to 4.0 with no drop-off at the top -- so the scale needs to
-be big enough, and little else. 1.0 sits in the middle of that plateau, which is why it is
-fixed rather than exposed as a knob. NVFP4 trails FP8 by a roughly constant 3.5% across the
-plateau: that gap is the 4-bit resolution cost itself and no choice of scale recovers it.
-
-Estimating the amax from the weights instead was tried and does not work: max|W| averages
-0.79 while a RMSNorm'd activation is O(1) with outlier channels in the tens, so the range
-lands 1-2 orders of magnitude low and clips. That measured -31% to -46% AL.
+``fp8`` and ``nvfp4`` quantize activations against a static amax that is normally measured
+on calibration data; a fixed ``input_scale`` of 1.0 is applied instead. That holds up
+because acceptance length is governed by clipping rather than resolution: on Qwen3-8B +
+a DSpark drafter (MT-Bench), AL falls off a cliff below input_scale ~0.03 but sits on a
+flat plateau from ~0.3 to 4.0 with no drop-off at the top, so the scale only has to be big
+enough. 1.0 is the middle of that plateau, and measures +0.1% AL for FP8 and -3.9% for
+NVFP4 (that gap is the 4-bit resolution cost; no scale recovers it). Deriving the amax
+from the weights instead clips badly and measures -31% to -46%.
 
 AWQ formats are deliberately not offered: ``awq_lite`` silently degrades to plain RTN when
 no ``forward_loop`` is supplied.
@@ -96,13 +70,6 @@ from modelopt.torch.export.quant_utils import (
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.utils import is_quantized_linear
 
-# Formats this script offers, in the order they are most likely to be wanted.
-#   w4a16_nvfp4 -- block-16 E2M1 weights, dynamic FP8 E4M3 scales. Smallest, weight-only.
-#   nvfp4       -- same weights plus NVFP4 activations (static amax -> needs a scale).
-#   fp8         -- E4M3 weights and activations, per-tensor (static amax -> needs a scale).
-#   fp8_pc_pt   -- E4M3 per-channel weights, DYNAMIC per-token activations. The
-#                  calibration-free way to get FP8 activations.
-#   fp8_pb_wo   -- E4M3 per-block weight-only fallback.
 # INT8/INT4 weight-only formats are deliberately absent: vLLM's ModelOpt backend accepts
 # only FP8, FP8_PER_CHANNEL_PER_TOKEN, FP8_PB_WO, NVFP4, W4A16_NVFP4, MXFP8 and
 # MIXED_PRECISION, so an INT checkpoint quantizes cleanly but cannot be served.
@@ -114,35 +81,19 @@ SUPPORTED_QFORMATS = [
     "fp8_pb_wo",
 ]
 
-# The Markov head writes straight into the draft logits and is only a few percent of the
-# drafter, so the bits it would save are not worth the acceptance-rate risk. It is also not
-# a plain GEMM in the real module tree -- markov_w1 is an nn.Embedding, which ModelOpt's
-# stock presets already exclude via `parent_class: nn.Embedding`; the flat-linear view here
-# has lost the original module classes, so the exclusion has to be restated by name.
-#
-# The confidence head is excluded for the same reason plus a mechanical one: it projects to
-# a single output (``[1, hidden]``), so a per-channel scale collapses to a 0-dim tensor and
-# the per-channel export path (fp8_pc_pt) indexes it as ``scale[:, None]`` and raises. It is
-# one row of weights, so there is nothing to gain by quantizing it.
-#
-# ``fc`` is deliberately NOT excluded here: it is the single largest non-lm_head tensor and
-# the formats' own presets decide its fate. Exclude it explicitly with --exclude '*fc*' when
-# comparing acceptance length.
-# lm_head is excluded by the preset itself (see --quantize_lm_head).
-#
-# ``embed_tokens`` must be excluded too. It is 2-D, so the flat-linear view happily treats
-# it as a GEMM, but it is an ``nn.Embedding``: a row lookup, not a matmul. ModelOpt's stock
-# presets skip embeddings via ``parent_class: nn.Embedding``, which the flat view cannot
-# see. Quantizing it also breaks deployment -- a drafter inherits ``embed_tokens`` from the
-# target, and vLLM's loader then fails with ``KeyError: 'embed_tokens.weight_scale'``.
+# These are 2-D, so the flat-linear view treats them as GEMMs, but none of them is one:
+# markov_w1 and embed_tokens are embeddings (row lookups), which ModelOpt's presets
+# normally skip via `parent_class: nn.Embedding` -- a class the flat view cannot see, so
+# the exclusion is restated by name. Quantizing embed_tokens also breaks deployment, since
+# a drafter inherits it from the target (vLLM: KeyError: 'embed_tokens.weight_scale').
+# confidence_head projects to a single output, whose per-channel scale collapses to a
+# 0-dim tensor. All are tiny; nothing is lost by leaving them alone.
+# Not excluded: `fc` (the presets decide; use --exclude '*fc*' to compare) and `lm_head`
+# (the preset already excludes it -- see --quantize_lm_head).
 DEFAULT_EXCLUDE = ["*markov_head*", "*confidence_head*", "*embed_tokens*"]
 
-# Static activation amax applied to every layer of a static-activation format, expressed as
-# the amax that yields input_scale 1.0. The exported input_scale is amax/448 for FP8 but
-# amax/(6*448) for NVFP4, so this is the FP8 convention; an NVFP4 checkpoint built from the
-# same amax records input_scale 0.1667. See the module docstring for why 1.0 and why this is
-# not a CLI knob: the usable plateau spans ~0.3 to 4.0, so the value only has to be big
-# enough, and 1.0 sits in the middle of it.
+# The amax that yields input_scale 1.0 for FP8. NVFP4 divides by 6*448 instead, so the same
+# amax records as input_scale 0.1667 there; both mean the same activation range.
 FP8_E4M3_MAX = 448.0
 STATIC_ACT_AMAX = FP8_E4M3_MAX
 
@@ -228,16 +179,8 @@ def build_linear_view(state_dict: dict[str, torch.Tensor], dtype: torch.dtype) -
 def set_static_activation_amax(root: nn.Module, amax: float = STATIC_ACT_AMAX) -> int:
     """Give every static ``input_quantizer`` the same fixed amax. Returns how many were set.
 
-    Static-activation formats (fp8, nvfp4) need an ``input_quantizer`` amax, which is
-    normally *measured* by pushing calibration data through the model. A drafter cannot be
-    driven that way here: it has no importable modeling code, and its real forward takes
-    hidden states rather than token ids. See the module docstring for why one fixed value
-    stands in for that measurement, and why 1.0.
-
-    Only quantizers that are enabled and still missing an amax are touched, so
-    dynamic-activation formats -- whose scales are computed per token at runtime -- are left
-    alone, and any amax already established (by a future calibration pass, see
-    ``resolve_activation_scales``) wins over the fixed default.
+    Skips quantizers that are dynamic (scale computed per token at runtime) or that already
+    have an amax, so this composes as a fallback rather than an overwrite.
     """
     count = 0
     for _, module in root.named_modules():
@@ -259,21 +202,14 @@ def set_static_activation_amax(root: nn.Module, amax: float = STATIC_ACT_AMAX) -
 def resolve_activation_scales(root: nn.Module, quant_cfg: dict) -> None:
     """Establish activation scales for a format that quantizes activations statically.
 
-    The single place that decides *where* a static activation amax comes from. Today there
-    is one source -- a fixed value applied uniformly -- because the drafter cannot be run
-    forward without its modeling code. Real calibration would slot in here as a second
-    source ahead of the fixed fallback::
+    The single place deciding where a static amax comes from. Real calibration would slot
+    in here ahead of the fixed fallback, leaving the CLI and call site unchanged::
 
         if calib_forward_loop is not None:
             mtq.calibrate(root, quant_cfg["algorithm"], forward_loop=calib_forward_loop)
-        set_static_activation_amax(root)  # fills in whatever calibration did not reach
-
-    ``set_static_activation_amax`` deliberately skips quantizers that already have an amax,
-    so it composes as a fallback rather than overwriting measured values, and the callers
-    below do not change when that day comes.
+        set_static_activation_amax(root)  # fills in what calibration did not reach
     """
     if not need_calibration(quant_cfg):
-        # Weight-only, or activations scaled per token at runtime -- nothing to establish.
         return
     n = set_static_activation_amax(root)
     print(f"Set {n} static activation amax values (fixed, input_scale 1.0) -- not calibrated.")
@@ -307,9 +243,9 @@ def export_quantized_state_dict(
         assert quantization is not None, f"{name}: enabled quantizer resolved to no format"
         weight_scale = get_weight_scaling_factor(module)
         weight_scale_2 = get_weight_scaling_factor_2(module)
-        # A per-channel scale over a single-output projection (``[1, hidden]``) collapses to
-        # a 0-dim tensor that the packing helpers index as ``scale[:, None]``. Such a layer
-        # is one row of weights, so skip it rather than crash -- it stays in ``dtype``.
+        # A per-channel scale over a single-output projection collapses to a 0-dim tensor
+        # that the packing helpers index as ``scale[:, None]``. Skip rather than crash --
+        # it is one row of weights and stays in ``dtype``.
         if weight_scale is not None and weight_scale.dim() == 0 and module.weight.shape[0] == 1:
             print(f"Skipping {name}: single-output projection, per-channel scale is scalar")
             continue
@@ -323,9 +259,8 @@ def export_quantized_state_dict(
         export_sd[f"{name}.weight_scale"] = weight_scale
         if weight_scale_2 is not None:
             export_sd[f"{name}.weight_scale_2"] = weight_scale_2
-        # Static-activation formats also need the input scale in the checkpoint. Without
-        # it the runtime has no activation scale to apply, so every heuristic produces a
-        # byte-identical export and the format silently degrades.
+        # Static-activation formats need the input scale in the checkpoint too; without it
+        # the runtime has no activation scale to apply and the format silently degrades.
         activation_scale = get_activation_scaling_factor(module)
         if activation_scale is not None:
             export_sd[f"{name}.input_scale"] = activation_scale
@@ -354,11 +289,9 @@ def main():
 
     config = json.loads((source_dir / "config.json").read_text())
     hf_quant_config = get_quant_config(root)
-    # ``get_quant_config`` only knows about the modules in the linear view, so anything the
-    # view never saw -- embeddings, norms, and any 1-D weight -- is absent from
-    # ``exclude_modules``. A loader that walks the checkpoint (vLLM does) then expects a
-    # ``weight_scale`` for those too and dies with e.g. KeyError: 'embed_tokens.weight_scale'.
-    # List every weight that was not quantized so the exclusion set is complete.
+    # ``get_quant_config`` only knows the modules in the linear view, so anything it never
+    # saw (norms, 1-D weights) is missing from ``exclude_modules`` and a loader walking the
+    # checkpoint expects a ``weight_scale`` for it. List every unquantized weight instead.
     quantized = {
         name
         for name, module in root.named_modules()
@@ -375,19 +308,15 @@ def main():
     for name in unquantized:
         if name not in exclude_modules:
             exclude_modules.append(name)
-        # A runtime matches this list against its own module prefix, which is usually
-        # nested relative to the checkpoint key (vLLM builds the draft's ``fc`` at
-        # ``model.fc`` via ``maybe_prefix``). A bare ``fc`` then fails to match, the layer
-        # is built quantized, and loading the bf16 weight into a packed parameter raises a
-        # size assertion. Add a suffix wildcard so the exclusion matches at any depth.
+        # A runtime matches this against its own module prefix, which is nested relative to
+        # the checkpoint key (vLLM builds the draft's ``fc`` at ``model.fc``). Add a suffix
+        # wildcard so the exclusion matches at any depth.
         wildcard = f"*{name}"
         if wildcard not in exclude_modules:
             exclude_modules.append(wildcard)
     # Runtimes fuse sibling projections into one layer whose name appears in no checkpoint
-    # key: q/k/v -> ``qkv_proj``, gate/up -> ``gate_up_proj``. Excluding only the individual
-    # names leaves the fused layer quantized, and its merged shard shapes then disagree with
-    # the unpacked weights being loaded into it. Emit the fused aliases whenever every
-    # component of a fusion group was excluded.
+    # key (q/k/v -> ``qkv_proj``, gate/up -> ``gate_up_proj``), so excluding only the parts
+    # leaves the fused layer quantized. Emit the alias once every component is excluded.
     for fused, parts in (
         ("qkv_proj", ("q_proj", "k_proj", "v_proj")),
         ("gate_up_proj", ("gate_proj", "up_proj")),
@@ -398,21 +327,16 @@ def main():
                 exclude_modules.append(alias)
     hf_quant_config["quantization"]["exclude_modules"] = exclude_modules
     config["quantization_config"] = dict(hf_quant_config["quantization"])
-    # ModelOpt names the format ``quant_algo``; vLLM's ModelConfig reads
-    # ``quant_cfg["quant_method"]`` and treats a config without that key as unquantized,
-    # then dies on the packed weight shapes. Emit both so either loader is satisfied.
-    # vLLM splits ModelOpt checkpoints into two backends: ``modelopt_fp4`` for the
-    # block-scaled NVFP4 layouts and ``modelopt`` for the per-tensor/per-channel ones.
+    # ModelOpt names the format ``quant_algo``; vLLM reads ``quant_method`` and treats its
+    # absence as unquantized. Emit both. vLLM splits ModelOpt checkpoints across two
+    # backends: ``modelopt_fp4`` for block-scaled NVFP4, ``modelopt`` for the rest.
     quant_algo = str(hf_quant_config["quantization"].get("quant_algo") or "")
     config["quantization_config"].setdefault(
         "quant_method", "modelopt_fp4" if "NVFP4" in quant_algo.upper() else "modelopt"
     )
-    # The exclusion list is read under two different keys. ModelOpt's own
-    # ``hf_quant_config.json`` nests it under ``quantization.exclude_modules``, but when a
-    # runtime parses the flat ``quantization_config`` block inside ``config.json`` it looks
-    # for ``ignore`` (vLLM's ModelOptQuantConfigBase.from_config). Emitting only
-    # ``exclude_modules`` there yields an empty exclusion set, every layer is built
-    # quantized, and loading an untouched bf16 weight into a packed parameter raises.
+    # The exclusion list is read under two different keys: ModelOpt nests it under
+    # ``quantization.exclude_modules``, but a runtime parsing the flat
+    # ``quantization_config`` in config.json looks for ``ignore``. Emit both.
     config["quantization_config"]["ignore"] = list(exclude_modules)
     config["torch_dtype"] = args.dtype
     (export_dir / "config.json").write_text(json.dumps(config, indent=2))
