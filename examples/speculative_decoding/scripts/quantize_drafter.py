@@ -74,6 +74,10 @@ SUPPORTED_QFORMATS = [
 # All tiny. `fc` is left to the presets; `lm_head` is excluded by the preset itself.
 DEFAULT_EXCLUDE = ["*markov_head*", "*confidence_head*", "*embed_tokens*"]
 
+# Sidecars carried over to the export, and -- with the weights and config.json -- the only
+# files fetched when --drafter_path is a repo id rather than a local directory.
+SIDECAR_FILES = ("tokenizer.json", "tokenizer_config.json", "generation_config.json")
+
 # The amax that yields input_scale 1.0 for FP8. NVFP4 divides by 6*448, so the same amax
 # records as 0.1667 there; both mean the same activation range.
 FP8_E4M3_MAX = 448.0
@@ -122,7 +126,11 @@ def load_drafter(drafter_path: str) -> tuple[Path, dict[str, torch.Tensor]]:
     if not local_dir.is_dir():
         from huggingface_hub import snapshot_download
 
-        local_dir = Path(snapshot_download(drafter_path))
+        local_dir = Path(
+            snapshot_download(
+                drafter_path, allow_patterns=["*.safetensors", "config.json", *SIDECAR_FILES]
+            )
+        )
 
     shards = sorted(local_dir.glob("*.safetensors"))
     assert shards, f"No .safetensors found under {local_dir}"
@@ -314,9 +322,18 @@ def main():
     (export_dir / "config.json").write_text(json.dumps(config, indent=2))
     (export_dir / "hf_quant_config.json").write_text(json.dumps(hf_quant_config, indent=2))
 
-    for extra in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+    for extra in SIDECAR_FILES:
         if (source_dir / extra).is_file():
             shutil.copy2(source_dir / extra, export_dir / extra)
+
+    # A drafter that ships custom modeling code points at it from auto_map; the export
+    # carries that config verbatim, so the .py files have to come along or the reference
+    # dangles. (The DFlash/DSpark exports have no auto_map -- this is for the ones that do.)
+    if config.get("auto_map"):
+        for module in {ref.split("--")[-1].split(".")[0] for ref in config["auto_map"].values()}:
+            source_py = source_dir / f"{module}.py"
+            if source_py.is_file():
+                shutil.copy2(source_py, export_dir / source_py.name)
 
     before = sum(v.numel() * v.element_size() for v in state_dict.values())
     after = sum(v.numel() * v.element_size() for v in export_sd.values())
