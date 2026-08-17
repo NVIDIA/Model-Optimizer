@@ -80,4 +80,12 @@ def restore_dflash_model(
 ) -> nn.Module:
     """Function for restoring a previously converted model to a DFlash model."""
     assert not metadata, "No metadata expected!"
+    # Warm start is a one-time training-time initialization, not part of the converted
+    # model's definition, so restore must not replay it: the restored checkpoint already
+    # carries the trained weights (which would immediately overwrite the warm-started
+    # ones), the recorded path need not exist on the machine doing the restore, and the
+    # from_pretrained path builds the draft on the meta device, where copying real tensors
+    # into it raises. dflash_init_checkpoint is serialized into modelopt_state, so it has
+    # to be cleared explicitly rather than simply not being there.
+    config = config.model_copy(update={"dflash_init_checkpoint": None})
     return convert_to_dflash_model(model, config)[0]

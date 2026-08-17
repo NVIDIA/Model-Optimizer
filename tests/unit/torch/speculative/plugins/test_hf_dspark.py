@@ -24,13 +24,16 @@ layout (``markov_w1.*`` / ``markov_w2.*`` / ``gate_proj.*`` / ``joint_proj.*`` /
 """
 
 import json
+import shutil
 from copy import deepcopy
 
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file, save_file
+from transformers import AutoModelForCausalLM
 
+import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
@@ -666,6 +669,29 @@ class TestInitCheckpoint:
         with pytest.raises(ValueError, match="does not match the configured draft"):
             self._make_model(init_checkpoint=export_dir, dflash_attention_sink=True)
 
+    def test_restore_does_not_replay_warm_start(self, tmp_path):
+        """Restoring a warm-started checkpoint must not re-read the warm-start source.
+
+        ``dflash_init_checkpoint`` is serialized into modelopt_state and restore goes
+        through ``convert_to_dflash_model`` → ``modify``, so without an explicit opt-out the
+        warm start runs again at load time. The saved checkpoint already carries the trained
+        weights, so re-reading a path that may be gone (another machine, cleaned-up source)
+        would fail the restore for weights that are immediately overwritten anyway.
+        """
+        mto.enable_huggingface_checkpointing()
+        export_dir = self._export(tmp_path)
+        model_ref = self._make_model(init_checkpoint=export_dir)
+        model_ref.save_pretrained(tmp_path / "modelopt_model")
+
+        # The warm-start source is gone by the time the checkpoint is loaded.
+        shutil.rmtree(export_dir)
+
+        model_test = AutoModelForCausalLM.from_pretrained(tmp_path / "modelopt_model")
+        assert isinstance(model_test, HFDSparkModel)
+        for name, p in model_test.dflash_module.named_parameters():
+            ref = dict(model_ref.dflash_module.named_parameters())[name]
+            assert torch.allclose(p, ref), f"{name} differs after restore"
+
     def test_nested_head_shape_mismatch_reported(self, tmp_path):
         """A wrong-shaped tensor is caught even under the nested `markov_head.` layout.
 
@@ -715,6 +741,15 @@ class TestExplicitTargetLayerIds:
     def test_out_of_range_raises(self):
         with pytest.raises(ValueError, match="beyond the base model"):
             self._make_model(target_layer_ids=[0, 99])
+
+    def test_negative_id_raises(self):
+        """A negative id would wrap to a valid layer in ``hidden_states[lid + 1]``.
+
+        Without an explicit lower bound it passes validation and silently feeds the draft
+        features from the wrong layer instead of failing.
+        """
+        with pytest.raises(ValueError, match="non-negative"):
+            self._make_model(target_layer_ids=[-2, 7])
 
     def test_export_round_trips_explicit_ids(self, tmp_path):
         model = self._make_model(target_layer_ids=[0, 7])
