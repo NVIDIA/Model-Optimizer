@@ -1875,7 +1875,7 @@ LayerActivationCollector.register_decoder_layer_support(
 
 
 class _QuantMoELinear(QuantModule):
-    """Quantization wrapper for Step3p5 MoELinear modules (fused expert weights).
+    """Quantization wrapper for expert-indexed MoELinear modules (fused expert weights).
 
     MoELinear has weight shape [num_experts, out_features, in_features] with
     forward(x, expert_id). We expand it into per-expert nn.Linear modules so
@@ -1921,29 +1921,64 @@ class _QuantMoELinear(QuantModule):
         return expert(x).float()
 
 
-def register_step3p5_moe_on_the_fly(model):
-    """Register Step3p5 MoELinear for quantization.
+def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
+    """Whether ``module`` packs one projection's experts into an expert-indexed 3-D weight.
 
-    Step3p5 uses a custom MoELinear class (loaded via trust_remote_code) with
-    weight shape [num_experts, out_features, in_features] and forward(x, expert_id).
-    We detect it by model class name, then grab the type from the first MoE layer.
+    The Step family (``stepfun-ai/Step-3.5-Flash``, ``stepfun-ai/Step-3.7-Flash``) ships a
+    custom ``MoELinear`` via ``trust_remote_code``: a plain ``nn.Module`` holding a single
+    ``weight`` of shape ``[num_experts, out_features, in_features]``, whose
+    ``forward(x, expert_id)`` runs ``F.linear`` against the selected expert's slice. The
+    weights therefore live on the projection submodule rather than on the expert container,
+    which is what :func:`_fused_experts_wrapper_class` looks for, and the module is not an
+    ``nn.Linear``, so neither the fused-experts path nor the plain linear path claims it.
+
+    Detection is structural rather than keyed on class names so new Step revisions (or any
+    other model shipping the same layout) are picked up without another hardcoded name.
     """
-    if type(model).__name__ not in ("Step3p5ForCausalLM", "Step3p5Model"):
-        return
-    for module in model.modules():
-        if type(module).__name__ == "Step3p5MoEMLP":
-            moe_linear_type = type(module.up_proj)
-            if QuantModuleRegistry.get(moe_linear_type) is None:
-                QuantModuleRegistry.register({moe_linear_type: f"hf.{moe_linear_type.__name__}"})(
-                    _QuantMoELinear
-                )
-            break
+    weight = getattr(module, "weight", None)
+    if not isinstance(weight, (nn.Parameter, Tensor)) or weight.dim() != 3:
+        return False
+    if not all(hasattr(module, attr) for attr in ("num_experts", "in_features", "out_features")):
+        return False
+    # `_QuantMoELinear.forward` takes (x, expert_id), so only claim modules whose callers
+    # already drive them that way.
+    try:
+        params = list(inspect.signature(type(module).forward).parameters.values())[1:]
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        p
+        for p in params
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty
+    ]
+    return len(positional) == 2
+
+
+def register_moe_linear_on_the_fly(model):
+    """Register expert-indexed ``MoELinear`` modules (Step-3.5 / Step-3.7) for quantization.
+
+    Without this the routed experts carry no quantizer at all: an experts-only recipe matches
+    nothing and the export writes a checkpoint with ``quant_algo: null``.
+    """
+    visited_types = set()
+    for name, module in model.named_modules():
+        mod_type = type(module)
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
+            continue
+        visited_types.add(mod_type)
+
+        if _is_expert_indexed_moe_linear(module):
+            print(
+                f"\033[1mDetected expert-indexed MoE linear '{name}' of type "
+                f"{mod_type.__name__}, registering with _QuantMoELinear.\033[0m"
+            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantMoELinear)
 
 
 def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
-    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
+    """Reconstruct :class:`_QuantMoELinear` per-expert weights back to the 3-D MoELinear format.
 
-    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
+    After _process_quantized_modules, each expert's nn.Linear inside the wrapper has:
       - weight: fp4-quantized tensor [out_features, in_features]
       - weight_scale, weight_scale_2: per-block / global scales
       - input_scale: activation scale (if calibrated)
@@ -1951,12 +1986,12 @@ def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
     This stacks them back into the original MoELinear layout so the exported state_dict
     uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
 
-    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
-    not _QuantMoELinear which is the implementation class.
+    Matched by wrapper type rather than by the dynamically generated class name (``Quant`` +
+    the model's own class name): a model whose class is not spelled ``MoELinear`` would
+    otherwise quantize normally but export unusable per-expert keys.
     """
     for _name, module in model.named_modules():
-        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
-        if type(module).__name__ != "QuantMoELinear":
+        if not isinstance(module, _QuantMoELinear):
             continue
 
         n = module.num_experts
@@ -1986,7 +2021,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
-        register_step3p5_moe_on_the_fly,
+        register_moe_linear_on_the_fly,
         register_fused_experts_on_the_fly,
         force_eager_experts_impl_on_the_fly,
         register_sparse_moe_on_the_fly,

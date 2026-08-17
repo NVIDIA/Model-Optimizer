@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model-specific PTQ recipe: Step-3.7 routed-experts-only NVFP4 with FP8 KV-cache cast.
+#
+# Step's remote code names the MoE block `moe` (not `experts` / `block_sparse_moe`), so the
+# general experts-only recipe matches nothing on this architecture. The routed experts are
+# `moe.{gate,up,down}_proj`, the router is `moe.gate`, and each MoE layer also has a dense
+# `share_expert` that stays in BF16.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Applies dynamic NVFP4 to Step-3.7 routed-expert weight and input quantizers, plus FP8
+    KV-cache cast mode using constant amax; the router, the shared expert and the dense MLPs
+    stay unquantized. Uses max calibration.
+
+quantize:
+  algorithm:
+    method: max
+    layerwise: false
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8_cast
+    - $import: default_disabled_quantizers
+    # Router and shared expert are matched by `*moe*` above; disable them last (later wins).
+    - quantizer_name: '*moe.gate.*'
+      enable: false
+    - quantizer_name: '*share_expert*'
+      enable: false
