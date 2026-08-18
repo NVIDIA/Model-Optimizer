@@ -161,8 +161,9 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         default=None,
         title="Effective bits per KV-cache scalar",
         description=(
-            "Average KV-cache storage bits target for layer-wise KV AutoQuant, in (0, 16]. "
-            "Exactly one of effective_bits and kv_effective_bits may be set."
+            "Average KV-cache storage bits target across eligible layers for layer-wise KV "
+            "AutoQuant, in (0, 16]. Exactly one of effective_bits and kv_effective_bits may "
+            "be set."
         ),
     )
     cost_model: Literal["weight", "active_moe"] = ModeloptField(

@@ -129,6 +129,36 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     }
 
 
+def test_unsupported_asymmetric_kv_cache_pair_fails_export():
+    class FakeAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k_bmm_quantizer = TensorQuantizer()
+            self.v_bmm_quantizer = TensorQuantizer()
+
+    model = FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {
+                "quantizer_name": "*k_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            },
+            {
+                "quantizer_name": "*v_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            },
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="Unsupported mixed K/V cache"):
+        get_quant_config(model)
+
+
 def test_mixed_kv_cache_postprocess_uses_each_layers_format():
     state_dict = {
         "attn0.k_bmm_quantizer._amax": torch.tensor([448.0]),

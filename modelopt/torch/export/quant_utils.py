@@ -452,6 +452,10 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
                 return KV_CACHE_FP8_K_NVFP4_V
             if k_dtype == v_dtype:
                 return k_dtype
+            raise NotImplementedError(
+                "Unsupported mixed K/V cache quantization pair: "
+                f"K uses {k_dtype}, while V uses {v_dtype}."
+            )
 
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
         # Still check for output quantizer for the unified_megatron_export path

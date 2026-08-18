@@ -675,21 +675,24 @@ def auto_quantize_kv_cache(
 
     Unlike weight AutoQuant, BF16/no-quant is only the scoring reference and is
     not an implicit solver choice. Each supplied format must configure K and V
-    together and declare exact config-level ``effective_bits``. Formats use their
-    own calibration algorithm; cast-mode constant-amax candidates skip calibration
-    forwards and provide the fastest turnaround.
+    together and declare config-level ``effective_bits`` equal to their packed
+    storage cost per K-or-V scalar, including scale overhead. The budget is weighted
+    by the K/V projection widths of eligible layers. Formats use their own calibration
+    algorithm; cast-mode constant-amax candidates skip calibration forwards.
 
     Args:
         model: Model whose attention K/V quantizers will be searched.
-        constraints: A ``{"kv_effective_bits": target}`` storage constraint.
+        constraints: A ``{"kv_effective_bits": target}`` storage constraint across
+            eligible layers.
         quantization_formats: Candidate ``QuantizeConfig`` dictionaries, optionally
             paired with display names.
         data_loader: Re-iterable calibration and scoring batches.
-        forward_step: Callable returning the full logits tensor for one batch.
+        forward_step: Callable returning full-vocabulary logits for the token positions
+            to score in one batch.
         num_calib_steps: Maximum calibration batches per candidate.
         num_score_steps: Maximum batches used for isolated forward-KL scoring.
         disabled_layers: Optional layer-name patterns excluded from the search and
-            preserved in their existing KV-cache format.
+            bit budget, and preserved in their existing KV-cache format.
         verbose: Whether to print progress and selected formats.
         checkpoint: Optional path for resumable calibration and sensitivity state.
 

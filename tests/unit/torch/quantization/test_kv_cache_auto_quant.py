@@ -183,6 +183,7 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path):
 
     assert state["best"]["effective_bits"] == pytest.approx(6.0)
     assert state["best"]["is_satisfied"]
+    assert model.training
     assert {layer["selected"] for layer in state["layers"].values()} == {
         "int8",
         "int4",
@@ -193,7 +194,7 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path):
         expected_bits = 8 if layer_state["selected"] == "int8" else 4
         assert layer.k_bmm_quantizer.num_bits == expected_bits
 
-    restored_model = _ToyKVModel()
+    restored_model = _ToyKVModel().eval()
     restored_model, restored_state = auto_quantize_kv_cache(
         restored_model,
         {"kv_effective_bits": 6.0},
@@ -206,10 +207,49 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path):
     )
 
     assert restored_state == state
+    assert not restored_model.training
     for layer_name, layer_state in restored_state["layers"].items():
         layer = restored_model.get_submodule(layer_name)
         expected_bits = 8 if layer_state["selected"] == "int8" else 4
         assert layer.k_bmm_quantizer.num_bits == expected_bits
+
+
+def test_kv_autoquant_rejects_invalid_logits_and_restores_model_state():
+    model = _ToyKVModel()
+    original_quantizers = {
+        name: (module.k_bmm_quantizer, module.v_bmm_quantizer)
+        for name, module in (("attn0", model.attn0), ("attn1", model.attn1))
+    }
+    candidates = [
+        (
+            {
+                "quant_cfg": [
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": 4, "constant_amax": 1.0},
+                    }
+                ],
+                "algorithm": None,
+                "effective_bits": 4.0,
+            },
+            "int4",
+        )
+    ]
+
+    with pytest.raises(ValueError, match="non-empty vocabulary dimension"):
+        auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 4.0},
+            candidates,
+            [torch.randn(2, 3, 8)],
+            lambda *_: torch.ones(8),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert model.training
+    for name, module in (("attn0", model.attn0), ("attn1", model.attn1)):
+        assert (module.k_bmm_quantizer, module.v_bmm_quantizer) == original_quantizers[name]
 
 
 def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path):
@@ -298,6 +338,7 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
     }
     model = mtq.quantize(model, fixed_kv_config)
     model.model.layers[0].self_attn.q_proj.weight_quantizer.enable()
+    assert not hasattr(model.model.layers[0].self_attn.q_proj.weight_quantizer, "_amax")
 
     model, state = mtq.auto_quantize_kv_cache(
         model,
@@ -308,10 +349,10 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
                     "quant_cfg": [
                         {
                             "quantizer_name": "*[kv]_bmm_quantizer",
-                            "cfg": {"num_bits": 4, "constant_amax": 1.0},
+                            "cfg": {"num_bits": 4},
                         }
                     ],
-                    "algorithm": None,
+                    "algorithm": "max",
                     "effective_bits": 4.0,
                 },
                 "int4",
@@ -327,6 +368,7 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
     assert set(state["layers"]) == {"model.layers.0.self_attn"}
     assert model.model.layers[0].self_attn.k_bmm_quantizer.num_bits == 4
     assert model.model.layers[0].self_attn.q_proj.weight_quantizer.is_enabled
+    assert not hasattr(model.model.layers[0].self_attn.q_proj.weight_quantizer, "_amax")
     fixed_attention = model.model.layers[1].self_attn
     assert fixed_attention.k_bmm_quantizer.is_enabled
     assert fixed_attention.v_bmm_quantizer.is_enabled
