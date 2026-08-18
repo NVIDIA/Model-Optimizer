@@ -69,10 +69,13 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
   `--max-num-batched-tokens 131072`.
 - `--kv-cache-dtype fp8` — **itself a precision choice**; keep identical across
   baseline and candidate or the delta also measures KV-cache quantization.
-- Fan out via `execution.num_nodes` / `num_instances` (golden **4 / 4**, HAProxy
-  pattern A — `references/multi-node.md`). `parallelism` is the total across
-  instances, so `--max-num-seqs = ceil(parallelism / num_instances / DP)`
-  (256/4/1 = 64).
+- Fan out via `execution.num_nodes` / `num_instances` (HAProxy pattern A —
+  `references/multi-node.md`). **Size these from the cluster's GPUs-per-node**, do
+  not copy: pick TP for the model, fill the node with DP, then choose instances for
+  the replica count you want. `parallelism` is the total across instances, so
+  `--max-num-seqs = ceil(parallelism / num_instances / DP)`. The golden ran 4 nodes
+  × (TP2 × DP2) on 4-GPU nodes = 8 replicas, `ceil(256/4/2) = 32` each; the same 8
+  replicas on 8-GPU nodes is 2 × (TP2 × DP4).
 - **Never cap output.** Answers reproduce a whole earlier turn; a cap truncates it
   and craters the ratio. Golden: `max_new_tokens: null` +
   `++responses_create_params.max_output_tokens=null`.

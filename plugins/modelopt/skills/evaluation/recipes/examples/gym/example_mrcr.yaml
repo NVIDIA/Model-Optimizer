@@ -45,11 +45,11 @@ execution:
   account: ???
   output_dir: ???        # absolute host path; keeps the response cache across resumes
   walltime: "04:00:00"
-  # 1M rollouts are slow; the golden fans out over 4 single-node instances
-  # (HAProxy pattern A, references/multi-node.md). `parallelism` below is the
-  # TOTAL across instances — halve/double both together.
-  num_nodes: 4
-  num_instances: 4
+  # num_nodes / num_instances: cluster-dependent, so size them from the node's GPU
+  # count rather than copying — see references/multi-node.md (HAProxy pattern A).
+  # Defaults are 1/1, which will not finish a 1M run inside the walltime; the
+  # golden used 4 nodes / 4 instances of TP2 x DP2 on 4-GPU nodes (8 replicas).
+  # `parallelism` below is the TOTAL across instances.
   # gres: a predefined internal/slurm/<cluster> config sets this. On slurm/default
   # it's gpu:8 — set to the node's GPU count (match --tensor/--data-parallel-size)
   # or sbatch fails "Requested node configuration is not available".
@@ -86,8 +86,9 @@ deployment:
   gpu_memory_utilization: 0.95      # golden raises this from 0.85 to fit the 1M KV cache
   # Golden serves in REASONING mode (thinking forced on via chat_template_kwargs
   # below), so set the model's --reasoning-parser.
-  # --max-num-seqs on the GYM path = ceil(parallelism / num_instances / DP), NOT
-  # the generic SKILL rule; here ceil(256/4/1) = 64.
+  # After sizing num_nodes / num_instances / TP / DP above, append
+  # `--max-num-seqs N` where N = ceil(parallelism / num_instances / DP) — the GYM
+  # rule, not the generic SKILL one. Golden: ceil(256/4/2) = 32.
   # --kv-cache-dtype fp8 is itself a precision choice — keep it IDENTICAL across
   # baseline and quantized runs or the delta measures KV-cache quantization too.
   command: >-
@@ -95,7 +96,7 @@ deployment:
     --served-model-name ${deployment.served_model_name}
     --host 0.0.0.0
     --port ${deployment.port}
-    --tensor-parallel-size ???
+    --tensor-parallel-size 1
     --data-parallel-size 1
     --max-model-len 1100000
     --kv-cache-dtype fp8
@@ -104,7 +105,6 @@ deployment:
     --enable-prefix-caching
     --enable-chunked-prefill
     --max-num-batched-tokens 131072
-    --max-num-seqs 64
 
 evaluation:
   env_vars:
