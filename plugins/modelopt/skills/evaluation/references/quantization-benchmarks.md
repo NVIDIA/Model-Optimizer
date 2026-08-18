@@ -75,9 +75,11 @@ merged into the `aa/` multi-task list.
   long-context matters: the longest-context task here (1M tokens) and, unlike
   AA-LCR, no judge, so the score is deterministic. Standalone `gym` config
   (`recipes/tasks/gym/mrcr.md`). Two comparability traps: the three variants use
-  different datasets and are **not** comparable to each other, and
-  `--kv-cache-dtype fp8` must match across baseline and candidate or the delta
-  also measures KV-cache quantization. Report the 2/4/8 needle strata — precision
+  different datasets and are **not** comparable to each other, and the
+  KV dtype must follow each checkpoint's `kv_cache_quant_algo`
+  (`hf_quant_config.json`) rather than being pinned to the golden's `fp8` — forcing
+  it onto an uncalibrated checkpoint applies KV quantization it was never
+  calibrated for. Report the 2/4/8 needle strata — precision
   loss hits the 8-needle stratum while the aggregate still looks flat.
 - **GDPVal** is part of the AA suite but the heaviest task and a separate
   harness: it runs as its **own standalone `gym` config** (never in the `aa/`

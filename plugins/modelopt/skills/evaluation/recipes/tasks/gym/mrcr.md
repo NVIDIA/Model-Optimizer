@@ -15,6 +15,13 @@ unless the response starts with the required prefix**. Stratified by needle coun
 A 0.2.6 `nel` `nemo_gym` task (not nel-next), so Steps 1–9 apply. **Standalone** —
 one gym eval per config, never mixed with other tasks.
 
+Run it through **`"$SKILL_DIR/scripts/nel-gdpval.sh"`**, the same pinned-launcher
+wrapper GDPVal uses — the name is GDPVal-flavoured but the pin is gym-wide. This
+config forwards `NEL_INVOCATION_ID`, and an unpinned `nel` from PATH can emit the
+re-export without first assigning it, exiting on `NEL_INVOCATION_ID: unbound
+variable` under `set -u` before the client starts. See `references/gym-gdpval.md`
+for the failure signature and the procedure for adopting a newer launcher.
+
 **Not an AA benchmark** — never generate it for an "AA" request. It shares
 `recipes/tasks/gym/` with GDPVal, which *is* AA: the dir groups by **harness**,
 not suite, so read membership per task.
