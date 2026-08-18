@@ -446,6 +446,14 @@ the selected formats in `kv_cache_quantized_layers` and writes the JSON-safe sen
 `kv_cache_auto_quantize_report.json`; `--auto_quantize_checkpoint` stores the resumable raw search
 state.
 
+> [!NOTE]
+> Layer-wise KV checkpoints require the companion
+> [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
+> vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
+> `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
+> Full FP8 K/V and full NVFP4 K/V use existing vLLM kernels; FP8-K/NVFP4-V within one layer also
+> requires the separate mixed-K/V kernel implementation.
+
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):
 

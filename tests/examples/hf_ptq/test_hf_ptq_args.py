@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -99,6 +100,16 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
         4.5,
     ]
     assert "kv_cache_quant_cfg" not in inputs
+
+
+def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    logits = torch.arange(2 * 4 * 3).reshape(2, 4, 3)
+    attention_mask = torch.tensor([[1, 1, 0, 0], [0, 1, 1, 0]])
+
+    selected = hf_ptq._select_unpadded_logits(logits, {"attention_mask": attention_mask})
+
+    assert torch.equal(selected, logits[attention_mask.bool()])
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):

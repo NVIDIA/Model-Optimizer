@@ -15,6 +15,7 @@
 
 """User-facing quantization API."""
 
+import copy
 import fnmatch
 import inspect
 import os
@@ -39,6 +40,7 @@ from modelopt.torch.utils import atomic_print
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
+from .kv_cache_auto_quant import _validate_search_inputs as _validate_kv_cache_search_inputs
 from .kv_cache_auto_quant import auto_quantize_kv_cache as _auto_quantize_kv_cache
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
@@ -712,20 +714,59 @@ def auto_quantize_kv_cache(
             raise ValueError("KV-cache AutoQuant candidate names must be non-empty strings.")
         processed_formats.append((raw_config, name))
 
-    if not is_quantized(model):
-        model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
-    return _auto_quantize_kv_cache(
-        model,
-        constraints,
-        processed_formats,
-        data_loader,
-        forward_step,
-        num_calib_steps=num_calib_steps,
-        num_score_steps=num_score_steps,
-        disabled_layers=disabled_layers,
-        verbose=verbose,
-        checkpoint=checkpoint,
+    _validate_kv_cache_search_inputs(
+        constraints, processed_formats, num_calib_steps, num_score_steps
     )
+
+    converted_for_search = not is_quantized(model)
+    conversion_snapshot = _snapshot_model_structure(model) if converted_for_search else []
+    try:
+        if converted_for_search:
+            model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+            set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+        return _auto_quantize_kv_cache(
+            model,
+            constraints,
+            processed_formats,
+            data_loader,
+            forward_step,
+            num_calib_steps=num_calib_steps,
+            num_score_steps=num_score_steps,
+            disabled_layers=disabled_layers,
+            verbose=verbose,
+            checkpoint=checkpoint,
+        )
+    except Exception:
+        if converted_for_search:
+            _restore_model_structure(conversion_snapshot)
+        raise
+
+
+def _snapshot_model_structure(
+    model: nn.Module,
+) -> list[tuple[nn.Module, type[nn.Module], dict[str, Any]]]:
+    """Capture lightweight module metadata for failure-atomic fresh conversion."""
+    return [
+        (
+            module,
+            type(module),
+            {
+                key: copy.copy(value) if isinstance(value, (dict, list, set)) else value
+                for key, value in module.__dict__.items()
+            },
+        )
+        for module in model.modules()
+    ]
+
+
+def _restore_model_structure(
+    snapshot: list[tuple[nn.Module, type[nn.Module], dict[str, Any]]],
+) -> None:
+    """Undo an in-place quantization conversion without copying model tensors."""
+    for module, original_type, original_state in reversed(snapshot):
+        object.__setattr__(module, "__class__", original_type)
+        module.__dict__.clear()
+        module.__dict__.update(original_state)
 
 
 def get_auto_quantize_config(search_state, constraints=None, verbose=False):

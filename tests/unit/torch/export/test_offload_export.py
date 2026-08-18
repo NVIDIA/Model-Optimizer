@@ -36,9 +36,12 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.model_config import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
 from modelopt.torch.export.model_utils import TiedWeightMap
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+)
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
@@ -317,6 +320,31 @@ def test_postprocess_kv_scale_renamed_and_divided():
     )
     assert key == "model.layers.0.self_attn.k_proj.k_scale"
     assert abs(val.item() - 0.5) < 1e-5
+
+
+@pytest.mark.parametrize(
+    ("layer_name", "quant_algo"),
+    [
+        ("model.layers.0.self_attn", KV_CACHE_FP8_K_NVFP4_V),
+        ("model.layers.1.self_attn", KV_CACHE_NVFP4),
+    ],
+)
+def test_postprocess_resolves_mixed_kv_format_per_layer(layer_name, quant_algo):
+    quantization = {
+        "kv_cache_quant_algo": "MIXED_PRECISION",
+        "kv_cache_quantized_layers": {layer_name: {"quant_algo": quant_algo}},
+    }
+    postprocess_config = _get_kv_cache_postprocess_config(quantization)
+
+    key, val = _postprocess_single_tensor(
+        f"{layer_name}.v_bmm_quantizer._amax",
+        torch.tensor(224.0),
+        448.0,
+        postprocess_config,
+    )
+
+    assert key == f"{layer_name}.v_proj.v_scale"
+    assert val.item() == pytest.approx(0.5)
 
 
 def test_postprocess_scale_squeezed():

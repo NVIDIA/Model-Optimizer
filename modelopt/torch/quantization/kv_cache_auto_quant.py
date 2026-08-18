@@ -26,7 +26,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.opt.searcher import LPS
 from modelopt.torch.utils import print_rank_0, safe_load, safe_save
 
@@ -97,6 +96,55 @@ def _validate_kv_only_config(config: QuantizeConfig) -> None:
             "k_bmm_quantizer and v_bmm_quantizer."
         )
 
+    algorithm = config.algorithm
+    if algorithm is None:
+        return
+    if isinstance(algorithm, str):
+        algorithm_method = algorithm
+    elif isinstance(algorithm, dict):
+        algorithm_method = algorithm.get("method")
+    else:
+        algorithm_method = getattr(algorithm, "method", None)
+    if algorithm_method != "max":
+        raise ValueError(
+            "KV-cache AutoQuant supports only non-structural calibration algorithms "
+            f"None and 'max'; got {algorithm_method!r}."
+        )
+
+
+def _validate_search_inputs(
+    constraints: dict[str, Any],
+    quantization_formats: list[tuple[dict[str, Any], str]],
+    num_calib_steps: int,
+    num_score_steps: int,
+) -> tuple[float, list[tuple[str, QuantizeConfig]]]:
+    """Validate a KV-cache search before the caller converts the model."""
+    if set(constraints) != {"kv_effective_bits"}:
+        raise ValueError(
+            "KV-cache AutoQuant constraints must contain only kv_effective_bits; "
+            f"got {sorted(constraints)}."
+        )
+    target_bits = float(constraints["kv_effective_bits"])
+    if not (0 < target_bits <= 16):
+        raise ValueError(f"kv_effective_bits must be in (0, 16], got {target_bits}.")
+    if num_calib_steps <= 0:
+        raise ValueError("num_calib_steps must be positive.")
+    if num_score_steps <= 0:
+        raise ValueError("num_score_steps must be positive.")
+
+    candidates = []
+    seen_names = set()
+    for raw_config, name in quantization_formats:
+        if name in seen_names:
+            raise ValueError(f"Duplicate KV-cache AutoQuant candidate name: {name!r}.")
+        config = QuantizeConfig(**raw_config)
+        _validate_kv_only_config(config)
+        candidates.append((name, config))
+        seen_names.add(name)
+    if not candidates:
+        raise ValueError("KV-cache AutoQuant requires at least one candidate format.")
+    return target_bits, candidates
+
 
 def _projection_width(module: nn.Module, side: str) -> int | None:
     projection = getattr(module, f"{side}_proj", None)
@@ -148,30 +196,6 @@ def _eligible_layers(
 def _apply_layer_quantizers(module: nn.Module, quantizers: dict[str, TensorQuantizer]) -> None:
     for attr, quantizer in quantizers.items():
         setattr(module, attr, quantizer)
-
-
-def _set_only_candidate_quantizers_enabled(
-    model: nn.Module, candidate_quantizers: set[TensorQuantizer]
-) -> list[tuple[TensorQuantizer, bool]]:
-    """Enable the active KV candidates while temporarily disabling every other quantizer."""
-    enable_states = []
-    for module in model.modules():
-        if not isinstance(module, TensorQuantizer):
-            continue
-        enable_states.append((module, module.is_enabled))
-        if module in candidate_quantizers:
-            module.enable()
-        else:
-            module.disable()
-    return enable_states
-
-
-def _restore_quantizer_enable_states(enable_states: list[tuple[TensorQuantizer, bool]]) -> None:
-    for quantizer, is_enabled in enable_states:
-        if is_enabled:
-            quantizer.enable()
-        else:
-            quantizer.disable()
 
 
 def _get_logits(
@@ -306,34 +330,13 @@ def auto_quantize_kv_cache(
 
     Candidate formats are format-agnostic ``QuantizeConfig`` dictionaries. Each must
     configure K and V together and declare ``effective_bits`` matching its packed
-    storage per K-or-V scalar, including scale overhead. Candidate-specific calibration
-    runs with non-KV quantizers disabled before scoring; cast-style constant-amax formats
-    skip calibration forwards through their normal algorithm configuration.
+    storage per K-or-V scalar, including scale overhead. Candidate calibration is scoped
+    to the candidate K/V quantizers, while pre-existing fixed quantizers keep executing
+    with frozen state. Cast-style constant-amax formats may skip calibration forwards.
     """
-    if set(constraints) != {"kv_effective_bits"}:
-        raise ValueError(
-            "KV-cache AutoQuant constraints must contain only kv_effective_bits; "
-            f"got {sorted(constraints)}."
-        )
-    target_bits = float(constraints["kv_effective_bits"])
-    if not (0 < target_bits <= 16):
-        raise ValueError(f"kv_effective_bits must be in (0, 16], got {target_bits}.")
-    if num_calib_steps <= 0:
-        raise ValueError("num_calib_steps must be positive.")
-    if num_score_steps <= 0:
-        raise ValueError("num_score_steps must be positive.")
-
-    candidates = []
-    seen_names = set()
-    for raw_config, name in quantization_formats:
-        if name in seen_names:
-            raise ValueError(f"Duplicate KV-cache AutoQuant candidate name: {name!r}.")
-        config = QuantizeConfig(**raw_config)
-        _validate_kv_only_config(config)
-        candidates.append((name, config))
-        seen_names.add(name)
-    if not candidates:
-        raise ValueError("KV-cache AutoQuant requires at least one candidate format.")
+    target_bits, candidates = _validate_search_inputs(
+        constraints, quantization_formats, num_calib_steps, num_score_steps
+    )
 
     layers = _eligible_layers(model, disabled_layers)
     signature = _search_signature(
@@ -412,26 +415,18 @@ def auto_quantize_kv_cache(
                                 break
                             _get_logits(forward_step, calibration_model, data)
 
-                    active_quantizers = {
+                    active_quantizers = [
                         quantizer
                         for layer_name, _, _ in layers
                         for quantizer in candidate_quantizers[layer_name][candidate_name].values()
-                    }
-                    enable_states = _set_only_candidate_quantizers_enabled(model, active_quantizers)
-                    modelopt_state = None
-                    original_mode_count = 0
-                    try:
-                        modelopt_state = ModeloptStateManager(model).state_dict()
-                        original_mode_count = len(modelopt_state)
-                        calibrate(
-                            model,
-                            algorithm=config.algorithm,
-                            forward_loop=calibration_loop,
-                        )
-                    finally:
-                        if modelopt_state is not None:
-                            del modelopt_state[original_mode_count:]
-                        _restore_quantizer_enable_states(enable_states)
+                    ]
+                    calibration_proxy = nn.Module()
+                    calibration_proxy.quantizers = nn.ModuleList(active_quantizers)
+                    calibrate(
+                        calibration_proxy,
+                        algorithm=config.algorithm,
+                        forward_loop=lambda _: calibration_loop(model),
+                    )
 
                 for layer_name, module, _ in layers:
                     _apply_layer_quantizers(module, disabled_quantizers[layer_name])

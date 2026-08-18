@@ -101,6 +101,7 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
+    _get_kv_cache_postprocess_config,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -1012,12 +1013,7 @@ def _export_transformers_checkpoint(
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
     quantization_details = quant_config["quantization"]
-    kv_cache_format = quantization_details["kv_cache_quant_algo"]
-    kv_cache_postprocess_config = (
-        quantization_details["kv_cache_quantized_layers"]
-        if kv_cache_format == "MIXED_PRECISION"
-        else kv_cache_format
-    )
+    kv_cache_postprocess_config = _get_kv_cache_postprocess_config(quantization_details)
 
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict,

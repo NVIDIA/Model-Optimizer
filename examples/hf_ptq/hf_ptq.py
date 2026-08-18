@@ -98,6 +98,19 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 
 
+def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
+    """Return logits only for token positions selected by ``attention_mask``."""
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is None:
+        return logits
+    if logits.shape[:-1] != attention_mask.shape:
+        raise ValueError(
+            "AutoQuant KL logits and attention_mask must have matching token dimensions; "
+            f"got {tuple(logits.shape[:-1])} and {tuple(attention_mask.shape)}."
+        )
+    return logits[attention_mask.bool()]
+
+
 def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
     """Return True if this KV cfg pins ``use_constant_amax`` on the bmm quantizer.
 
@@ -490,8 +503,10 @@ def auto_quantize(
             output = model(**inputs_)
             if is_base_model:
                 assert full_model is not None
-                return full_model.lm_head(output.last_hidden_state)
-            return output.logits
+                logits = full_model.lm_head(output.last_hidden_state)
+            else:
+                logits = output.logits
+            return _select_unpadded_logits(logits, batch)
 
     else:
         raise ValueError(

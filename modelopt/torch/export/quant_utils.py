@@ -1034,7 +1034,7 @@ def _postprocess_single_tensor(
     key: str,
     value: torch.Tensor,
     kv_cache_max_bound: float,
-    kv_cache_format: str | None,
+    kv_cache_format: str | dict[str, dict[str, str]] | None,
     is_modelopt_qlora: bool = False,
 ) -> tuple[str | None, torch.Tensor | None]:
     """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
@@ -1068,12 +1068,20 @@ def _postprocess_single_tensor(
         if key.endswith(old_suffix):
             prefix = key[: -len(old_suffix)]
             if "_amax" in key:
-                assert kv_cache_format in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
-                    "Invalid KV cache quantization format."
-                )
+                layer_quantization = _resolve_kv_cache_format_for_key(key, kv_cache_format)
+                assert layer_quantization in [
+                    KV_CACHE_FP8,
+                    KV_CACHE_FP8_K_NVFP4_V,
+                    KV_CACHE_NVFP4,
+                    KV_CACHE_NVFP4_AFFINE,
+                ], "Invalid KV cache quantization format."
                 assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
                 value = value.float() / kv_cache_max_bound
-                if kv_cache_format == KV_CACHE_FP8 and value.item() > 0.5:
+                is_fp8_scale = layer_quantization == KV_CACHE_FP8 or (
+                    layer_quantization == KV_CACHE_FP8_K_NVFP4_V
+                    and key.endswith("k_bmm_quantizer._amax")
+                )
+                if is_fp8_scale and value.item() > 0.5:
                     logger.warning(
                         "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                     )
@@ -1082,6 +1090,32 @@ def _postprocess_single_tensor(
 
     # Key has a skip_key but no replacement matched — drop it
     return None, None
+
+
+def _resolve_kv_cache_format_for_key(
+    key: str, quantization: str | dict[str, dict[str, str]] | None
+) -> str | None:
+    """Resolve uniform or per-layer KV-cache metadata for one state-dict key."""
+    if not isinstance(quantization, dict):
+        return quantization
+    matches = [
+        (layer_name, layer_config.get("quant_algo"))
+        for layer_name, layer_config in quantization.items()
+        if key == layer_name or key.startswith(layer_name + ".")
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item[0]))[1]
+
+
+def _get_kv_cache_postprocess_config(
+    quantization_details: dict[str, Any],
+) -> str | dict[str, dict[str, str]] | None:
+    """Return the uniform format or layer map consumed by both HF exporters."""
+    kv_cache_format = quantization_details.get("kv_cache_quant_algo")
+    if kv_cache_format == "MIXED_PRECISION":
+        return quantization_details.get("kv_cache_quantized_layers", {})
+    return kv_cache_format
 
 
 def postprocess_state_dict(
@@ -1118,18 +1152,6 @@ def postprocess_state_dict(
 
     post_state_dict = {}
 
-    def _kv_quantization_for_key(key: str) -> str | None:
-        if not isinstance(quantization, dict):
-            return quantization
-        matches = [
-            (layer_name, layer_config.get("quant_algo"))
-            for layer_name, layer_config in quantization.items()
-            if key == layer_name or key.startswith(layer_name + ".")
-        ]
-        if not matches:
-            return None
-        return max(matches, key=lambda item: len(item[0]))[1]
-
     for key, value in state_dict.items():
         # Skip problematic parameters for specific model architectures, e.g., Nemotron Nano VL models
         if key == "vision_model.radio_model.summary_idxs":
@@ -1147,7 +1169,7 @@ def postprocess_state_dict(
                 prefix = key[: -len(old_suffix)]
 
                 if "_amax" in key:
-                    layer_quantization = _kv_quantization_for_key(key)
+                    layer_quantization = _resolve_kv_cache_format_for_key(key, quantization)
                     assert layer_quantization in [
                         KV_CACHE_FP8,
                         KV_CACHE_FP8_K_NVFP4_V,

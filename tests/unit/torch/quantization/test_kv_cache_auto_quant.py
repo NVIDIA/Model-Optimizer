@@ -19,6 +19,7 @@ import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
     _candidate_quantizers,
@@ -27,6 +28,7 @@ from modelopt.torch.quantization.kv_cache_auto_quant import (
     _validate_kv_only_config,
     auto_quantize_kv_cache,
 )
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 def _kv_config(bits, effective_bits):
@@ -67,6 +69,14 @@ def test_kv_candidate_requires_exact_bits_and_both_sides():
                 effective_bits=8.0,
             )
         )
+
+
+@pytest.mark.parametrize("algorithm", ["svdquant", {"method": "smoothquant"}])
+def test_kv_candidate_rejects_structural_or_unscoped_algorithms(algorithm):
+    config = _kv_config((4, 3), 8.0).model_copy(update={"algorithm": algorithm})
+
+    with pytest.raises(ValueError, match="only non-structural calibration algorithms"):
+        _validate_kv_only_config(config)
 
 
 def test_kv_additive_solver_spends_fp8_on_more_sensitive_layer():
@@ -302,6 +312,20 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path):
         layer.self_attn.k_bmm_quantizer.is_enabled and layer.self_attn.v_bmm_quantizer.is_enabled
         for layer in model.model.layers
     )
+    non_kv_quantizers = [
+        quantizer
+        for name, quantizer in model.named_modules()
+        if isinstance(quantizer, TensorQuantizer)
+        and not name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+    ]
+    assert non_kv_quantizers
+    assert all(not quantizer.is_enabled for quantizer in non_kv_quantizers)
+    exported_quantization = get_quant_config(model)["quantization"]
+    assert exported_quantization["quantized_layers"] == {}
+    assert exported_quantization["kv_cache_quantized_layers"]
+    assert set(exported_quantization["kv_cache_quantized_layers"]) <= {
+        f"model.layers.{idx}.self_attn" for idx in range(model.config.num_hidden_layers)
+    }
 
     restored_model = get_tiny_llama(num_hidden_layers=2)
     restored_model, restored_state = mtq.auto_quantize_kv_cache(
@@ -323,6 +347,44 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path):
     )
 
 
+def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():
+    model = get_tiny_llama(num_hidden_layers=1)
+    original_types = {name: type(module) for name, module in model.named_modules()}
+    invalid_candidate = _kv_config((4, 3), 4.5).model_dump()
+    invalid_candidate["algorithm"] = "svdquant"
+
+    with pytest.raises(ValueError, match="only non-structural calibration algorithms"):
+        mtq.auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 4.5},
+            [invalid_candidate],
+            [],
+            lambda *_: pytest.fail("Validation must run before model conversion."),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert not hasattr(model, "_modelopt_state")
+    assert {name: type(module) for name, module in model.named_modules()} == original_types
+
+    valid_candidate = _kv_config((4, 3), 4.5).model_dump()
+    valid_candidate["algorithm"] = None
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+    with pytest.raises(ValueError, match="non-empty vocabulary dimension"):
+        mtq.auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 4.5},
+            [valid_candidate],
+            data,
+            lambda *_: torch.ones(8),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert not hasattr(model, "_modelopt_state")
+    assert {name: type(module) for name, module in model.named_modules()} == original_types
+
+
 def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
     torch.manual_seed(123)
     model = get_tiny_llama(num_hidden_layers=2)
@@ -337,35 +399,47 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
         "algorithm": None,
     }
     model = mtq.quantize(model, fixed_kv_config)
-    model.model.layers[0].self_attn.q_proj.weight_quantizer.enable()
-    assert not hasattr(model.model.layers[0].self_attn.q_proj.weight_quantizer, "_amax")
-
-    model, state = mtq.auto_quantize_kv_cache(
-        model,
-        {"kv_effective_bits": 4.0},
-        [
-            (
-                {
-                    "quant_cfg": [
-                        {
-                            "quantizer_name": "*[kv]_bmm_quantizer",
-                            "cfg": {"num_bits": 4},
-                        }
-                    ],
-                    "algorithm": "max",
-                    "effective_bits": 4.0,
-                },
-                "int4",
-            )
-        ],
-        data,
-        lambda search_model, batch: search_model(**batch).logits,
-        num_calib_steps=1,
-        num_score_steps=1,
-        disabled_layers="model.layers.1.self_attn",
+    fixed_weight_quantizer = model.model.layers[0].self_attn.q_proj.weight_quantizer
+    fixed_weight_quantizer.enable()
+    assert not hasattr(fixed_weight_quantizer, "_amax")
+    observed_fixed_states = []
+    hook = fixed_weight_quantizer.register_forward_hook(
+        lambda module, _inputs, _output: observed_fixed_states.append(
+            (module.is_enabled, module._if_quant, module._if_calib)
+        )
     )
 
+    try:
+        model, state = mtq.auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 4.0},
+            [
+                (
+                    {
+                        "quant_cfg": [
+                            {
+                                "quantizer_name": "*[kv]_bmm_quantizer",
+                                "cfg": {"num_bits": 4},
+                            }
+                        ],
+                        "algorithm": "max",
+                        "effective_bits": 4.0,
+                    },
+                    "int4",
+                )
+            ],
+            data,
+            lambda search_model, batch: search_model(**batch).logits,
+            num_calib_steps=1,
+            num_score_steps=1,
+            disabled_layers="model.layers.1.self_attn",
+        )
+    finally:
+        hook.remove()
+
     assert set(state["layers"]) == {"model.layers.0.self_attn"}
+    assert observed_fixed_states
+    assert all(state == (True, True, False) for state in observed_fixed_states)
     assert model.model.layers[0].self_attn.k_bmm_quantizer.num_bits == 4
     assert model.model.layers[0].self_attn.q_proj.weight_quantizer.is_enabled
     assert not hasattr(model.model.layers[0].self_attn.q_proj.weight_quantizer, "_amax")

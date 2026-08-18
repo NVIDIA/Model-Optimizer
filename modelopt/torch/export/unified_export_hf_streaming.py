@@ -34,7 +34,11 @@ import torch.nn as nn
 from safetensors.torch import save_file
 
 from .quant_aware_conversion import build_reverse_name_mapper
-from .quant_utils import _postprocess_single_tensor, get_quant_config
+from .quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    get_quant_config,
+)
 from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
@@ -253,7 +257,7 @@ def _export_transformers_checkpoint_streaming(
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448
-    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+    kv_cache_format = _get_kv_cache_postprocess_config(quant_config["quantization"])
 
     # --- Tied alias keys to skip ---
     # data_ptr() is unreliable for disk-offloaded weights, so we use _tied_weights_keys.
