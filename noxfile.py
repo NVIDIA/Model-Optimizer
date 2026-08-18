@@ -241,6 +241,7 @@ def regression(session):
 def pre_commit_all(session):
     session.install("-e", ".[all,dev-lint]")
     session.run("pre-commit", "run", "--all-files", "--show-diff-on-failure")
+    session.run("python", "tests/unit/tools/ci/test_mypy_hook_config.py")
 
 
 @dataclass(frozen=True)
@@ -267,7 +268,6 @@ _MYPY_LOCATION = re.compile(
     r"^(?P<path>.*?):(?P<line>\d+)(?::(?P<column>\d+))?: error: (?P<message>.*)$"
 )
 _MYPY_CODE = re.compile(r"^(?P<message>.*)  \[(?P<code>[^]]+)\]$")
-_MYPY_DIFF_DEPENDENCIES = ("types-PyYAML==6.0.12.20260724",)
 
 
 def _normalize_diagnostic_path(path):
@@ -363,8 +363,9 @@ def _run_mypy(session, checkout, paths, cache_dir):
             "--no-pretty",
             "--show-column-numbers",
             "--show-error-codes",
-            "--follow-imports=skip",
+            "--follow-imports=silent",
             "--ignore-missing-imports",
+            "--scripts-are-modules",
             "--cache-dir",
             str(cache_dir),
             "--",
@@ -475,7 +476,7 @@ def pre_commit_diff(session):
     from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     from_ref = _resolve_git_commit(session, from_ref)
     to_ref = _resolve_git_commit(session, to_ref)
-    session.install("-e", ".[all,dev-lint]", *_MYPY_DIFF_DEPENDENCIES)
+    session.install("-e", ".[all,dev-lint]")
     skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
     skip_hooks.add("mypy")
     session.run(
@@ -489,6 +490,7 @@ def pre_commit_diff(session):
         env={"SKIP": ",".join(sorted(skip_hooks))},
     )
     _run_changed_file_mypy(session, from_ref, to_ref)
+    session.run("python", "tests/unit/tools/ci/test_mypy_hook_config.py")
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────
