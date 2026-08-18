@@ -1,0 +1,202 @@
+# DSpark recipe for Gemma-4-E4B-it -- SLIDING-WINDOW (SWA) VARIANT.
+#
+# Derived from dspark_gemma4_e4b.yaml (the validated full-attention baseline);
+# the ONLY delta is `dflash_swa_window_size` below. Keep the two in sync.
+#
+# !! NOT YET SERVABLE -- requires a vLLM fix. Read this before running. !!
+#
+# Training side is ready: _build_draft_attention_mask() already windows the
+# context (`kv > q_real_pos - window`) while leaving block-internal attention
+# bidirectional, and hf_dspark.py passes dflash_swa_window_size through. The
+# exporter emits dflash_config.use_swa/swa_window_size + a top-level
+# sliding_window, and pins causal: False.
+#
+# The serving gap is Gemma4-specific. vLLM's Qwen3 DFlash layer resolves its
+# window via _resolve_layer_attention(), which honours dflash_config.use_swa.
+# Gemma4DSparkAttention does NOT: it inherits Gemma4MTPAttention.__init__,
+# which derives the window purely from the base-model layer pattern --
+#
+#     self.is_sliding  = layer_type == "sliding_attention"
+#     sliding_window   = config.sliding_window if self.is_sliding else None
+#
+# Our draft is deliberately all "full_attention" (that is what keeps
+# attention_k_eq_v uniform and the fused-KV precompute assert satisfied), so
+# is_sliding is False on every layer and per_layer_sliding_window stays None.
+# The draft would therefore TRAIN with a 512-token window and SERVE with full
+# attention -- a silent train/inference mismatch that only shows up as a
+# depressed acceptance length, with no error raised.
+#
+# Fix (vLLM side, small): have Gemma4DSparkAttention resolve its window through
+# _resolve_layer_attention(config, layer_idx) like the Qwen3 DFlash layer does,
+# and pass the result as per_layer_sliding_window. Verified by config
+# simulation that this keeps all 5 layers use_k_eq_v=True (fused-KV assert
+# passes), causal=False, and does not require the V2 model runner.
+#
+# Until that lands, train with dspark_gemma4_e4b.yaml instead.
+#
+#
+# Streaming: the real Gemma-4-E4B-it base is served by vLLM; the trainer uses a
+# fake base (FakeBaseModel carries embed_tokens + the final norm). DSpark
+# reconstructs the base teacher distribution from the captured PRE-norm hidden
+# and re-applies the base final norm before lm_head.
+#
+# Gemma-4-E4B-specific notes (all verified on PDX 2026-08-12):
+#
+#  * FINAL NORM: Gemma 4 nests the LLM under text_config with model_type
+#    "gemma4_text", so modeling_final_norm.py needed BOTH "gemma4_text" and
+#    "gemma4" added to _FINAL_NORM_TYPE_BY_MODEL_TYPE. Verified numerically that
+#    Gemma4RMSNorm is plain `normed * weight` (NOT Gemma 2/3's `(1 + weight)`),
+#    reproducing HF hidden_states[-1] at cos=0.999999, so the existing
+#    _FinalRMSNorm is correct as-is.
+#
+#  * ROPE: Gemma 4 has NO flat `rope_theta`; it nests per-attention-kind settings
+#    under `rope_parameters` (full_attention: theta 1e6 + rope_type
+#    "proportional" + partial_rotary_factor 0.25; sliding_attention: theta 1e4 +
+#    rope_type "default"). modeling_fakebase.py needed _resolve_rope_theta() to
+#    read the nested form. hf_dflash.py ENFORCES rope_theta from the base config
+#    and overwrites any value set here, so this could NOT be fixed from the yaml.
+#    We take the sliding_attention entry -> rope_theta 10000.0. Note this is the
+#    LOCAL theta even though the draft below is all full_attention: the
+#    full_attention entry's "proportional" rope + partial_rotary_factor 0.25 is
+#    not implemented in the draft classes, and the reference drafter
+#    (deepseek-ai/dspark_gemma4_12b_block7) also carries the default/1e4 form.
+#    The draft is trained and served with the same value, so it is self-consistent.
+#
+#  * CAPTURE IDS: vLLM's EagleModelMixin captures POST-layer with residual added
+#    and indexes as layer_idx+1, so valid ids are 1..42 and 42 is the TRUE final
+#    layer (verified: cos(id42, final_norm_INPUT) = 1.0000, and ids 9/18/27/36
+#    match HF hidden_states[id] at cos=1.0000 with off-by-one dropping to
+#    0.55-0.98). Gemma 4 repeats 5x sliding + 1x full attention, so the
+#    full_attention layers (0-based [5,11,17,23,29,35,41]) correspond to capture
+#    ids [6,12,18,24,30,36,42]; we sample those to land on residual-stream
+#    boundaries rather than spacing uniformly.
+#
+#  * MASK TOKEN: Gemma 4's vocab is fully packed (no free/unused ids), but it
+#    ships a native `<mask>` token at id 4 — used directly.
+#
+#  * DRAFT ATTENTION IS NON-CAUSAL (bidirectional), like every other DSpark head.
+#    vLLM resolves this per layer in qwen3_dflash._dflash_layer_causal: an
+#    explicit `dflash_config.causal` overrides everything, otherwise a layer is
+#    causal only when layer_types[i] == "sliding_attention". This draft sets
+#    neither, and every layer is full_attention, so all 5 layers come out
+#    causal=False. That is what a block-parallel (semi-autoregressive) drafter
+#    wants: the block's tokens are predicted at once and must see each other.
+#    ModelOpt matches this -- DFlashAttention is non-causal, and the exporter
+#    does not emit a `causal` field. See "SERVING" below for the consequence.
+#
+#  * SERVING requires speculative_config.attention_backend = "FLASHINFER", for
+#    TWO independent reasons; either alone is fatal:
+#      1. head dim -- full_attention layers use global_head_dim=512 and the
+#         auto-selected FLASH_ATTN (FA2) caps head dimension at 256.
+#      2. causality -- load_dspark_model sets attention_config.use_non_causal
+#         from dflash_has_any_non_causal(), which is True here, and the backend
+#         must be able to serve a non-causal mask.
+#    VLLM_ATTENTION_BACKEND does NOT reach the draft; it is read from
+#    speculative_config.attention_backend. Confirmed at runtime by the log line
+#    "Using FlashInfer for draft model non-causal attention".
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DSpark for Gemma-4-E4B-it, 5-layer draft with non-causal sliding-window
+    attention (window 512). Trains today; needs a vLLM fix before it can be served.
+
+model:
+  model_name_or_path:
+  trust_remote_code: true
+  use_fake_base_for_offline: true
+
+data:
+  mode: streaming
+  data_path:
+  offline_data_path:
+  chat_template:
+
+training:
+  output_dir:
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-4
+  warmup_steps: 500
+  training_seq_len: 4096
+  logging_steps: 20
+  save_steps: 1000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Eval runs the DFlash backbone only (Markov head not applied in eval forward),
+  # so AR would misreport. Compare via export + offline AL harness instead.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: none
+
+dflash:
+  dflash_block_size: 8
+  dflash_num_anchors: 512
+  # THE ONLY FUNCTIONAL DELTA vs dspark_gemma4_e4b.yaml.
+  # Non-causal sliding window over the CONTEXT only; block-internal attention
+  # stays bidirectional and un-windowed (config.py enforces window >=
+  # dflash_block_size, so a full block always fits). 512 matches the base
+  # model's own sliding_window.
+  dflash_swa_window_size: 512
+  dflash_use_torch_compile: false
+  dflash_self_logit_distillation: false
+  # block_size=8 -> decay gamma 4 (matches the K2.6 DSpark regime).
+  dflash_loss_decay_factor: 4.0
+  # Gemma 4 ships a native <mask> token at id 4 (vocab is fully packed, so there
+  # is no spare/unused id to borrow the way Kimi's 163838 was).
+  dflash_mask_token_id: 4
+  # --- DSpark three-term loss (DeepSpec L1/TVD-dominant defaults) ---
+  dflash_ce_loss_alpha: 0.1
+  dflash_l1_loss_alpha: 0.9
+  dflash_confidence_head_alpha: 1.0
+  dflash_architecture_config:
+    # Aligned with the official reference drafter deepseek-ai/dspark_gemma4_12b_block7
+    # (the checkpoint vLLM's gemma4_dspark.py was written for). Its backbone is
+    # 5 full-attention layers with attention_k_eq_v.
+    #
+    # Why not SWA here: Gemma4DSparkModel._build_fused_kv_buffers asserts
+    # `all(a.use_k_eq_v for a in layers_attn)`, and Gemma4DSparkAttention only
+    # sets use_k_eq_v when layer_type == "full_attention". So the assert is
+    # really about k_eq_v uniformity, but because the two are coupled, ANY
+    # sliding layer trips it. Mixed sliding/full would additionally need the V2
+    # model runner (see _resolve_layer_attention in qwen3_dflash.py).
+    num_hidden_layers: 5
+    num_attention_heads: 16
+    num_key_value_heads: 8
+    # Full-attention layers use global_head_dim (512) and, under k_eq_v,
+    # num_global_key_value_heads (1) -- see gemma4_layer_config in vLLM.
+    head_dim: 256
+    global_head_dim: 512
+    num_global_key_value_heads: 1
+    intermediate_size: 10240
+    projector_type: dspark
+    markov_rank: 256
+    markov_head_type: vanilla
+    use_confidence_head: true
+    # --- Gemma4 block shape (sandwich norms + layer_scalar) + k_eq_v ---
+    # model_type gemma4* selects DFlashGemma4DecoderLayer, which adds
+    # pre/post_feedforward_layernorm and layer_scalar. vLLM's
+    # Gemma4MTPDecoderLayer looks those up BY NAME and its DSpark loader leaves
+    # anything it cannot find randomly initialized -- silently. A Qwen3-shaped
+    # draft therefore loads without error and produces garbage.
+    model_type: gemma4_text
+    attention_k_eq_v: true
+    layer_types:
+      - full_attention
+      - full_attention
+      - full_attention
+      - full_attention
+      - full_attention
