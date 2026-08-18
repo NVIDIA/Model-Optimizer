@@ -171,6 +171,23 @@ class VLLMModel(Model):
             async_scheduling=kwargs.get("async_scheduling", True),
             enforce_eager=enforce_eager,
             max_model_len=kwargs.get("max_model_len"),
+            # Engine knobs a model card may pin, passed through from
+            # --runtime_params engine_args.<key>. Only keys the caller actually set are
+            # forwarded, so vLLM keeps its own defaults otherwise. Hybrid Mamba models
+            # need these: on Nemotron-3.5-Lightning the SSM-cache settings decide whether
+            # the first draft token is accepted, and leaving them at vLLM's defaults costs
+            # ~65% of acceptance length while every later position looks normal.
+            **{
+                key: kwargs[key]
+                for key in (
+                    "mamba_backend",
+                    "mamba_ssm_cache_dtype",
+                    "mamba_cache_mode",
+                    "mamba_cache_philox_rounds",
+                    "enable_mamba_cache_stochastic_rounding",
+                )
+                if kwargs.get(key) is not None
+            },
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)

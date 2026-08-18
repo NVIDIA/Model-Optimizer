@@ -52,9 +52,13 @@ pipeline:
   # Step 2: Acceptance length on MT-Bench. Compare against the same run with
   # --draft_model_dir <<global_vars.draft_model>> to see what quantization cost.
   #
-  # The target is a hybrid Mamba-MoE model, which changes two things versus the
-  # Qwen3 example: it needs TP8, and startup is dominated by Mamba2 kernel warmup
-  # (~6 min before the engine is ready) rather than weight loading.
+  # This target is a hybrid Mamba-MoE model, so it differs from the Qwen3 example
+  # in three ways. It needs TP8. Startup is dominated by Mamba2 kernel warmup
+  # (~6 min before the engine is ready), not weight loading. And it needs the
+  # mamba engine settings from the model card (runtime_params below): without
+  # them the first draft token is rejected ~88% of the time and acceptance length
+  # collapses from ~4.3 to ~1.5, while every later position stays normal -- so it
+  # looks like a bad drafter rather than a serving misconfiguration.
   task_1:
     script: common/specdec_bench/quick_check.sh
     args:
@@ -67,13 +71,18 @@ pipeline:
       - --tp_size 8
       - --ep_size 1
       - --speculative_algorithm DSPARK
+      - --trust_remote_code
+      - --temperature 0
+      - --runtime_params modules/Model-Optimizer/tools/launcher/examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/engine_args.json
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
-      - --concurrency 32
+      - --concurrency 8
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # The model card sets this on every Nemotron-3.5 serve command.
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 8
+      ntasks_per_node: 1
       gpus_per_node: 8
       container: vllm/vllm-openai:nightly
