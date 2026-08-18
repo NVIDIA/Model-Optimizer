@@ -123,8 +123,8 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 
   | Task | Recipe / example | In AA suite? | Generate when |
   | --- | --- | --- | --- |
-  | **GDPVal** (Stirrup agent, agentic) | `tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
-  | **MRCR** (simple agent, long-context) | `tasks/gym/mrcr.md`, `examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
+  | **GDPVal** (Stirrup agent, agentic) | `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `recipes/examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
+  | **MRCR** (simple agent, long-context) | `recipes/tasks/gym/mrcr.md`, `recipes/examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
 
 **AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
 

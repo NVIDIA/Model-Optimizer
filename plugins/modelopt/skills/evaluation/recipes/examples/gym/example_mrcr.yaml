@@ -23,7 +23,8 @@
 # Read recipes/tasks/gym/mrcr.md first (variant choice, Gym pin/container
 # coupling, score extraction, failure modes).
 #
-# `.env` needs HF_TOKEN + NEMO_EVALUATOR_TRUST_PRE_CMD=1 (this config has a pre_cmd).
+# `.env` needs HF_TOKEN, NEMO_EVALUATOR_TRUST_PRE_CMD=1 (this config has a pre_cmd)
+# and NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1 (nemo_gym is not in the FDF map).
 #   nel run --config example_mrcr.yaml --env-file .env
 #
 # =============================================================================
@@ -146,8 +147,8 @@ evaluation:
             chat_template_kwargs:
               enable_thinking: true
             skip_special_tokens: false
-          # Caching OFF: MRCR prompts are near-identical across needle counts and
-          # a response cache would serve stale completions across variants.
+          # Caching OFF (same as the other gym template) — a cache hit across
+          # runs or variants would report stale completions.
           use_caching: false
           use_progress_tracking: true
           tracking_requests_stats: true
@@ -182,13 +183,19 @@ evaluation:
                   source .venv/bin/activate
                   # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
                   # images bake Gym at a fixed version (not a git repo) — use it as-is.
+                  # MRCR REQUIRES the pin (N3 1M prepare path). Unlike GDPVal rubric
+                  # mode there is no valid fallback, so refuse to run unpinned rather
+                  # than score a different benchmark green.
                   if [ -d .git ]; then
                     git remote add oss_pin "{{config.params.extra.nemo_gym.install_on_the_fly.url}}" 2>/dev/null || true
                     git fetch oss_pin
                     git checkout "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}"
                     echo "=== NeMo Gym commit ===" && git rev-parse HEAD
+                    [ "$(git rev-parse HEAD)" = "{{config.params.extra.nemo_gym.install_on_the_fly.commit}}" ] || \
+                      { echo "ERROR: Gym HEAD != pinned commit" >&2; exit 1; }
                   else
-                    echo "=== /opt/Gym is not a git repo; using baked-in Gym version ==="
+                    echo "ERROR: /opt/Gym is not a git repo; MRCR requires the pinned Gym" >&2
+                    exit 1
                   fi
                   # Pin sub-venv ray to whatever the IMAGE already has. Hardcoding a
                   # version breaks when the image moves: a 2.49.2 pin against an image
@@ -277,6 +284,7 @@ evaluation:
                   ++responses_create_params.top_p={{config.params.top_p}}
                   ++responses_create_params.max_output_tokens=null
                 common_params: >-
+                  ++num_repeats=1
                   ++policy_base_url={{target.api_endpoint.url}}
                   ++policy_api_key=$DUMMY_API_KEY
                   ++policy_model_name={{target.api_endpoint.model_id}}
@@ -294,6 +302,6 @@ export:
     tags:
       framework: vllm
       model: CHANGEME-served-model-name
-      benchmark: nemo_gym.mrcr
+      benchmark: nemo_gym.mrcr_n3_1m   # CHANGEME with the variant (see VARIANT SELECTOR)
       temperature: '1.0'
       top_p: '0.95'

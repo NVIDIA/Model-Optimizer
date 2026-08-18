@@ -34,6 +34,10 @@ config:
 recipes/examples/gym/example_mrcr.yaml   # SLURM + vLLM, 1M variant
 ```
 
+The gym bootstrap `command:` block (install_on_the_fly, sub-venv setup, rollout
+heredoc, Ray teardown) is **shared with GDPVal**; `references/gym-gdpval.md`
+documents that machinery and a fix there applies to both examples.
+
 ### Variant — pick first
 
 Sets the context cap, the dataset, **and the metric prefix**. The golden uses 1M.
@@ -49,10 +53,11 @@ The n3 variants drop over-long samples, so all three are different datasets and
 candidate, and set it in **both** `data_prep_params` and `collect_rollout_params`
 — changing one prepares one dataset and rolls out another.
 
-`num_repeats` comes from the variant; the template does not override it (1M
-reports `pass@1`). Upstream it is a placeholder for `type: benchmark` datasets —
-the real count comes from the runner. **Do not change repeat counts when aligning
-to a golden.**
+The `num_repeats` column is what each variant **declares upstream**, not
+necessarily what runs: for `type: benchmark` datasets the value is a placeholder
+and the runner decides. The template therefore pins `++num_repeats=1` in
+`common_params`, so **report `pass@1` regardless of variant** unless you raise it
+deliberately. **Do not change repeat counts when aligning to a golden.**
 
 ### Serving envelope (1M)
 
@@ -88,16 +93,23 @@ An inert pin gives either a loud failure (missing `config_n3_1m.yaml`) or — wo
 — an older variant that scores green and non-comparable. Verify every run:
 
 ```bash
-grep -c "=== NeMo Gym commit ==="  $RD/logs/client-*.log   # applied
-grep -c "not a git repo"           $RD/logs/client-*.log   # INERT
+grep -A1 "=== NeMo Gym commit ===" $RD/logs/client-*.log | grep -c a431501a  # pin APPLIED
 ```
+
+Match the **SHA**, not just the marker — a stale checkout still prints the marker.
+The template now hard-fails when the pin cannot apply, so only an older copy of
+this config can still hit the silent case.
 
 NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
 ## Canary
 
-MRCR's gym path accepts `++limit=N` (unlike GDPVal). Append it explicitly — the
-launcher-level `limit_samples` does not reach the gym:
+MRCR's gym path takes `++limit=N` (the launcher-level `limit_samples` does not
+reach the gym). **Not verified on this pinned commit** — treat the first ~30 min
+of the real run as the canary, as the GDPVal recipe does. `++limit` caps rollouts
+only: the 1M tokenize/drop-over-long **prepare pass still runs in full**, so a
+5-sample canary is not cheap. Easiest applied by editing your copy of the YAML
+rather than re-pasting the whole folded string:
 
 ```bash
 nel run --config example_mrcr.yaml -o \
@@ -122,7 +134,9 @@ cumulative — check `wc -l evaluator_rollouts.jsonl` before assuming loss.
 Rollouts flowing but scores ~0 = the **prefix gate** failing, not a bad
 checkpoint. On a reasoning model that is usually the reasoning trace leaking into
 the graded answer — check `--reasoning-parser` on the server and
-`process_reasoning_traces: true` in the adapter.
+`process_reasoning_traces: true` in the adapter. That is the **current** adapter
+key; `use_reasoning` (used elsewhere in this skill) is its deprecated alias and
+the evaluator maps the two to each other, so either works today.
 
 ## Score Extraction
 
@@ -154,5 +168,6 @@ at `--max-model-len 1100000`).
 Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
 needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /
 4 instances. Use it to sanity-check shape, not as a bar for another model — a
-rollout count well below 2363 means tasks were lost (e.g. a walltime resume) and
+rollout count well below 2363 (full runs only — a `++limit` canary is expected
+to be short) means tasks were lost (e.g. a walltime resume) and
 the score covers fewer tasks than the reference.
