@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
+import torch
+
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
+from modelopt.torch.export.unified_export_hf import _write_hf_export_config
 
 
 def test_convert_mixed_kv_cache_config_preserves_layer_map():
@@ -40,3 +45,39 @@ def test_convert_mixed_kv_cache_config_preserves_layer_map():
     assert converted["kv_cache_quant_algo"] == "MIXED_PRECISION"
     assert converted["kv_cache_quantized_layers"] == layer_map
     assert converted["kv_cache_schema_version"] == 1
+
+
+def test_write_hf_export_config_writes_mapped_kv_autoquant_report(tmp_path):
+    layer_name = "model.layers.0.self_attn"
+    model = torch.nn.Module()
+    model._modelopt_kv_cache_auto_quantize_state = {
+        "layers": {layer_name: {"selected": "fp8"}},
+        "search_signature": {"layers": [{"name": layer_name}]},
+    }
+    quant_config = {
+        "producer": {"name": "modelopt", "version": "test"},
+        "quantization": {
+            "quant_algo": None,
+            "kv_cache_quant_algo": "MIXED_PRECISION",
+            "kv_cache_quantized_layers": {layer_name: {"quant_algo": "FP8"}},
+            "kv_cache_schema_version": 1,
+        },
+    }
+    (tmp_path / "config.json").write_text("{}")
+
+    _write_hf_export_config(
+        model,
+        quant_config,
+        tmp_path,
+        name_mapper=lambda name: f"hub.{name}",
+    )
+
+    report = json.loads((tmp_path / "kv_cache_auto_quantize_report.json").read_text())
+    assert report["layers"] == {f"hub.{layer_name}": {"selected": "fp8"}}
+    assert report["search_signature"]["layers"] == [{"name": f"hub.{layer_name}"}]
+    assert model._modelopt_kv_cache_auto_quantize_state["layers"] == {
+        layer_name: {"selected": "fp8"}
+    }
+    assert (tmp_path / "hf_quant_config.json").is_file()
+    exported_config = json.loads((tmp_path / "config.json").read_text())
+    assert exported_config["quantization_config"]["kv_cache_quant_algo"] == "MIXED_PRECISION"
