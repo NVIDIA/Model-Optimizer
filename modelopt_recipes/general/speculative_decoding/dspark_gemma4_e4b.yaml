@@ -20,9 +20,12 @@
 #    rope_type "default"). modeling_fakebase.py needed _resolve_rope_theta() to
 #    read the nested form. hf_dflash.py ENFORCES rope_theta from the base config
 #    and overwrites any value set here, so this could NOT be fixed from the yaml.
-#    We take the sliding_attention entry -> rope_theta 10000.0, matching the SWA
-#    draft below. (The full_attention entry's "proportional" rope +
-#    partial_rotary_factor is not implemented in the draft classes.)
+#    We take the sliding_attention entry -> rope_theta 10000.0. Note this is the
+#    LOCAL theta even though the draft below is all full_attention: the
+#    full_attention entry's "proportional" rope + partial_rotary_factor 0.25 is
+#    not implemented in the draft classes, and the reference drafter
+#    (deepseek-ai/dspark_gemma4_12b_block7) also carries the default/1e4 form.
+#    The draft is trained and served with the same value, so it is self-consistent.
 #
 #  * CAPTURE IDS: vLLM's EagleModelMixin captures POST-layer with residual added
 #    and indexes as layer_idx+1, so valid ids are 1..42 and 42 is the TRUE final
@@ -35,10 +38,32 @@
 #
 #  * MASK TOKEN: Gemma 4's vocab is fully packed (no free/unused ids), but it
 #    ships a native `<mask>` token at id 4 — used directly.
+#
+#  * DRAFT ATTENTION IS NON-CAUSAL (bidirectional), like every other DSpark head.
+#    vLLM resolves this per layer in qwen3_dflash._dflash_layer_causal: an
+#    explicit `dflash_config.causal` overrides everything, otherwise a layer is
+#    causal only when layer_types[i] == "sliding_attention". This draft sets
+#    neither, and every layer is full_attention, so all 5 layers come out
+#    causal=False. That is what a block-parallel (semi-autoregressive) drafter
+#    wants: the block's tokens are predicted at once and must see each other.
+#    ModelOpt matches this -- DFlashAttention is non-causal, and the exporter
+#    does not emit a `causal` field. See "SERVING" below for the consequence.
+#
+#  * SERVING requires speculative_config.attention_backend = "FLASHINFER", for
+#    TWO independent reasons; either alone is fatal:
+#      1. head dim -- full_attention layers use global_head_dim=512 and the
+#         auto-selected FLASH_ATTN (FA2) caps head dimension at 256.
+#      2. causality -- load_dspark_model sets attention_config.use_non_causal
+#         from dflash_has_any_non_causal(), which is True here, and the backend
+#         must be able to serve a non-causal mask.
+#    VLLM_ATTENTION_BACKEND does NOT reach the draft; it is read from
+#    speculative_config.attention_backend. Confirmed at runtime by the log line
+#    "Using FlashInfer for draft model non-causal attention".
 
 metadata:
   recipe_type: speculative_dflash
-  description: DSpark (DFlash backbone + Markov + confidence head) for Gemma-4-E4B-it, SWA draft.
+  description: DSpark (DFlash backbone + Markov + confidence head) for Gemma-4-E4B-it,
+    5-layer full-attention draft aligned with the official reference checkpoint.
 
 model:
   model_name_or_path:
@@ -99,9 +124,14 @@ dflash:
   dflash_architecture_config:
     # Aligned with the official reference drafter deepseek-ai/dspark_gemma4_12b_block7
     # (the checkpoint vLLM's gemma4_dspark.py was written for). Its backbone is
-    # 5 full-attention layers with attention_k_eq_v; vLLM's fused context-KV
-    # precompute ASSERTS every draft layer is built that way, so an SWA draft
-    # cannot be served by that path at all.
+    # 5 full-attention layers with attention_k_eq_v.
+    #
+    # Why not SWA here: Gemma4DSparkModel._build_fused_kv_buffers asserts
+    # `all(a.use_k_eq_v for a in layers_attn)`, and Gemma4DSparkAttention only
+    # sets use_k_eq_v when layer_type == "full_attention". So the assert is
+    # really about k_eq_v uniformity, but because the two are coupled, ANY
+    # sliding layer trips it. Mixed sliding/full would additionally need the V2
+    # model runner (see _resolve_layer_attention in qwen3_dflash.py).
     num_hidden_layers: 5
     num_attention_heads: 16
     num_key_value_heads: 8

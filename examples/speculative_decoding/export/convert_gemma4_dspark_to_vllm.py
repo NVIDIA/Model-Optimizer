@@ -121,8 +121,16 @@ _spec = (
 )
 print(f"  vllm serve <base> --speculative-config '{_spec}'")
 print(
-    "  FLASHINFER is REQUIRED: the draft re-runs backend auto-selection and lands on\n"
-    "  FLASH_ATTN, whose FA2 kernel caps head dimension at 256, but Gemma4 full-attention\n"
-    "  layers use global_head_dim=512. The VLLM_ATTENTION_BACKEND env var does NOT reach\n"
-    "  the draft -- it is read from speculative_config.attention_backend."
+    "  FLASHINFER is REQUIRED for TWO independent reasons; either alone is fatal:\n"
+    "    1. head dim  -- the draft re-runs backend auto-selection and lands on FLASH_ATTN,\n"
+    "       whose FA2 kernel caps head dimension at 256, but Gemma4 full-attention layers\n"
+    "       use global_head_dim=512.\n"
+    "    2. causality -- the draft is NON-CAUSAL (bidirectional) on every layer, as DSpark\n"
+    "       heads are: _dflash_layer_causal() only marks sliding_attention layers causal,\n"
+    "       and this draft is all full_attention with no dflash_config.causal override.\n"
+    "       load_dspark_model therefore sets use_non_causal=True, which the backend must\n"
+    "       support. Runtime confirms with: 'Using FlashInfer for draft model non-causal\n"
+    "       attention'.\n"
+    "  The VLLM_ATTENTION_BACKEND env var does NOT reach the draft -- it is read from\n"
+    "  speculative_config.attention_backend."
 )

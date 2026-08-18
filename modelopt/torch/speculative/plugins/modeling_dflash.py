@@ -141,6 +141,18 @@ class DFlashAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = getattr(config, "attention_dropout", 0.0)
+        # DFlash/DSpark drafts attend bidirectionally: a block of draft tokens is
+        # predicted in one shot, so those tokens must see each other. Serving must
+        # agree -- vLLM resolves per-layer causality in
+        # qwen3_dflash._dflash_layer_causal(): an explicit ``dflash_config.causal``
+        # overrides all layers, otherwise a layer is causal only when
+        # ``layer_types[i] == "sliding_attention"``. The exporter emits no
+        # ``causal`` field for a plain full-attention draft, so it stays non-causal
+        # on both sides. With ``dflash_swa_window_size`` set, the exporter instead
+        # emits ``use_swa: True`` + an explicit ``causal: False`` and leaves
+        # ``layer_types`` all-full, which keeps vLLM non-causal too. Only mark
+        # layers ``sliding_attention`` if you also intend them to be CAUSAL at
+        # serving time, and train them that way -- see _build_draft_attention_mask.
         self.is_causal = False
 
         attn_bias = getattr(config, "attention_bias", False)
