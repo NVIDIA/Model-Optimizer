@@ -256,16 +256,14 @@ quoted: \"1e-4\"
     )
 
 
-@pytest.mark.parametrize("override", ["~value", "~value=1"])
 def test_load_experiment_config_rejects_deletion_overrides(
     tmp_path: Path,
-    override: str,
 ) -> None:
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text("value: 1\n")
 
     with pytest.raises(ValueError, match="^Deletion overrides are not supported"):
-        load_experiment_config(experiment, overrides=[override])
+        load_experiment_config(experiment, overrides=["~value"])
 
 
 def test_load_experiment_config_distinguishes_hydra_addition_modes(

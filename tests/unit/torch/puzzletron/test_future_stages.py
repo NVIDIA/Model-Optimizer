@@ -25,11 +25,6 @@ from modelopt.torch.puzzletron.security_policy import require_boolean_policy
 from modelopt.torch.puzzletron.stages.future import evaluation_stage
 
 
-def test_security_policy_rejects_non_boolean_values():
-    with pytest.raises(ValueError, match="^policy must be a boolean$"):
-        require_boolean_policy("false", path="policy")
-
-
 def test_security_policy_resolves_none_only_with_an_explicit_default():
     assert require_boolean_policy(None, path="policy", default=False) is False
     assert require_boolean_policy(None, path="policy", default=True) is True

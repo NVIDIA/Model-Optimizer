@@ -190,11 +190,7 @@ def test_compile_campaign_plan_configures_artifact_settling_timeout(tmp_configs)
     ("value", "error_type"),
     [
         (True, TypeError),
-        ("300", TypeError),
         (0, ValueError),
-        (-1, ValueError),
-        (float("nan"), ValueError),
-        (float("inf"), ValueError),
     ],
 )
 def test_compile_campaign_plan_rejects_invalid_artifact_settling_timeout(

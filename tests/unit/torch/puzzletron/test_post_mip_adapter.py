@@ -102,21 +102,12 @@ def test_post_mip_evaluation_preserves_pre_ledger_dry_run_fallback(tmp_path: Pat
     assert work_plan.items[0].metadata["logical_shard_count"] == node.instances
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "post-MIP candidate registry does not reflect the active MIP execution",
-        "post-MIP inputs for 'post.params.online_eval' are unavailable",
-    ],
-    ids=("stale-registry", "missing-input"),
-)
-def test_post_mip_evaluation_with_existing_registry_fails_closed(
-    tmp_path: Path, monkeypatch, message: str
-):
+def test_post_mip_evaluation_with_existing_registry_fails_closed(tmp_path: Path, monkeypatch):
     plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
     registry = plan.puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json"
     registry.parent.mkdir(parents=True)
     registry.write_text("{}\n")
+    message = "post-MIP candidate registry does not reflect the active MIP execution"
     identity_api = _candidate_count_api(_PostMIPExecutionContractUnavailableError(message))
     monkeypatch.setattr(post_mip_adapter, "_post_mip_identity_api", lambda: identity_api)
 

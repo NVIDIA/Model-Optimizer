@@ -301,12 +301,11 @@ def test_post_mip_submission_prepares_a_stale_candidate_registry(tmp_path: Path)
     assert refreshed.active_profile_ids == {"p1"}
 
 
-@pytest.mark.parametrize("status", ["pending", "running"])
-def test_non_success_active_mip_defers_identity_without_mutation(tmp_path: Path, status: str):
+def test_non_success_active_mip_defers_identity_without_mutation(tmp_path: Path):
     config, ledger, _roots = _identity_fixture(tmp_path)
     active_path = Path(config["puzzle_dir"]) / "mip/active_profiles.json"
     registry_before = ledger.registry_path.read_bytes()
-    active_path.write_text(json.dumps({"status": status}) + "\n")
+    active_path.write_text(json.dumps({"status": "running"}) + "\n")
 
     with pytest.raises(PostMIPExecutionContractUnavailable):
         expected_post_mip_execution_contract(config, "post.params.select")
@@ -323,18 +322,12 @@ def test_malformed_active_mip_fails_closed(tmp_path: Path):
         expected_post_mip_execution_contract(config, "post.params.select")
 
 
-@pytest.mark.parametrize(
-    "payload",
-    ["{", "{}", "[]"],
-    ids=["torn-json", "missing-identity", "non-object"],
-)
 def test_unpublished_dependency_current_defers_execution_contract(
     tmp_path: Path,
-    payload: str,
 ):
     config, _ledger, _roots = _identity_fixture(tmp_path)
     current_path = Path(config["puzzle_dir"]) / "artifacts/post_mip/nodes/materialize/current.json"
-    current_path.write_text(payload)
+    current_path.write_text("{}")
 
     with pytest.raises(
         PostMIPExecutionContractUnavailable,

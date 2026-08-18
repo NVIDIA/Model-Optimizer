@@ -366,6 +366,12 @@ durable manual decision gate.
 | Global KD sanity | Can the student overfit with the configured CE/KLD/MTP loss path? | Validates forward/backward and loss semantics before a long run |
 | Artifact completion | Are all expected identities, shards, candidates, and outputs present? | Partial work remains resumable progress, not a completed stage |
 
+On filesystems with delayed visibility, the controller allows completed work a
+bounded interval to publish valid stage artifacts. Advanced deployments can set
+`execution.defaults.artifact_settling_timeout_seconds` in the execution config;
+the default is 300 seconds. This changes only the post-completion settling
+window, not scheduler or stage timeouts.
+
 These gates answer different questions. Width ranking compares the quality of
 different reduced candidates at the same target geometry. Sort and slicing
 equivalence compare routes that are supposed to represent the same model
