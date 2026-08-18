@@ -76,6 +76,12 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
   `--max-num-seqs = ceil(parallelism / num_instances / DP)`. The golden ran 4 nodes
   × (TP2 × DP2) on 4-GPU nodes = 8 replicas, `ceil(256/4/2) = 32` each; the same 8
   replicas on 8-GPU nodes is 2 × (TP2 × DP4).
+- **`--max-num-seqs` is a ceiling, not a target.** MRCR is the most KV-bound task
+  in the skill — ~1M input tokens per request against AA-LCR's ~120K — so AA-LCR's
+  rule applies harder: oversubscribe and vLLM preempts, and recomputing a 1M-token
+  prefill makes the run *slower*, not faster. Start small and raise only while
+  preemption stays ~0 (`grep -c preempted` the server log). See
+  `recipes/tasks/aa/lcr.md` and `references/parallelism.md` ("Balanced sizing").
 - **Never cap output.** Answers reproduce a whole earlier turn; a cap truncates it
   and craters the ratio. Golden: `max_new_tokens: null` +
   `++responses_create_params.max_output_tokens=null`.
