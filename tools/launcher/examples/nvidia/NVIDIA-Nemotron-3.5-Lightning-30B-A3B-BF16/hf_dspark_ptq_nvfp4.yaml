@@ -1,37 +1,38 @@
-# Calibration-free NVFP4 PTQ of a DSpark drafter for Qwen3-8B.
+# Calibration-free NVFP4 PTQ of the DSpark drafter for Nemotron-3.5-Lightning-30B-A3B.
 #
-# Takes an exported drafter (train one with hf_streaming_dspark.yaml, or point
-# drafter at a published checkpoint) and quantizes it weight-only to NVFP4, then
-# measures acceptance length so the cost is visible. No calibration data needed:
+# Same pipeline as examples/Qwen/Qwen3-8B/hf_dspark_ptq_nvfp4.yaml, against a hybrid
+# Mamba-MoE target and the published DSpark drafter. Quantizes weight-only to NVFP4,
+# then measures acceptance length so the cost is visible. No calibration data needed:
 # every scale comes from the weights.
 #
 # 2-step pipeline:
-#   task_0: Quantize the drafter (CPU-only, ~1 min for an 8B-class draft)
+#   task_0: Quantize the drafter (CPU-only, well under a minute for this 0.97B draft)
 #   task_1: Benchmark acceptance length on MT-Bench via vLLM
 #
 # Usage:
-#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_dspark_ptq_nvfp4.yaml --yes
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/hf_dspark_ptq_nvfp4.yaml --yes
 
-job_name: Qwen3-8B_DSpark_PTQ_nvfp4
+job_name: Nemotron-3.5-Lightning-30B-A3B_DSpark_PTQ_nvfp4
 pipeline:
   allow_to_fail: false
   skip: false
   note:
 
   global_vars:
-    hf_model: /hf-local/Qwen/Qwen3-8B
-    # Exported drafter to quantize. /scratchspace/export is where the streaming
-    # examples leave theirs; a plain checkpoint dir or HF repo id also works.
-    draft_model: /scratchspace/export
+    hf_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    draft_model: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark
 
   # Step 1: Quantize. w4a16_nvfp4 keeps activations in bf16; use --qformat nvfp4
-  # for weight+activation (fixed input_scale 1.0, ~3.9% AL on Qwen3-8B).
+  # for weight+activation (fixed input_scale 1.0).
   #
   # The q/k/v exclusions are mandatory, not a tuning choice: DFlash-family
   # drafters build their fused context-KV projection by reading qkv_proj.weight
   # raw, which cannot be a packed tensor. o_proj and the MLP still quantize.
-  # `fc` is optional -- quantizing it saves ~12% more size for ~0.7% AL on
-  # Qwen3-8B (3.0186 vs 3.0392); add '*fc*' to keep it in bf16.
+  # `fc` is optional -- add '*fc*' to keep it in bf16 at the cost of size.
+  #
+  # This drafter has has_lm_head=false (it shares the target's), so
+  # --quantize_lm_head does not apply. embed_tokens is 37% of the checkpoint but
+  # is excluded by default: it is an nn.Embedding the drafter inherits.
   task_0:
     script: common/specdec/quantize_drafter.sh
     args:
@@ -49,16 +50,20 @@ pipeline:
 
   # Step 2: Acceptance length on MT-Bench. Compare against the same run with
   # --draft_model_dir <<global_vars.draft_model>> to see what quantization cost.
+  #
+  # The target is a hybrid Mamba-MoE model, which changes two things versus the
+  # Qwen3 example: it needs TP8, and startup is dominated by Mamba2 kernel warmup
+  # (~6 min before the engine is ready) rather than weight loading.
   task_1:
     script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/export_quantized
-      # DSPARK/DFLASH read --block_size, not --draft_length; must match the
-      # drafter's block_size (7 for dspark_qwen3_8b_block7).
-      - --block_size 7
+      # DSPARK reads --block_size, not --draft_length; must match the drafter's
+      # block_size, which is 8 for this checkpoint.
+      - --block_size 8
       - --output_length 4096
       - --engine VLLM
-      - --tp_size 1
+      - --tp_size 8
       - --ep_size 1
       - --speculative_algorithm DSPARK
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
@@ -68,6 +73,6 @@ pipeline:
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
-      ntasks_per_node: 1
-      gpus_per_node: 1
+      ntasks_per_node: 8
+      gpus_per_node: 8
       container: vllm/vllm-openai:nightly
