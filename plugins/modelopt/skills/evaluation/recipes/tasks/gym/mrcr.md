@@ -22,7 +22,8 @@ not suite, so read membership per task.
 Much lighter than GDPVal: `simple_agent`, **no SIF sandbox, no judge, no Tavily** —
 `HF_TOKEN` is the only secret, and the cost is context length rather than agent
 turns. Like GDPVal it needs `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the config has a
-`pre_cmd`).
+`pre_cmd`), plus `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` — `nemo_gym` is not in
+the FDF mapping, so submission is refused without it.
 
 ## Config
 
@@ -112,6 +113,12 @@ grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log   # pre_cmd didn'
 wc -l $RD/artifacts/evaluator_rollouts.jsonl                     # rollouts flowing
 ```
 
+**Preempted vs timed out.** A 1M run routinely exceeds 4h. `TIMEOUT` auto-resumes
+from the response cache; `CANCELLED by <uid>` (preemption) does not — its chained
+job exits in ~20s (`…finished with 'CANCELLED…' state. EXIT!`), which is expected,
+not a bug. Resume by hand: `cd <run>/nemo_gym.0 && sbatch run.sub`. Progress is
+cumulative — check `wc -l evaluator_rollouts.jsonl` before assuming loss.
+
 Rollouts flowing but scores ~0 = the **prefix gate** failing, not a bad
 checkpoint. On a reasoning model that is usually the reasoning trace leaking into
 the graded answer — check `--reasoning-parser` on the server and
@@ -119,27 +126,30 @@ the graded answer — check `--reasoning-parser` on the server and
 
 ## Score Extraction
 
-Headline: **`<prefix>/pass@1/accuracy`** (prefix per the variant table). Metrics
-are in `artifacts/results.yml`, mirrored to MLflow as `nemo_gym_…` plus a
-`key_metrics/` copy.
+**Not in `results.yml`** — its `groups.nemo_gym.metrics` map is empty for MRCR
+(only `key_metrics/mean/*` token telemetry). Read
+`artifacts/evaluator_rollouts_aggregate_metrics.json` → `[0].agent_metrics`:
 
-| Metric | |
+| Key | |
 | --- | --- |
-| `<prefix>/pass@1/accuracy` | **REPORT THIS** — mean prefix-gated ratio |
-| `<prefix>/n_needles=2\|4\|8/pass@1/accuracy` | per-stratum — **always quote too** |
-| `<prefix>/pass@k/…`, `<prefix>/pass@1[avg-of-k]/…` | only meaningful when repeats > 1 |
+| `pass@1/accuracy` | **REPORT THIS** — already 0-100, do not ×100 |
+| `n_needles=2\|4\|8/pass@1/accuracy` | per-stratum — **always quote too** |
+| `mean/reward` | same number as a 0-1 fraction (= `mean/seq_match_ratio`) |
+| `mean/prefix_matched` | prefix-gate pass rate; **~0.55 is healthy** |
 
 ```bash
 python3 -c "
-import yaml
-m=yaml.safe_load(open('<output_dir>/<run>/nemo_gym.0/artifacts/results.yml'))['groups']['nemo_gym']['metrics']
-p='mrcr_n3_1m_benchmark_simple_agent'
-for k in [f'{p}/pass@1/accuracy'] + [f'{p}/n_needles={n}/pass@1/accuracy' for n in (2,4,8)]:
-    if k in m: print(k, '=', m[k]['scores'][k]['value'])"
+import json
+m=json.load(open('<output_dir>/<run>/nemo_gym.0/artifacts/evaluator_rollouts_aggregate_metrics.json'))[0]['agent_metrics']
+print('pass@1', round(m['pass@1/accuracy'],2))
+for n in (2,4,8): print(f'  n={n}', round(m[f'n_needles={n}/pass@1/accuracy'],2))
+print('prefix_matched', round(m['mean/prefix_matched'],3))"
 ```
 
-Quantization damage shows in the **8-needle stratum first** while the aggregate
-barely moves — the aggregate alone hides it.
+Quantization damage hits the **8-needle stratum first** while the aggregate stays
+flat. Before quoting, check truncation: `eval_factory_metrics.json` →
+`response_stats.finish_reason.length` (a capped response scores ~0; measured 2.4%
+at `--max-model-len 1100000`).
 
 Reference shape (reviewed golden, BF16 Nano 3.5, 1M): `pass@1 = 26.91` (2/4/8
 needles = 36.81 / 27.12 / 16.74), 2363/2363 rollouts, parallelism 256, 4 nodes /

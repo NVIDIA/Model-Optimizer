@@ -94,7 +94,8 @@ for an "AA" request. If the user asks for MRCR:
    comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
 3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
-   `transformers`; prepare fails without it).
+   `transformers`; prepare fails without it) and
+   `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
 4. The Gym pin is **newer than any image's baked Gym** and is silently ignored
    where `/opt/Gym` is not a git repo — verify it applied before quoting a score.
    NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
