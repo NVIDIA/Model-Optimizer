@@ -51,8 +51,20 @@ new["mask_token_id"] = df.get("mask_token_id")
 new["block_size"] = cfg.get("block_size")
 new.setdefault("draft_vocab_size", cfg["vocab_size"])
 # Gemma4 attention knobs consulted by gemma4_layer_config()/Gemma4DSparkAttention
-new.setdefault("global_head_dim", cfg["head_dim"])
-new.setdefault("attention_k_eq_v", False)
+# Do NOT default these: Gemma4 sizes attention per layer, and quietly falling back to
+# the sliding-layer values rebuilds the draft with the wrong q/k/o and q/k-norm shapes.
+# They must come from the training config (see hf_spec_export.py).
+for _req in ("global_head_dim", "attention_k_eq_v"):
+    if _req not in cfg:
+        raise SystemExit(
+            f"drafter config.json is missing {_req!r}. Re-export with a ModelOpt that "
+            "propagates the Gemma4 per-layer attention fields, or add it by hand."
+        )
+if cfg.get("attention_k_eq_v") and "num_global_key_value_heads" not in cfg:
+    raise SystemExit(
+        "attention_k_eq_v is set but num_global_key_value_heads is missing; "
+        "vLLM would size k_proj with the sliding-layer KV head count."
+    )
 new.setdefault("sliding_window", 512)
 new.setdefault("final_logit_softcapping", None)
 json.dump(new, open(os.path.join(args.out, "config.json"), "w"), indent=2)
@@ -101,3 +113,16 @@ for f in ("tokenizer.json", "tokenizer_config.json"):
     if os.path.exists(src):
         shutil.copy(src, os.path.join(args.out, f))
 print(f"wrote {len(out)} tensors -> {args.out}")
+print()
+print("Serve with (note the draft attention backend):")
+_spec = (
+    f'{{"model": "{args.out}", "num_speculative_tokens": 3, '
+    '"method": "dspark", "attention_backend": "FLASHINFER"}'
+)
+print(f"  vllm serve <base> --speculative-config '{_spec}'")
+print(
+    "  FLASHINFER is REQUIRED: the draft re-runs backend auto-selection and lands on\n"
+    "  FLASH_ATTN, whose FA2 kernel caps head dimension at 256, but Gemma4 full-attention\n"
+    "  layers use global_head_dim=512. The VLLM_ATTENTION_BACKEND env var does NOT reach\n"
+    "  the draft -- it is read from speculative_config.attention_backend."
+)
