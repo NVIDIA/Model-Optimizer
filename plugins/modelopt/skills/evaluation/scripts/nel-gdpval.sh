@@ -16,9 +16,14 @@
 
 set -euo pipefail
 
-# Exact known-good pin; follow references/gym-gdpval.md before bumping it.
-readonly NEL_GDPVAL_VERSION="0.2.6"
-readonly NEL_GDPVAL_SPEC="nemo-evaluator-launcher[all]==${NEL_GDPVAL_VERSION}"
+# Exact known-good pin, taken from the shared constant (never from the
+# environment, so a stale `.env` value cannot select a different launcher).
+# Follow references/launcher-version.md before bumping it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./nel-validated-version.sh
+source "$SCRIPT_DIR/nel-validated-version.sh"
+readonly NEL_GDPVAL_VERSION="$NEL_VALIDATED_VERSION"
+readonly NEL_GDPVAL_SPEC="$NEL_VALIDATED_SPEC"
 
 case "${1:-}" in
   -h|--help)
