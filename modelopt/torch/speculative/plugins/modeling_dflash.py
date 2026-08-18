@@ -41,6 +41,7 @@ Draft model components use Qwen3 (MLP, RMSNorm, RotaryEmbedding) from
 The draft architecture is independent of the target model.
 """
 
+import copy
 from dataclasses import dataclass
 
 import torch
@@ -436,6 +437,8 @@ class DFlashModule(nn.Module):
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
+        self._gemma4_rope_kinds = self._build_gemma4_rope_kinds(config)
+        self._layer_types = list(getattr(config, "layer_types", []) or [])
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
@@ -448,9 +451,46 @@ class DFlashModule(nn.Module):
         Same pattern as EAGLE3's _maybe_init_rope. Avoids creating rotary_emb
         during __init__ (which runs on meta device during from_pretrained),
         preventing the meta-tensor inv_freq issue on checkpoint resume.
+
+        Gemma4 needs one module PER attention kind, not one for the whole draft:
+        its full-attention layers use ``global_head_dim`` while sliding layers use
+        ``head_dim``, and the two kinds carry different ``rope_parameters`` (theta
+        1e6 vs 1e4). vLLM builds RoPE per layer for exactly this reason; a single
+        shared module silently mismatches the head dim on one of the two kinds.
         """
         if not hasattr(self, "rotary_emb"):
             self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
+        if self._gemma4_rope_kinds and not hasattr(self, "rotary_emb_by_kind"):
+            self.rotary_emb_by_kind = nn.ModuleDict(
+                {
+                    kind: _ROTARY_CLS(config=cfg, device=device)
+                    for kind, cfg in self._gemma4_rope_kinds.items()
+                }
+            )
+
+    @staticmethod
+    def _build_gemma4_rope_kinds(config):
+        """Per-attention-kind rotary configs for a Gemma4 draft, or ``{}`` otherwise.
+
+        Returns a shallow copy of ``config`` per distinct ``layer_types`` entry with
+        ``head_dim`` and ``rope_parameters`` resolved for that kind.
+        """
+        if not str(getattr(config, "model_type", "")).startswith("gemma4"):
+            return {}
+        layer_types = getattr(config, "layer_types", None)
+        if not layer_types:
+            return {}
+        rope_params = getattr(config, "rope_parameters", None)
+        kinds = {}
+        for kind in dict.fromkeys(layer_types):
+            cfg = copy.copy(config)
+            if kind == "full_attention":
+                cfg.head_dim = getattr(config, "global_head_dim", None) or config.head_dim
+            if isinstance(rope_params, dict) and isinstance(rope_params.get(kind), dict):
+                cfg.rope_parameters = dict(rope_params[kind])
+                cfg.rope_theta = cfg.rope_parameters.get("rope_theta", config.rope_theta)
+            kinds[kind] = cfg
+        return kinds
 
     def _init_weights(self, config):
         """Initialize weights matching HF PreTrainedModel._init_weights."""
@@ -467,8 +507,15 @@ class DFlashModule(nn.Module):
         target_hidden = self.hidden_norm(self.fc(target_hidden))
         self._maybe_init_rotary_emb(device=hidden_states.device)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        per_kind = {
+            kind: emb(hidden_states, position_ids)
+            for kind, emb in getattr(self, "rotary_emb_by_kind", {}).items()
+        }
 
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, target_hidden, position_embeddings, attention_mask)
+        for layer_idx, layer in enumerate(self.layers):
+            layer_pos = position_embeddings
+            if per_kind and layer_idx < len(self._layer_types):
+                layer_pos = per_kind.get(self._layer_types[layer_idx], position_embeddings)
+            hidden_states = layer(hidden_states, target_hidden, layer_pos, attention_mask)
 
         return self.norm(hidden_states)
