@@ -51,7 +51,6 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
@@ -61,6 +60,7 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import distributed as _dist
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
@@ -999,11 +999,10 @@ def _export_transformers_checkpoint(
     _reconstruct_fused_moe_linear(model)
 
     if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
+        # FSDP2: each rank packed its own Shard(0) slice. Gather only THIS rank's owned decoder-layer
+        # units to full CPU tensors (bounded host memory; the write is parallel per-rank). At world=1
+        # rank 0 owns every unit, so this one path covers any world size.
+        quantized_state_dict = _gather_owned_units(model)
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
         quantized_state_dict = model.state_dict()
@@ -1488,6 +1487,152 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
+# ---------------------------------------------------------------------------
+# FSDP2 shard-local parallel checkpoint save (see docs/fsdp2_export_changes.md).
+# Each rank writes its owned decoder-layer units concurrently; host memory is
+# bounded to its owned subset and the disk write parallelizes across ranks.
+# ---------------------------------------------------------------------------
+
+
+def _materialize_cpu(v: torch.Tensor) -> torch.Tensor:
+    """Convert a gathered state-dict value to a plain, contiguous CPU tensor.
+
+    A gathered DTensor here is fully replicated (``full_tensor``/replicated buffer), so
+    ``to_local()`` yields the complete tensor. A ``QTensorWrapper`` (compressed weight) unwraps
+    to its packed data via ``.data``.
+    """
+    from torch.distributed.tensor import DTensor
+
+    if isinstance(v, DTensor):
+        v = v.to_local()
+    v = getattr(v, "data", v)  # QTensorWrapper -> packed data; plain tensor -> itself
+    return v.detach().to("cpu").contiguous()
+
+
+def _enumerate_export_units(model, id_to_name):
+    """Ordered export units, identical on every rank (this order drives ownership).
+
+    Each decoder layer is one unit; a trailing "root-leaves" unit holds every module that owns
+    parameters directly and is not under a decoder-layer prefix (embed / lm_head / final norm).
+    Returns ``[(modules, is_root), ...]``. If decoder layers cannot be discovered, the whole model
+    becomes a single root unit (correct, but no parallelism).
+    """
+    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
+    units: list[tuple[list[nn.Module], bool]] = []
+    layer_prefixes: tuple[str, ...] = ()
+    if decoder_layers is not None:
+        layer_prefixes = tuple(id_to_name[id(layer)] + "." for layer in decoder_layers)
+        units = [([layer], False) for layer in decoder_layers]
+    root_leaves = [
+        m
+        for n, m in model.named_modules()
+        if next(m.parameters(recurse=False), None) is not None
+        and not (layer_prefixes and n.startswith(layer_prefixes))
+    ]
+    units.append((root_leaves, True))
+    return units
+
+
+def _gather_unit(modules, id_to_name, is_owner):
+    """Gather one unit's params to the owner via ``full_tensor()`` (all-gather on every rank).
+
+    Only the owner keeps the materialized CPU copy. Non-owners join the collective and drop the
+    result, so the gate is on the *keep*, never the collective (skipping it on non-owners deadlocks).
+    """
+    from torch.distributed.tensor import DTensor
+
+    unit_sd: dict[str, torch.Tensor] = {}
+    for m in modules:
+        base = id_to_name.get(id(m), "")
+        prefix = (base + ".") if base else ""
+        for name, v in m.state_dict().items():
+            full = v.full_tensor() if isinstance(v, DTensor) else v  # COLLECTIVE (all ranks)
+            if is_owner:
+                unit_sd[prefix + name] = _materialize_cpu(full)
+    return unit_sd if is_owner else None
+
+
+def _write_owned_shards(owned, export_dir, rank_id, max_shard_size):
+    """Write this rank's tensors as safetensors shards via the HF splitter.
+
+    Returns ``(weight_map {key: filename}, total_bytes)`` for the index merge. Filenames embed the rank
+    so ranks never collide; the HF splitter handles ``max_shard_size`` and never splits a single tensor
+    (a >cap tensor gets its own over-cap shard).
+    """
+    from huggingface_hub import split_torch_state_dict_into_shards
+
+    pattern = f"model-r{rank_id:02d}{{suffix}}.safetensors"
+    split = split_torch_state_dict_into_shards(
+        owned, filename_pattern=pattern, max_shard_size=max_shard_size
+    )
+    for fname, keys in split.filename_to_tensors.items():
+        save_file(
+            {k: owned[k] for k in keys}, str(Path(export_dir) / fname), metadata={"format": "pt"}
+        )
+    return split.tensor_to_filename, split.metadata["total_size"]
+
+
+def _gather_owned_units(model):
+    """Each rank gathers only the decoder-layer units it owns (``i % world``) to full CPU tensors.
+
+    All ranks walk every unit in lockstep (``_gather_unit``'s ``full_tensor`` is collective); each rank
+    keeps just its owned units, so host memory is bounded to the owned subset (+ one transient unit on
+    GPU). Keep-fused MoE experts are split into per-expert keys once the owned units are assembled.
+    """
+    from .moe_utils import _split_fused_experts_state_dict
+
+    rank, world = _dist.rank(), _dist.size()
+    id_to_name = {id(m): n for n, m in model.named_modules()}
+    units = _enumerate_export_units(model, id_to_name)
+    my_sd: dict[str, torch.Tensor] = {}
+    for i, (modules, _is_root) in enumerate(units):
+        owned = _gather_unit(
+            modules, id_to_name, is_owner=(i % world == rank)
+        )  # COLLECTIVE all ranks
+        if owned is not None:
+            my_sd.update(owned)
+    _split_fused_experts_state_dict(
+        my_sd, model
+    )  # only this rank's owned keep-fused keys are present
+    return my_sd
+
+
+def _finalize_index(local_maps, export_dir, rank, world):
+    """gather_object the per-rank HF weight_maps to rank 0; write the standard index. No sidecars."""
+    from huggingface_hub.constants import SAFETENSORS_INDEX_FILE
+
+    gathered: list[Any] | None
+    if world > 1:
+        gathered = [None] * world if rank == 0 else None
+        torch.distributed.gather_object(local_maps, gathered, dst=0)
+    else:
+        gathered = [local_maps]
+    if rank != 0 or gathered is None:
+        return
+    weight_map: dict[str, str] = {}
+    total = 0
+    for rank_maps in gathered:
+        for t2f, nbytes in rank_maps:
+            weight_map.update(t2f)
+            total += nbytes
+    index = {"metadata": {"total_size": total}, "weight_map": weight_map}
+    (Path(export_dir) / SAFETENSORS_INDEX_FILE).write_text(json.dumps(index, indent=2))
+
+
+def _parallel_write(my_sd, export_dir, max_shard_size):
+    """Distributed write: each rank writes its own safetensors shards concurrently.
+
+    Rank 0 then merges the single ``model.safetensors.index.json`` from the gathered per-rank
+    weight_maps.
+    """
+    rank, world = _dist.rank(), _dist.size()
+    local_map = _write_owned_shards(my_sd, export_dir, rank, max_shard_size)  # (weight_map, nbytes)
+    _dist.barrier()
+    _finalize_index([local_map], export_dir, rank, world)
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1589,7 +1734,12 @@ def export_hf_checkpoint(
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
-        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
+        # extra_state_dict (e.g. MTP) is added on rank 0 only under distributed (it owns that slot);
+        # non-owner ranks hold only their own gathered units.
+        is_rank0 = (not is_distributed) or torch.distributed.get_rank() == 0
+        export_state_dict = dict(post_state_dict)
+        if extra_state_dict and is_rank0:
+            export_state_dict.update(extra_state_dict)
 
         # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
         # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
@@ -1613,30 +1763,43 @@ def export_hf_checkpoint(
                 "names may not match the original HF hub checkpoint."
             )
 
-        # Under torch.distributed only rank 0 writes; others sync at the finally barrier.
-        if is_distributed and torch.distributed.get_rank() != 0:
-            return
-
-        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
-        # scale tensors). Patch both the source and importing module since modeling_utils does
-        # `from core_model_loading import revert_weight_conversion`.
-        _patches = _patch_revert_weight_conversion()
-
         _sanitize_generation_config_for_save(model)
 
-        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
-        try:
-            model.save_pretrained(
-                export_dir,
-                state_dict=export_state_dict,
-                save_modelopt_state=save_modelopt_state,
-                max_shard_size=max_shard_size,
-            )
-        finally:
-            _unpatch_revert_weight_conversion(_patches)
+        if is_distributed:
+            # FSDP2 multi-rank: every rank writes its owned shards concurrently (the gather/index
+            # collectives are inside _parallel_write, so all ranks must call it); rank 0 then writes
+            # config / generation / modelopt_state and embeds the quant config. Replaces the old
+            # rank-0 full-gather + single-process save_pretrained (fixes the OOM + serialized write).
+            _parallel_write(export_state_dict, export_dir, max_shard_size)
+            if is_rank0:
+                model.config.save_pretrained(str(export_dir))
+                if getattr(model, "generation_config", None) is not None:
+                    model.generation_config.save_pretrained(str(export_dir))
+                if save_modelopt_state:
+                    # Model-level (independent of the weight write), so rank 0 writes it directly —
+                    # matching what save_pretrained(save_modelopt_state=True) does internally.
+                    from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 
-        _write_hf_export_config(model, hf_quant_config, export_dir)
+                    if ModeloptStateManager.is_converted(model):
+                        torch.save(modelopt_state(model), export_dir / "modelopt_state.pth")
+                _write_hf_export_config(model, hf_quant_config, export_dir)
+        else:
+            # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+            # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+            # scale tensors). Patch both the source and importing module since modeling_utils does
+            # `from core_model_loading import revert_weight_conversion`.
+            _patches = _patch_revert_weight_conversion()
+            try:
+                model.save_pretrained(
+                    export_dir,
+                    state_dict=export_state_dict,
+                    save_modelopt_state=save_modelopt_state,
+                    max_shard_size=max_shard_size,
+                )
+            finally:
+                _unpatch_revert_weight_conversion(_patches)
+
+            _write_hf_export_config(model, hf_quant_config, export_dir)
 
     except Exception as e:
         warnings.warn(

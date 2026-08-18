@@ -228,6 +228,187 @@ def _export_fused_experts(
     _delete_fused_moe_source_attrs(module)
 
 
+def _export_fused_experts_keep_fused(module, dtype):
+    """Shard-local keep-fused NVFP4/FP8 pack for one rank's experts.
+
+    Pack THIS rank's experts IN PLACE and keep the weight FUSED (``Shard(0)`` on E),
+    instead of splitting into per-expert child modules.
+
+    Self-adapts to FSDP2 vs single-process via ``module._shard_local_start`` (set by
+    :func:`fsdp2_shard_local_pack`):
+
+    * FSDP2 shard-local: the context has already ``to_local``'d ``gate_up_proj``/``down_proj`` to this
+      rank's ``[E/world, ...]`` block and recorded ``start`` (this rank's global expert offset), so the
+      per-expert weight quantizers are indexed ``[start + i]`` (the quantizer ModuleList is global
+      length-E and replicated -- verified in ``spike_moe_indexing.py``).
+    * single-process: ``start == 0`` and the tensors are the full ``[E, ...]`` block.
+
+    Each local expert's fused first-projection ``[2I, H]`` is packed WHOLE by reusing the standard
+    ``_export_quantized_weight`` (so the per-tensor ``weight_scale_2`` is naturally shared by the gate
+    and up halves -- what vLLM's load-time fusion requires -- and per-block scales are row-local). The
+    packed per-expert results are stacked back into fused ``[local_n, ...]`` tensors + per-expert
+    scale buffers; the gate/up split is deferred to write time (``_split_fused_experts_state_dict``).
+    Non-destructive: the fused params survive, so :func:`fsdp2_shard_local_pack` re-registers them.
+    """
+    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+
+    first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+    start = getattr(module, "_shard_local_start", {}).get(first_proj_attr, 0)
+    first_proj_wq = getattr(module, f"{first_proj_attr}_weight_quantizers")
+    down_wq = module.down_proj_weight_quantizers
+    first_proj_iq = getattr(module, f"{first_proj_attr}_input_quantizer")
+    down_iq = module.down_proj_input_quantizer
+
+    first_proj = getattr(
+        module, first_proj_attr
+    ).data  # local [local_n, 2I, H] (or full [E, 2I, H])
+    down = module.down_proj.data
+    local_n = first_proj.shape[0]
+
+    def _pack_one(weight_2d, w_quant_src, i_quant):
+        wrapper = nn.Module()
+        wrapper.weight = nn.Parameter(weight_2d.contiguous(), requires_grad=False)
+        # deepcopy so packing does not mutate the shared calibrated quantizer state.
+        wrapper.weight_quantizer = copy.deepcopy(w_quant_src)
+        wrapper.input_quantizer = i_quant
+        wq = wrapper.weight_quantizer
+        if getattr(wq, "is_enabled", False) and (
+            not hasattr(wq, "_amax") or wq._amax is None or torch.all(wq._amax == 0)
+        ):
+            # Uncalibrated expert (received no tokens): fall back to the weight's own amax.
+            wq.amax = weight_2d.abs().amax().to(torch.float32)
+        _export_quantized_weight(wrapper, dtype)
+        return (
+            wrapper.weight.data,
+            getattr(wrapper, "weight_scale", None),
+            getattr(wrapper, "weight_scale_2", None),
+            getattr(wrapper, "input_scale", None),
+        )
+
+    fp_w, fp_s, fp_s2 = [], [], []
+    dp_w, dp_s, dp_s2 = [], [], []
+    fp_input_scale = dp_input_scale = None
+    for i in range(local_n):
+        g = start + i
+        w, s, s2, isc = _pack_one(first_proj[i], first_proj_wq[g], first_proj_iq)
+        fp_w.append(w)
+        fp_s.append(s)
+        fp_s2.append(s2)
+        fp_input_scale = isc if isc is not None else fp_input_scale
+        w, s, s2, isc = _pack_one(down[i], down_wq[g], down_iq)
+        dp_w.append(w)
+        dp_s.append(s)
+        dp_s2.append(s2)
+        dp_input_scale = isc if isc is not None else dp_input_scale
+
+    def _register(attr, weights, scales, scale2s):
+        setattr(module, attr, nn.Parameter(torch.stack(weights), requires_grad=False))
+        if scales[0] is not None:
+            module.register_buffer(f"{attr}_weight_scale", torch.stack(scales))
+        if scale2s[0] is not None:
+            module.register_buffer(
+                f"{attr}_weight_scale_2", torch.stack([x.reshape(()) for x in scale2s])
+            )
+
+    _register(first_proj_attr, fp_w, fp_s, fp_s2)
+    _register("down_proj", dp_w, dp_s, dp_s2)
+    if fp_input_scale is not None:
+        module.register_buffer(f"{first_proj_attr}_input_scale", fp_input_scale)
+    if dp_input_scale is not None:
+        module.register_buffer("down_proj_input_scale", dp_input_scale)
+
+
+def _split_fused_experts_state_dict(state_dict, model):
+    """Split keep-fused expert tensors in a gathered ``state_dict`` into per-expert keys.
+
+    Converts the ``_export_fused_experts_keep_fused`` output (fused ``{name}.gate_up_proj [E,2I,H/2]``
+    + per-expert scales) into the same per-expert deployment keys ``_export_fused_experts`` emits
+    (``{name}.{e}.gate_proj.weight`` / ``up_proj`` / ``down_proj`` + scales). Byte-identical: packing
+    is row-independent, so slicing the packed fused tensor equals packing each half; gate/up share the
+    per-tensor ``weight_scale_2`` (packed together with one amax). Runs on the gathered (full) dict.
+    """
+    from modelopt.torch.quantization.plugins.huggingface import _get_fused_expert_intermediate_dim
+
+    for name, module in model.named_modules():
+        first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
+        if not hasattr(module, f"{first_proj_attr}_weight_quantizers"):
+            continue
+        prefix = f"{name}." if name else ""
+        fp_w = state_dict.pop(prefix + first_proj_attr, None)
+        if fp_w is None:
+            continue  # not keep-fused here (e.g. already split) -> nothing to do
+        is_gated = getattr(module, "_is_gated", True)
+        n = module.num_experts
+        fp_s = state_dict.pop(prefix + f"{first_proj_attr}_weight_scale", None)
+        fp_s2 = state_dict.pop(prefix + f"{first_proj_attr}_weight_scale_2", None)
+        fp_in = state_dict.pop(prefix + f"{first_proj_attr}_input_scale", None)
+        dp_w = state_dict.pop(prefix + "down_proj", None)
+        dp_s = state_dict.pop(prefix + "down_proj_weight_scale", None)
+        dp_s2 = state_dict.pop(prefix + "down_proj_weight_scale_2", None)
+        dp_in = state_dict.pop(prefix + "down_proj_input_scale", None)
+
+        # Drop leftover fused quantizer buffers (keep-fused does not delete them, unlike the
+        # per-expert path which calls _delete_fused_moe_source_attrs).
+        for k in [
+            k for k in state_dict if k.startswith(prefix) and "_quantizer" in k[len(prefix) :]
+        ]:
+            state_dict.pop(k)
+
+        edim = _get_fused_expert_intermediate_dim(module) if is_gated else None
+
+        def _emit(e, proj, w, s, s2, insc):
+            # clone/contiguous so each per-expert/projection key is a DISTINCT tensor object. The
+            # shared scales (one input_scale across all experts; one weight_scale_2 across gate|up)
+            # would otherwise share a data_ptr and get collapsed by postprocess_state_dict's tied-
+            # weight dedup -- producing fewer keys than the per-expert path, which builds separate
+            # equal-valued objects. Cloning matches that format exactly (values are identical).
+            p = f"{prefix}{e}.{proj}."
+            state_dict[p + "weight"] = w.contiguous()
+            if s is not None:
+                state_dict[p + "weight_scale"] = s.contiguous()
+            if s2 is not None:
+                state_dict[p + "weight_scale_2"] = s2.clone()
+            if insc is not None:
+                state_dict[p + "input_scale"] = insc.clone()
+
+        for e in range(n):
+            if is_gated:
+                _emit(
+                    e,
+                    "gate_proj",
+                    fp_w[e, :edim],
+                    fp_s[e, :edim] if fp_s is not None else None,
+                    fp_s2[e] if fp_s2 is not None else None,
+                    fp_in,
+                )
+                _emit(
+                    e,
+                    "up_proj",
+                    fp_w[e, edim:],
+                    fp_s[e, edim:] if fp_s is not None else None,
+                    fp_s2[e] if fp_s2 is not None else None,
+                    fp_in,
+                )
+            else:
+                _emit(
+                    e,
+                    "up_proj",
+                    fp_w[e],
+                    fp_s[e] if fp_s is not None else None,
+                    fp_s2[e] if fp_s2 is not None else None,
+                    fp_in,
+                )
+            _emit(
+                e,
+                "down_proj",
+                dp_w[e],
+                dp_s[e] if dp_s is not None else None,
+                dp_s2[e] if dp_s2 is not None else None,
+                dp_in,
+            )
+    return state_dict
+
+
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):
     """Collect expert_token_count from all quantized MoE layers and save as an HTML table.
 

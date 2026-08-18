@@ -137,7 +137,7 @@ def convert_quantization_axis_to_reduce_axis(input, axis):
     """
     if axis is None:
         return None
-    axis = axis if isinstance(axis, (list, tuple)) else [axis]
+    axis = axis if isinstance(axis, list | tuple) else [axis]
     # Handle positive and negative axis.
     reduce_axis = [i for i in range(input.dim()) if i not in axis and (i - input.dim()) not in axis]
     return reduce_axis
@@ -230,7 +230,7 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
 
     singular = quantizer_attr_names(weight_name).weight_quantizer
     q = getattr(module, singular, None)
-    if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
+    if isinstance(q, TensorQuantizer | SequentialQuantizer):
         return q
     if isinstance(q, GroupedQuantizer) and len(q) > 0:
         return q[0]
@@ -238,7 +238,7 @@ def representative_weight_quantizer(module: nn.Module, weight_name: str = "weigh
     plural = getattr(module, singular + "s", None)
     if isinstance(plural, nn.ModuleList) and len(plural) > 0:
         first = plural[0]
-        if isinstance(first, (TensorQuantizer, SequentialQuantizer)):
+        if isinstance(first, TensorQuantizer | SequentialQuantizer):
             return first
     return None
 
@@ -1044,6 +1044,210 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
             if reshard:
                 with enable_fake_quant(root_module):
                     root_module.reshard()
+
+
+_ShardInfo = namedtuple("_ShardInfo", ["name", "old", "mesh", "placements"])
+
+
+def _shard_start(param):
+    """Global offset along shard dim 0 for a ``Shard(0)`` DTensor on a 1-D FSDP mesh.
+
+    Returns 0 for non-DTensor params. Uses torch's even-split convention: the first ``dim0 % world``
+    ranks get an extra row, so rank ``r``'s offset is ``r * (dim0 // world) + min(r, dim0 % world)``.
+    Correct for both even and uneven sharding.
+    """
+    if not isinstance(param, DTensor):
+        return 0
+    dim0 = param.shape[0]  # global size
+    world = param.device_mesh.size()
+    r = param.device_mesh.get_local_rank()
+    base, rem = divmod(dim0, world)
+    return r * base + min(r, rem)
+
+
+def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
+    """Re-register a PACKED weight as an FSDPParam from full shape + this rank's packed shard.
+
+    Does so WITHOUT materializing the full weight.
+
+    The obvious route -- ``DTensor.from_local(shard)`` then ``FSDPParam(dtensor, ...)`` -- crashes:
+    ``_init_sharded_param`` takes a DTensor down its tensor-parallel branch
+    (``DeviceMesh._concatenate([dp_mesh, tp_mesh])``) which has no ``tp_mesh`` on a plain 1-D FSDP
+    mesh. Instead build the FSDPParam from a ``meta``-device full-shape tensor (a plain tensor ->
+    non-DTensor path; ``meta`` is explicitly allowed by ``_init_sharded_param``), which computes every
+    size/stride/spec field with no real full data and no crash, then overwrite only the two
+    data-holding fields (``_sharded_param_data``, ``sharded_param``) with this rank's packed shard.
+    Only dim-0 (the ``Shard(0)`` axis) differs between shard and full; inner dims are identical.
+    Validated by ``spike_inplace_pack.py`` (world=2, NVFP4).
+    """
+    from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
+
+    full_shape = (old_fp._orig_size[0], *packed_local.shape[1:])
+    is_qtw = isinstance(packed_local, QTensorWrapper)
+    param_class = QFSDPParam if is_qtw else FSDPParam
+    mp = MixedPrecisionPolicy(
+        param_dtype=packed_local.dtype,
+        reduce_dtype=None,
+        output_dtype=None,
+        cast_forward_inputs=False,
+    )
+
+    # (a) meta full-shape skeleton -> computes sharded_size / padded_sharded_param_size / specs
+    skeleton = torch.empty(full_shape, dtype=packed_local.dtype, device="meta")
+    if is_qtw:
+        skeleton = QTensorWrapper(skeleton, metadata={**packed_local.metadata, "shape": full_shape})
+    new_fp = param_class(
+        nn.Parameter(skeleton, requires_grad=False),
+        old_fp._module_info,
+        old_fp.mesh_info,
+        old_fp.post_forward_mesh_info,
+        old_fp.device,
+        None,
+        mp,
+        None,
+    )
+    if param_class is FSDPParam:
+        new_fp.init_dtype_attrs(mp)
+
+    # (b) overwrite the two data fields with the real packed shard (pad the 0th shard as FSDP does)
+    local = (packed_local.data if is_qtw else packed_local).contiguous().to(old_fp.device)
+    padded = local.new_zeros(new_fp.padded_sharded_param_size)
+    padded.narrow(0, 0, new_fp.sharded_size[0]).copy_(local)
+    new_fp._sharded_param_data = padded.view(-1)
+    new_fp.sharded_param = nn.Parameter(
+        new_fp.to_sharded_dtensor(padded.narrow(0, 0, new_fp.sharded_size[0])), requires_grad=False
+    )
+    new_fp._setattr_on_modules(new_fp.sharded_param)
+    return new_fp
+
+
+def _rewrap_scale_buffers_shard0(module, captured, local_dim0):
+    """Re-wrap packed per-shard scale buffers as ``Shard(0)`` DTensors.
+
+    A later ``full_tensor()`` gather then reconstructs the full scale.
+
+    Scale buffers are ordinary registered buffers (not FSDP params), so they can use
+    ``DTensor.from_local`` directly (the FSDPParam-constructor crash does not apply). A buffer is
+    treated as sharded iff its dim-0 matches the local shard row/expert count (``local_dim0``):
+    ``weight_scale [rows/world, ...]`` and per-expert ``weight_scale_2 [E/world]`` -> ``Shard(0)``;
+    per-tensor scalars (``weight_scale_2`` for a plain linear, ``input_scale``) stay replicated.
+    Validated by ``spike_scale_gather.py`` (world=2, NVFP4).
+    """
+    info = next(iter(captured.values()))
+    mesh, placements = info.mesh, info.placements
+    # The scale's dim-0 matches the weight's global dim-0 (per-row / per-expert). Pass the true global
+    # shape+stride to from_local: without it, from_local infers global = local * world (even-shard
+    # assumption), so under UNEVEN sharding ranks disagree on the global shape and full_tensor()
+    # deadlocks. sharded_param DTensors (weights) already carry the right shape via their spec.
+    global_dim0 = info.old._orig_size[0]
+    for bname, buf in list(module._buffers.items()):
+        if buf is None or isinstance(buf, DTensor) or buf.dim() == 0:
+            continue
+        if buf.shape[0] == local_dim0:
+            local = buf.contiguous()
+            global_shape = torch.Size((global_dim0, *local.shape[1:]))
+            global_stride = torch.empty(global_shape, device="meta").stride()
+            module._buffers[bname] = DTensor.from_local(
+                local, mesh, placements, shape=global_shape, stride=global_stride
+            )
+
+
+@contextmanager
+def fsdp2_shard_local_pack(root_model, module):
+    """Pack a module's ``Shard(0)`` weights on the LOCAL shard, in place, keeping them sharded.
+
+    Works for plain quant-linears (``Shard(0)`` on ``out``) and keep-fused experts (``Shard(0)`` on
+    ``E``). No unshard, no reshard, no collective -> leaves a valid packed FSDP module. No-ops for
+    non-FSDP models (so the same handler code covers the single-process/standard path).
+
+    Enter: ``to_local`` each weight param (recording its old FSDPParam + mesh/placements and this
+    rank's global shard offset in ``module._shard_local_start``); the wrapped handler packs the plain
+    local block in place. Exit: re-register each packed weight via :func:`_rebuild_fsdp_param_from_shard`
+    and re-wrap the packed scale buffers via :func:`_rewrap_scale_buffers_shard0`; no reshard.
+    """
+    if not isinstance(root_model, FSDPModule):
+        yield
+        return
+
+    root_module = _get_enclosing_fsdp_module(module, root_model)
+    group = fully_shard.state(root_module)._fsdp_param_group
+    # The root FSDP module keeps reshard_after_forward=False, so a prior forward (e.g. the export
+    # resmooth) can leave its own params (embed/lm_head/norm) UNSHARDED (full, non-DTensor). Reshard so
+    # every shardable param is Shard(0) and gets captured + FSDPParam-rebuilt below -- otherwise an
+    # in-place pack of an unsharded param is silently discarded when state_dict re-materializes from the
+    # (stale) FSDPParam. Idempotent: a no-op for already-sharded decoder layers.
+    if group is not None and not group.is_sharded:
+        root_module.reshard()
+    mapping = create_fsdp_param_mapping(group.fsdp_params, root_model)
+
+    captured = {}
+    module._shard_local_start = {}
+    for pname, param in list(module.named_parameters(recurse=False)):
+        name = f"{_get_module_name(module, root_model)}.{pname}"
+        if name not in mapping:
+            continue
+        # A non-DTensor param that survives the reshard above is genuinely replicated (not row-sharded,
+        # e.g. shard_root=False root params): shard-local packing does not apply -> leave it for the
+        # handler to pack in place. Only Shard(0) DTensors get the shard-local path.
+        if not isinstance(param, DTensor):
+            continue
+        # Fail fast + clear on uneven sharding rather than deadlocking the gather later. Symmetric
+        # (global shape + world are identical on every rank) so this raise can't itself hang.
+        world = param.device_mesh.size()
+        if param.shape[0] % world != 0:
+            raise NotImplementedError(
+                f"fsdp2_shard_local_pack does not support uneven sharding: '{name}' has dim0="
+                f"{param.shape[0]}, not divisible by world size {world}. Use a world size that "
+                f"divides every sharded dim-0."
+            )
+        captured[pname] = _ShardInfo(name, mapping[name], param.device_mesh, param.placements)
+        module._shard_local_start[pname] = _shard_start(param)
+        module._parameters[pname] = nn.Parameter(param.to_local(), requires_grad=False)
+    try:
+        yield
+    finally:
+        local_dim0 = None
+        with no_requires_grad(), enable_fake_quant(module):
+            for pname, info in captured.items():
+                packed_local = getattr(module, pname)
+                if local_dim0 is None:
+                    local_dim0 = packed_local.shape[0]
+                mapping[info.name] = _rebuild_fsdp_param_from_shard(info.old, packed_local)
+                info.old._post_load_hook_handle.remove()
+        if captured:
+            _rewrap_scale_buffers_shard0(module, captured, local_dim0)
+            group.fsdp_params = list(mapping.values())
+        module.__dict__.pop("_shard_local_start", None)
+
+
+@contextmanager
+def materialize_fsdp2_root(model: nn.Module):
+    """Unshard a sharded FSDP2 root's own params (embed/lm_head/norm) for a calibration forward.
+
+    The calibration loop calls ``model.forward(**batch)`` directly (``dataset_utils._forward_loop``)
+    rather than ``model(**batch)``, so ``nn.Module.__call__`` is bypassed and the root's FSDP2
+    forward pre-hook never fires. Its own params (embed/lm_head/norm) stay sharded DTensors and the
+    forward hits ``aten.embedding: mixed Tensor and DTensor``. Decoder layers are unaffected: they are
+    called as ``layer(...)`` inside ``forward``, so their pre-hooks fire and they unshard normally.
+
+    Unshard the root up front so its params are full tensors, then reshard on exit. The bypass also
+    skips the root's post-forward hook, so nothing reshards it mid-calibration and a single unshard
+    holds across all batches. Cheap: only the root's own param group is gathered, not the decoder
+    layers. No-op for non-FSDP2 or already-replicated roots.
+    """
+    root_sharded = False
+    if isinstance(model, FSDPModule):
+        pg = fully_shard.state(model)._fsdp_param_group
+        root_sharded = pg is not None and pg.is_sharded
+    if root_sharded:
+        with enable_fake_quant(model):
+            model.unshard()
+    try:
+        yield
+    finally:
+        if root_sharded:
+            with enable_fake_quant(model):
+                model.reshard()
 
 
 def update_quant_cfg_with_kv_cache_quant(
