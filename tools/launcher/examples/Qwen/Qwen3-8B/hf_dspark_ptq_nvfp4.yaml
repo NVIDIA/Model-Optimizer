@@ -30,7 +30,7 @@ pipeline:
   # The q/k/v exclusions are mandatory, not a tuning choice: DFlash-family
   # drafters build their fused context-KV projection by reading qkv_proj.weight
   # raw, which cannot be a packed tensor. o_proj and the MLP still quantize.
-  # `fc` is optional -- quantizing it saves ~12% more size for ~0.7% AL on
+  # `fc` is optional -- quantizing it saves ~3% more size for ~0.7% AL on
   # Qwen3-8B (3.0186 vs 3.0392); add '*fc*' to keep it in bf16.
   task_0:
     script: common/specdec/quantize_drafter.sh

@@ -28,7 +28,8 @@ pipeline:
   # The q/k/v exclusions are mandatory, not a tuning choice: DFlash-family
   # drafters build their fused context-KV projection by reading qkv_proj.weight
   # raw, which cannot be a packed tensor. o_proj and the MLP still quantize.
-  # `fc` is optional -- add '*fc*' to keep it in bf16 at the cost of size.
+  # `fc` is optional -- quantizing it saves ~4% more size for ~1.3% AL on this
+  # model (4.2334 vs 4.2899); add '*fc*' to keep it in bf16.
   #
   # This drafter has has_lm_head=false (it shares the target's), so
   # --quantize_lm_head does not apply. embed_tokens is 37% of the checkpoint but
