@@ -1,0 +1,16 @@
+matplotlib==3.10.8
+netron==9.2.1
+numba==0.63.1
+numpy==2.1.0
+nuscenes-devkit==1.1.9
+opencv-python==4.12.0.88
+pillow==12.1.0
+pycocotools==2.0.11
+pycuda==2026.1
+pyquaternion==0.9.9
+scipy==1.16.3
+shapely==2.1.2
+terminaltables==3.1.10
+thop==0.1.1.post2209072238
+tqdm==4.67.1
+trimesh==5.0.0
