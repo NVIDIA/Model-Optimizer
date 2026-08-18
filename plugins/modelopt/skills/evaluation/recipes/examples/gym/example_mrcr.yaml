@@ -94,8 +94,10 @@ deployment:
   # ~120K. Too high and vLLM preempts, and recomputing a 1M-token prefill makes the
   # run SLOWER, not faster. Start small and raise only while preemption stays ~0
   # (grep the server log for "preempted"). See references/parallelism.md.
-  # --kv-cache-dtype fp8 is itself a precision choice — keep it IDENTICAL across
-  # baseline and quantized runs or the delta measures KV-cache quantization too.
+  # --kv-cache-dtype: match the checkpoint's kv_cache_quant_algo in
+  # hf_quant_config.json (vLLM does NOT read it from config.json). fp8 here only
+  # because this class of checkpoint declares FP8 KV; drop it for a checkpoint
+  # that does not, rather than applying uncalibrated KV quantization.
   command: >-
     vllm serve /checkpoint
     --served-model-name ${deployment.served_model_name}

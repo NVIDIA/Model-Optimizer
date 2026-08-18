@@ -64,11 +64,21 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
 - `--max-model-len 1100000` **+** `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` in
   `deployment.env_vars` — vLLM otherwise refuses a len above the checkpoint's
   `max_position_embeddings`.
-- `gpu_memory_utilization: 0.95` (vs the usual 0.85) for the KV cache.
+- `gpu_memory_utilization: 0.95` (vs the usual 0.85) — driven by **sequence
+  length**, not prefix caching: a ~1M-token context needs a far larger KV
+  allocation, and prefix-cache blocks come out of the same pool.
 - `--enable-prefix-caching`, `--enable-chunked-prefill`,
   `--max-num-batched-tokens 131072`.
-- `--kv-cache-dtype fp8` — **itself a precision choice**; keep identical across
-  baseline and candidate or the delta also measures KV-cache quantization.
+- **KV dtype: follow the checkpoint, not this template.** Read
+  `kv_cache_quant_algo` from the checkpoint's `hf_quant_config.json` and pass the
+  matching `--kv-cache-dtype`. vLLM does **not** infer it — `config.json`'s
+  `quantization_config` carries no kv_cache key — so an FP8-KV-calibrated
+  checkpoint needs the flag explicitly, and a checkpoint without it must **not**
+  get `fp8` (that applies uncalibrated KV quantization, worst exactly here where
+  error accumulates over ~1M tokens). BF16 KV works and is the safe default, but
+  roughly doubles KV footprint, which at 1M is what decides whether the cache
+  fits. If baseline and candidate declare different KV algos, that difference is
+  part of the delta — report it rather than forcing them equal.
 - Fan out via `execution.num_nodes` / `num_instances` (HAProxy pattern A —
   `references/multi-node.md`). **Size these from the cluster's GPUs-per-node**, do
   not copy: pick TP for the model, fill the node with DP, then choose instances for
