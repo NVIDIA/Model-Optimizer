@@ -160,7 +160,12 @@ evaluation:
   # STANDALONE: exactly one gym task. Do NOT add other tasks to this list.
   tasks:
     - name: nemo_gym
-      container: nvcr.io/nvidia/eval-factory/nemo-gym:26.05   # pin a verified tag
+      # ??? on purpose: MRCR REQUIRES a git-backed Gym image so the pin below can
+      # apply, and the bootstrap exits 1 without one. The public
+      # nvcr.io/nvidia/eval-factory/nemo-gym:* images have a NON-git /opt/Gym and
+      # will not run this benchmark (GDPVal differs — its baked fallback is valid).
+      # NVIDIA-internal: modelopttools:eval-config Step 3d names a working image.
+      container: ???
       nemo_evaluator_config:
         config:
           params:
@@ -171,9 +176,9 @@ evaluation:
                   # Golden's pin. Carries the N3 1M prepare path config_n3_1m.yaml
                   # needs, and is NEWER than the Gym baked into any image — so it
                   # MUST apply. Applied by `git checkout` in /opt/Gym, so it is
-                  # SILENTLY ignored where that is not a git repo (public image).
-                  # Confirm "=== NeMo Gym commit ===" + SHA in the client log before
-                  # trusting a score. See recipes/tasks/gym/mrcr.md.
+                  # only usable where that is a git repo — the bootstrap exits
+                  # nonzero if the pin cannot apply or HEAD != this SHA, so a wrong
+                  # image fails fast instead of scoring. See recipes/tasks/gym/mrcr.md.
                   commit: a431501aa294f3237d472aaf58dd1e5026156ea8  # pragma: allowlist secret
                 command: |
                   set -ex

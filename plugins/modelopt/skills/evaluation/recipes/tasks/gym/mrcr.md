@@ -77,6 +77,15 @@ deliberately. **Do not change repeat counts when aligning to a golden.**
   and craters the ratio. Golden: `max_new_tokens: null` +
   `++responses_create_params.max_output_tokens=null`.
 
+### Deferred, know the risk
+
+`pre_cmd` installs `tiktoken` / `transformers` **unversioned**, and the n3 prepare
+path uses `transformers.AutoTokenizer` to decide which samples exceed the cap — so
+a version bump can shift dataset membership even with the Gym pin fixed. The
+sub-venv loop also swallows `uv pip install` failures (`|| true`). Both are
+inherited from the reviewed golden's `pre_cmd`; pinning would diverge from the run
+that produced the reference number. Re-check both if a score moves unexpectedly.
+
 ### Gym pin ↔ container — verify before trusting a score
 
 The template pins Gym to `a431501a` (the golden's commit), which carries the N3 1M
@@ -86,7 +95,7 @@ works only where that is a git repo:
 
 | Image | Pin behaviour |
 | --- | --- |
-| Public `nvcr.io/nvidia/eval-factory/nemo-gym:*` (template default) | often **silently ignored** — logs `/opt/Gym is not a git repo`, runs baked Gym |
+| Public `nvcr.io/nvidia/eval-factory/nemo-gym:*` | **not usable** — `/opt/Gym` is not a git repo, so the bootstrap exits 1 |
 | Internal core-evals `ci-llm/nemo-gym` (≥ 2026-07-05) | applies, or **hard-fails** on mismatch |
 
 An inert pin gives either a loud failure (missing `config_n3_1m.yaml`) or — worse
@@ -97,8 +106,8 @@ grep -A1 "=== NeMo Gym commit ===" $RD/logs/client-*.log | grep -c a431501a  # p
 ```
 
 Match the **SHA**, not just the marker — a stale checkout still prints the marker.
-The template now hard-fails when the pin cannot apply, so only an older copy of
-this config can still hit the silent case.
+The template's `container:` is `???` for this reason and its bootstrap exits 1 if
+the pin cannot apply, so only an older copy of this config can score unpinned.
 
 NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 
@@ -108,19 +117,20 @@ MRCR's gym path takes `++limit=N` (the launcher-level `limit_samples` does not
 reach the gym). **Not verified on this pinned commit** — treat the first ~30 min
 of the real run as the canary, as the GDPVal recipe does. `++limit` caps rollouts
 only: the 1M tokenize/drop-over-long **prepare pass still runs in full**, so a
-5-sample canary is not cheap. Easiest applied by editing your copy of the YAML
-rather than re-pasting the whole folded string:
+5-sample canary is not cheap. Append it to `collect_rollout_params` in your copy
+of the YAML — easier than re-pasting the whole folded scalar through `-o`:
 
-```bash
-nel run --config example_mrcr.yaml -o \
-  ++evaluation.tasks.0.nemo_evaluator_config.config.params.extra.nemo_gym.collect_rollout_params="<existing> ++limit=5"
+```yaml
+                collect_rollout_params: >-
+                  ...
+                  ++limit=5          # canary only — remove for the scored run
 ```
 
 Then watch the first ~30 min of the real run:
 
 ```bash
 RD=<output_dir>/<run>/nemo_gym.0
-grep -c "=== NeMo Gym commit ==="        $RD/logs/client-*.log   # pin applied
+grep -A1 "=== NeMo Gym commit ===" $RD/logs/client-*.log | grep -c a431501a  # pin applied
 grep -ciE "ModuleNotFoundError|tiktoken" $RD/logs/client-*.log   # pre_cmd didn't take
 wc -l $RD/artifacts/evaluator_rollouts.jsonl                     # rollouts flowing
 ```

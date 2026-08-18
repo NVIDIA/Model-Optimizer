@@ -96,8 +96,9 @@ for an "AA" request. If the user asks for MRCR:
    `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
    `transformers`; prepare fails without it) and
    `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
-4. The Gym pin is **newer than any image's baked Gym** and is silently ignored
-   where `/opt/Gym` is not a git repo — verify it applied before quoting a score.
+4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
+   Gym and must apply, so the template's `container:` is `???` and the bootstrap
+   exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
    NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
 5. Long-context deploy (`--max-model-len 1100000` +
    `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
