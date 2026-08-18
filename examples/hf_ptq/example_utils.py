@@ -742,12 +742,18 @@ def _pin_externally_read_params(
     """
     from accelerate.hooks import remove_hook_from_module
 
+    from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
+
     pinned = 0
     for name, module in model.named_modules():
         if not name.endswith(suffixes):
             continue
-        hook = getattr(module, "_hf_hook", None)
-        if hook is None or not getattr(hook, "offload", False):
+        # Via the library's unwrapper, not getattr(module, "_hf_hook"): accelerate wraps the
+        # AlignDevicesHook in a SequentialHook as soon as a second hook is appended, and a
+        # raw getattr misses it -- silently skipping the module and letting the original
+        # meta-tensor error come back with nothing in the log.
+        hook = _get_offload_hook(getattr(module, "_hf_hook", None))
+        if hook is None:
             continue
         device = hook.execution_device
         hook.original_devices = dict.fromkeys(getattr(hook, "original_devices", {}), device)

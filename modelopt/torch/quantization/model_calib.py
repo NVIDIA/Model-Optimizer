@@ -2123,7 +2123,7 @@ def layerwise_calibrate(
             # ephemeral storage is the usual cause). Calibration would restart at layer 0
             # and overwrite finished shards without a word; refuse instead.
             exporter.assert_no_orphan_shards(
-                start_layer, manifest_present=_read_manifest(checkpoint_dir) is not None
+                manifest_present=_read_manifest(checkpoint_dir) is not None
             )
 
     layer_pbar = tqdm(
@@ -2136,6 +2136,23 @@ def layerwise_calibrate(
 
     def _set_layer_status(status: str):
         layer_pbar.set_postfix_str(status, refresh=True)
+
+    def _fresh_kv(kwargs_input: dict) -> dict:
+        """Drop stale KV so a replayed batch starts from an empty cache.
+
+        These input tuples are replayed more than once -- max_calibrate, then GPTQ's Hessian
+        pass, then the fusion probe -- and a cache still holding this layer's keys makes the
+        next forward see kv_len twice the mask width.
+        """
+        cache = kwargs_input.get("past_key_values")
+        if cache is None:
+            return kwargs_input
+        kwargs_input = dict(kwargs_input)
+        if hasattr(cache, "reset"):
+            cache.reset()
+        else:
+            kwargs_input["past_key_values"] = None
+        return kwargs_input
 
     input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
@@ -2153,22 +2170,7 @@ def layerwise_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
-                    # Reset past_key_values to prevent the KV cache from
-                    # accumulating across multiple forward replays (e.g.
-                    # max_calibrate then Hessian collection in GPTQ).
-                    # The layer doesn't need stale KV data — each replay
-                    # should start with a fresh cache.
-                    if (
-                        "past_key_values" in kwargs_input
-                        and kwargs_input["past_key_values"] is not None
-                    ):
-                        kwargs_input = dict(kwargs_input)
-                        cache = kwargs_input["past_key_values"]
-                        if hasattr(cache, "reset"):
-                            cache.reset()
-                        else:
-                            kwargs_input["past_key_values"] = None
-                    m(*args, **kwargs_input)
+                    m(*args, **_fresh_kv(kwargs_input))
 
             is_last = layer_idx + 1 >= num_layers
 
@@ -2206,17 +2208,7 @@ def layerwise_calibrate(
                     # an input without the whole-model forward this path never runs.
                     def _fusion_probe(m, _inputs=layer_inputs):
                         args, kwargs_input = _inputs[0]
-                        # Same reset _layer_forward_loop does: these tuples were already
-                        # replayed once, so the cache holds this layer's keys and the probe
-                        # would see kv_len twice the mask width.
-                        cache = kwargs_input.get("past_key_values")
-                        if cache is not None:
-                            kwargs_input = dict(kwargs_input)
-                            if hasattr(cache, "reset"):
-                                cache.reset()
-                            else:
-                                kwargs_input["past_key_values"] = None
-                        m(*args, **kwargs_input)
+                        m(*args, **_fresh_kv(kwargs_input))
 
                     exporter.export_layer(layer_idx, layer, _fusion_probe)
 

@@ -29,10 +29,8 @@ from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import get_quant_config, get_quantization_format
 
 __all__ = [
+    "EXPORT_PARENT_ATTR",
     "LayerwiseExporter",
-    "assert_layerwise_export_supported",
-    "layer_shard_name",
-    "transient_module_state",
 ]
 
 # Fusing formats this path can handle itself. The groups _fuse_shared_input_modules works
@@ -57,17 +55,24 @@ def layer_shard_name(layer_idx: int) -> str:
     return f"model-layer-{layer_idx:05d}.safetensors"
 
 
-def _is_quantized_module(module: nn.Module) -> bool:
+def _quantizer_types() -> tuple[type, ...]:
+    """Quantizer classes, imported lazily to avoid a circular import at module load."""
+    from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+
+    return (TensorQuantizer, SequentialQuantizer)
+
+
+def _is_quantized_module(module: nn.Module, types: tuple[type, ...] | None = None) -> bool:
     """Whether this module carries quantizers of its own.
 
     Detected by type, not attribute name: fused-expert modules name theirs after the weight
     (``gate_up_proj_weight_quantizer``), so a name-based test misses whole MoE blocks.
-    """
-    from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 
-    return any(
-        isinstance(child, (TensorQuantizer, SequentialQuantizer)) for child in module.children()
-    )
+    ``types`` lets a caller scanning many modules resolve the import once; this runs per
+    module, so on a 300k-module MoE the lookup is not free.
+    """
+    types = types or _quantizer_types()
+    return any(isinstance(child, types) for child in module.children())
 
 
 def _module_formats(model: nn.Module) -> set:
@@ -76,10 +81,11 @@ def _module_formats(model: nn.Module) -> set:
     ``get_quantization_format(model)`` stops at the first quantized child, so gating on it
     would let an NVFP4 layer slip through a check meant to exclude it.
     """
+    types = _quantizer_types()
     return {
         get_quantization_format(module)
         for _, module in model.named_modules()
-        if _is_quantized_module(module)
+        if _is_quantized_module(module, types)
     }
 
 
@@ -90,9 +96,10 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
     pass cannot, since a tie partner may be uncalibrated or already written.
     """
     by_ptr: dict[int, list[str]] = {}
+    types = _quantizer_types()
     for name, module in model.named_modules():
         weight = getattr(module, "weight", None)
-        if weight is None or not _is_quantized_module(module) or weight.is_meta:
+        if weight is None or not _is_quantized_module(module, types) or weight.is_meta:
             continue
         ptr = weight.data_ptr()
         # data_ptr() is 0 for meta tensors and DTensors, grouping unrelated modules.
@@ -240,20 +247,21 @@ def _prefix_quant_config_names(quant_config: dict, prefix: str, siblings: list[s
     they are unquantized, but a loader that finds them absent from the exclusion list will
     read them as quantized and misinterpret plain BF16 weights.
     """
+    from .quant_aware_conversion import revert_quant_config_names
+
     if not prefix:
         return
     quantization = quant_config.get("quantization")
     if not isinstance(quantization, dict):
         return
 
-    excluded = quantization.get("exclude_modules")
-    if isinstance(excluded, list):
+    # Same key/list rewrite the hub-name reversal does, with prefixing as the mapper, so the
+    # two cannot diverge on config shape.
+    revert_quant_config_names(quantization, lambda name: prefix + name)
+    if quantization.get("exclude_modules") is not None:
         quantization["exclude_modules"] = sorted(
-            [prefix + m for m in excluded] + [f"{s}*" for s in siblings]
+            quantization["exclude_modules"] + [f"{s}*" for s in siblings]
         )
-    quantized = quantization.get("quantized_layers")
-    if isinstance(quantized, dict):
-        quantization["quantized_layers"] = {prefix + k: v for k, v in quantized.items()}
 
 
 @contextlib.contextmanager
@@ -356,6 +364,8 @@ class LayerwiseExporter:
         self._name_to_module = dict(model.named_modules())
 
         self._model = model
+        # _module_formats over the whole model is already computed by the support check above.
+        self._has_fusing_format = bool(_module_formats(model) - FUSION_FREE_FORMATS)
         # For a multimodal pipeline these differ: calibration runs on the extracted language
         # model, but the checkpoint must describe the whole VLM. Everything that walks
         # modules stays on `model`; only tensor keys and the config artifacts move up.
@@ -483,7 +493,9 @@ class LayerwiseExporter:
         # format found, so a layer with FP8 attention and NVFP4 experts reports fp8 and
         # would skip fusing its NVFP4 groups. _fuse_shared_input_modules re-evaluates the
         # format per group, so the value passed below is only a fallback.
-        if not (_module_formats(layer_module) - FUSION_FREE_FORMATS):
+        # Decided once at construction: a model with no fusing format anywhere cannot grow
+        # one per layer, and this scan would otherwise run for all 93+ layers.
+        if not self._has_fusing_format:
             return
         layer_format = get_quantization_format(layer_module)
         if probe_forward is None:
@@ -617,11 +629,10 @@ class LayerwiseExporter:
         )
 
         parent = self._export_model
-        skip = f"{self._key_prefix}"
+        skip = self._key_prefix
         parent_modules = dict(parent.named_modules())
         inner_ids = {id(m) for m in self._model.modules()}
 
-        windowed: set[int] = set()
         for name, module in parent.named_modules():
             if id(module) in inner_ids or not name or name.startswith(skip):
                 continue
@@ -638,7 +649,6 @@ class LayerwiseExporter:
                         and full not in self._tied_alias_keys
                     ):
                         tail.setdefault(full, tensor.detach().contiguous().cpu())
-            windowed.add(id(module))
 
         for key, tensor in parent.state_dict().items():
             if key.startswith(skip) or key in tail:
@@ -668,7 +678,7 @@ class LayerwiseExporter:
             n += 1
         return n
 
-    def assert_no_orphan_shards(self, start_layer: int, manifest_present: bool) -> None:
+    def assert_no_orphan_shards(self, manifest_present: bool) -> None:
         """Refuse to silently redo work when shards exist but the resume record does not.
 
         The shards cannot themselves say where to resume: restarting at layer K needs the
@@ -685,7 +695,7 @@ class LayerwiseExporter:
         shards is *not* an error -- that is an ordinary partial or rewound run, and those
         layers are correctly re-exported.
         """
-        if manifest_present or start_layer > 0:
+        if manifest_present:
             return
         done = self.completed_layers()
         if not done:

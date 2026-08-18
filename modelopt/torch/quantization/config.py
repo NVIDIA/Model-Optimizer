@@ -772,7 +772,7 @@ class LayerwiseConfig(ModeloptBaseConfig):
             "Combined with ``checkpoint_dir``, an interrupted run resumes without "
             "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
             "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
-            "weight-tied quantized modules, multimodal and MTP models raise "
+            "weight-tied quantized modules and MTP models raise "
             "NotImplementedError. The model left in memory afterwards is not valid for "
             "inference if the run resumed."
         ),
