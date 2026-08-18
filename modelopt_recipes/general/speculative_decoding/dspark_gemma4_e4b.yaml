@@ -97,31 +97,35 @@ dflash:
   dflash_l1_loss_alpha: 0.9
   dflash_confidence_head_alpha: 1.0
   dflash_architecture_config:
-    # Draft dims are set explicitly — the draft is an independent model and does
-    # NOT inherit these from the base (hidden_size/vocab/rope_theta ARE forced to
-    # the base and need not be set here).
+    # Aligned with the official reference drafter deepseek-ai/dspark_gemma4_12b_block7
+    # (the checkpoint vLLM's gemma4_dspark.py was written for). Its backbone is
+    # 5 full-attention layers with attention_k_eq_v; vLLM's fused context-KV
+    # precompute ASSERTS every draft layer is built that way, so an SWA draft
+    # cannot be served by that path at all.
     num_hidden_layers: 5
     num_attention_heads: 16
-    num_key_value_heads: 4
+    num_key_value_heads: 8
+    # Full-attention layers use global_head_dim (512) and, under k_eq_v,
+    # num_global_key_value_heads (1) -- see gemma4_layer_config in vLLM.
     head_dim: 256
+    global_head_dim: 512
+    num_global_key_value_heads: 1
     intermediate_size: 10240
     projector_type: dspark
-    # Markov head: low-rank first-order transition bias, memoryless variant.
     markov_rank: 256
     markov_head_type: vanilla
     use_confidence_head: true
-    # --- SWA draft (user decision 2026-08-12: try SWA first) ---
-    # DFlashAttention enables sliding-window attention only when the draft config
-    # carries BOTH `layer_types` and `sliding_window`; it then applies the window
-    # on layers whose layer_types entry is "sliding_attention". Matching the base's
-    # window of 512 and its sliding-layer rope_theta of 10000.
-    # NOTE: K3 measured SWA costing ~23% AL vs full attention at window 1024, and
-    # this window is smaller still — expect an AL hit and compare against a
-    # full-attention control before concluding.
-    sliding_window: 512
+    # --- Gemma4 block shape (sandwich norms + layer_scalar) + k_eq_v ---
+    # model_type gemma4* selects DFlashGemma4DecoderLayer, which adds
+    # pre/post_feedforward_layernorm and layer_scalar. vLLM's
+    # Gemma4MTPDecoderLayer looks those up BY NAME and its DSpark loader leaves
+    # anything it cannot find randomly initialized -- silently. A Qwen3-shaped
+    # draft therefore loads without error and produces garbage.
+    model_type: gemma4_text
+    attention_k_eq_v: true
     layer_types:
-      - sliding_attention
-      - sliding_attention
-      - sliding_attention
-      - sliding_attention
-      - sliding_attention
+      - full_attention
+      - full_attention
+      - full_attention
+      - full_attention
+      - full_attention

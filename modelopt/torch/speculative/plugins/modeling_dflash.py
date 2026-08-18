@@ -221,6 +221,117 @@ class DFlashAttention(nn.Module):
         return self.o_proj(attn_output)
 
 
+class DFlashGemma4Attention(DFlashAttention):
+    """DFlash attention for a Gemma4-style draft.
+
+    Two deltas versus the Qwen3-style :class:`DFlashAttention`:
+
+    * ``attention_k_eq_v``: Gemma4 can derive V from the K projection instead of
+      carrying a separate ``v_proj``, halving the KV parameters. vLLM's
+      ``Gemma4DSparkAttention`` does exactly this (``v_src = k`` when
+      ``use_k_eq_v``), and its fused context-KV precompute *asserts* every draft
+      layer is built this way, so a draft trained with a separate ``v_proj``
+      cannot be served by that path at all.
+    * ``v_norm``: applied to V, with **no learnable weight**, mirroring vLLM's
+      ``RMSNorm(..., has_weight=False)``. Plain (Qwen3) DFlash does not norm V.
+
+    ``use_k_eq_v`` follows vLLM: full-attention layers only, and only when the
+    config opts in. Sliding layers keep their own ``v_proj``.
+    """
+
+    def __init__(self, config, layer_idx):
+        """Initialize Gemma4 draft attention with per-layer dims, dropping ``v_proj`` under k_eq_v."""
+        super().__init__(config, layer_idx)
+        layer_types = getattr(config, "layer_types", None)
+        is_full = layer_types is None or layer_types[layer_idx] == "full_attention"
+        self.use_k_eq_v = is_full and getattr(config, "attention_k_eq_v", False)
+
+        # Gemma4's attention dims are PER LAYER: full-attention layers use a larger
+        # ``global_head_dim`` and, under k_eq_v, a smaller ``num_global_key_value_heads``.
+        # This mirrors vLLM's ``gemma4_layer_config`` (transformers_utils/configs/gemma4.py),
+        # which Gemma4DSparkAttention calls to size q/k/o. Getting this wrong is silent:
+        # the DSpark weight loader only fills names it finds, so a mis-shaped k_proj is
+        # simply left randomly initialized.
+        if is_full:
+            self.head_dim = getattr(config, "global_head_dim", None) or self.head_dim
+            if self.use_k_eq_v:
+                self.num_kv_heads = (
+                    getattr(config, "num_global_key_value_heads", None) or self.num_kv_heads
+                )
+            self.num_key_value_groups = self.num_heads // self.num_kv_heads
+            self.scaling = self.head_dim**-0.5
+            attn_bias = getattr(config, "attention_bias", False)
+            self.q_proj = nn.Linear(
+                config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias
+            )
+            self.k_proj = nn.Linear(
+                config.hidden_size, self.num_kv_heads * self.head_dim, bias=attn_bias
+            )
+            self.o_proj = nn.Linear(
+                self.num_heads * self.head_dim, config.hidden_size, bias=attn_bias
+            )
+            self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+            self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+
+        if self.use_k_eq_v:
+            # Registered by the parent; drop it so it is neither trained nor exported.
+            del self.v_proj
+            self.v_proj = None
+        elif is_full:
+            self.v_proj = nn.Linear(
+                config.hidden_size,
+                self.num_kv_heads * self.head_dim,
+                bias=getattr(config, "attention_bias", False),
+            )
+        # vLLM builds this as ``RMSNorm(..., has_weight=False)`` and the reference
+        # checkpoint ships NO v_norm tensor, so keep the scale fixed at ones and
+        # non-persistent: it must not appear in the exported state_dict.
+        self.v_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+        del self.v_norm.weight
+        self.v_norm.register_buffer("weight", torch.ones(self.head_dim), persistent=False)
+
+    def _project_v(self, target_hidden, hidden_states, k_ctx, k_noise):
+        """Return the V sequence, from K under k_eq_v or from ``v_proj`` otherwise."""
+        if self.use_k_eq_v:
+            return k_ctx, k_noise
+        return self.v_proj(target_hidden), self.v_proj(hidden_states)
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with KV injection; V is normed and, under k_eq_v, shares K's projection."""
+        bsz, q_len, _ = hidden_states.shape
+        ctx_len = target_hidden.shape[1]
+
+        q = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim)
+        q = self.q_norm(q).transpose(1, 2)
+
+        k_ctx = self.k_proj(target_hidden)
+        k_noise = self.k_proj(hidden_states)
+        k = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        k = self.k_norm(k).transpose(1, 2)
+
+        v_ctx, v_noise = self._project_v(target_hidden, hidden_states, k_ctx, k_noise)
+        v = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, self.head_dim)
+        # vLLM norms V (no RoPE on V), unlike the Qwen3-style path.
+        v = self.v_norm(v).transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        attn_fn = self._get_attn_fn()
+        attn_output, _ = attn_fn(
+            self,
+            q,
+            k,
+            v,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+        )
+        attn_output = attn_output.reshape(bsz, q_len, -1)
+        return self.o_proj(attn_output)
+
+
 class DFlashDecoderLayer(nn.Module):
     """Draft decoder layer with KV injection."""
 
@@ -248,6 +359,56 @@ class DFlashDecoderLayer(nn.Module):
         return hidden_states
 
 
+class DFlashGemma4DecoderLayer(nn.Module):
+    """Draft decoder layer matching Gemma4's block, with KV injection.
+
+    Gemma4 wraps each sub-block in a *pair* of norms ("sandwich norm") and scales
+    the layer output by a learned ``layer_scalar``, where Qwen3 uses a single
+    pre-norm per sub-block. vLLM's ``Gemma4MTPDecoderLayer`` -- which
+    ``Gemma4DSparkDecoderLayer`` inherits -- looks up
+    ``pre_feedforward_layernorm`` / ``post_feedforward_layernorm`` /
+    ``layer_scalar`` by name, and its DSpark weight loader silently leaves any
+    parameter it cannot find randomly initialized. A Qwen3-shaped draft
+    therefore *loads without error* and produces garbage, so the shapes must
+    match exactly.
+
+    The residual/norm order below mirrors ``Gemma4MTPDecoderLayer.forward``:
+    norm -> attn -> norm -> +residual -> norm -> mlp -> norm -> +residual, then
+    scale by ``layer_scalar``.
+    """
+
+    def __init__(self, config, layer_idx):
+        """Initialize a Gemma4-style draft layer (sandwich norms + layer scalar)."""
+        super().__init__()
+        self.self_attn = DFlashGemma4Attention(config, layer_idx)
+        self.mlp = _MLP_CLS(config)
+        self.input_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_feedforward_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_feedforward_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
+        # A buffer (not a parameter) to match vLLM's `register_buffer`, so the
+        # exported tensor name and shape line up with the reference checkpoint.
+        self.register_buffer("layer_scalar", torch.ones(1))
+
+    def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with sandwich norms, KV injection, and the layer scalar."""
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states, target_hidden, position_embeddings, attention_mask
+        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+
+        residual = hidden_states
+        hidden_states = self.pre_feedforward_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = hidden_states + residual
+
+        return hidden_states * self.layer_scalar
+
+
 class DFlashModule(nn.Module):
     """DFlash draft module using Qwen3 components (MLP, RMSNorm, RotaryEmbedding)."""
 
@@ -263,8 +424,15 @@ class DFlashModule(nn.Module):
         self.hidden_norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
 
         # Decoder layers
+        # Gemma4 drafts need Gemma4's block shape (sandwich norms + layer_scalar,
+        # optional k_eq_v); everything else keeps the Qwen3-style block.
+        layer_cls = (
+            DFlashGemma4DecoderLayer
+            if str(getattr(config, "model_type", "")).startswith("gemma4")
+            else DFlashDecoderLayer
+        )
         self.layers = nn.ModuleList(
-            [DFlashDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
