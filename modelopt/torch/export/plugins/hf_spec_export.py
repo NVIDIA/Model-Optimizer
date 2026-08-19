@@ -572,6 +572,14 @@ class DFlash2Exporter(DFlashExporter):
                 "conv_group_size": draft_config.conv_group_size,
                 "selector_rank": draft_config.selector_rank,
                 "selector_top_k": draft_config.selector_top_k,
+                # The published DFlash2 checkpoints carry block_size inside
+                # dflash_config; the DFlash loader reads it from the top level.
+                # Emit both so either contract resolves to the same value.
+                "block_size": config["block_size"],
             }
         )
+        # Published DFlash2 checkpoints state causality explicitly rather than
+        # leaving it to be inferred from layer_types. Only set it when the SWA
+        # block above has not already written a `causal` entry.
+        config.setdefault("is_causal", config["dflash_config"].get("causal", False))
         return config
