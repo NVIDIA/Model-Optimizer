@@ -51,7 +51,7 @@ def test_pep610_exact_source_is_accepted(monkeypatch):
         ci_environment.metadata,
         "distribution",
         lambda _package: _Distribution(
-            _pep610_source(_EXPECTED_SOURCE["repository"], _EXPECTED_SOURCE["commit"])
+            _pep610_source(f"{_EXPECTED_SOURCE['repository']}/", _EXPECTED_SOURCE["commit"])
         ),
     )
 
@@ -115,5 +115,5 @@ def test_malformed_direct_url_metadata_has_package_named_error(monkeypatch):
         lambda _package: _Distribution("{"),
     )
 
-    with pytest.raises(RuntimeError, match="dependency 'nemo-automodel'.*malformed"):
+    with pytest.raises(RuntimeError, match=r"dependency 'nemo-automodel'.*malformed"):
         ci_environment.verify_installed_vcs_source("nemo-automodel", _EXPECTED_SOURCE)

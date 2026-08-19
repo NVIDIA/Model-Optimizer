@@ -29,7 +29,13 @@ _GIT_TIMEOUT_SECONDS = 10
 
 
 def _normalized_repository(url: object) -> str:
-    return str(url or "").removesuffix(".git").rstrip("/")
+    return str(url or "").rstrip("/").removesuffix(".git").rstrip("/")
+
+
+def _invalid_direct_url_metadata(package: str, field: str) -> RuntimeError:
+    return RuntimeError(
+        f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata: {field}"
+    )
 
 
 def _installed_vcs_source(package: str) -> tuple[str | None, str | None]:
@@ -52,30 +58,20 @@ def _installed_vcs_source(package: str) -> tuple[str | None, str | None]:
             f"Pinned Puzzletron dependency {package!r} has malformed direct URL metadata"
         ) from error
     if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata"
-        )
+        raise _invalid_direct_url_metadata(package, "payload is not an object")
     repository = payload.get("url")
     vcs_info = payload.get("vcs_info", {})
     dir_info = payload.get("dir_info", {})
     if not isinstance(repository, str) or not repository:
-        raise RuntimeError(
-            f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata"
-        )
+        raise _invalid_direct_url_metadata(package, "url")
     if not isinstance(vcs_info, dict) or not isinstance(dir_info, dict):
-        raise RuntimeError(
-            f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata"
-        )
+        raise _invalid_direct_url_metadata(package, "vcs_info or dir_info")
     if "editable" in dir_info and not isinstance(dir_info["editable"], bool):
-        raise RuntimeError(
-            f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata"
-        )
+        raise _invalid_direct_url_metadata(package, "dir_info.editable")
     commit = vcs_info.get("commit_id")
     if commit is not None:
         if not isinstance(commit, str) or not commit:
-            raise RuntimeError(
-                f"Pinned Puzzletron dependency {package!r} has invalid direct URL metadata"
-            )
+            raise _invalid_direct_url_metadata(package, "vcs_info.commit_id")
         return repository, commit
     if dir_info.get("editable") and repository.startswith("file:"):
         root = unquote(urlparse(repository).path)
@@ -103,7 +99,10 @@ def _installed_vcs_source(package: str) -> tuple[str | None, str | None]:
             ) from error
         repository, commit, dirty = (output.strip() for output in git_outputs)
         if dirty:
-            raise RuntimeError(f"Pinned Puzzletron dependency {package!r} is dirty: {dirty}")
+            raise RuntimeError(
+                f"Pinned Puzzletron dependency {package!r} is dirty: "
+                f"{len(dirty.splitlines())} changed entries"
+            )
         return repository, commit
     return repository, None
 

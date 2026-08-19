@@ -706,14 +706,7 @@ def test_controller_revalidates_recent_completed_work_before_resubmitting(
     assert controller.store.stage_is_complete("convert")
 
 
-@pytest.mark.parametrize(
-    "completed_at",
-    [None, 10_000.0],
-    ids=("missing", "future"),
-)
-def test_controller_starts_settling_window_when_completed_timestamp_is_invalid(
-    tmp_path: Path, monkeypatch, completed_at
-):
+def test_controller_uses_monotonic_artifact_settling_window(tmp_path: Path, monkeypatch):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
     execution = load_execution_config(execution_path)
     execution["defaults"]["artifact_settling_timeout_seconds"] = 5
@@ -740,11 +733,6 @@ def test_controller_starts_settling_window_when_completed_timestamp_is_invalid(
     monkeypatch.setattr("puzzletron_orchestrator.controller.time.monotonic", lambda: now[0])
     controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
     attempts = controller.store.list_attempts("convert")
-    attempts[0]["submitted_at"] = 1.0
-    if completed_at is None:
-        attempts[0].pop("completed_at", None)
-    else:
-        attempts[0]["completed_at"] = completed_at
 
     assert controller._completed_work_artifact_settling_elapsed(node, attempts) == 0.0
     now[0] = 1004.0

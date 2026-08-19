@@ -511,6 +511,7 @@ def test_global_kd_config_rejects_non_boolean_trust_policy(tmp_path):
 
 
 def test_global_kd_model_kwargs_cannot_bypass_trust_policy(tmp_path):
+    # Keep the optional NeMo AutoModel runtime out of test collection.
     from modelopt.torch.puzzletron.distillation import global_automodel
 
     kd = GlobalKDConfig(

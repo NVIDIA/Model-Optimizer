@@ -1236,12 +1236,9 @@ class _WeightedObjectiveMixin:
                 kd_total = kd_total + kd_depth
             return ce_total / len(student_values), kd_total / len(student_values)
 
-        student_head = _get_lm_head_module(student_model) if student_is_hidden else None
         teacher_head = (
             _get_lm_head_module(teacher_model) if needs_mtp_kd and teacher_is_hidden else None
         )
-        if student_is_hidden and student_head is None:
-            raise ValueError("MTP losses require an accessible student lm_head")
         if needs_mtp_kd and teacher_is_hidden and teacher_head is None:
             raise ValueError("MTP KD requires an accessible teacher lm_head")
 
@@ -1278,15 +1275,7 @@ class _WeightedObjectiveMixin:
 
                 def _chunk_objectives(s_chunk, t_chunk, chunk_labels):
                     phase = f"mtp_depth_{depth}_chunk_{start}_{stop}"
-                    _trace_global_kd_phase(f"{phase}_student_head_begin")
-                    if student_is_hidden:
-                        if student_head is None:
-                            raise RuntimeError("MTP hidden-state projection is missing its lm_head")
-                        s_chunk = _align_dtensor_to_module_mesh(s_chunk, student_head)
-                        s_logits = student_head(s_chunk)
-                    else:
-                        s_logits = s_chunk
-                    _trace_global_kd_phase(f"{phase}_student_head_end")
+                    s_logits = s_chunk
                     zero = self._local_zero(s_logits)
                     _trace_global_kd_phase(f"{phase}_ce_begin")
                     ce = (
