@@ -49,22 +49,25 @@ def _disabled_quantizer() -> TensorQuantizer:
     return quantizer
 
 
-def _candidate_quantizers(module: nn.Module, config: QuantizeConfig) -> dict[str, TensorQuantizer]:
-    original = {attr: getattr(module, attr) for attr in _KV_QUANTIZER_ATTRS}
-    try:
-        for attr in _KV_QUANTIZER_ATTRS:
-            setattr(module, attr, _disabled_quantizer())
-        set_quantizer_by_cfg(module, config.quant_cfg)
-        quantizers = {attr: getattr(module, attr) for attr in _KV_QUANTIZER_ATTRS}
-        for attr, quantizer in quantizers.items():
-            if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
-                raise ValueError(
-                    f"KV-cache candidate must enable {attr}; got {type(quantizer).__name__}."
-                )
-        return quantizers
-    finally:
-        for attr, quantizer in original.items():
-            setattr(module, attr, quantizer)
+def _candidate_quantizers(config: QuantizeConfig) -> dict[str, TensorQuantizer]:
+    """Build a candidate on a holder that exposes only the K/V quantizers.
+
+    Applying an untrusted wildcard config to an attention module can match and mutate
+    unrelated nested quantizers (for example ``q_proj.*_quantizer``). Keeping candidate
+    construction isolated makes such entries no-ops and guarantees that the search can
+    only retain K/V quantizer state.
+    """
+    holder = nn.Module()
+    for attr in _KV_QUANTIZER_ATTRS:
+        setattr(holder, attr, _disabled_quantizer())
+    set_quantizer_by_cfg(holder, config.quant_cfg)
+    quantizers = {attr: getattr(holder, attr) for attr in _KV_QUANTIZER_ATTRS}
+    for attr, quantizer in quantizers.items():
+        if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
+            raise ValueError(
+                f"KV-cache candidate must enable {attr}; got {type(quantizer).__name__}."
+            )
+    return quantizers
 
 
 def _validate_kv_only_config(config: QuantizeConfig) -> None:
@@ -201,7 +204,7 @@ def _apply_layer_quantizers(module: nn.Module, quantizers: dict[str, TensorQuant
 
 @contextmanager
 def _freeze_existing_quantizers(model: nn.Module, candidate_quantizers: list[TensorQuantizer]):
-    """Run enabled non-candidate quantizers as QDQ without updating their calibration state."""
+    """Freeze calibration without changing existing quantizers' execution mode."""
     candidate_ids = {id(quantizer) for quantizer in candidate_quantizers}
     states = []
     for module in model.modules():
@@ -211,14 +214,12 @@ def _freeze_existing_quantizers(model: nn.Module, candidate_quantizers: list[Ten
             or not module.is_enabled
         ):
             continue
-        states.append((module, module._if_quant, module._if_calib))
-        module.enable_quant()
+        states.append((module, module._if_calib))
         module.disable_calib()
     try:
         yield
     finally:
-        for quantizer, if_quant, if_calib in states:
-            quantizer._if_quant = if_quant
+        for quantizer, if_calib in states:
             quantizer._if_calib = if_calib
 
 
@@ -385,10 +386,9 @@ def auto_quantize_kv_cache(
     }
     candidate_quantizers = {
         name: {
-            candidate_name: _candidate_quantizers(module, config)
-            for candidate_name, config in candidates
+            candidate_name: _candidate_quantizers(config) for candidate_name, config in candidates
         }
-        for name, module, _ in layers
+        for name, _, _ in layers
     }
 
     is_training = model.training

@@ -96,6 +96,10 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+_FSDP2_AUTOQUANT_ERROR = (
+    "AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
+    "selection, and checkpoint writes are synchronized across ranks."
+)
 
 
 def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
@@ -456,11 +460,7 @@ def auto_quantize(
     )
 
     if args.use_fsdp2:
-        warnings.warn(
-            "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-            "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-            "synchronization across ranks); use at your own risk."
-        )
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
 
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
@@ -573,6 +573,8 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
+    if args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code

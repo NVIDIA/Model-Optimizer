@@ -118,6 +118,31 @@ def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
         hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
 
 
+def test_autoquant_rejects_fsdp2(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+        hf_ptq.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
+
+
+def test_fsdp2_autoquant_rejected_before_model_load(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(hf_ptq, "_recipe_is_auto_quantize", lambda _: True)
+    monkeypatch.setattr(
+        hf_ptq.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+
+
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
     key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""

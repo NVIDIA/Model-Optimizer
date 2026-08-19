@@ -489,6 +489,8 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
+> *AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Use a PTQ recipe with FSDP2.*
+
 ### Usage
 
 #### Slurm (recommended)

@@ -104,9 +104,6 @@ def test_kv_scalar_weight_counts_k_and_v_widths():
 
 
 def test_kv_candidate_format_can_use_dynamic_amax():
-    module = nn.Module()
-    module.k_bmm_quantizer = nn.Identity()
-    module.v_bmm_quantizer = nn.Identity()
     config = QuantizeConfig(
         quant_cfg=[
             {
@@ -118,7 +115,7 @@ def test_kv_candidate_format_can_use_dynamic_amax():
         effective_bits=8.0,
     )
 
-    quantizers = _candidate_quantizers(module, config)
+    quantizers = _candidate_quantizers(config)
 
     assert all(quantizer.is_enabled for quantizer in quantizers.values())
     assert all(not quantizer._use_constant_amax for quantizer in quantizers.values())
@@ -274,7 +271,11 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path):
                     {
                         "quantizer_name": "*[kv]_bmm_quantizer",
                         "cfg": {"num_bits": 8},
-                    }
+                    },
+                    {
+                        "quantizer_name": "q_proj.*_quantizer",
+                        "cfg": {"num_bits": 2},
+                    },
                 ],
                 "algorithm": "max",
                 "effective_bits": 8.0,
@@ -321,6 +322,9 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path):
     ]
     assert non_kv_quantizers
     assert all(not quantizer.is_enabled for quantizer in non_kv_quantizers)
+    assert all(
+        layer.self_attn.q_proj.weight_quantizer.num_bits == 8 for layer in model.model.layers
+    )
     exported_quantization = get_quant_config(model)["quantization"]
     assert exported_quantization["quantized_layers"] == {}
     assert exported_quantization["kv_cache_quantized_layers"]
@@ -446,7 +450,11 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers(monkey
                             {
                                 "quantizer_name": "*[kv]_bmm_quantizer",
                                 "cfg": {"num_bits": 4},
-                            }
+                            },
+                            {
+                                "quantizer_name": "q_proj.*_quantizer",
+                                "cfg": {"num_bits": 2},
+                            },
                         ],
                         "algorithm": "max",
                         "effective_bits": 4.0,
@@ -466,9 +474,8 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers(monkey
 
     assert set(state["layers"]) == {"model.layers.0.self_attn"}
     assert observed_fixed_states
-    assert observed_fixed_states[0] == (True, True, False)
-    assert all(state == (True, False, False) for state in observed_fixed_states[1:])
-    assert calibration_states == [(True, False), (True, False)]
+    assert all(state == (True, False, False) for state in observed_fixed_states)
+    assert calibration_states == [(False, False), (False, False)]
     assert model.model.layers[0].self_attn.k_bmm_quantizer.num_bits == 4
     assert model.model.layers[0].self_attn.q_proj.weight_quantizer.is_enabled
     assert not fixed_weight_quantizer._if_quant
