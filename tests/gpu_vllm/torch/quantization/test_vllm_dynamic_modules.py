@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import gc
 import importlib.util
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -53,10 +54,12 @@ from modelopt.torch.quantization.plugins.vllm import (
     VllmMLAAttention,
     _QuantFusedMoEBase,
     _QuantVLLMAttention,
+    _QuantVLLMRowParallelLinear,
     _VLLMParallelLinear,
     build_vllm_attention_quant_cfg,
     configure_vllm_nvfp4_attention_quantizers,
     disable_compilation,
+    validate_quant_cfg_against_vllm_quant_method,
 )
 
 
@@ -536,3 +539,114 @@ def test_configure_vllm_attention_quantizers_fp8_bmm2(monkeypatch):
         cfg=build_vllm_attention_quant_cfg(p_format="fp8", v_format="fp8"),
     )
     assert float(reconfigured.v_bmm_quantizer._amax) == 96.0
+
+
+class _DummyQuantizedMethod:
+    """Stand-in for a real vLLM quant method (e.g. ModelOptNvFp4LinearMethod)."""
+
+
+class _FakeLinear(torch.nn.Module):
+    def __init__(self, quant_method):
+        super().__init__()
+        self.quant_method = quant_method
+
+
+def _model_with_layer(quant_method):
+    model = torch.nn.Module()
+    model.layer = _FakeLinear(quant_method)
+    return model
+
+
+def test_setup_skips_weight_input_output_quantizer_for_already_quantized_layer(monkeypatch):
+    """fold_weight() folds any "*weight_quantizer" attribute regardless of enabled state, which
+    would corrupt an already-quantized (e.g. packed NVFP4) weight if it existed here."""
+    monkeypatch.setattr(
+        vllm_plugin,
+        "create_parallel_state",
+        lambda: vllm_plugin.ParallelState(data_parallel_group=None),
+    )
+    layer = object.__new__(_QuantVLLMRowParallelLinear)
+    torch.nn.Module.__init__(layer)
+    layer.quant_method = _DummyQuantizedMethod()
+    layer.weight = torch.nn.Parameter(
+        torch.randint(0, 255, (4, 4), dtype=torch.uint8), requires_grad=False
+    )
+
+    layer._setup()
+
+    assert not hasattr(layer, "input_quantizer")
+    assert not hasattr(layer, "weight_quantizer")
+    assert not hasattr(layer, "output_quantizer")
+    assert layer.fake_quant_method is not None
+
+    original_weight = layer.weight.clone()
+    layer.fold_weight()  # must be a no-op: nothing named "*weight_quantizer" to fold
+    assert torch.equal(layer.weight, original_weight)
+
+
+def test_validate_quant_cfg_allows_weight_quant_on_unquantized_layer():
+    model = _model_with_layer(vllm_plugin.vllm_linear.UnquantizedLinearMethod())
+    quant_cfg = [{"quantizer_name": "*weight_quantizer", "enable": True, "cfg": {"num_bits": 8}}]
+
+    validate_quant_cfg_against_vllm_quant_method(model, quant_cfg)  # must not raise
+
+
+def test_validate_quant_cfg_ignores_modules_without_quant_method():
+    model = torch.nn.Module()
+    model.plain = torch.nn.Linear(2, 2)
+    quant_cfg = [{"quantizer_name": "*", "enable": True, "cfg": {"num_bits": 8}}]
+
+    validate_quant_cfg_against_vllm_quant_method(model, quant_cfg)  # must not raise
+
+
+def test_validate_quant_cfg_kv_only_cfg_ignores_already_quantized_linear():
+    """A KV-only quant_cfg (the fakequant-on-existing-checkpoint use case) never
+    matches Linear weight_quantizer/input_quantizer names, so it must pass
+    regardless of the checkpoint's own quant_method."""
+    model = _model_with_layer(_DummyQuantizedMethod())
+    quant_cfg = [
+        {"quantizer_name": "*", "enable": False},
+        {
+            "quantizer_name": "*[kv]_bmm_quantizer",
+            "enable": True,
+            "cfg": {"num_bits": (2, 1), "use_constant_amax": True},
+        },
+    ]
+
+    validate_quant_cfg_against_vllm_quant_method(model, quant_cfg)  # must not raise
+
+
+@pytest.mark.parametrize("suffix", ["weight_quantizer", "input_quantizer", "output_quantizer"])
+def test_validate_quant_cfg_raises_on_already_quantized_layer(suffix):
+    model = _model_with_layer(_DummyQuantizedMethod())
+    quant_cfg = [{"quantizer_name": f"*{suffix}", "enable": True, "cfg": {"num_bits": 8}}]
+
+    with pytest.raises(ValueError, match=re.escape(f"layer.{suffix}")):
+        validate_quant_cfg_against_vllm_quant_method(model, quant_cfg)
+
+
+def test_validate_quant_cfg_last_matching_entry_wins():
+    model = _model_with_layer(_DummyQuantizedMethod())
+
+    # Blanket enable overridden by a later, more specific disable -> no raise.
+    validate_quant_cfg_against_vllm_quant_method(
+        model,
+        [
+            {"quantizer_name": "*weight_quantizer", "enable": True, "cfg": {"num_bits": 8}},
+            {"quantizer_name": "layer.weight_quantizer", "enable": False},
+        ],
+    )
+
+    # Blanket disable overridden by a later, more specific enable -> raises.
+    with pytest.raises(ValueError, match=re.escape("layer.weight_quantizer")):
+        validate_quant_cfg_against_vllm_quant_method(
+            model,
+            [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "layer.weight_quantizer",
+                    "enable": True,
+                    "cfg": {"num_bits": 8},
+                },
+            ],
+        )
