@@ -17,7 +17,7 @@
 # GDPVal (NeMo Gym "Stirrup" agent) — STANDALONE gym eval, RUBRIC mode.
 # Self-deploys a checkpoint via vLLM on one SLURM node. One gym eval per config.
 #
-# Read recipes/tasks/aa_gym/gdpval.md + references/gym-gdpval.md first — they
+# Read recipes/tasks/gym/gdpval.md + references/gym-gdpval.md first — they
 # cover the SIF sandbox, scoring modes, judge panel, preflight and failure modes.
 #
 # Before running: `.env` needs HF_TOKEN, INFERENCE_API_KEY, TAVILY_API_KEY,
@@ -25,7 +25,7 @@
 # SIF must exist (prefer a site-provided one, else
 # `srun -p cpu -t 01:00:00 --pty "$SKILL_DIR/scripts/gdpval-sif.sh"`).
 #
-#   nel run --config example_gym_gdpval.yaml --env-file .env
+#   nel run --config example_gdpval.yaml --env-file .env
 #
 # `limit_samples` is INERT here — the gym always runs all 220 tasks. There is no
 # cheap smoke test; see the recipe's Canary section.
@@ -144,6 +144,8 @@ evaluation:
     # deliverables are NOT auto-uploaded — they stay on disk for inspection.
     # Drop "_cache" if you WANT them uploaded as artifacts.
     PERSIST_DELIVERABLES_DIR: lit:/results/gdpval/deliverables_cache
+    # Use the currently validated launcher via $SKILL_DIR/scripts/nel-gdpval.sh. It
+    # assigns this stable ID before the runtime re-export (including across resumes).
     NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID
   # Installs apptainer + squashfuse into the eval container (needs
   # NEMO_EVALUATOR_TRUST_PRE_CMD=1 in the launching shell). See references/gym-gdpval.md.
@@ -228,7 +230,7 @@ evaluation:
                 command: |
                   set -ex
                   cd /opt/Gym
-                  # Honour a mounted uv cache if injected, else image-local. No ${VAR} braces.
+                  # Honour a mounted uv cache if injected, else image-local. Plain $VAR, no braces.
                   [ -n "$UV_CACHE_DIR" ] || export UV_CACHE_DIR=/opt/cache/uv
                   source .venv/bin/activate
                   # install_on_the_fly: checkout the pin when /opt/Gym is a git repo; some
@@ -241,12 +243,18 @@ evaluation:
                   else
                     echo "=== /opt/Gym is not a git repo; using baked-in Gym version ==="
                   fi
+                  # Pin sub-venv ray to whatever the IMAGE already has. Hardcoding a
+                  # version breaks when the image moves: a 2.49.2 pin against an image
+                  # carrying ray[default]==2.55.1 makes uv unsatisfiable and the gym
+                  # server dies at startup. Empty => leave ray unpinned.
+                  _ray_ver="$(/opt/Gym/.venv/bin/python -c 'import ray,sys; sys.stdout.write(ray.__version__)' 2>/dev/null || true)"
+                  echo "=== image ray version: $_ray_ver ==="
                   for r in /opt/Gym/responses_api_models/*/requirements.txt \
                            /opt/Gym/responses_api_agents/*/requirements.txt \
                            /opt/Gym/resources_servers/*/requirements.txt; do
                     [ -f "$r" ] || continue
                     grep -vE '^[[:space:]]*-e ' "$r" > "$r.fixed" || true
-                    grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo 'ray==2.49.2' >> "$r.fixed"
+                    [ -n "$_ray_ver" ] && { grep -qiE '^ray([<>=[]|$)' "$r.fixed" 2>/dev/null || echo "ray[default]==$_ray_ver" >> "$r.fixed"; }
                     grep -qiE '^tqdm' "$r.fixed" 2>/dev/null || echo 'tqdm' >> "$r.fixed"
                     mv "$r.fixed" "$r" 2>/dev/null || true
                   done
@@ -257,7 +265,7 @@ evaluation:
                     d="$(dirname "$v")"
                     [ -f "$d/requirements.txt" ] && uv pip install --python "$v/bin/python" -q -r "$d/requirements.txt" || true
                   done
-                  # Preserve inherited PYTHONPATH. Plain $VAR only (OmegaConf parses ${...}).
+                  # Preserve inherited PYTHONPATH. Plain $VAR only -- OmegaConf parses brace syntax.
                   _gym_sp="$(/opt/Gym/.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')"
                   if [ -n "$PYTHONPATH" ]; then export PYTHONPATH="/opt/Gym:$_gym_sp:$PYTHONPATH"
                   else export PYTHONPATH="/opt/Gym:$_gym_sp"; fi

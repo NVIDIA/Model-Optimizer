@@ -34,8 +34,8 @@ If `MODELOPT_WORKSPACE_ROOT` is set, use the common skill's `workspace-managemen
 
 ### nel-next path (Terminal-Bench 2.x, SWE-bench, …) — branch here FIRST
 
-A few **agentic** AA benchmarks do **not** run on the default
-`nemo-evaluator-launcher` 0.2.6 (Steps 1–9 don't apply). They run on **nel-next**
+A few **agentic** AA benchmarks do **not** run on the currently validated
+`nemo-evaluator-launcher` 0.2.6 path (Steps 1–9 don't apply). They run on **nel-next**
 (`nemo-evaluator[harbor]` 0.4.x) — a separate package, CLI (`nel eval run`), `-O`
 overrides, and `services`/`benchmarks`/`cluster`/`output` schema. If the user asks
 for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
@@ -45,21 +45,21 @@ for one, do **not** add it to a 0.2.6 `evaluation.tasks` list — instead:
 3. Run **`modelopttools:eval-config`** (Step 3b) to write the AWS-sandbox creds + harbor infra rows (`${NEL_NEXT_EVAL_IMAGE}`, `${HARBOR_*_ECR_REPOSITORY}`) into `.env`; always include the `output.export_config.mlflow` block.
 4. Dry-run → canary → full (`nel-next.sh eval run`), then **push to MLflow** — SLURM doesn't auto-export, so run `nel-next.sh mlflow-push -r <run_id> -c <cfg>` after (config-driven; see `references/nel-next.md`).
 
-Steps 1–9 below are the 0.2.6 path — use them for everything else.
+Steps 1–9 below are currently validated with 0.2.6 — use them for everything else.
 
 ---
 
 ### GDPVal (NeMo Gym "Stirrup" agent) path — branch here too
 
-GDPVal **does** run on the 0.2.6 `nel` launcher (as a `nemo_gym` task, not
-nel-next), so Steps 1–9 apply — but it is mechanically special and **standalone**
-(one gym eval per config; never mix it with `aa/` tasks). If the user asks for
-GDPVal:
+GDPVal **does** run on the currently validated 0.2.6 `nel` launcher (as a
+`nemo_gym` task, not nel-next), so Steps 1–9 apply — but it is mechanically
+special and **standalone** (one gym eval per config; never mix it with `aa/`
+tasks). If the user asks for GDPVal:
 
 1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, gym prepare/reap
    machinery, deploy sizing, rubric-vs-comparison scoring, MLflow deliverables trap,
-   failure modes) + **`recipes/tasks/aa_gym/gdpval.md`**.
-2. Start from **`recipes/examples/gym_gdpval/example_gym_gdpval.yaml`** — a single
+   failure modes) + **`recipes/tasks/gym/gdpval.md`**.
+2. Start from **`recipes/examples/gym/example_gdpval.yaml`** — a single
    self-contained file.
 3. Prerequisite — the Apptainer SIF. **If your site provides one, use it**
    (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
@@ -70,10 +70,40 @@ GDPVal:
    unsandboxed. Verify with `gdpval-sif.sh --check`. `.env` needs `HF_TOKEN`, `INFERENCE_API_KEY`, `TAVILY_API_KEY`,
    `INFERENCE_JUDGE_URL`, `GDPVAL_SIF_DIR`, and `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the
    config has a `pre_cmd`). Thinking mode is mandatory (non-thinking loses ~86%).
-4. Dry-run → launch. **`limit_samples` is inert on the gym path** (the gym runs all
-   220 tasks regardless), so there is no cheap canary: watch the real run's first
+4. Run both dry-run and launch through `"$SKILL_DIR/scripts/nel-gdpval.sh"`; it
+   enforces the currently validated 0.2.6 launcher even if `nel` on PATH is stale
+   and avoids an unset `NEL_INVOCATION_ID` failure before client startup.
+   **`limit_samples` is inert on the gym path** (the gym runs all 220 tasks
+   regardless), so there is no cheap canary: watch the real run's first
    ~20–30 min for the SIF-sandbox line and judge auth, and cancel if wrong. See the
    recipe's Canary section.
+
+---
+
+### MRCR (NeMo Gym `simple_agent`) path — branch here too
+
+A 0.2.6 `nemo_gym` task like GDPVal and equally **standalone**, but far simpler:
+`simple_agent`, **no SIF, no judge, no Tavily** — deterministic prefix-gated
+grading, `HF_TOKEN` the only secret. **Not an AA benchmark** — never generate it
+for an "AA" request. If the user asks for MRCR:
+
+1. Read **`recipes/tasks/gym/mrcr.md`**; start from
+   **`recipes/examples/gym/example_mrcr.yaml`** (1M variant, like the golden).
+2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
+   sets the context cap, dataset *and* metric prefix; the three are not
+   comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
+   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
+   `transformers`; prepare fails without it) and
+   `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
+4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
+   Gym and must apply, so the template's `container:` is `???` and the bootstrap
+   exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
+   NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
+5. Long-context deploy (`--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
+   multi-instance fan-out); **never cap output tokens**; report the needle-count
+   strata alongside `pass@1/accuracy`.
 
 ---
 
@@ -90,9 +120,14 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 - AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 - **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require `nemo-evaluator[harbor]` 0.4.x (the package; `nemo-evaluator-next` is the eval *image* repo); `aa/` is the 0.2.6 suite.
-- **GDPVal (NeMo Gym / agentic)** — **part of the AA suite** but a 0.2.6 `nemo_gym` task on a different harness, so it's **standalone** (see the GDPVal branch above): recipe `recipes/tasks/aa_gym/gdpval.md` + shared reference `references/gym-gdpval.md` + self-contained example `recipes/examples/gym_gdpval/`. Generated as its **own config** from the example, **never merged into the `aa/` multi-task `tasks` list**. The `aa_gym/` dir holds the NeMo Gym Stirrup-agent tasks.
+- **NeMo Gym tasks** — `recipes/tasks/gym/*.md`, with self-contained examples at `recipes/examples/gym/example_<task>.yaml`. The `gym/` dir groups by **harness** (0.2.6 `nemo_gym`), **not** by suite membership, so read AA membership per task from the table below — never from the path. Every gym task is **standalone**: generated as its own config from its example, one gym eval per config, **never merged into the `aa/` multi-task `tasks` list** and never mixed with each other.
 
-**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/aa_gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
+  | Task | Recipe / example | In AA suite? | Generate when |
+  | --- | --- | --- | --- |
+  | **GDPVal** (Stirrup agent, agentic) | `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `recipes/examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
+  | **MRCR** (simple agent, long-context) | `recipes/tasks/gym/mrcr.md`, `recipes/examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
+
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
 
 **Shortcut path** (when task list is known up front, e.g. "run AA"):
 

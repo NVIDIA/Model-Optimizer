@@ -28,7 +28,7 @@
 #                        directory -> <dir>/$GDPVAL_SIF_NAME (default python-3.13.gdpval.sif,
 #                        matching the example config); a *.sif path
 #                        is used verbatim. Bind-mount this SAME dir into the eval
-#                        container at /gdpval/sif (see recipes/examples/gym_gdpval/).
+#                        container at /gdpval/sif (see recipes/examples/gym/).
 #     --commit <sha>     NeMo Gym commit whose gdpval.def to build. Keep in sync
 #                        with the config's install_on_the_fly.commit.
 #     --force            Rebuild even if the SIF already exists.

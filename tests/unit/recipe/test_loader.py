@@ -22,6 +22,7 @@ import sys
 import types
 from fnmatch import fnmatch
 from importlib.resources import files
+from pathlib import Path
 
 import pytest
 
@@ -36,6 +37,7 @@ from modelopt.recipe.config import (
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
+from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -1916,3 +1918,40 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
+    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
+    # them unconditionally, so a general recipe is the migration target and must match it. Without
+    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
+    assert "*output_layer*" in recipe.auto_quantize.disabled_layers
+    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
+def _all_shipped_ptq_recipe_paths():
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    root = files("modelopt_recipes")
+    paths = []
+    for path in sorted(Path(str(root)).rglob("*.yaml")):
+        rel = path.relative_to(str(root))
+        # Units/presets under configs/ are fragments, not standalone recipes.
+        if rel.parts[0] == "configs":
+            continue
+        raw = _load_raw_config(path)
+        # List-shaped fragments (layer-pattern units) are not recipes.
+        if not isinstance(raw, dict):
+            continue
+        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+            paths.append(str(rel.with_suffix("")))
+    return paths
+
+
+@pytest.mark.parametrize("recipe_path", _all_shipped_ptq_recipe_paths())
+def test_shipped_ptq_recipe_algorithm_config_constructs(recipe_path):
+    """Every shipped PTQ recipe's ``algorithm`` must build its calibration config class.
+
+    ``QuantizeConfig.algorithm`` accepts a bare dict, so ``load_recipe`` alone never constructs
+    ``QuantizeAlgorithmConfig`` — a malformed algorithm block loads fine here and only blows up
+    later inside ``mtq.quantize``. This walks the same path ``apply_mode`` does so a schema break
+    (e.g. a legacy ``layerwise: false`` bool) fails at test time instead of at calibration time.
+    """
+    algorithm = load_recipe(recipe_path).quantize.algorithm
+    for mode_name, mode_cfg in get_modelike_from_algo_cfg(algorithm):
+        CalibrateModeRegistry[mode_name].config_class(**mode_cfg)

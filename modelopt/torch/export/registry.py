@@ -27,12 +27,10 @@ editing if/elif chains inside ``unified_export_hf.py``.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-
-from modelopt.torch.quantization.utils.core_utils import has_non_resident_weights
 
 __all__ = [
     "ExportContext",
@@ -46,32 +44,16 @@ __all__ = [
 class ExportContext:
     """Shared state for a single export invocation, passed to every handler call.
 
-    The tied-weight dedup caches must be scoped to one export invocation: a
-    process-global cache would carry stale entries whose ``data_ptr`` keys can be
-    recycled by PyTorch's allocator across exports, causing silent false-positive
-    aliasing. ``tied_cache`` (int keys) holds dense Linear / per-expert wrapper
-    dedup; ``moe_tied_cache`` (tuple keys) holds MoE fused-experts module dedup.
-
-    Both are ``None`` when the model's weights are not resident for the whole export
-    (FSDP2 or accelerate offload), since ``data_ptr`` keys are meaningless once weights
-    move.
+    Tied-weight dedup is not a handler concern: the driver builds one name-based
+    :class:`TiedWeightMap` and feeds it to ``sync_tied_input_amax`` and
+    ``postprocess_state_dict`` directly. Both dense and fused-MoE tied weights are packed
+    independently and their duplicate keys are dropped by name there, so the context
+    carries no tied-weight map (handlers never consulted it).
     """
 
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
-    tied_cache: dict[int, nn.Module] | None = field(default_factory=dict)
-    moe_tied_cache: dict[tuple[int, int], nn.Module] | None = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # data_ptr() only identifies a tensor while it stays resident, so dedup is unsafe
-        # once weights move. Tied weights are then written as duplicates rather than
-        # re-aliased, making tied-weight export (DiffusionGemma) resident-path only.
-        # TODO: dedup by tied-group name instead, reusing the _tied_weights_keys
-        # resolution in _collect_canonical_tied_patterns, which survives weight moves.
-        if has_non_resident_weights(self.model):
-            self.tied_cache = None
-            self.moe_tied_cache = None
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]

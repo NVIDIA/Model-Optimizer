@@ -28,7 +28,7 @@ metadata:
 quantize:
   algorithm:
     method: max
-    layerwise: false
+    layerwise: {enable: false}
   quant_cfg:
     - $import: base_disable_all
     # NVFP4 on MLP and expert weight matrices.

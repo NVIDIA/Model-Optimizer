@@ -712,21 +712,34 @@ def main(args: argparse.Namespace):
 
         # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
         # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
-        use_config_only_export = (
+        exported_config_only = False
+        if (
             hasattr(AutoBridge, "from_hf_config")
             and isinstance(provider, _HYBRID_PROVIDER_TYPES)
             and not is_vlm
-        )
-        if use_config_only_export:
+        ):
             pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
             # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
             pruned_bridge.trust_remote_code = args.trust_remote_code
-            pruned_bridge.save_hf_pretrained(
-                model, args.output_hf_path, source_path=args.hf_model_name_or_path
-            )
-        else:
-            if isinstance(provider, _HYBRID_PROVIDER_TYPES) and not is_vlm:
+            try:
+                pruned_bridge.save_hf_pretrained(
+                    model, args.output_hf_path, source_path=args.hf_model_name_or_path
+                )
+                exported_config_only = True
+            except ValueError as e:
+                # nemo:26.06+ exposes from_hf_config but rejects config-only save_hf_pretrained;
+                # fall back to the dummy-model path below.
+                if "requires a pretrained HuggingFace model" not in str(e):
+                    raise
+                warn_rank_0(f"Config-only HF export unsupported ({e}); using dummy-model export.")
+
+        if not exported_config_only:
+            if (
+                not hasattr(AutoBridge, "from_hf_config")
+                and isinstance(provider, _HYBRID_PROVIDER_TYPES)
+                and not is_vlm
+            ):
                 warn_rank_0(
                     "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
                     "path, which cannot round-trip a pruned native NemotronH config. Use "

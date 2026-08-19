@@ -35,6 +35,6 @@ eval_steps: 8
 dataset_test_split: test
 
 # ModelOpt Quantization Parameters
-quant_cfg: # Examples: MXFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_ONLY_CFG
-  # For the full list of supported configs, do: mtq.config.choices
+recipe: # Examples: general/ptq/mxfp4_mlp_weight_only, general/ptq/nvfp4_mlp_weight_only
+  # For the full list of built-in recipes, see modelopt_recipes/general/ptq/
 calib_size: 128
