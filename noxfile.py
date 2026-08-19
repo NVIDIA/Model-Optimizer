@@ -239,9 +239,17 @@ def regression(session):
 # ─── Code quality ─────────────────────────────────────────────────────────────
 @nox.session
 def pre_commit_all(session):
-    session.install("-e", ".[all,dev-lint]")
+    session.install("-e", ".[all,dev-lint]", "pytest", "pytest-timeout")
     session.run("pre-commit", "run", "--all-files", "--show-diff-on-failure")
-    session.run("python", "tests/unit/tools/ci/test_mypy_hook_config.py")
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "--confcutdir=tests/unit/tools/ci",
+        "tests/unit/tools/ci/test_mypy_hook_config.py",
+    )
 
 
 @dataclass(frozen=True)
@@ -476,7 +484,7 @@ def pre_commit_diff(session):
     from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     from_ref = _resolve_git_commit(session, from_ref)
     to_ref = _resolve_git_commit(session, to_ref)
-    session.install("-e", ".[all,dev-lint]")
+    session.install("-e", ".[all,dev-lint]", "pytest", "pytest-timeout")
     skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
     skip_hooks.add("mypy")
     session.run(
@@ -490,7 +498,15 @@ def pre_commit_diff(session):
         env={"SKIP": ",".join(sorted(skip_hooks))},
     )
     _run_changed_file_mypy(session, from_ref, to_ref)
-    session.run("python", "tests/unit/tools/ci/test_mypy_hook_config.py")
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "--confcutdir=tests/unit/tools/ci",
+        "tests/unit/tools/ci/test_mypy_hook_config.py",
+    )
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────

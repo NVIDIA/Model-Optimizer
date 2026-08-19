@@ -13,10 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavioral check for the Mypy pre-commit hook configuration.
-
-Run with ``python tests/unit/tools/ci/test_mypy_hook_config.py``.
-"""
+"""Behavioral tests for the Mypy pre-commit hook configuration."""
 
 import subprocess
 import sys
@@ -28,7 +25,7 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 
-def main() -> None:
+def test_mypy_hook_reports_imported_interface_error() -> None:
     config = yaml.safe_load(
         (REPOSITORY_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     )
@@ -66,12 +63,6 @@ def main() -> None:
             text=True,
         )
 
-    if result.returncode != 1:
-        raise RuntimeError(result.stdout + result.stderr)
+    assert result.returncode == 1, result.stdout + result.stderr
     expected = 'Argument 1 to "takes_int" has incompatible type "str"; expected "int"  [arg-type]'
-    if expected not in result.stdout:
-        raise RuntimeError(result.stdout + result.stderr)
-
-
-if __name__ == "__main__":
-    main()
+    assert expected in result.stdout, result.stdout + result.stderr
