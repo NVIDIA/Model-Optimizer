@@ -1,3 +1,4 @@
+# SPDX-FileCopyrightText: Copyright 2026 Google LLC and contributors
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -38,6 +39,7 @@ MODEL_NAME_TO_TYPE = {
     # DiffusionGemma must come before "Gemma" — get_model_type substring-matches
     # in order, and "gemma" is a substring of "diffusiongemma".
     "DiffusionGemma": "diffusion_gemma",
+    "Gemma4": "gemma4",
     "Gemma3": "gemma3",
     "Gemma2": "gemma2",
     "Gemma": "gemma",

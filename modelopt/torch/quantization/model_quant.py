@@ -1,3 +1,4 @@
+# Some changes Copyright 2026 Google LLC and contributors.
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -51,9 +52,11 @@ __all__ = [
     "enable_quantizer",
     "fold_weight",
     "get_auto_quantize_config",
+    "get_calibration_state",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
+    "set_calibration_state",
 ]
 
 
@@ -807,3 +810,29 @@ def compute_quantization_mse(
     return {
         name: acc["sum"] / acc["count"] for name, acc in accumulators.items() if acc["count"] > 0
     }
+
+def get_calibration_state(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Extracts the current calibration state (amax) from all quantizers in the model."""
+    state = {}
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer):
+            if hasattr(module, "_calibrator") and hasattr(module._calibrator, "_calib_amax"):
+                amax = module._calibrator._calib_amax
+                if amax is not None:
+                    state[f"{name}._calib_amax"] = amax.detach().cpu()
+    return state
+
+
+def set_calibration_state(model: nn.Module, state: dict[str, torch.Tensor]):
+    """Injects calibration state back into the model's quantizers."""
+    # Get the model's primary device
+    model_device = next(model.parameters()).device if list(model.parameters()) else torch.device("cpu")
+    
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer):
+            key = f"{name}._calib_amax"
+            if key in state:
+                if hasattr(module, "_calibrator"):
+                    # Use the module's buffer device if available, otherwise fallback to model device
+                    target_device = module._amax.device if hasattr(module, "_amax") else model_device
+                    module._calibrator._calib_amax = state[key].to(target_device)
