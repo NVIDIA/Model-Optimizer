@@ -85,7 +85,8 @@ def finalization_marker_is_current(
         marker_identity
         and marker_identity == _successful_manifest_identity_from_payload(manifest)
         and isinstance(outputs, Mapping)
-        and summary == outputs.get("report")
+        and "report" in outputs
+        and summary == outputs["report"]
     )
 
 
