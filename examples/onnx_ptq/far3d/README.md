@@ -67,18 +67,16 @@ This produces `far3d.encoder.onnx` and `far3d.decoder.onnx`.
 
 ## 3. Prepare calibration batches
 
-Build temporary engines from the exported models. They run the reference pipeline while collecting representative encoder and decoder inputs:
+Build temporary engines from the exported models. They run the reference pipeline while collecting representative encoder and decoder inputs. TensorRT 11 builds strongly typed networks by default, so these engines preserve the types declared by the exported graphs; builder precision flags such as `--fp16` are no longer accepted:
 
 ```bash
 trtexec \
   --onnx=far3d.encoder.onnx \
-  --saveEngine=far3d.encoder.fp16.engine \
-  --fp16 \
+  --saveEngine=far3d.encoder.calibration.engine \
   --skipInference
 trtexec \
   --onnx=far3d.decoder.onnx \
-  --saveEngine=far3d.decoder.fp16.engine \
-  --stronglyTyped \
+  --saveEngine=far3d.decoder.calibration.engine \
   --skipInference
 ```
 
@@ -88,8 +86,8 @@ Extract 512 batches sampled every 20 frames from the Argoverse 2 validation load
 /opt/far3d/bin/python /opt/Model-Optimizer/examples/onnx_ptq/far3d/prepare_calibration.py \
   dependencies/Far3D/projects/configs/far3d.py \
   data/far3d_calibration \
-  --encoder-engine far3d.encoder.fp16.engine \
-  --decoder-engine far3d.decoder.fp16.engine \
+  --encoder-engine far3d.encoder.calibration.engine \
+  --decoder-engine far3d.decoder.calibration.engine \
   --num-samples 512 \
   --sample-skip-interval 20
 ```

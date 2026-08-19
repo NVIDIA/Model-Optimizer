@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add an end-to-end PETRv1 and PETRv2 ONNX PTQ example with nuScenes calibration and accuracy evaluation, INT8 and FP8 backbone quantization, FP16 heads, and TensorRT engine benchmarking.
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Instead of setting the global scale from the largest per-block amax seen during calibration (plain ``max``, which leaves no room above it so any larger activation saturates), it anchors the scale to a low percentile of the per-block amax distribution, leaving the rest of the FP8 block-scale range as headroom: ``amax = max(rho * anchor, upper)``, where ``anchor`` and ``upper`` are the per-block amaxes at ``anchor_percentile`` (default 1) and ``upper_percentile`` (default 99.99; set to 100 to never clip calibration data), and ``rho`` (default 16384) is the headroom factor. Applies only to NVFP4 dynamic-block input quantizers; ``SequentialQuantizer`` activation quantizers raise. Weight scales are an orthogonal axis selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian``), so one recipe can combine a weight calibration with this activation policy in a single pass. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` with only the calibration algorithm swapped and exports a standard NVFP4 checkpoint.
 
 *Megatron Framework (M-LM / M-Bridge)*

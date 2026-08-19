@@ -14,80 +14,17 @@
 # limitations under the License.
 
 import argparse
-import re
+import sys
 from pathlib import Path
 
-import numpy as np
-import onnx
-from onnxruntime.quantization.calibrate import CalibrationDataReader
-
 from modelopt.onnx.quantization import quantize
-from modelopt.onnx.utils import topologically_sort_graph_nodes
 
-
-class FileCalibrationReader(CalibrationDataReader):
-    def __init__(self, calibration_dir, pattern):
-        self.batch_paths = sorted(Path(calibration_dir).glob(pattern))
-        if not self.batch_paths:
-            raise ValueError(f"No {pattern} calibration batches found in {calibration_dir}")
-        self.rewind()
-
-    def get_next(self):
-        batch_path = next(self._iterator, None)
-        return None if batch_path is None else self.load(batch_path)
-
-    def get_first(self):
-        return self.load(self.batch_paths[0])
-
-    def rewind(self):
-        self._iterator = iter(self.batch_paths)
-
-    def load(self, batch_path):
-        raise NotImplementedError
-
-
-class EncoderCalibrationReader(FileCalibrationReader):
-    def __init__(self, calibration_dir):
-        super().__init__(calibration_dir, "*.npy")
-
-    def load(self, batch_path):
-        return {"img": np.load(batch_path)}
-
-
-class DecoderCalibrationReader(FileCalibrationReader):
-    def __init__(self, calibration_dir, onnx_path):
-        graph = onnx.load(onnx_path, load_external_data=False).graph
-        self.input_dtypes = {
-            value.name: onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type)
-            for value in graph.input
-        }
-        super().__init__(calibration_dir, "*.npz")
-
-    def load(self, batch_path):
-        with np.load(batch_path) as batch:
-            missing = self.input_dtypes.keys() - batch.files
-            if missing:
-                raise ValueError(f"{batch_path} is missing decoder inputs: {sorted(missing)}")
-            return {
-                name: batch[name].astype(dtype, copy=False)
-                for name, dtype in self.input_dtypes.items()
-            }
-
-
-def find_encoder_nodes_to_exclude(onnx_path):
-    graph = onnx.load(onnx_path, load_external_data=False).graph
-    topologically_sort_graph_nodes(graph)
-
-    excluded = set()
-    downstream_tensors = set()
-    for node in graph.node:
-        is_osa = "OSA4_5" in node.name
-        is_downstream = any(name in downstream_tensors for name in node.input)
-        if is_osa or is_downstream:
-            excluded.add(node.name)
-        if "lateral_convs" in node.name or (is_downstream and not is_osa):
-            downstream_tensors.update(node.output)
-    return sorted(excluded)
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from examples.onnx_ptq.quantization_utils import (
+    NpyCalibrationReader,
+    NpzCalibrationReader,
+    find_vovnet_nodes_to_exclude,
+)
 
 
 def parse_args():
@@ -98,6 +35,12 @@ def parse_args():
         "--calibration-dir", required=True, help="Directory created by prepare_calibration.py"
     )
     parser.add_argument("--quantization-mode", choices=("int8", "fp8"), default="int8")
+    parser.add_argument(
+        "--max-calibration-batches",
+        type=int,
+        default=512,
+        help="Maximum number of calibration batches to load",
+    )
     parser.add_argument("--encoder-output")
     parser.add_argument("--decoder-output")
     parser.add_argument(
@@ -112,14 +55,17 @@ def quantize_encoder(args):
     encoder_dir = Path(args.calibration_dir)
     if (encoder_dir / "encoder").is_dir():
         encoder_dir /= "encoder"
-    excluded_nodes = [
-        rf"^{re.escape(name)}$" for name in find_encoder_nodes_to_exclude(args.encoder_onnx)
-    ]
+    excluded_nodes = find_vovnet_nodes_to_exclude(args.encoder_onnx)
     print(f"Excluding {len(excluded_nodes)} accuracy-sensitive nodes from quantization")
     quantize(
         onnx_path=args.encoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=EncoderCalibrationReader(encoder_dir),
+        calibration_data_reader=NpyCalibrationReader(
+            encoder_dir,
+            args.encoder_onnx,
+            "img",
+            max_batches=args.max_calibration_batches,
+        ),
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         nodes_to_exclude=excluded_nodes,
@@ -130,10 +76,16 @@ def quantize_encoder(args):
 
 def quantize_decoder(args):
     decoder_dir = Path(args.calibration_dir) / "decoder"
+    calibration_reader = NpzCalibrationReader(
+        decoder_dir,
+        args.decoder_onnx,
+        max_batches=args.max_calibration_batches,
+        safe_cast_inputs=("timestamp",),
+    )
     quantize(
         onnx_path=args.decoder_onnx,
         quantize_mode=args.quantization_mode,
-        calibration_data_reader=DecoderCalibrationReader(decoder_dir, args.decoder_onnx),
+        calibration_data_reader=calibration_reader,
         calibration_method="max",
         calibration_eps=["cuda:0", "cpu"],
         high_precision_dtype="fp16" if args.quantization_mode == "fp8" else "fp32",
@@ -143,6 +95,8 @@ def quantize_decoder(args):
 
 def main():
     args = parse_args()
+    if args.max_calibration_batches < 1:
+        raise ValueError("--max-calibration-batches must be positive")
     if args.encoder_output is None:
         args.encoder_output = f"far3d.encoder.{args.quantization_mode}.onnx"
     if args.decoder_output is None:
