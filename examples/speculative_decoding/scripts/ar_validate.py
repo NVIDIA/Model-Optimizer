@@ -19,6 +19,7 @@ Supports per-category MT-Bench evaluation and online (context-dependent) validat
 """
 
 import argparse
+import json
 from collections import defaultdict
 
 from accelerate import Accelerator
@@ -100,11 +101,26 @@ def main():
         default=None,
         help="Error if AR is below this threshold.",
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=(
+            "JSON dict of config fields to override on the model config and its text_config "
+            "before instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints "
+            "whose nested text_config dims don't propagate to the parent config."
+        ),
+    )
     args = parser.parse_args()
+
+    config_overrides = json.loads(args.config_overrides) if args.config_overrides else None
 
     accelerator = Accelerator()
     model = load_vlm_or_llm(
-        args.model_path, device_map="auto", trust_remote_code=args.trust_remote_code
+        args.model_path,
+        device_map="auto",
+        trust_remote_code=args.trust_remote_code,
+        config_overrides=config_overrides,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
