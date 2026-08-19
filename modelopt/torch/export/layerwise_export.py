@@ -261,11 +261,22 @@ class LayerwiseExporter:
         # handful of tail modules reach it, but the map is model-sized either way.
         self._name_to_module = dict(model.named_modules())
 
-        self._model = model
+        # The context is the single owner of the model, dtype and qlora flag; keeping
+        # parallel copies on self would leave two sources of truth for the same facts.
+        # Dedup is off for the reason the offload path turns it off (registry.py
+        # __post_init__): data_ptr() cannot identify a tensor across an export that keeps
+        # rolling packed weights back. Ties are refused anyway, and with both caches None
+        # the context is immutable, so one instance serves every pass.
+        self._ctx = ExportContext(
+            model=model,
+            dtype=_resolve_export_dtype(model, dtype),
+            is_modelopt_qlora=is_modelopt_qlora,
+            tied_cache=None,
+            moe_tied_cache=None,
+        )
+
         self._export_dir = Path(export_dir)
         self._export_dir.mkdir(parents=True, exist_ok=True)
-        self._is_modelopt_qlora = is_modelopt_qlora
-        self._dtype = _resolve_export_dtype(model, dtype)
         # Not get_kv_cache_dtype(model): it does not recurse, so given the root it always
         # answers None, which then trips the KV assert in the per-tensor pass.
         self._kv_cache_format = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)[
@@ -292,18 +303,6 @@ class LayerwiseExporter:
             {self._name_mapper(k) for k in raw_tied_keys}
             if self._name_mapper is not None
             else raw_tied_keys
-        )
-
-        # Dedup off for the reason the offload path turns it off (registry.py
-        # __post_init__): data_ptr() cannot identify a tensor across an export that keeps
-        # rolling packed weights back. Ties are refused anyway, and with both caches None
-        # the context is immutable, so one instance serves every pass.
-        self._ctx = ExportContext(
-            model=model,
-            dtype=self._dtype,
-            is_modelopt_qlora=is_modelopt_qlora,
-            tied_cache=None,
-            moe_tied_cache=None,
         )
 
     def export_layer(
@@ -334,7 +333,7 @@ class LayerwiseExporter:
         with transient_module_state(layer_module):
             # Per-block, so neither fits a whole-model prep pass: earlier there is no amax
             # yet, later the layer is already written.
-            _prepare_moe_inputs(layer_module, self._dtype, self._is_modelopt_qlora)
+            _prepare_moe_inputs(layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora)
             self._fuse_shared_inputs(layer_module, probe_forward)
             sync_moe_gate_up_amax(layer_module)
 
@@ -377,7 +376,7 @@ class LayerwiseExporter:
         input_to_linear, _ = collect_shared_input_modules(
             layer_module, lambda: probe_forward(layer_module)
         )
-        _fuse_shared_input_modules(self._model, input_to_linear, quantization_format=layer_format)
+        _fuse_shared_input_modules(self._ctx.model, input_to_linear, quantization_format=layer_format)
 
     def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
         """Export the tail, write every config artifact, and index all shards.
@@ -402,8 +401,8 @@ class LayerwiseExporter:
         assert not self._finalized, "finalize() called twice"
         self._finalized = True
 
-        model = self._model
-        quant_config = get_quant_config(model, is_modelopt_qlora=self._is_modelopt_qlora)
+        model = self._ctx.model
+        quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         _add_mtp_exclusions(model, quant_config)
         _warn_on_unsynced_moe_gate_up(model)
         if getattr(model, "hf_quantizer", None) is not None:
@@ -496,7 +495,7 @@ class LayerwiseExporter:
         if tensor is None or tensor.is_meta:
             return
         new_key, new_value = _postprocess_single_tensor(
-            full_key, tensor, 448, self._kv_cache_format, self._is_modelopt_qlora
+            full_key, tensor, 448, self._kv_cache_format, self._ctx.is_modelopt_qlora
         )
         if new_key is None or new_value is None:
             return
