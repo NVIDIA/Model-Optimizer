@@ -431,6 +431,38 @@ class LayerwiseExporter:
         _write_hf_export_config(model, quant_config, self._export_dir)
         return quant_config
 
+    def completed_layers(self) -> int:
+        """How many leading layers already have a shard on disk.
+
+        A *contiguous* run from layer 0: a gap means the layers after it were never
+        finished, and resuming past one would leave the checkpoint missing them.
+        """
+        n = 0
+        while (self._export_dir / layer_shard_name(n)).exists():
+            n += 1
+        return n
+
+    def assert_no_orphan_shards(self, manifest_present: bool) -> None:
+        """Refuse to silently redo work when shards exist but the resume record does not.
+
+        The shards cannot say where to resume: that needs ``next_inputs`` and the skipped
+        layers' ``output_meta``, neither reconstructible from quantized weights. So the
+        resume point comes from the manifest, and shards-without-manifest is dangerous --
+        ``start_layer`` is 0, :meth:`assert_shards_present` checks an empty range and
+        passes, and calibration overwrites every finished layer without a word.
+        """
+        if manifest_present:
+            return
+        done = self.completed_layers()
+        if not done:
+            return
+        raise RuntimeError(
+            f"{self._export_dir} already holds shards for layers 0..{done - 1}, but the "
+            "layerwise checkpoint directory has no manifest, so calibration would restart "
+            "at layer 0 and overwrite them. Either restore the checkpoint directory that "
+            f"produced these shards, or delete {self._export_dir} to re-export."
+        )
+
     def assert_shards_present(self, upto: int) -> None:
         """Require shards for layers ``[0, upto)``, which a resume intends to skip.
 

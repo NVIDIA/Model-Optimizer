@@ -152,6 +152,32 @@ def test_resume_without_matching_shards_fails_fast(tmp_path):
         )
 
 
+def test_shards_without_manifest_refuse(tmp_path):
+    """A lost resume record must not silently overwrite finished shards."""
+    export_dir = tmp_path / "fused"
+    checkpoint_dir = tmp_path / "ckpt"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+    # What an ephemeral checkpoint_dir looks like on the next run: shards survive, the
+    # manifest does not. start_layer is then 0, so assert_shards_present checks nothing.
+    (checkpoint_dir / "manifest.json").unlink()
+
+    with pytest.raises(RuntimeError, match="no manifest"):
+        mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+
+def test_export_without_checkpoint_dir_may_overwrite(tmp_path):
+    """Without checkpoint_dir there is no resume to lose, so re-export is allowed."""
+    export_dir = tmp_path / "fused"
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["algorithm"] = {
+        "method": "max",
+        "layerwise": {"enable": True, "export_dir": str(export_dir)},
+    }
+    mtq.quantize(_build_model(), cfg, _calib)
+    mtq.quantize(_build_model(), copy.deepcopy(cfg), _calib)  # must not raise
+
+
 def test_kv_cache_quantized_export_matches(tmp_path):
     """KV-cache scales must survive: the format has to be read off the whole quant config.
 
