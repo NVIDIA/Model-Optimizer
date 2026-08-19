@@ -84,17 +84,29 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
 
     The whole-model export merges their amaxes via ``sync_tied_input_amax``; a per-layer
     pass cannot, since a partner may be uncalibrated or already written.
+
+    Grouped by name via :class:`TiedWeightMap`, which survives offload -- a ``data_ptr``
+    grouping sees nothing when the weights are on meta and would pass vacuously. Falls back
+    to ``data_ptr`` when the map is empty (transformers <5.0 does not publish one).
     """
+    from .model_utils import TiedWeightMap
+
+    tied_map = TiedWeightMap(model)
+    groups: dict[str, list[str]] = {}
     by_ptr: dict[int, list[str]] = {}
     for name, module in model.named_modules():
         weight = getattr(module, "weight", None)
-        if weight is None or not _is_quantized_module(module) or weight.is_meta:
+        if weight is None or not _is_quantized_module(module):
             continue
-        ptr = weight.data_ptr()
-        # data_ptr() is 0 for meta tensors and DTensors, grouping unrelated modules.
-        if ptr:
-            by_ptr.setdefault(ptr, []).append(name)
-    return sorted(n for names in by_ptr.values() if len(names) > 1 for n in names)
+        key = tied_map.group_key(f"{name}.weight")
+        if key is not None:
+            groups.setdefault(key, []).append(name)
+        elif not weight.is_meta and weight.data_ptr():
+            # data_ptr() is 0 for meta tensors and DTensors, grouping unrelated modules.
+            by_ptr.setdefault(weight.data_ptr(), []).append(name)
+    tied = {n for names in groups.values() if len(names) > 1 for n in names}
+    tied |= {n for names in by_ptr.values() if len(names) > 1 for n in names}
+    return sorted(tied)
 
 
 def assert_layerwise_export_supported(model: nn.Module) -> None:
@@ -107,7 +119,6 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
     .. todo::
         AWQ and SVDQuant need that pass's pre-quant-scale steps made per-layer.
     """
-    from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
     from modelopt.torch.utils import distributed as dist
 
     unsupported = sorted(str(f) for f in _module_formats(model) - SUPPORTED_FORMATS)
@@ -120,15 +131,6 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
         )
 
     tied = _tied_quantized_modules(model)
-    if has_accelerate_offload(model) and not tied:
-        # Offloaded weights are on meta, so the grouping above inspected nothing; an empty
-        # result is not a clean bill of health. See ExportContext.__post_init__'s TODO.
-        warnings.warn(
-            "Weight-tie detection is skipped for offloaded models: data_ptr() cannot group "
-            "weights that are not resident. A model with tied quantized modules would "
-            "export per-module input_scale instead of the merged value."
-        )
-
     if tied:
         raise NotImplementedError(
             f"layerwise export does not support weight-tied quantized modules {tied[:6]}: "
@@ -230,14 +232,12 @@ class LayerwiseExporter:
         self._name_to_module = dict(model.named_modules())
 
         # Sole owner of model/dtype/qlora: parallel copies on self would be a second
-        # source of truth. Dedup off as registry.py does for non-resident weights --
-        # data_ptr cannot identify a tensor across an export that keeps rolling them back.
+        # source of truth. Tie state is no longer carried here -- the driver owns a
+        # name-based TiedWeightMap instead.
         self._ctx = ExportContext(
             model=model,
             dtype=_resolve_export_dtype(model, dtype),
             is_modelopt_qlora=is_modelopt_qlora,
-            tied_cache=None,
-            moe_tied_cache=None,
         )
 
         self._export_dir = Path(export_dir)
