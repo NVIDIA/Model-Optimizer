@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -196,6 +197,29 @@ def _eligible_layers(
 def _apply_layer_quantizers(module: nn.Module, quantizers: dict[str, TensorQuantizer]) -> None:
     for attr, quantizer in quantizers.items():
         setattr(module, attr, quantizer)
+
+
+@contextmanager
+def _freeze_existing_quantizers(model: nn.Module, candidate_quantizers: list[TensorQuantizer]):
+    """Run enabled non-candidate quantizers as QDQ without updating their calibration state."""
+    candidate_ids = {id(quantizer) for quantizer in candidate_quantizers}
+    states = []
+    for module in model.modules():
+        if (
+            not isinstance(module, TensorQuantizer)
+            or id(module) in candidate_ids
+            or not module.is_enabled
+        ):
+            continue
+        states.append((module, module._if_quant, module._if_calib))
+        module.enable_quant()
+        module.disable_calib()
+    try:
+        yield
+    finally:
+        for quantizer, if_quant, if_calib in states:
+            quantizer._if_quant = if_quant
+            quantizer._if_calib = if_calib
 
 
 def _get_logits(
@@ -422,11 +446,12 @@ def auto_quantize_kv_cache(
                     ]
                     calibration_proxy = nn.Module()
                     calibration_proxy.quantizers = nn.ModuleList(active_quantizers)
-                    calibrate(
-                        calibration_proxy,
-                        algorithm=config.algorithm,
-                        forward_loop=lambda _: calibration_loop(model),
-                    )
+                    with _freeze_existing_quantizers(model, active_quantizers):
+                        calibrate(
+                            calibration_proxy,
+                            algorithm=config.algorithm,
+                            forward_loop=lambda _: calibration_loop(model),
+                        )
 
                 for layer_name, module, _ in layers:
                     _apply_layer_quantizers(module, disabled_quantizers[layer_name])

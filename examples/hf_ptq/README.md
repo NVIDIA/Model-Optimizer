@@ -429,9 +429,9 @@ KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
 packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
 preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.
-The shipped canary recipe
-searches cast-mode FP8 K/V (8.0 bits/scalar), FP8-K/NVFP4-V (6.25 bits/scalar),
-and packed NVFP4 K/V (4.5 bits/scalar) at 5.4 bits/scalar:
+The shipped canary recipe searches cast-mode FP8 K/V (8.0 bits/scalar) and packed NVFP4 K/V
+(4.5 bits/scalar) at 5.4 bits/scalar. It intentionally excludes FP8-K/NVFP4-V because the
+companion vLLM implementation does not support that asymmetric per-layer format:
 
 ```bash
 python hf_ptq.py \
@@ -451,8 +451,8 @@ state.
 > [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
 > vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
 > `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
-> Full FP8 K/V and full NVFP4 K/V use existing vLLM kernels; FP8-K/NVFP4-V within one layer also
-> requires the separate mixed-K/V kernel implementation.
+> Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
+> kernels once the layer-wise metadata consumer is available.
 
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):

@@ -1071,17 +1071,12 @@ def _postprocess_single_tensor(
                 layer_quantization = _resolve_kv_cache_format_for_key(key, kv_cache_format)
                 assert layer_quantization in [
                     KV_CACHE_FP8,
-                    KV_CACHE_FP8_K_NVFP4_V,
                     KV_CACHE_NVFP4,
                     KV_CACHE_NVFP4_AFFINE,
                 ], "Invalid KV cache quantization format."
                 assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
                 value = value.float() / kv_cache_max_bound
-                is_fp8_scale = layer_quantization == KV_CACHE_FP8 or (
-                    layer_quantization == KV_CACHE_FP8_K_NVFP4_V
-                    and key.endswith("k_bmm_quantizer._amax")
-                )
-                if is_fp8_scale and value.item() > 0.5:
+                if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
                     logger.warning(
                         "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                     )
@@ -1095,17 +1090,21 @@ def _postprocess_single_tensor(
 def _resolve_kv_cache_format_for_key(
     key: str, quantization: str | dict[str, dict[str, str]] | None
 ) -> str | None:
-    """Resolve uniform or per-layer KV-cache metadata for one state-dict key."""
-    if not isinstance(quantization, dict):
-        return quantization
-    matches = [
-        (layer_name, layer_config.get("quant_algo"))
-        for layer_name, layer_config in quantization.items()
-        if key == layer_name or key.startswith(layer_name + ".")
-    ]
-    if not matches:
+    """Resolve uniform or per-layer metadata to the format for this K or V tensor."""
+    if isinstance(quantization, dict):
+        matches = [
+            (layer_name, layer_config.get("quant_algo"))
+            for layer_name, layer_config in quantization.items()
+            if key == layer_name or key.startswith(layer_name + ".")
+        ]
+        quantization = max(matches, key=lambda item: len(item[0]))[1] if matches else None
+    if quantization == KV_CACHE_FP8_K_NVFP4_V:
+        if key.endswith("k_bmm_quantizer._amax"):
+            return KV_CACHE_FP8
+        if key.endswith("v_bmm_quantizer._amax"):
+            return KV_CACHE_NVFP4
         return None
-    return max(matches, key=lambda item: len(item[0]))[1]
+    return quantization
 
 
 def _get_kv_cache_postprocess_config(
@@ -1172,7 +1171,6 @@ def postprocess_state_dict(
                     layer_quantization = _resolve_kv_cache_format_for_key(key, quantization)
                     assert layer_quantization in [
                         KV_CACHE_FP8,
-                        KV_CACHE_FP8_K_NVFP4_V,
                         KV_CACHE_NVFP4,
                         KV_CACHE_NVFP4_AFFINE,
                     ], "Invalid KV cache quantization format."
@@ -1181,11 +1179,7 @@ def postprocess_state_dict(
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    is_fp8_scale = layer_quantization == KV_CACHE_FP8 or (
-                        layer_quantization == KV_CACHE_FP8_K_NVFP4_V
-                        and key.endswith("k_bmm_quantizer._amax")
-                    )
-                    if is_fp8_scale and value.item() > 0.5:
+                    if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )

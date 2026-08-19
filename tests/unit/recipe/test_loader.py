@@ -1933,18 +1933,10 @@ def test_load_recipe_kv_autoquantize_contract():
     assert aq.constraints.effective_bits is None
     assert aq.constraints.kv_effective_bits == 5.4
     assert aq.auto_quantize_method == "kl_div"
-    assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 6.25, 4.5]
-    assert [entry.quantizer_name for entry in aq.candidate_formats[1].quant_cfg] == [
-        "*k_bmm_quantizer",
-        "*v_bmm_quantizer",
-    ]
+    assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
-            assert entry.quantizer_name in {
-                "*[kv]_bmm_quantizer",
-                "*k_bmm_quantizer",
-                "*v_bmm_quantizer",
-            }
+            assert entry.quantizer_name == "*[kv]_bmm_quantizer"
             assert entry.cfg.use_constant_amax
         assert fmt.algorithm["skip_forward_without_activation_calib"]
 

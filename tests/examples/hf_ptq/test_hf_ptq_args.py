@@ -96,7 +96,6 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
     assert inputs["method"] == "kl_div"
     assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
         8.0,
-        6.25,
         4.5,
     ]
     assert "kv_cache_quant_cfg" not in inputs
@@ -110,6 +109,13 @@ def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):
     selected = hf_ptq._select_unpadded_logits(logits, {"attention_mask": attention_mask})
 
     assert torch.equal(selected, logits[attention_mask.bool()])
+
+
+def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    with pytest.raises(ValueError, match="matching token dimensions"):
+        hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):

@@ -20,6 +20,7 @@ from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_quant_config
+from modelopt.torch.quantization import model_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
     _candidate_quantizers,
@@ -71,7 +72,7 @@ def test_kv_candidate_requires_exact_bits_and_both_sides():
         )
 
 
-@pytest.mark.parametrize("algorithm", ["svdquant", {"method": "smoothquant"}])
+@pytest.mark.parametrize("algorithm", ["svdquant", {"method": "smoothquant"}, {"method": "mse"}])
 def test_kv_candidate_rejects_structural_or_unscoped_algorithms(algorithm):
     config = _kv_config((4, 3), 8.0).model_copy(update={"algorithm": algorithm})
 
@@ -385,7 +386,7 @@ def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():
     assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
+def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers(monkeypatch):
     torch.manual_seed(123)
     model = get_tiny_llama(num_hidden_layers=2)
     data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
@@ -401,13 +402,38 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
     model = mtq.quantize(model, fixed_kv_config)
     fixed_weight_quantizer = model.model.layers[0].self_attn.q_proj.weight_quantizer
     fixed_weight_quantizer.enable()
-    assert not hasattr(fixed_weight_quantizer, "_amax")
+    fixed_weight_quantizer.amax = torch.tensor(1.0)
+    fixed_weight_quantizer.disable_quant()
+    fixed_weight_quantizer.disable_calib()
     observed_fixed_states = []
-    hook = fixed_weight_quantizer.register_forward_hook(
+    fixed_hook = fixed_weight_quantizer.register_forward_hook(
         lambda module, _inputs, _output: observed_fixed_states.append(
             (module.is_enabled, module._if_quant, module._if_calib)
         )
     )
+    fixed_qdq_quantizer = model.model.layers[1].self_attn.q_proj.weight_quantizer
+    fixed_qdq_quantizer.enable()
+    fixed_qdq_quantizer.amax = torch.tensor(1.0)
+    observed_qdq_states = []
+    qdq_hook = fixed_qdq_quantizer.register_forward_hook(
+        lambda module, _inputs, _output: observed_qdq_states.append(
+            (module.is_enabled, module._if_quant, module._if_calib)
+        )
+    )
+    calibration_states = []
+    real_calibrate = model_quant.calibrate
+
+    def calibrate_with_state_check(*args, **kwargs):
+        calibration_states.append(
+            (fixed_weight_quantizer._if_quant, fixed_weight_quantizer._if_calib)
+        )
+        result = real_calibrate(*args, **kwargs)
+        calibration_states.append(
+            (fixed_weight_quantizer._if_quant, fixed_weight_quantizer._if_calib)
+        )
+        return result
+
+    monkeypatch.setattr(model_quant, "calibrate", calibrate_with_state_check)
 
     try:
         model, state = mtq.auto_quantize_kv_cache(
@@ -435,14 +461,24 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers():
             disabled_layers="model.layers.1.self_attn",
         )
     finally:
-        hook.remove()
+        fixed_hook.remove()
+        qdq_hook.remove()
 
     assert set(state["layers"]) == {"model.layers.0.self_attn"}
     assert observed_fixed_states
-    assert all(state == (True, True, False) for state in observed_fixed_states)
+    assert observed_fixed_states[0] == (True, True, False)
+    assert all(state == (True, False, False) for state in observed_fixed_states[1:])
+    assert calibration_states == [(True, False), (True, False)]
     assert model.model.layers[0].self_attn.k_bmm_quantizer.num_bits == 4
     assert model.model.layers[0].self_attn.q_proj.weight_quantizer.is_enabled
-    assert not hasattr(model.model.layers[0].self_attn.q_proj.weight_quantizer, "_amax")
+    assert not fixed_weight_quantizer._if_quant
+    assert not fixed_weight_quantizer._if_calib
+    assert fixed_weight_quantizer.amax.item() == pytest.approx(1.0)
+    assert observed_qdq_states
+    assert all(quantizer_state == (True, True, False) for quantizer_state in observed_qdq_states)
+    assert fixed_qdq_quantizer._if_quant
+    assert not fixed_qdq_quantizer._if_calib
+    assert fixed_qdq_quantizer.amax.item() == pytest.approx(1.0)
     fixed_attention = model.model.layers[1].self_attn
     assert fixed_attention.k_bmm_quantizer.is_enabled
     assert fixed_attention.v_bmm_quantizer.is_enabled
