@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from pathlib import Path
 
-from puzzletron_orchestrator.post_mip.records import CandidateLedger
+# Reuse the standalone aggregate entry point without importing its runtime
+# dependencies into the controller. The adapter compiles the argv and never
+# invokes a shell.
+import subprocess  # nosec B404
+from pathlib import Path
+from typing import Any
 
 from ..schema import (
     AttemptSpec,
@@ -40,6 +43,16 @@ from .packing import packed_allocation
 from .stage_compat import _hf_checkpoint_is_complete, post_mip_summary_is_current
 
 __all__ = ["ManualInputRequired", "PostMIPAdapter"]
+
+
+def _post_mip_identity_api() -> Any:
+    """Load the producer identity contract after orchestration initialization."""
+
+    if (__package__ or "").startswith("puzzletron_orchestrator."):
+        from puzzletron_orchestrator.post_mip import identity as identity_api
+    else:
+        from ...post_mip import identity as identity_api
+    return identity_api
 
 
 class ManualInputRequired(RuntimeError):
@@ -75,23 +88,19 @@ def _node_root(plan: CampaignPlan, stage_id: str) -> Path:
     return plan.puzzle_dir / "artifacts" / "post_mip" / "nodes" / _node_id(stage_id)
 
 
-def _available_evaluation_candidates(plan: CampaignPlan, stage_id: str, config: dict) -> int | None:
-    input_id = str(config.get("input", "source"))
-    ledger = CandidateLedger(plan.puzzle_dir / "artifacts" / "post_mip")
-    if input_id == "source":
-        active_mip = plan.puzzle_dir / "mip" / "active_profiles.json"
-        if not active_mip.is_file():
-            return None
-        ledger.ingest_mip(plan.puzzle_dir)
-        _prefix, flow_id, _node_id_value = stage_id.split(".", 2)
-        flow = plan.experiment_config["post_mip"]["flows"][flow_id]
-        candidate_set = ledger.root_set(flow_id, flow["source"])
-    else:
-        current = plan.puzzle_dir / "artifacts" / "post_mip" / "nodes" / input_id / "current.json"
-        if not current.is_file():
-            return None
-        candidate_set = ledger.load_candidate_set(input_id)
-    return len(candidate_set.revision_ids)
+def _identity_config(plan: CampaignPlan) -> dict[str, Any]:
+    return {**plan.experiment_config, "puzzle_dir": str(plan.puzzle_dir)}
+
+
+def _available_evaluation_candidates(plan: CampaignPlan, stage_id: str) -> int | None:
+    identity_api = _post_mip_identity_api()
+    try:
+        return identity_api.expected_post_mip_candidate_count(_identity_config(plan), stage_id)
+    except identity_api.PostMIPExecutionContractUnavailable:
+        registry = plan.puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json"
+        if registry.exists():
+            raise
+        return None
 
 
 def _full_node_instance_count(node: StagePlanNode, count: int) -> int:
@@ -110,12 +119,37 @@ class PostMIPAdapter(WorkAdapter):
 
     strategy = ExecutionStrategy.SHARDED
 
+    def prepare_execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+    ) -> None:
+        """Prepare the candidate registry only on the attempt-submission path."""
+
+        del node
+        _post_mip_identity_api().prepare_post_mip_candidate_ledger(_identity_config(plan))
+
+    def execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+        work_plan: WorkPlan,
+    ) -> dict[str, Any]:
+        """Bind scheduler attempts to the canonical producer execution contract."""
+
+        del work_plan
+        return _post_mip_identity_api().expected_post_mip_execution_contract(
+            _identity_config(plan), node.stage_id
+        )
+
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
         config = _node_config(plan, node.stage_id)
         node_type = str(config.get("type"))
         count = 1 if node_type in {"filter", "manual_filter"} else node.instances
         if node_type in {"evaluation", "downstream_evaluation"}:
-            available = _available_evaluation_candidates(plan, node.stage_id, config)
+            available = _available_evaluation_candidates(plan, node.stage_id)
             if available is not None:
                 if available < 1:
                     raise RuntimeError(
@@ -223,16 +257,20 @@ class PostMIPAdapter(WorkAdapter):
     ) -> PublishedOutput | None:
         repo = Path(plan.runner.contract.repository)
         script = repo / "examples" / "puzzletron" / "run_post_mip_node.py"
-        result = subprocess.run(
-            (
-                "python",
-                str(script),
-                "--config",
-                plan.experiment_config_path,
-                "--stage-id",
-                node.stage_id,
-                "--aggregate",
-            ),
+        argv = [
+            "python",
+            str(script),
+            "--config",
+            plan.experiment_config_path,
+            "--stage-id",
+            node.stage_id,
+            "--aggregate",
+        ]
+        for override in plan.overrides:
+            argv.extend(["--override", override])
+        # The fixed Python entry point receives only controller-compiled arguments.
+        result = subprocess.run(  # nosec B603
+            argv,
             cwd=repo,
             capture_output=True,
             text=True,

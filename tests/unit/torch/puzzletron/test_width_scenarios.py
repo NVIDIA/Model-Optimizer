@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import examples.puzzletron.finalize_replacement_scoring as replacement_finalizer
 from examples.puzzletron.embedding_pipeline import (
     _project_vllm_stats_to_scenarios,
     _visible_gpu_count,
@@ -42,6 +43,135 @@ from modelopt.torch.puzzletron.replacement_library.build_replacement_library imp
 )
 from modelopt.torch.puzzletron.replacement_library.library import ReplacementLibrary
 from modelopt.torch.puzzletron.scenarios import ScenarioKey
+from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
+
+
+def _finalize_replacement_scoring(tmp_path, monkeypatch):
+    config_path = tmp_path / "experiment.yaml"
+    config_path.touch()
+    root_override = "+replacement_scoring.automodel.lm_head_backend=streaming"
+    loaded_overrides = []
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "model": {"path": "tiny-qwen"},
+        "embedding_pruning": {"enabled": True, "widths": [256]},
+        "replacement_scoring": {
+            "granularity": "subblock",
+            "automodel": {"lm_head_backend": "streaming"},
+        },
+    }
+
+    def load_config(path, *, overrides=None):
+        assert path == config_path
+        loaded_overrides.extend(overrides or ())
+        return config
+
+    monkeypatch.setattr(replacement_finalizer, "pipeline_config_from_path", load_config)
+    report = {"scenario_count": 1, "widths": [256]}
+
+    def publish_report(config):
+        summary = tmp_path / "artifacts" / "replacement_scoring" / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(json.dumps(report))
+        return report
+
+    monkeypatch.setattr(
+        replacement_finalizer,
+        "finalize_replacement_scoring_diagnostics",
+        publish_report,
+    )
+
+    published_report = replacement_finalizer.finalize_replacement_scoring(
+        config_path,
+        tmp_path,
+        overrides=[root_override],
+    )
+    return config, loaded_overrides, published_report
+
+
+def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_path, monkeypatch):
+    config, loaded_overrides, published_report = _finalize_replacement_scoring(
+        tmp_path, monkeypatch
+    )
+
+    manifest_path = tmp_path / "manifests" / "replacement_scoring.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert loaded_overrides == ["+replacement_scoring.automodel.lm_head_backend=streaming"]
+    assert published_report == {"scenario_count": 1, "widths": [256]}
+    assert manifest["stage"] == "replacement_scoring"
+    assert manifest["status"] == "success"
+    assert manifest["semantic_config"]["replacement_scoring"]["automodel"] == {
+        "lm_head_backend": "streaming"
+    }
+    assert manifest["outputs"]["report"] == published_report
+    assert stage_is_complete(config, "replacement_scoring")
+
+
+@pytest.mark.parametrize(
+    "stale_input",
+    ["missing-summary", "changed-identity", "malformed-manifest"],
+)
+def test_replacement_scoring_finalization_marker_rejects_stale_inputs(
+    tmp_path, monkeypatch, stale_input
+):
+    _finalize_replacement_scoring(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "manifests" / "replacement_scoring.json"
+    summary = tmp_path / "artifacts" / "replacement_scoring" / "summary.json"
+
+    marker_a = tmp_path / "completion-a" / "finalized"
+    marker_a.parent.mkdir()
+    replacement_finalizer.write_finalization_marker(marker_a, manifest_path)
+    assert replacement_finalizer.finalization_marker_is_current(marker_a, manifest_path, summary)
+
+    if stale_input == "missing-summary":
+        summary.unlink()
+    elif stale_input == "changed-identity":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["semantic_identity"] = "replacement_scoring_semantic_b"
+        manifest_path.write_text(json.dumps(manifest))
+    else:
+        manifest_path.write_text("[]\n")
+
+    assert not replacement_finalizer.finalization_marker_is_current(
+        marker_a, manifest_path, summary
+    )
+
+
+def test_replacement_scoring_finalizer_main_reads_root_overrides(monkeypatch):
+    captured = {}
+    overrides = [
+        "+replacement_scoring.automodel.lm_head_backend=streaming",
+        "embedding_pruning.enabled=false",
+    ]
+
+    def finalize(config_path, puzzle_dir, *, overrides=None):
+        captured.update(
+            config_path=config_path,
+            puzzle_dir=puzzle_dir,
+            overrides=overrides,
+        )
+
+    monkeypatch.setenv("FINALIZE_OVERRIDES", "\n".join(overrides))
+    monkeypatch.setattr(replacement_finalizer, "finalize_replacement_scoring", finalize)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "finalize_replacement_scoring.py",
+            "--config",
+            "experiment.yaml",
+            "--puzzle-dir",
+            "run",
+        ],
+    )
+
+    replacement_finalizer.main()
+
+    assert captured == {
+        "config_path": "experiment.yaml",
+        "puzzle_dir": "run",
+        "overrides": overrides,
+    }
 
 
 def _write_scenario_manifest(
@@ -397,6 +527,8 @@ def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
 
     assert command[1:4] == ("-m", "torch.distributed.run", "--standalone")
     assert "--nproc_per_node=1" in command
+    overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
+    assert "embedding_pruning.enabled=false" in overrides
 
 
 def test_embedding_pipeline_skips_composite_work_on_nonzero_rank(tmp_path, monkeypatch):

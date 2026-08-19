@@ -241,6 +241,7 @@ def regression(session):
 def pre_commit_all(session):
     session.install("-e", ".[all,dev-lint]")
     session.run("pre-commit", "run", "--all-files", "--show-diff-on-failure")
+    session.run("python", "tests/unit/tools/test_mypy_hook_config.py")
 
 
 @dataclass(frozen=True)
@@ -489,6 +490,7 @@ def pre_commit_diff(session):
         env={"SKIP": ",".join(sorted(skip_hooks))},
     )
     _run_changed_file_mypy(session, from_ref, to_ref)
+    session.run("python", "tests/unit/tools/test_mypy_hook_config.py")
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────

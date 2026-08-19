@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
+from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.stage_runner import StageResult
 from modelopt.torch.puzzletron.stages.graph import StageSkipReason, stage_is_enabled
 from puzzletron_orchestrator.token_caches import resolve_tokenize_caches
@@ -35,7 +35,7 @@ def tokenize_data_stage(config: dict) -> StageResult:
     stage_config = config.get("tokenize_data") or {}
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / "tokenize_data.json"
-    manifest = StageManifest(stage="tokenize_data", inputs={"config": config}, config=config)
+    manifest = stage_manifest_from_config("tokenize_data", config)
     if not stage_is_enabled("tokenize_data", config):
         skip_reason = StageSkipReason.DISABLED
         manifest.complete(

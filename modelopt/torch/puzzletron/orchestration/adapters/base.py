@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """WorkAdapter contract for stage orchestration."""
 
@@ -22,7 +34,11 @@ from ..schema import (
     WorkPlan,
 )
 
-__all__ = ["WorkAdapter"]
+__all__ = ["ExecutionIdentityProjectionUnavailable", "WorkAdapter"]
+
+
+class ExecutionIdentityProjectionUnavailable(RuntimeError):
+    """The current upstream state does not yet define an adapter identity projection."""
 
 
 class WorkAdapter(ABC):
@@ -70,6 +86,30 @@ class WorkAdapter(ABC):
         work_plan: WorkPlan,
     ) -> PublishedOutput | None:
         return None
+
+    def execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+        work_plan: WorkPlan,
+    ) -> Mapping[str, Any]:
+        """Return adapter-owned, currently resolvable execution inputs."""
+
+        return {}
+
+    def prepare_execution_identity_projection(
+        self,
+        *,
+        plan: CampaignPlan,
+        node: StagePlanNode,
+    ) -> None:
+        """Prepare mutable adapter inputs immediately before binding a new attempt.
+
+        Read-only currentness checks call only :meth:`execution_identity_projection`.
+        Adapters that require preparation must implement it here rather than mutate
+        state while projecting identity.
+        """
 
     def classify_failure(
         self,

@@ -781,7 +781,10 @@ def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert attempt.command.argv[-1].endswith("run_replacement_pool.sh")
 
 
-def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path):
+def _replacement_width_attempts(
+    tmp_path: Path,
+    widths: list[int],
+) -> tuple[CampaignPlan, WorkPlan, list[AttemptSpec]]:
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
@@ -806,7 +809,7 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
         experiment_config_path=str(tmp_path / "experiment.yaml"),
         puzzle_dir=tmp_path / "run",
         experiment_config={
-            "embedding_pruning": {"enabled": True, "widths": [2048, 1792]},
+            "embedding_pruning": {"enabled": True, "widths": widths},
             "replacement_scoring": {"granularity": "subblock"},
         },
         runner=runner,
@@ -816,13 +819,6 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     )
     adapter = adapter_for_stage(node)
     work_plan = adapter.plan(plan, node)
-
-    assert [item.work_id for item in work_plan.items] == [
-        "replacement_scoring:width-2048",
-        "replacement_scoring:width-1792",
-    ]
-    assert [item.metadata["worker_count"] for item in work_plan.items] == [4, 4]
-
     attempts = [
         adapter.command(
             plan=plan,
@@ -830,14 +826,40 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
             item=item,
             attempt_id=f"a{index}",
             runner=runner,
+            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
         )
         for index, item in enumerate(work_plan.items)
     ]
+    return plan, work_plan, attempts
+
+
+def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path):
+    plan, work_plan, attempts = _replacement_width_attempts(tmp_path, [2048, 1792])
+    runner = plan.runner
+    node = plan.stages[0]
+    adapter = adapter_for_stage(node)
+
+    assert [item.work_id for item in work_plan.items] == [
+        "replacement_scoring:width-2048",
+        "replacement_scoring:width-1792",
+    ]
+    assert [item.metadata["worker_count"] for item in work_plan.items] == [4, 4]
+
     assert [attempt.allocation_nodes for attempt in attempts] == [2, 2]
     assert [attempt.allocation_gpus for attempt in attempts] == [16, 16]
     assert [attempt.task_topology.task_count for attempt in attempts] == [4, 4]
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
+    assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
+        "+replacement_scoring.automodel.lm_head_backend=streaming",
+        "+replacement_scoring.automodel.lm_head_backend=streaming",
+    ]
+    assert all(
+        "puzzle_dir=" not in attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts
+    )
+    assert all(
+        "puzzle_dir=" in attempt.command.env["DISTRIBUTED_EVAL_OVERRIDES"] for attempt in attempts
+    )
     assert [attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in attempts] == [
         "2",
         "2",
@@ -850,8 +872,60 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
         attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
         == attempts[1].command.env["FINALIZE_COMPLETION_DIR"]
     )
+    changed_plan = CampaignPlan(
+        experiment_config_path=plan.experiment_config_path,
+        puzzle_dir=plan.puzzle_dir,
+        experiment_config={
+            **plan.experiment_config,
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "default_metric": "mse_loss_hidden_states",
+            },
+        },
+        runner=runner,
+        execution_defaults=plan.execution_defaults,
+        stages=(node,),
+        contract_hash=plan.contract_hash,
+    )
+    changed_work_plan = adapter.plan(changed_plan, node)
+    changed_attempt = adapter.command(
+        plan=changed_plan,
+        node=node,
+        item=changed_work_plan.items[0],
+        attempt_id="changed",
+        runner=runner,
+        overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+    )
+    assert (
+        changed_attempt.command.env["FINALIZE_COMPLETION_DIR"]
+        != attempts[0].command.env["FINALIZE_COMPLETION_DIR"]
+    )
     assert attempts[0].command.env["PUZZLE_DIR"].endswith("scenarios/width-2048/depth-00")
     assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
+
+
+def test_replacement_pool_completion_identity_changes_with_embedding_widths(tmp_path: Path):
+    _, _, baseline_attempts = _replacement_width_attempts(tmp_path, [2048, 1792])
+    _, _, changed_attempts = _replacement_width_attempts(tmp_path, [2048, 1792, 1536, 1280])
+
+    baseline_completion_dirs = {
+        attempt.command.env["FINALIZE_COMPLETION_DIR"] for attempt in baseline_attempts
+    }
+    changed_completion_dirs = {
+        attempt.command.env["FINALIZE_COMPLETION_DIR"] for attempt in changed_attempts
+    }
+    assert len(baseline_completion_dirs) == 1
+    assert len(changed_completion_dirs) == 1
+    assert changed_completion_dirs != baseline_completion_dirs
+    assert [attempt.command.env["FINALIZE_COMPLETION_MARKER"] for attempt in changed_attempts] == [
+        "width-2048",
+        "width-1792",
+        "width-1536",
+        "width-1280",
+    ]
+    assert [
+        attempt.command.env["FINALIZE_EXPECTED_COMPLETIONS"] for attempt in changed_attempts
+    ] == ["4", "4", "4", "4"]
 
 
 def test_stage_partition_override_forces_batch(tmp_path: Path):

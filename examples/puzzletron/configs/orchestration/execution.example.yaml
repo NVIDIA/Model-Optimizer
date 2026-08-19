@@ -7,6 +7,7 @@ execution:
   defaults:
     failure_policy: strict
     halt_policy: drain
+    artifact_settling_timeout_seconds: 300
     gpus_per_node: 8
   stages:
     convert:

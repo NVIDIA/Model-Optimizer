@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -33,6 +33,7 @@ __all__ = [
     "load_runtime_hydra_config",
     "normalize_pipeline_config",
     "pipeline_config_from_path",
+    "rebase_authored_pipeline_config",
 ]
 
 
@@ -115,7 +116,7 @@ def _config_root_and_name(path: Path) -> tuple[Path, str]:
 
 def _to_plain(config: DictConfig | dict[str, Any]) -> dict[str, Any]:
     if isinstance(config, DictConfig):
-        return OmegaConf.to_container(config, resolve=True)
+        return cast("dict[str, Any]", OmegaConf.to_container(config, resolve=True))
     return deepcopy(dict(config))
 
 
@@ -276,8 +277,12 @@ def pipeline_config_from_path(
     node_index: int = 0,
 ) -> dict[str, Any]:
     """Load a Hydra YAML and attach runtime metadata for stage handlers."""
+    # Defer the orchestration-package import until this module is initialized.
+    from .orchestration.config import load_experiment_config
+
     register_hydra_resolvers()
     path = Path(config_path).resolve()
+    authored_config = load_experiment_config(path, overrides=overrides)
     config_dir, config_name = _config_root_and_name(path)
     hydra_cfg = initialize_hydra_config_for_dir(
         config_dir=str(config_dir),
@@ -290,8 +295,21 @@ def pipeline_config_from_path(
         "overrides": list(overrides or []),
         "num_nodes": int(num_nodes),
         "node_index": int(node_index),
+        "authored_config": authored_config,
     }
     return cfg
+
+
+def rebase_authored_pipeline_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Bind an intentionally derived worker config as its own authored view."""
+
+    runtime = deepcopy(dict(config.get("_runtime") or {}))
+    runtime.pop("authored_config", None)
+    authored_config = deepcopy(config)
+    authored_config["_runtime"] = deepcopy(runtime)
+    runtime["authored_config"] = authored_config
+    config["_runtime"] = runtime
+    return config
 
 
 def load_runtime_hydra_config(config: dict[str, Any]) -> DictConfig:

@@ -148,6 +148,7 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         f"teacher_dir={teacher}",
         f"convert.teacher_dir={teacher}",
         "bypass.enabled=false",
+        "embedding_pruning.enabled=false",
         f"replacement_library_path={scenario / 'replacement_library.json'}",
         f"build_replacement_library.source_checkpoint_dir={teacher}",
         "calc_subblock_stats.runtime_stats.execution=inline",
