@@ -58,6 +58,39 @@ datasets_available = {
 }
 
 
+def _speculation_profile_metadata(args):
+    """Describe the measurement for speculation_profile.json.
+
+    Only the fields needed to interpret the acceptance vectors standalone live here;
+    the exhaustive run record (engine version, checkpoint hashes, redacted argv, GPU)
+    is already written to configuration.json by dump_env().
+
+    On K: `--draft_length` is the number of *draft positions*, which is what the
+    acceptance vectors are indexed by, and is what the engines receive as
+    `speculative_num_steps`. `--block_size` is the DFlash trained block size, one
+    larger than the draft length, and bounds K -- serving above it is invalid rather
+    than merely degraded, so it is published as max_supported_k.
+    """
+    method = (args.speculative_algorithm or "").lower() or None
+    block_size = getattr(args, "block_size", None)
+    return {
+        "num_speculative_tokens": args.draft_length,
+        "method": method,
+        "block_size": block_size,
+        "max_supported_k": (block_size - 1) if block_size else args.draft_length,
+        "draft_checkpoint": {"path": args.draft_model_dir} if args.draft_model_dir else None,
+        "target_model": {"path": args.model_dir},
+        "measurement_conditions": {
+            "dataset": args.dataset or ("mtbench" if args.mtbench else None),
+            "concurrency": args.concurrency,
+            "temperature": args.temperature,
+            "engine": args.engine,
+            "tp_size": args.tp_size,
+            "full_run_record": "configuration.json",
+        },
+    }
+
+
 async def tqdm_gather(*fs, return_exceptions=False, **kwargs):
     if not return_exceptions:
         return await tqdm.gather(*fs, **kwargs)
@@ -210,6 +243,7 @@ def run_simple(args):
     if args.save_dir is not None:
         for metric in metrics_list:
             metric.update_directory(args.save_dir)
+        metrics.AcceptanceRate.set_profile_metadata(_speculation_profile_metadata(args))
         # Stamp configuration.json BEFORE the run loop so the file lands even
         # when the run crashes mid-way. Engine init is already done, so the
         # live serving_config from the model is available.
