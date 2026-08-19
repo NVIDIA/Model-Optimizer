@@ -698,7 +698,10 @@ class _WeightedObjectiveMixin:
                 consolidated = Path(checkpoint_path, "model", "consolidated")
                 config_path = consolidated / "config.json"
                 config = json.loads(config_path.read_text()) if config_path.is_file() else {}
-                if config.get("block_configs"):
+                block_configs = config.get("block_configs")
+                if not block_configs and isinstance(config.get("text_config"), dict):
+                    block_configs = config["text_config"].get("block_configs")
+                if block_configs:
                     from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
                     model_config = _config_value(getattr(self, "cfg", None), "model")

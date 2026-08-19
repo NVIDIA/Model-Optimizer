@@ -857,7 +857,7 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
             consolidated = checkpoint / "model/consolidated"
             consolidated.mkdir(parents=True)
             (consolidated / "config.json").write_text(
-                json.dumps({"block_configs": [{"subblock_configs": []}]})
+                json.dumps({"text_config": {"block_configs": [{"subblock_configs": []}]}})
             )
             return "saved"
 
