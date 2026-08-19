@@ -229,12 +229,15 @@ class CampaignController:
         self._halt_policy = HaltPolicy(str(defaults.get("halt_policy", HaltPolicy.DRAIN.value)))
 
     def _recover_active_attempts(self) -> None:
+        active_states = {
+            JobState.RUNNING.value,
+            JobState.PENDING.value,
+            JobState.UNKNOWN.value,
+        }
+        nodes = {node.stage_id: node for node in self.plan.stages}
+        recoverable: list[tuple[dict[str, Any], JobHandle, bool]] = []
         for attempt in self.store.list_attempts():
-            if attempt.get("status") not in {
-                JobState.RUNNING.value,
-                JobState.PENDING.value,
-                JobState.UNKNOWN.value,
-            }:
+            if attempt.get("status") not in active_states:
                 continue
             handle_payload = attempt.get("handle")
             if not isinstance(handle_payload, dict):
@@ -245,12 +248,56 @@ class CampaignController:
                 attempt_id=str(handle_payload["attempt_id"]),
                 metadata=dict(handle_payload.get("metadata") or {}),
             )
+            node = nodes.get(str(attempt.get("stage_id") or ""))
+            metadata = attempt.get("metadata")
+            current = False
+            if (
+                node is not None
+                and attempt.get("contract_hash") == self.plan.contract_hash
+                and isinstance(metadata, Mapping)
+            ):
+                try:
+                    current = metadata.get(
+                        "stage_execution_identity"
+                    ) == self._stage_execution_identity(node)
+                except ExecutionIdentityProjectionUnavailable:
+                    pass
+            recoverable.append((attempt, handle, current))
+
+        stale_active_attempts: list[str] = []
+        for attempt, handle, current in sorted(recoverable, key=lambda item: item[2]):
+            if current and stale_active_attempts:
+                continue
             status = self.executor.recover(handle)
             self.store.update_attempt_status(
                 str(attempt["work_id"]),
                 str(attempt["attempt_id"]),
                 status,
             )
+            if not current:
+                self.store.untrack_live_job(handle.handle_id)
+                if status.state.value in active_states:
+                    self.executor.cancel([handle])
+                    stale_active_attempts.append(str(attempt["attempt_id"]))
+                    self.store.append_event(
+                        "stale_active_attempt_cancellation_requested",
+                        {
+                            "attempt_id": str(attempt["attempt_id"]),
+                            "work_id": str(attempt["work_id"]),
+                            "reported_state": status.state.value,
+                        },
+                    )
+                    self.logger.warning(
+                        f"requested cancellation of stale {attempt['work_id']} "
+                        f"[{handle.handle_id}]; "
+                        "waiting for scheduler confirmation before resubmission"
+                    )
+                else:
+                    self.logger.warning(
+                        f"ignored stale {attempt['work_id']} recovered as "
+                        f"{status.state.value} [{handle.handle_id}]"
+                    )
+                continue
             if status.state in {JobState.RUNNING, JobState.PENDING, JobState.UNKNOWN}:
                 tracked = JobHandle(
                     backend=handle.backend,
@@ -282,6 +329,11 @@ class CampaignController:
                 self.logger.warning(
                     f"recovered {attempt['work_id']} as {status.state.value} [{handle.handle_id}]"
                 )
+        if stale_active_attempts:
+            raise RuntimeError(
+                "stale active attempts were cancelled; rerun after the scheduler reports "
+                "them terminal"
+            )
 
     def _parents_ready(self, node: StagePlanNode) -> bool:
         for parent in node.parents:

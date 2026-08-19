@@ -303,6 +303,28 @@ def _compile_test_plan(
     )
 
 
+def _compile_changed_convert_plans(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    runner = load_runner_config(runner_path)
+    execution = load_execution_config(execution_path)
+    baseline = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=runner,
+        execution=execution,
+        stage_filter="convert",
+    )
+    config = yaml.safe_load(experiment.read_text())
+    config["convert"]["model_path"] = "/models/replacement"
+    experiment.write_text(yaml.safe_dump(config))
+    changed = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=runner,
+        execution=execution,
+        stage_filter="convert",
+    )
+    return baseline, changed
+
+
 def _record_completed_attempt(
     controller: CampaignController,
     node,
@@ -566,24 +588,7 @@ def test_controller_resubmits_legacy_completed_attempt_without_execution_identit
 def test_controller_resubmits_completed_work_when_stage_semantics_change(
     tmp_path: Path, monkeypatch
 ):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    runner = load_runner_config(runner_path)
-    execution = load_execution_config(execution_path)
-    plan_a = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=runner,
-        execution=execution,
-        stage_filter="convert",
-    )
-    config_b = yaml.safe_load(experiment.read_text())
-    config_b["convert"]["model_path"] = "/models/replacement"
-    experiment.write_text(yaml.safe_dump(config_b))
-    plan_b = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=runner,
-        execution=execution,
-        stage_filter="convert",
-    )
+    plan_a, plan_b = _compile_changed_convert_plans(tmp_path)
     executor = _TrackingFakeExecutor()
     controller_a = CampaignController(plan_a, executor=_FakeExecutor())
     controller_b = CampaignController(plan_b, executor=executor)
@@ -610,6 +615,47 @@ def test_controller_resubmits_completed_work_when_stage_semantics_change(
         "convert"
     )
     assert persisted_attempts[-1]["metadata"]["stage_execution_identity"] == identity_b
+
+
+def test_controller_cancels_stale_active_attempt_before_current_resubmission(tmp_path: Path):
+    old_plan, plan = _compile_changed_convert_plans(tmp_path)
+    old_node = old_plan.stages[0]
+    old_controller = CampaignController(old_plan, executor=_FakeExecutor())
+    handle = JobHandle(
+        backend="fake",
+        handle_id="stale-active-handle",
+        attempt_id="completed-attempt",
+        metadata={"work_id": "convert:0"},
+    )
+    attempt = _record_completed_attempt(old_controller, old_node, handle=handle)
+    old_controller.store.save_attempt(attempt, handle, JobState.RUNNING.value)
+    old_controller.store.track_live_job(handle)
+
+    class _FailsIfPolledExecutor(_TrackingFakeExecutor):
+        def poll(self, handles):
+            raise AssertionError("a stale active attempt must not enter the current poll set")
+
+    executor = _FailsIfPolledExecutor()
+    controller = CampaignController(plan, executor=executor)
+
+    with pytest.raises(RuntimeError, match="stale active attempts were cancelled"):
+        controller.run(once=True)
+
+    assert executor.cancelled == [handle]
+    assert executor.submitted_stage_ids == []
+    assert controller._active == {}
+    assert controller._failed_stages == set()
+    assert controller.store.load_attempt(attempt.work_id, attempt.attempt_id)["status"] == "running"
+    assert (
+        len(
+            list(
+                controller.store.events_root.glob(
+                    "*_stale_active_attempt_cancellation_requested.json"
+                )
+            )
+        )
+        == 1
+    )
 
 
 def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: Path):
