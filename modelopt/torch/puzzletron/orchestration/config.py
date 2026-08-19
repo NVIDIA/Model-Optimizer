@@ -182,22 +182,31 @@ def _apply_override(config: dict[str, Any], override: str) -> None:
     if not separator:
         raise ValueError(f"Override must have KEY=VALUE form: {override!r}")
     addition_only = False
+    allow_missing = False
     if key.startswith("++"):
         key = key[2:]
+        allow_missing = True
     elif key.startswith("+"):
         key = key[1:]
         addition_only = True
+        allow_missing = True
     if not key or key.startswith(("+", "~")):
         raise ValueError(f"Unsupported Hydra override form: {override!r}")
     keys = key.split(".")
     target = config
     for part in keys[:-1]:
-        child = target.setdefault(part, {})
+        if part not in target:
+            if not allow_missing:
+                raise ValueError(f"Override path does not exist: {override!r}")
+            target[part] = {}
+        child = target[part]
         if not isinstance(child, dict):
             raise ValueError(f"Override path crosses a scalar: {override!r}")
         target = child
     if addition_only and keys[-1] in target:
         raise ValueError(f"Addition override already exists: {override!r}")
+    if not allow_missing and keys[-1] not in target:
+        raise ValueError(f"Override key does not exist: {override!r}")
     target[keys[-1]] = _load_yaml(raw_value)
 
 

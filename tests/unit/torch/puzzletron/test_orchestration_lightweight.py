@@ -235,7 +235,7 @@ quoted: \"1e-4\"
 """
     )
 
-    config = load_experiment_config(experiment, overrides=["threshold=1e-4"])
+    config = load_experiment_config(experiment, overrides=["+threshold=1e-4"])
 
     assert config["bypass"]["best_val_loss"] == 1e9
     assert config["bypass"]["training"] == {
@@ -275,6 +275,8 @@ def test_load_experiment_config_distinguishes_hydra_addition_modes(
     added = load_experiment_config(experiment, overrides=["+added.value=2"])
     with pytest.raises(ValueError, match="^Addition override already exists"):
         load_experiment_config(experiment, overrides=["+value=2"])
+    with pytest.raises(ValueError, match="^Override path does not exist"):
+        load_experiment_config(experiment, overrides=["missing.value=2"])
     replaced = load_experiment_config(experiment, overrides=["++value=2"])
 
     assert added["added"] == {"value": 2}

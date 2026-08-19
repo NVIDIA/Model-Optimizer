@@ -80,7 +80,7 @@ from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
 from ..security_policy import require_boolean_policy
 from .flash_kld import TrainingFlashKLD
-from .global_automodel import _descriptor_trust_remote_code
+from .global_automodel import _descriptor_requires_trust_remote_code
 
 
 def _config_value(config: Any, name: str) -> Any:
@@ -108,7 +108,7 @@ def _config_contains(config: Any, name: str) -> bool:
 
 
 def _checkpoint_trust_remote_code(model_config: Any) -> bool:
-    """Resolve checkpoint publication trust from config or the model descriptor."""
+    """Resolve explicit checkpoint publication trust with a secure default."""
 
     if _config_contains(model_config, "trust_remote_code"):
         return require_boolean_policy(
@@ -117,9 +117,12 @@ def _checkpoint_trust_remote_code(model_config: Any) -> bool:
         )
 
     descriptor_name = _config_value(model_config, "anymodel_descriptor")
-    if descriptor_name is None:
-        return False
-    return _descriptor_trust_remote_code(str(descriptor_name))
+    if descriptor_name is not None and _descriptor_requires_trust_remote_code(str(descriptor_name)):
+        raise ValueError(
+            "model.anymodel_descriptor requires remote code; set "
+            "model.trust_remote_code=true for trusted model sources"
+        )
+    return False
 
 
 def _global_kd_checkpoint_adapter_context(model_parts, descriptor_name: str | None = None):

@@ -75,7 +75,7 @@ class GlobalKDConfig:
     teacher_model_kwargs: dict[str, Any] = field(default_factory=dict)
     student_model_kwargs: dict[str, Any] = field(default_factory=dict)
     domain: Literal["auto", "llm", "vlm"] = "auto"
-    trust_remote_code: bool = True
+    trust_remote_code: bool = False
     torch_dtype: str = "bf16"
     attn_implementation: str | None = None
     tp: int = 1
@@ -220,11 +220,11 @@ def _loss_term(node: dict[str, Any], *, legacy_temperature: float) -> KDLossTerm
     )
 
 
-def _descriptor_trust_remote_code(*descriptor_names: str) -> bool:
+def _descriptor_requires_trust_remote_code(*descriptor_names: str) -> bool:
     """Return whether any selected model descriptor requires remote code."""
 
     # Loading the descriptor catalog imports every supported HF model module.
-    # Keep that work on the config-building path that needs the fallback.
+    # Keep that work on the config-building path that needs the policy check.
     from ..anymodel.model_descriptor import ModelDescriptorFactory
 
     for descriptor_name in dict.fromkeys(descriptor_names):
@@ -247,7 +247,7 @@ def _global_kd_trust_remote_code(
     student_descriptor: str,
     teacher_descriptor: str,
 ) -> bool:
-    """Resolve explicit global-KD trust policy before descriptor fallback."""
+    """Resolve explicit global-KD trust policy with a secure default."""
 
     for config, path in (
         (kd_config, "distillation.trust_remote_code"),
@@ -255,7 +255,13 @@ def _global_kd_trust_remote_code(
     ):
         if "trust_remote_code" in config:
             return require_boolean_policy(config["trust_remote_code"], path=path)
-    return _descriptor_trust_remote_code(student_descriptor, teacher_descriptor)
+    if _descriptor_requires_trust_remote_code(student_descriptor, teacher_descriptor):
+        raise ValueError(
+            "Global KD descriptors require remote code; set "
+            "distillation.trust_remote_code=true or model.trust_remote_code=true "
+            "for trusted model sources"
+        )
+    return False
 
 
 def _require_matching_trust_policy(value: Any, *, path: str, expected: bool) -> None:
@@ -852,8 +858,15 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
         processor = dict(
             domain_metadata.get("processor") or kd_config.metadata.get("processor") or {}
         )
+        if "trust_remote_code" in processor:
+            _require_matching_trust_policy(
+                processor["trust_remote_code"],
+                path="distillation.metadata.processor.trust_remote_code",
+                expected=kd_config.trust_remote_code,
+            )
         processor.setdefault("_target_", "transformers.AutoProcessor.from_pretrained")
         processor.setdefault("pretrained_model_name_or_path", str(kd_config.student_dir))
+        processor["trust_remote_code"] = kd_config.trust_remote_code
         recipe["processor"] = processor
         metadata_keys = ["dataset", "dataloader", "freeze_config"]
         if kd_config.validation_enabled:
@@ -961,7 +974,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     overrides = kd_config.metadata.get("recipe_overrides")
     if overrides:
         recipe_overrides = dict(overrides)
-        for model_key in ("model", "teacher_model"):
+        for model_key in ("model", "teacher_model", "processor"):
             model_overrides = recipe_overrides.get(model_key)
             if isinstance(model_overrides, Mapping) and "trust_remote_code" in model_overrides:
                 _require_matching_trust_policy(
@@ -970,6 +983,9 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                     expected=kd_config.trust_remote_code,
                 )
         _deep_update(recipe, recipe_overrides)
+        processor = recipe.get("processor")
+        if isinstance(processor, dict):
+            processor["trust_remote_code"] = kd_config.trust_remote_code
 
     from ..plugins.automodel.config import inject_descriptor_model_kwargs
 
