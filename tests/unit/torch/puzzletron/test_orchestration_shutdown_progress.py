@@ -587,7 +587,7 @@ def test_controller_resubmits_completed_work_when_stage_semantics_change(
 
 def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: Path):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
-    compiled_overrides = ["convert.model_path=/models/compiled"]
+    compiled_overrides = ["+convert.model_path=/models/compiled"]
     plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
@@ -605,7 +605,7 @@ def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: P
     )
 
     with pytest.raises(ValueError, match="must match the overrides compiled"):
-        controller.run(overrides=["convert.model_path=/models/runtime"], once=True)
+        controller.run(overrides=["+convert.model_path=/models/runtime"], once=True)
 
     assert executor.submitted_stage_ids == []
     assert controller.store.list_attempts("convert") == []

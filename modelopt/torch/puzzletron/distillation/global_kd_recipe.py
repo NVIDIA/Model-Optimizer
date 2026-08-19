@@ -1198,10 +1198,10 @@ class _WeightedObjectiveMixin:
     ):
         """Compute MTP CE and KD without retaining full token-by-vocab logits.
 
-        Each checkpointed token chunk owns the hidden-to-LM-head projection and
-        both distribution losses. Backward therefore saves only hidden-state
-        chunks and recomputes the vocabulary projection/softmax, while TP-sharded
-        LM heads and logits remain sharded end to end.
+        Student logits are consumed directly when available; hidden student
+        states are projected by the student LM head. Teacher hidden states are
+        projected by the teacher LM head. Chunked loss computation keeps
+        TP-sharded LM heads and logits sharded end to end.
         """
         student_values = list(student_h if student_h is not None else student_logits or [])
         student_is_hidden = student_h is not None
