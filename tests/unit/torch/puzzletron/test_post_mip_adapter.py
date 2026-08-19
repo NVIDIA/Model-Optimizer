@@ -16,7 +16,8 @@
 """Tests for post-MIP orchestration adapter launch policy."""
 
 import json
-import subprocess
+import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 import puzzletron_orchestrator.adapters.post_mip as post_mip_adapter
-from puzzletron_orchestrator.adapters.post_mip import PostMIPAdapter
+from puzzletron_orchestrator.adapters.post_mip import PostMIPAdapter, _run_aggregation_command
 from puzzletron_orchestrator.schema import (
     CampaignPlan,
     ExecutionContract,
@@ -219,12 +220,15 @@ def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkey
         ),
     )
     commands = []
+    timeouts = []
 
-    def run(command, **_kwargs):
+    def run(command, *, cwd, timeout_seconds):
+        assert cwd == tmp_path
         commands.append(tuple(command))
-        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"status": "success"}))
+        timeouts.append(timeout_seconds)
+        return 0, json.dumps({"status": "success"}), ""
 
-    monkeypatch.setattr("puzzletron_orchestrator.adapters.post_mip.subprocess.run", run)
+    monkeypatch.setattr(post_mip_adapter, "_run_aggregation_command", run)
 
     publication = PostMIPAdapter().aggregate(
         plan=plan,
@@ -247,5 +251,67 @@ def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkey
             plan.overrides[1],
         )
     ]
+    assert timeouts == [300.0]
     assert publication is not None
     assert publication.summary == {"status": "success"}
+
+
+def test_post_mip_aggregation_timeout_is_bounded(tmp_path: Path, monkeypatch):
+    plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    plan = replace(
+        plan,
+        execution_defaults={
+            **plan.execution_defaults,
+            "artifact_settling_timeout_seconds": 17,
+        },
+    )
+
+    def time_out(_command, **kwargs):
+        assert kwargs == {"cwd": tmp_path, "timeout_seconds": 17.0}
+        raise TimeoutError
+
+    monkeypatch.setattr(post_mip_adapter, "_run_aggregation_command", time_out)
+
+    with pytest.raises(RuntimeError, match=r"aggregation timed out after 17s"):
+        PostMIPAdapter().aggregate(
+            plan=plan,
+            node=node,
+            work_plan=WorkPlan(stage_id=node.stage_id, strategy=node.strategy, items=()),
+        )
+
+
+def test_aggregation_runner_captures_output_and_return_code(tmp_path: Path):
+    return_code, stdout, stderr = _run_aggregation_command(
+        (
+            sys.executable,
+            "-c",
+            "import sys; print('output'); print('error', file=sys.stderr); sys.exit(7)",
+        ),
+        cwd=tmp_path,
+        timeout_seconds=5,
+    )
+
+    assert (return_code, stdout, stderr) == (7, "output\n", "error\n")
+
+
+def test_aggregation_runner_kills_a_timed_out_process(tmp_path: Path):
+    pid_path = tmp_path / "aggregation.pid"
+
+    with pytest.raises(TimeoutError):
+        _run_aggregation_command(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import os, pathlib, time; "
+                    f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+                    "time.sleep(60)"
+                ),
+            ),
+            cwd=tmp_path,
+            timeout_seconds=1,
+        )
+
+    process_id = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(process_id, 0)

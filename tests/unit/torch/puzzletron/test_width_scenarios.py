@@ -137,6 +137,32 @@ def test_replacement_scoring_finalization_marker_rejects_stale_inputs(
     )
 
 
+def test_replacement_scoring_marker_uses_one_manifest_snapshot(tmp_path, monkeypatch):
+    _finalize_replacement_scoring(tmp_path, monkeypatch)
+    manifest_path = tmp_path / "manifests" / "replacement_scoring.json"
+    summary = tmp_path / "artifacts" / "replacement_scoring" / "summary.json"
+    marker = tmp_path / "completion" / "finalized"
+    marker.parent.mkdir()
+    replacement_finalizer.write_finalization_marker(marker, manifest_path)
+    original_read_text = Path.read_text
+    manifest_reads = 0
+
+    def republish_after_read(path, *args, **kwargs):
+        nonlocal manifest_reads
+        payload = original_read_text(path, *args, **kwargs)
+        if path == manifest_path:
+            manifest_reads += 1
+            changed = json.loads(payload)
+            changed["semantic_identity"] = "replacement_scoring_semantic_b"
+            manifest_path.write_text(json.dumps(changed))
+        return payload
+
+    monkeypatch.setattr(Path, "read_text", republish_after_read)
+
+    assert replacement_finalizer.finalization_marker_is_current(marker, manifest_path, summary)
+    assert manifest_reads == 1
+
+
 def test_replacement_scoring_finalizer_main_reads_root_overrides(monkeypatch):
     captured = {}
     overrides = [

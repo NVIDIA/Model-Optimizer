@@ -36,7 +36,7 @@ from .filters import apply_filter
 from .identity import (
     expected_post_mip_execution_identity,
     post_mip_execution_contract,
-    post_mip_execution_identity,
+    post_mip_execution_contract_identity,
 )
 from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservation
 
@@ -599,7 +599,8 @@ def run_post_mip_node_shard(
     ledger = _ledger(config)
     ledger.ingest_mip(_puzzle_dir(config))
     candidate_set = _input_set(ledger, config, node)
-    execution_identity = post_mip_execution_identity(config, node, candidate_set, ledger)
+    execution_contract = post_mip_execution_contract(config, node, candidate_set, ledger)
+    execution_identity = post_mip_execution_contract_identity(execution_contract)
     revision_ids = candidate_set.revision_ids[shard_index::shard_count]
     output_path = (
         _execution_root(config, node, execution_identity)
@@ -701,7 +702,8 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     ledger = _ledger(config)
     ledger.ingest_mip(_puzzle_dir(config))
     input_set = _input_set(ledger, config, node)
-    execution_identity = post_mip_execution_identity(config, node, input_set, ledger)
+    execution_contract = post_mip_execution_contract(config, node, input_set, ledger)
+    execution_identity = post_mip_execution_contract_identity(execution_contract)
     timed_out_candidates = []
     if node.node_type == "filter":
         observations, output_set = _aggregate_filter(ledger, node, input_set, execution_identity)
@@ -822,7 +824,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
         "observations_path": str(observations_path),
         "candidate_set_path": str(candidate_set_path),
         "execution_identity": execution_identity,
-        "execution_contract": post_mip_execution_contract(config, node, input_set, ledger),
+        "execution_contract": execution_contract,
         "checkpoints": sorted(
             {
                 str(ledger.revisions[revision_id].artifact["checkpoint"])

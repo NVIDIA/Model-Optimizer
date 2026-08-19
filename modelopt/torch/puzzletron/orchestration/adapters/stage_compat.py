@@ -463,7 +463,7 @@ def post_mip_summary_is_current(
     """Validate a node summary without importing torch."""
 
     try:
-        if __package__.startswith("puzzletron_orchestrator."):
+        if (__package__ or "").startswith("puzzletron_orchestrator."):
             from puzzletron_orchestrator.post_mip.identity import (
                 expected_post_mip_execution_identity,
             )

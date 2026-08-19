@@ -26,7 +26,7 @@ from ..identity import stable_hash
 from .base import CompiledPostMIPNode, compile_post_mip_flows
 from .records import CandidateLedger, CandidateSet
 
-if __package__.startswith("puzzletron_orchestrator."):
+if (__package__ or "").startswith("puzzletron_orchestrator."):
     from puzzletron_orchestrator.adapters.base import ExecutionIdentityProjectionUnavailable
 else:
     from ..orchestration.adapters.base import ExecutionIdentityProjectionUnavailable
@@ -97,7 +97,10 @@ def _input_candidate_set(
         flow = (config.get("post_mip") or {})["flows"][node.flow_id]
         candidate_set = ledger.root_set(node.flow_id, flow["source"])
     else:
-        candidate_set = ledger.load_candidate_set(node.input_id)
+        candidate_set = ledger.load_candidate_set(
+            node.input_id,
+            execution_identity=input_execution_identity,
+        )
     canonical = CandidateSet.create(
         candidate_set.flow_id,
         candidate_set.node_id,
@@ -123,9 +126,12 @@ def _input_candidate_set(
 
 def _active_mip_contract(config: Mapping[str, Any]) -> tuple[str, set[str]]:
     active_path = _puzzle_dir(config) / "mip" / "active_profiles.json"
-    if not active_path.is_file():
-        raise PostMIPExecutionContractUnavailable("active MIP profile manifest is unavailable")
-    active = json.loads(active_path.read_text())
+    try:
+        active = json.loads(active_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PostMIPExecutionContractUnavailable(
+            "active MIP profile manifest is unavailable"
+        ) from error
     if not isinstance(active, Mapping):
         raise TypeError(f"active MIP profile manifest must contain a mapping: {active_path}")
     status = active.get("status")
@@ -153,13 +159,18 @@ def _expected_post_mip_inputs(
 ) -> tuple[CompiledPostMIPNode, CandidateSet, CandidateLedger]:
     active_execution, active_profiles = _active_mip_contract(config)
     node = _compiled_node(config, stage_id)
-    required_nodes = _dependency_owners(node)
-    if node.input_id != "source":
-        required_nodes.add(node.input_id)
-    published_executions = {
-        owner: _published_execution_identity(config, owner) for owner in sorted(required_nodes)
+    dependency_executions = {
+        owner: _published_execution_identity(config, owner)
+        for owner in sorted(_dependency_owners(node))
     }
+    input_execution_identity = dependency_executions.get(node.input_id)
+    if node.input_id != "source" and input_execution_identity is None:
+        input_execution_identity = _published_execution_identity(config, node.input_id)
+    execution_identities = dict(dependency_executions)
+    if input_execution_identity is not None:
+        execution_identities[node.input_id] = input_execution_identity
     ledger = CandidateLedger(_puzzle_dir(config) / "artifacts" / "post_mip")
+    ledger.load_execution_observations(execution_identities)
     if not ledger.registry_path.is_file():
         raise PostMIPExecutionContractUnavailable("post-MIP candidate registry is unavailable")
     if (
@@ -174,7 +185,7 @@ def _expected_post_mip_inputs(
             ledger,
             config,
             node,
-            input_execution_identity=published_executions.get(node.input_id),
+            input_execution_identity=input_execution_identity,
         )
     except FileNotFoundError as error:
         raise PostMIPExecutionContractUnavailable(
@@ -191,10 +202,14 @@ def post_mip_execution_contract(
 ) -> dict[str, Any]:
     """Return the exact node, input, dependency, and source-revision contract."""
 
-    dependency_executions = {
-        owner: _published_execution_identity(config, owner)
-        for owner in sorted(_dependency_owners(node))
-    }
+    try:
+        dependency_executions = {
+            owner: ledger.execution_identities[owner] for owner in sorted(_dependency_owners(node))
+        }
+    except KeyError as error:
+        raise PostMIPExecutionContractUnavailable(
+            f"post-MIP dependency {error.args[0]!r} has no loaded execution identity"
+        ) from error
     source_revisions = {}
     for revision_id in candidate_set.revision_ids:
         try:

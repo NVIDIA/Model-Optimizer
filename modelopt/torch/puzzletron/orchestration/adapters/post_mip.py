@@ -17,14 +17,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-
-# Reuse the standalone aggregate entry point without importing its runtime
-# dependencies into the controller. The adapter compiles the argv and never
-# invokes a shell.
-import subprocess  # nosec B404
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from ..schema import (
     AttemptSpec,
@@ -43,6 +39,37 @@ from .packing import packed_allocation
 from .stage_compat import _hf_checkpoint_is_complete, post_mip_summary_is_current
 
 __all__ = ["ManualInputRequired", "PostMIPAdapter"]
+
+_DEFAULT_AGGREGATION_TIMEOUT_SECONDS = 300.0
+
+
+async def _communicate_with_timeout(
+    argv: Sequence[str], *, cwd: Path, timeout_seconds: float
+) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+    except TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise
+    return_code = process.returncode
+    if return_code is None:
+        raise RuntimeError("aggregation subprocess exited without a return code")
+    return return_code, stdout.decode(), stderr.decode()
+
+
+def _run_aggregation_command(
+    argv: Sequence[str], *, cwd: Path, timeout_seconds: float
+) -> tuple[int, str, str]:
+    """Run one argv-only aggregation process within a finite deadline."""
+
+    return asyncio.run(_communicate_with_timeout(argv, cwd=cwd, timeout_seconds=timeout_seconds))
 
 
 def _post_mip_identity_api() -> Any:
@@ -268,20 +295,27 @@ class PostMIPAdapter(WorkAdapter):
         ]
         for override in plan.overrides:
             argv.extend(["--override", override])
-        # The fixed Python entry point receives only controller-compiled arguments.
-        result = subprocess.run(  # nosec B603
-            argv,
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode:
-            raise RuntimeError(
-                f"{node.stage_id} aggregation failed: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
+        timeout_seconds = float(
+            plan.execution_defaults.get(
+                "artifact_settling_timeout_seconds",
+                _DEFAULT_AGGREGATION_TIMEOUT_SECONDS,
             )
-        output_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        )
+        try:
+            return_code, stdout, stderr = _run_aggregation_command(
+                argv,
+                cwd=repo,
+                timeout_seconds=timeout_seconds,
+            )
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"{node.stage_id} aggregation timed out after {timeout_seconds:g}s"
+            ) from error
+        if return_code:
+            raise RuntimeError(
+                f"{node.stage_id} aggregation failed: {stderr.strip() or stdout.strip()}"
+            )
+        output_lines = [line for line in stdout.splitlines() if line.strip()]
         if not output_lines:
             raise RuntimeError(f"{node.stage_id} aggregation produced no summary")
         payload = json.loads(output_lines[-1])

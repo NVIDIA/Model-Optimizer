@@ -47,17 +47,21 @@ def finalize_replacement_scoring_diagnostics(config: dict):
     return script_finalize(config)
 
 
-def _successful_manifest_identity(manifest_path: str | Path) -> str | None:
-    try:
-        manifest = json.loads(Path(manifest_path).read_text())
-    except (OSError, ValueError):
-        return None
+def _successful_manifest_identity_from_payload(manifest: object) -> str | None:
     if not isinstance(manifest, dict):
         return None
     if manifest.get("stage") != "replacement_scoring" or manifest.get("status") != "success":
         return None
     identity = manifest.get("semantic_identity")
     return str(identity) if identity else None
+
+
+def _successful_manifest_identity(manifest_path: str | Path) -> str | None:
+    try:
+        manifest = json.loads(Path(manifest_path).read_text())
+    except (OSError, ValueError):
+        return None
+    return _successful_manifest_identity_from_payload(manifest)
 
 
 def finalization_marker_is_current(
@@ -77,7 +81,7 @@ def finalization_marker_is_current(
         return False
     return bool(
         marker_identity
-        and marker_identity == _successful_manifest_identity(manifest_path)
+        and marker_identity == _successful_manifest_identity_from_payload(manifest)
         and summary == (manifest.get("outputs") or {}).get("report")
     )
 

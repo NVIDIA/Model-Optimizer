@@ -26,6 +26,8 @@ import pytest
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 from puzzletron_orchestrator.controller import CampaignController
+from puzzletron_orchestrator.post_mip import identity as post_mip_identity
+from puzzletron_orchestrator.post_mip import runner as post_mip_runner
 from puzzletron_orchestrator.post_mip.base import compile_post_mip_flows
 from puzzletron_orchestrator.post_mip.identity import (
     PostMIPExecutionContractUnavailable,
@@ -337,6 +339,15 @@ def test_malformed_active_mip_fails_closed(tmp_path: Path):
         expected_post_mip_execution_contract(config, "post.params.select")
 
 
+def test_torn_active_mip_defers_execution_contract(tmp_path: Path):
+    config, _ledger, _roots = _identity_fixture(tmp_path)
+    active_path = Path(config["puzzle_dir"]) / "mip/active_profiles.json"
+    active_path.write_text("{")
+
+    with pytest.raises(PostMIPExecutionContractUnavailable):
+        expected_post_mip_execution_contract(config, "post.params.select")
+
+
 @pytest.mark.parametrize(
     "payload",
     ["{", "{}", "[]"],
@@ -379,6 +390,65 @@ def test_input_candidate_set_must_match_current_producer_execution(tmp_path: Pat
 
     with pytest.raises(RuntimeError, match="candidate set does not match its current execution"):
         expected_post_mip_execution_contract(config, "post.params.select")
+
+
+def test_dependency_identity_uses_the_validated_publication(tmp_path: Path, monkeypatch):
+    config, ledger, roots = _identity_fixture(tmp_path)
+    source_revisions = {
+        revision_id: ledger.source_revision(revision_id, "materialize").revision_id
+        for revision_id in roots[:2]
+    }
+    original = post_mip_identity._published_execution_identity
+    reads = []
+
+    def published_execution_identity(_config, owner):
+        reads.append(owner)
+        execution_identity = original(_config, owner)
+        if owner == "materialize":
+            _materialize_revisions(
+                ledger,
+                roots[:2],
+                execution_identity="materialize-b",
+                checkpoint_prefix="/checkpoint-b",
+            )
+        return execution_identity
+
+    monkeypatch.setattr(
+        post_mip_identity,
+        "_published_execution_identity",
+        published_execution_identity,
+    )
+
+    contract = expected_post_mip_execution_contract(config, "post.params.final")
+
+    assert contract["dependency_executions"] == {"materialize": "materialize-a"}
+    assert contract["source_revisions"] == source_revisions
+    assert reads == ["materialize", "select"]
+
+
+def test_post_mip_aggregation_reuses_one_dependency_snapshot(tmp_path: Path, monkeypatch):
+    config, ledger, roots = _identity_fixture(tmp_path)
+    original = post_mip_runner._input_set
+
+    def input_set(snapshot, input_config, node):
+        candidate_set = original(snapshot, input_config, node)
+        _publish_node(
+            ledger,
+            "score",
+            roots[:2],
+            execution_identity="score-b",
+            include_loss=True,
+        )
+        return candidate_set
+
+    monkeypatch.setattr(post_mip_runner, "_input_set", input_set)
+
+    summary = post_mip_runner.aggregate_post_mip_node(config, "post.params.select")
+
+    assert summary["execution_contract"]["dependency_executions"] == {"score": "score-a"}
+    assert summary["execution_identity"] == post_mip_identity.post_mip_execution_contract_identity(
+        summary["execution_contract"]
+    )
 
 
 @pytest.mark.parametrize(

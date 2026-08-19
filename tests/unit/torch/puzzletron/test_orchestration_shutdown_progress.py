@@ -793,10 +793,14 @@ def test_controller_artifact_settling_deadline_survives_restart(tmp_path: Path, 
     ids=("submitted-at-fallback", "no-usable-timestamp"),
 )
 def test_controller_settling_elapsed_handles_legacy_attempt_timestamps(
-    monkeypatch, attempt, expected_elapsed
+    tmp_path: Path, monkeypatch, attempt, expected_elapsed
 ):
-    controller = CampaignController.__new__(CampaignController)
-    controller.artifact_settling_timeout_seconds = 120.0
+    plan = _compile_test_plan(
+        tmp_path,
+        stage_filter="convert",
+        execution_defaults={"artifact_settling_timeout_seconds": 120},
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
     monkeypatch.setattr(
         controller,
         "_required_completed_attempts",
@@ -921,24 +925,7 @@ def test_controller_fails_when_completed_work_artifacts_do_not_settle(
 
 
 def test_controller_ignores_failed_record_from_stale_stage_execution(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    runner = load_runner_config(runner_path)
-    execution = load_execution_config(execution_path)
-    old_plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=runner,
-        execution=execution,
-        stage_filter="convert",
-    )
-    config = yaml.safe_load(experiment.read_text())
-    config["convert"]["model_path"] = "/models/replacement"
-    experiment.write_text(yaml.safe_dump(config))
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=runner,
-        execution=execution,
-        stage_filter="convert",
-    )
+    old_plan, plan = _compile_changed_convert_plans(tmp_path)
     old_identity = CampaignController(old_plan, executor=_FakeExecutor())._stage_execution_identity(
         old_plan.stages[0]
     )
