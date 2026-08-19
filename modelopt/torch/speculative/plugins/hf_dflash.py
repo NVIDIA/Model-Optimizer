@@ -419,10 +419,21 @@ class HFDFlashModel(DFlashModel):
         # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
         # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
         # added only at export via dflash_export_rope_scaling.)
+        # A config can carry BOTH a top-level rope_theta and a rope_parameters dict
+        # with different values: Transformers 5 keeps the real base in
+        # rope_parameters while the class default (10000.0 for Qwen3) stays visible
+        # as rope_theta. rope_parameters wins, otherwise the draft trains against a
+        # RoPE base 100x off the target's.
+        base_rope_params = getattr(base_config, "rope_parameters", None)
+        if not isinstance(base_rope_params, dict):
+            base_rope_params = {}
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if not hasattr(base_config, attr):
+            if attr in base_rope_params:
+                base_val = base_rope_params[attr]
+            elif hasattr(base_config, attr):
+                base_val = getattr(base_config, attr)
+            else:
                 continue
-            base_val = getattr(base_config, attr)
             user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
                 logger.warning(
@@ -434,6 +445,12 @@ class HFDFlashModel(DFlashModel):
                     base_val,
                 )
             setattr(self.dflash_config, attr, base_val)
+            # Qwen3Config populates rope_parameters at construction, so a later
+            # setattr on the flat field alone would leave the dict — which is what
+            # the rotary module reads — holding the stale value.
+            draft_rope_params = getattr(self.dflash_config, "rope_parameters", None)
+            if isinstance(draft_rope_params, dict) and attr in draft_rope_params:
+                draft_rope_params[attr] = base_val
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
