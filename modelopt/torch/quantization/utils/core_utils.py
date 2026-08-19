@@ -1050,19 +1050,16 @@ _ShardInfo = namedtuple("_ShardInfo", ["name", "old", "mesh", "placements"])
 
 
 def _shard_start(param):
-    """Global offset along shard dim 0 for a ``Shard(0)`` DTensor on a 1-D FSDP mesh.
+    """Global row offset of this rank's ``Shard(0)`` slice (0 for a non-DTensor param).
 
-    Returns 0 for non-DTensor params. Uses torch's even-split convention: the first ``dim0 % world``
-    ranks get an extra row, so rank ``r``'s offset is ``r * (dim0 // world) + min(r, dim0 % world)``.
-    Correct for both even and uneven sharding.
+    Sharding is always even here (``fsdp2_shard_local_pack`` rejects uneven), so it is just
+    ``rank * rows_per_rank``.
     """
     if not isinstance(param, DTensor):
         return 0
-    dim0 = param.shape[0]  # global size
     world = param.device_mesh.size()
     r = param.device_mesh.get_local_rank()
-    base, rem = divmod(dim0, world)
-    return r * base + min(r, rem)
+    return r * (param.shape[0] // world)
 
 
 def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
@@ -1135,21 +1132,13 @@ def _rewrap_scale_buffers_shard0(module, captured, local_dim0):
     """
     info = next(iter(captured.values()))
     mesh, placements = info.mesh, info.placements
-    # The scale's dim-0 matches the weight's global dim-0 (per-row / per-expert). Pass the true global
-    # shape+stride to from_local: without it, from_local infers global = local * world (even-shard
-    # assumption), so under UNEVEN sharding ranks disagree on the global shape and full_tensor()
-    # deadlocks. sharded_param DTensors (weights) already carry the right shape via their spec.
-    global_dim0 = info.old._orig_size[0]
     for bname, buf in list(module._buffers.items()):
         if buf is None or isinstance(buf, DTensor) or buf.dim() == 0:
             continue
+        # A buffer whose dim-0 matches the shard row/expert count is sharded; wrap it Shard(0) so a
+        # later full_tensor() rebuilds it. Even sharding, so from_local infers the global shape.
         if buf.shape[0] == local_dim0:
-            local = buf.contiguous()
-            global_shape = torch.Size((global_dim0, *local.shape[1:]))
-            global_stride = torch.empty(global_shape, device="meta").stride()
-            module._buffers[bname] = DTensor.from_local(
-                local, mesh, placements, shape=global_shape, stride=global_stride
-            )
+            module._buffers[bname] = DTensor.from_local(buf.contiguous(), mesh, placements)
 
 
 @contextmanager
@@ -1218,36 +1207,6 @@ def fsdp2_shard_local_pack(root_model, module):
             _rewrap_scale_buffers_shard0(module, captured, local_dim0)
             group.fsdp_params = list(mapping.values())
         module.__dict__.pop("_shard_local_start", None)
-
-
-@contextmanager
-def materialize_fsdp2_root(model: nn.Module):
-    """Unshard a sharded FSDP2 root's own params (embed/lm_head/norm) for a calibration forward.
-
-    The calibration loop calls ``model.forward(**batch)`` directly (``dataset_utils._forward_loop``)
-    rather than ``model(**batch)``, so ``nn.Module.__call__`` is bypassed and the root's FSDP2
-    forward pre-hook never fires. Its own params (embed/lm_head/norm) stay sharded DTensors and the
-    forward hits ``aten.embedding: mixed Tensor and DTensor``. Decoder layers are unaffected: they are
-    called as ``layer(...)`` inside ``forward``, so their pre-hooks fire and they unshard normally.
-
-    Unshard the root up front so its params are full tensors, then reshard on exit. The bypass also
-    skips the root's post-forward hook, so nothing reshards it mid-calibration and a single unshard
-    holds across all batches. Cheap: only the root's own param group is gathered, not the decoder
-    layers. No-op for non-FSDP2 or already-replicated roots.
-    """
-    root_sharded = False
-    if isinstance(model, FSDPModule):
-        pg = fully_shard.state(model)._fsdp_param_group
-        root_sharded = pg is not None and pg.is_sharded
-    if root_sharded:
-        with enable_fake_quant(model):
-            model.unshard()
-    try:
-        yield
-    finally:
-        if root_sharded:
-            with enable_fake_quant(model):
-                model.reshard()
 
 
 def update_quant_cfg_with_kv_cache_quant(

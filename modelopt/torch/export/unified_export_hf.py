@@ -27,8 +27,11 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from huggingface_hub import split_torch_state_dict_into_shards
+from huggingface_hub.constants import SAFETENSORS_INDEX_FILE
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch.distributed.tensor import DTensor
 
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
@@ -60,9 +63,12 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import distributed as _dist
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
+
+from .moe_utils import _split_packed_fused_experts
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -999,9 +1005,7 @@ def _export_transformers_checkpoint(
     _reconstruct_fused_moe_linear(model)
 
     if is_fsdp2_model(model):
-        # FSDP2: each rank packed its own Shard(0) slice. Gather only THIS rank's owned decoder-layer
-        # units to full CPU tensors (bounded host memory; the write is parallel per-rank). At world=1
-        # rank 0 owns every unit, so this one path covers any world size.
+        # Each rank gathers only its owned layers to CPU (bounded memory; parallel per-rank write).
         quantized_state_dict = _gather_owned_units(model)
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
@@ -1487,62 +1491,36 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
-# ---------------------------------------------------------------------------
-# FSDP2 shard-local parallel checkpoint save (see docs/fsdp2_export_changes.md).
-# Each rank writes its owned decoder-layer units concurrently; host memory is
-# bounded to its owned subset and the disk write parallelizes across ranks.
-# ---------------------------------------------------------------------------
-
-
 def _materialize_cpu(v: torch.Tensor) -> torch.Tensor:
-    """Convert a gathered state-dict value to a plain, contiguous CPU tensor.
-
-    A gathered DTensor here is fully replicated (``full_tensor``/replicated buffer), so
-    ``to_local()`` yields the complete tensor. A ``QTensorWrapper`` (compressed weight) unwraps
-    to its packed data via ``.data``.
-    """
-    from torch.distributed.tensor import DTensor
-
+    """Convert a gathered weight into a plain, contiguous CPU tensor."""
     if isinstance(v, DTensor):
         v = v.to_local()
     v = getattr(v, "data", v)  # QTensorWrapper -> packed data; plain tensor -> itself
     return v.detach().to("cpu").contiguous()
 
 
-def _enumerate_export_units(model, id_to_name):
-    """Ordered export units, identical on every rank (this order drives ownership).
+def _enumerate_export_units(model):
+    """List the module groups to export, one per decoder layer plus a final "leftovers" group.
 
-    Each decoder layer is one unit; a trailing "root-leaves" unit holds every module that owns
-    parameters directly and is not under a decoder-layer prefix (embed / lm_head / final norm).
-    Returns ``[(modules, is_root), ...]``. If decoder layers cannot be discovered, the whole model
-    becomes a single root unit (correct, but no parallelism).
+    The leftovers group is the weight-owning modules outside any layer (embeddings, lm_head, norm).
+    Every rank builds the same list, so they agree on who exports what without communicating.
     """
-    from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
-
-    decoder_layers = LayerActivationCollector.get_decoder_layers(model)
-    units: list[tuple[list[nn.Module], bool]] = []
-    layer_prefixes: tuple[str, ...] = ()
-    if decoder_layers is not None:
-        layer_prefixes = tuple(id_to_name[id(layer)] + "." for layer in decoder_layers)
-        units = [([layer], False) for layer in decoder_layers]
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
+    in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
     root_leaves = [
         m
-        for n, m in model.named_modules()
-        if next(m.parameters(recurse=False), None) is not None
-        and not (layer_prefixes and n.startswith(layer_prefixes))
+        for m in model.modules()
+        if id(m) not in in_layer and next(m.parameters(recurse=False), None) is not None
     ]
-    units.append((root_leaves, True))
-    return units
+    return [[layer] for layer in decoder_layers] + [root_leaves]
 
 
 def _gather_unit(modules, id_to_name, is_owner):
-    """Gather one unit's params to the owner via ``full_tensor()`` (all-gather on every rank).
+    """Collect one group's weights onto the owner rank.
 
-    Only the owner keeps the materialized CPU copy. Non-owners join the collective and drop the
-    result, so the gate is on the *keep*, never the collective (skipping it on non-owners deadlocks).
+    Every rank takes part in the all-gather (it is a collective, so skipping it on the non-owners
+    would hang); only the owner keeps the result.
     """
-    from torch.distributed.tensor import DTensor
-
     unit_sd: dict[str, torch.Tensor] = {}
     for m in modules:
         base = id_to_name.get(id(m), "")
@@ -1555,14 +1533,11 @@ def _gather_unit(modules, id_to_name, is_owner):
 
 
 def _write_owned_shards(owned, export_dir, rank_id, max_shard_size):
-    """Write this rank's tensors as safetensors shards via the HF splitter.
+    """Write this rank's tensors to its own safetensors shard files.
 
-    Returns ``(weight_map {key: filename}, total_bytes)`` for the index merge. Filenames embed the rank
-    so ranks never collide; the HF splitter handles ``max_shard_size`` and never splits a single tensor
-    (a >cap tensor gets its own over-cap shard).
+    Returns the ``{tensor_name: filename}`` map and total byte size, which rank 0 uses to build the
+    index. Filenames include the rank number so ranks never overwrite each other.
     """
-    from huggingface_hub import split_torch_state_dict_into_shards
-
     pattern = f"model-r{rank_id:02d}{{suffix}}.safetensors"
     split = split_torch_state_dict_into_shards(
         owned, filename_pattern=pattern, max_shard_size=max_shard_size
@@ -1575,34 +1550,28 @@ def _write_owned_shards(owned, export_dir, rank_id, max_shard_size):
 
 
 def _gather_owned_units(model):
-    """Each rank gathers only the decoder-layer units it owns (``i % world``) to full CPU tensors.
+    """Gather the layers this rank owns onto it, as CPU tensors.
 
-    All ranks walk every unit in lockstep (``_gather_unit``'s ``full_tensor`` is collective); each rank
-    keeps just its owned units, so host memory is bounded to the owned subset (+ one transient unit on
-    GPU). Keep-fused MoE experts are split into per-expert keys once the owned units are assembled.
+    Every rank walks all layers together (the gather is a collective) but keeps only the ones it owns,
+    so host memory holds just this rank's share. Fused MoE experts are split into per-expert keys at
+    the end.
     """
-    from .moe_utils import _split_fused_experts_state_dict
-
     rank, world = _dist.rank(), _dist.size()
     id_to_name = {id(m): n for n, m in model.named_modules()}
-    units = _enumerate_export_units(model, id_to_name)
+    units = _enumerate_export_units(model)
     my_sd: dict[str, torch.Tensor] = {}
-    for i, (modules, _is_root) in enumerate(units):
+    for i, modules in enumerate(units):
         owned = _gather_unit(
             modules, id_to_name, is_owner=(i % world == rank)
         )  # COLLECTIVE all ranks
         if owned is not None:
             my_sd.update(owned)
-    _split_fused_experts_state_dict(
-        my_sd, model
-    )  # only this rank's owned keep-fused keys are present
+    _split_packed_fused_experts(my_sd, model)  # only this rank's owned keep-fused keys are present
     return my_sd
 
 
 def _finalize_index(local_maps, export_dir, rank, world):
-    """gather_object the per-rank HF weight_maps to rank 0; write the standard index. No sidecars."""
-    from huggingface_hub.constants import SAFETENSORS_INDEX_FILE
-
+    """Collect every rank's tensor-to-file map onto rank 0 and write model.safetensors.index.json."""
     gathered: list[Any] | None
     if world > 1:
         gathered = [None] * world if rank == 0 else None
@@ -1622,11 +1591,7 @@ def _finalize_index(local_maps, export_dir, rank, world):
 
 
 def _parallel_write(my_sd, export_dir, max_shard_size):
-    """Distributed write: each rank writes its own safetensors shards concurrently.
-
-    Rank 0 then merges the single ``model.safetensors.index.json`` from the gathered per-rank
-    weight_maps.
-    """
+    """Each rank writes its own shard files at once; rank 0 then writes the combined index."""
     rank, world = _dist.rank(), _dist.size()
     local_map = _write_owned_shards(my_sd, export_dir, rank, max_shard_size)  # (weight_map, nbytes)
     _dist.barrier()

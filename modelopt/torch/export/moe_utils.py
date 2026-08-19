@@ -228,7 +228,7 @@ def _export_fused_experts(
     _delete_fused_moe_source_attrs(module)
 
 
-def _export_fused_experts_keep_fused(module, dtype):
+def _pack_fused_experts_shard_local(module, dtype):
     """Shard-local keep-fused NVFP4/FP8 pack for one rank's experts.
 
     Pack THIS rank's experts IN PLACE and keep the weight FUSED (``Shard(0)`` on E),
@@ -247,7 +247,7 @@ def _export_fused_experts_keep_fused(module, dtype):
     ``_export_quantized_weight`` (so the per-tensor ``weight_scale_2`` is naturally shared by the gate
     and up halves -- what vLLM's load-time fusion requires -- and per-block scales are row-local). The
     packed per-expert results are stacked back into fused ``[local_n, ...]`` tensors + per-expert
-    scale buffers; the gate/up split is deferred to write time (``_split_fused_experts_state_dict``).
+    scale buffers; the gate/up split is deferred to write time (``_split_packed_fused_experts``).
     Non-destructive: the fused params survive, so :func:`fsdp2_shard_local_pack` re-registers them.
     """
     from modelopt.torch.export.unified_export_hf import _export_quantized_weight
@@ -318,10 +318,10 @@ def _export_fused_experts_keep_fused(module, dtype):
         module.register_buffer("down_proj_input_scale", dp_input_scale)
 
 
-def _split_fused_experts_state_dict(state_dict, model):
+def _split_packed_fused_experts(state_dict, model):
     """Split keep-fused expert tensors in a gathered ``state_dict`` into per-expert keys.
 
-    Converts the ``_export_fused_experts_keep_fused`` output (fused ``{name}.gate_up_proj [E,2I,H/2]``
+    Converts the ``_pack_fused_experts_shard_local`` output (fused ``{name}.gate_up_proj [E,2I,H/2]``
     + per-expert scales) into the same per-expert deployment keys ``_export_fused_experts`` emits
     (``{name}.{e}.gate_proj.weight`` / ``up_proj`` / ``down_proj`` + scales). Byte-identical: packing
     is row-independent, so slicing the packed fused tensor equals packing each half; gate/up share the
