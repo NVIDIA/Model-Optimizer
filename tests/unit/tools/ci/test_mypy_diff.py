@@ -120,6 +120,9 @@ def test_run_mypy_separates_paths_from_options():
     _run_mypy(session, Path("checkout"), ["-strict.py"], Path("cache"))
 
     assert session.arguments[-2:] == ("--", "-strict.py")
+    assert "--follow-imports=silent" in session.arguments
+    assert "--follow-imports=skip" not in session.arguments
+    assert "--scripts-are-modules" in session.arguments
 
 
 def test_merge_parent_avoids_target_only_files_selected_by_stale_event_base(tmp_path):
@@ -187,22 +190,26 @@ def test_code_quality_uses_checked_out_pull_request_merge_parent():
     assert "github.event.pull_request.base.sha" not in changed_file_step["run"]
 
 
-def test_mypy_hook_pins_stubs_and_disables_automatic_installation():
+def test_mypy_hook_uses_modelopt_environment():
     config = yaml.safe_load(
         (REPOSITORY_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     )
-    hook = next(
-        hook
+    repository, hook = next(
+        (repository, hook)
         for repository in config["repos"]
         for hook in repository["hooks"]
         if hook["id"] == "mypy"
     )
-    dependencies = hook["additional_dependencies"]
 
-    assert hook["args"] == ["--no-install-types", "--interactive"]
-    assert {dependency.split("==", maxsplit=1)[0] for dependency in dependencies} == {
-        "nox",
-        "types-docutils",
-        "types-PyYAML",
-    }
-    assert all(dependency.count("==") == 1 for dependency in dependencies)
+    assert repository["repo"] == "local"
+    assert hook["entry"] == "python -m mypy"
+    assert hook["language"] == "system"
+    assert hook["types_or"] == ["python", "pyi"]
+    assert hook["require_serial"] is True
+    assert hook["args"] == [
+        "--no-install-types",
+        "--interactive",
+        "--ignore-missing-imports",
+        "--follow-imports=silent",
+        "--scripts-are-modules",
+    ]
