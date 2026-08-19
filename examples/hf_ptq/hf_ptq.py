@@ -587,6 +587,7 @@ def load_model(args: argparse.Namespace):
             offload_folder=args.offload_folder,
             max_cpu_memory_gb=args.max_cpu_memory_gb,
             max_gpu_memory_gb=args.max_gpu_memory_gb,
+            pin_offloaded_modules=args.pin_offloaded_modules,
         )
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -1764,6 +1765,18 @@ def parse_args() -> argparse.Namespace:
             "Per-block _amax is computed from the loaded BF16 weights (data-derived). "
             "Use when --pyt_ckpt_path points at an MXFP4 HF checkpoint (e.g. "
             "openai/gpt-oss-20b) and the target qformat is NVFP4-family."
+        ),
+    )
+    parser.add_argument(
+        "--pin_offloaded_modules",
+        type=lambda v: tuple(x.strip() for x in v.split(",") if x.strip()),
+        default=(),
+        help=(
+            "Comma-separated module-name suffixes to keep resident under --offload_folder. "
+            "For models whose forward reads a sibling module's weights, which accelerate "
+            "leaves on meta outside that sibling's own forward (e.g. Kimi-K3: "
+            "mlp_res_proj,mlp_res_norm,self_attention_res_proj,self_attention_res_norm,"
+            "output_attn_res_proj,output_attn_res_norm)."
         ),
     )
     parser.add_argument(
