@@ -76,7 +76,7 @@ def _cov_args():
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Non-Puzzletron unit tests across the generic dependency matrix."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-lint,dev-test]")
     tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pin:
         session.install(tf_pin)
