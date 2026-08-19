@@ -632,7 +632,14 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _compute_loss(
-        self, logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits=None
+        self,
+        logits,
+        input_ids,
+        anchor_positions,
+        block_keep_mask,
+        loss_mask,
+        base_logits=None,
+        draft_hidden=None,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
@@ -643,6 +650,8 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
+            draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
+                Unused here; DFlash2 needs them for its candidate-selector term.
 
         Returns:
             (loss, accuracy) tuple.
@@ -921,6 +930,7 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask,
             loss_mask,
             base_outputs.logits if self.dflash_self_logit_distillation else None,
+            draft_hidden=hidden,
         )
 
         return ModelOutput(

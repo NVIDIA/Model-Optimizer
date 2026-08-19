@@ -31,6 +31,7 @@ with import_plugin("megatron_medusa"):
 
 with import_plugin("transformers"):
     from .hf_dflash import *
+    from .hf_dflash2 import *
     from .hf_domino import *
     from .hf_dspark import *
     from .hf_eagle import *
