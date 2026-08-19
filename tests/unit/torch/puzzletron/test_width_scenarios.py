@@ -109,7 +109,7 @@ def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_p
 
 @pytest.mark.parametrize(
     "stale_input",
-    ["missing-summary", "changed-identity", "malformed-manifest"],
+    ["missing-summary", "changed-identity", "malformed-manifest", "malformed-outputs"],
 )
 def test_replacement_scoring_finalization_marker_rejects_stale_inputs(
     tmp_path, monkeypatch, stale_input
@@ -129,8 +129,12 @@ def test_replacement_scoring_finalization_marker_rejects_stale_inputs(
         manifest = json.loads(manifest_path.read_text())
         manifest["semantic_identity"] = "replacement_scoring_semantic_b"
         manifest_path.write_text(json.dumps(manifest))
-    else:
+    elif stale_input == "malformed-manifest":
         manifest_path.write_text("[]\n")
+    else:
+        manifest = json.loads(manifest_path.read_text())
+        manifest["outputs"] = ["invalid"]
+        manifest_path.write_text(json.dumps(manifest))
 
     assert not replacement_finalizer.finalization_marker_is_current(
         marker_a, manifest_path, summary

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from modelopt.torch.puzzletron.diagnostics import generate_replace_block_report
@@ -79,10 +80,12 @@ def finalization_marker_is_current(
         return False
     except ValueError:
         return False
+    outputs = manifest.get("outputs") if isinstance(manifest, Mapping) else None
     return bool(
         marker_identity
         and marker_identity == _successful_manifest_identity_from_payload(manifest)
-        and summary == (manifest.get("outputs") or {}).get("report")
+        and isinstance(outputs, Mapping)
+        and summary == outputs.get("report")
     )
 
 
