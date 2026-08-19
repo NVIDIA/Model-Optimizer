@@ -804,8 +804,7 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
             "rewrites weights after calibration, by which point every shard is written."
         )
 
-    # Mirrors the branch conditions in export_quantized: anything that routes to a second
-    # exporter would write over the --export_path layerwise calibration already populated.
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
     for flag, value, exporter in (
         ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
         ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
@@ -1224,16 +1223,13 @@ def quantize_main(
     args.layerwise_export = _layerwise_get(layerwise_cfg, "export_dir") is not None
     if args.layerwise_export:
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
-            # Only the mono-quantize path retargets export_dir and runs the compatibility
-            # refusals. Reaching auto_quantize with the flag set would export to the
-            # recipe's placeholder directory and skip export_hf_checkpoint(), leaving
-            # --export_path with no weights and no error.
+            # Only the mono-quantize path retargets export_dir and runs the refusals;
+            # auto_quantize would export to the placeholder and skip the real export.
             raise NotImplementedError(
                 "layerwise.export_dir is not supported with an AutoQuantize recipe; "
                 "use a PTQ recipe, or drop export_dir and export afterwards."
             )
-        # A resumed run leaves the model without amax on the layers it skipped, so no
-        # preview may run against it.
+        # A resumed run leaves skipped layers without amax; only the checkpoint is whole.
         args.skip_generate = True
 
     if args.batch_size == 0:
@@ -1366,10 +1362,8 @@ def quantize_main(
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Retarget export_dir before resolving checkpoint_dir: the resolved name hashes the
-        # config, so hashing it with the recipe's placeholder would make two runs to
-        # different --export_path values share one checkpoint dir and resume against the
-        # wrong shards.
+        # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
+        # still in it, two --export_path values would share one checkpoint dir.
         if args.layerwise_export:
             assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
             quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)

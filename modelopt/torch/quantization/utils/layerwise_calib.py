@@ -599,8 +599,8 @@ class _CheckpointState:
         self.start_layer = start_layer
         self.save_every = save_every
         self.calib_mutates_weights = calib_mutates_weights
-        # False when per-layer export runs alongside: its shards already hold each layer's
-        # result, so resume skips the layer instead of restoring it.
+        # False when per-layer export runs alongside: its shards hold each layer's result,
+        # so resume skips rather than restores.
         self.save_layer_state = save_layer_state
         # Tracks the most recent saved layer so save() can window-save the layers
         # since the last save event. Initialized to start_layer - 1 so the first
@@ -627,8 +627,8 @@ class _CheckpointState:
                 ("num_layers", num_layers),
                 ("save_every", save_every),
                 ("calib_mutates_weights", calib_mutates_weights),
-                # Else resuming an export-mode checkpoint without export_dir recalibrates
-                # everything, then fails in full_restore on files that were never written.
+                # Else a resume without export_dir recalibrates everything, then fails in
+                # full_restore on files that were never written.
                 ("save_layer_state", save_layer_state),
             ):
                 ckpt_value = manifest.get(key)

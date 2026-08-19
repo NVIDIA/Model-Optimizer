@@ -51,8 +51,8 @@ _INDEX_FILE = "model.safetensors.index.json"
 def layer_shard_name(layer_idx: int) -> str:
     """Shard filename for one decoder layer.
 
-    Derived from the index rather than a running counter so that re-exporting a layer
-    overwrites its shard instead of leaving a stale copy behind for the index to pick up.
+    Keyed by index, not a counter, so re-exporting overwrites rather than leaving a stale
+    shard for the index to find.
     """
     return f"model-layer-{layer_idx:05d}.safetensors"
 
@@ -60,8 +60,8 @@ def layer_shard_name(layer_idx: int) -> str:
 def _is_quantized_module(module: nn.Module) -> bool:
     """Whether this module carries quantizers of its own.
 
-    Detected by type, not attribute name: fused-expert modules name theirs after the weight
-    (``gate_up_proj_weight_quantizer``), so a name-based test misses whole MoE blocks.
+    By type, not attribute name: fused experts name theirs after the weight
+    (``gate_up_proj_weight_quantizer``), which a name test misses.
     """
     from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 
@@ -71,11 +71,7 @@ def _is_quantized_module(module: nn.Module) -> bool:
 
 
 def _module_formats(model: nn.Module) -> set:
-    """Every distinct quantization format present, not just the first one found.
-
-    ``get_quantization_format(model)`` stops at the first quantized child, so gating on it
-    would let an NVFP4 layer slip through a check meant to exclude it.
-    """
+    """Every distinct format present. ``get_quantization_format`` stops at the first."""
     return {
         get_quantization_format(module)
         for _, module in model.named_modules()
@@ -84,10 +80,10 @@ def _module_formats(model: nn.Module) -> set:
 
 
 def _tied_quantized_modules(model: nn.Module) -> list[str]:
-    """Names of quantized modules that share a weight tensor with another quantized module.
+    """Quantized modules sharing a weight with another.
 
     The whole-model export merges their amaxes via ``sync_tied_input_amax``; a per-layer
-    pass cannot, since a tie partner may be uncalibrated or already written.
+    pass cannot, since a partner may be uncalibrated or already written.
     """
     by_ptr: dict[int, list[str]] = {}
     for name, module in model.named_modules():
@@ -104,24 +100,12 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
 def assert_layerwise_export_supported(model: nn.Module) -> None:
     """Raise ``NotImplementedError`` unless per-layer export is valid for this model.
 
-    Each case would otherwise produce a checkpoint differing from a whole-model export
-    without failing, so all are rejected before the first shard is written.
-
-    The central one is the format gate. Both other export paths begin with
-    ``requantize_resmooth_fused_llm_layers``, which this one never calls: its core step
-    discovers modules sharing an input via a dummy forward over the *whole* model, and
-    there is no such forward here. Restricting to ``FUSION_FREE_FORMATS`` is what makes
-    that omission invisible -- for those formats all three of its steps are no-ops, since
-    pre-quant-scale fusion requires ``nvfp4_awq`` and MoE expert resmoothing requires AWQ
-    or SVDQuant. Any other format would silently lose them.
+    Each case would otherwise differ from a whole-model export without failing. The format
+    gate is the central one: this path never runs ``requantize_resmooth_fused_llm_layers``,
+    so it is limited to formats whose scales it can reproduce per layer.
 
     .. todo::
-        Support the fusing formats (NVFP4 above all) by making
-        ``collect_shared_input_modules`` operate on a single decoder layer rather than the
-        whole model. The groups it finds -- q/k/v, gate/up -- are intra-layer, so a dummy
-        forward over one layer can discover them; the whole-model scope is an artifact of
-        how the batch exporter happens to call it, not a requirement. AWQ and SVDQuant
-        additionally need the pre-quant-scale steps made per-layer.
+        AWQ and SVDQuant need that pass's pre-quant-scale steps made per-layer.
     """
     from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
     from modelopt.torch.utils import distributed as dist
@@ -137,10 +121,8 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
 
     tied = _tied_quantized_modules(model)
     if has_accelerate_offload(model) and not tied:
-        # Offloaded weights sit on meta between windows, so the grouping above inspected
-        # nothing; an empty result is not a clean bill of health. Resolving ties by name
-        # instead would survive weight moves -- the same fix ExportContext.__post_init__
-        # already carries a TODO for.
+        # Offloaded weights are on meta, so the grouping above inspected nothing; an empty
+        # result is not a clean bill of health. See ExportContext.__post_init__'s TODO.
         warnings.warn(
             "Weight-tie detection is skipped for offloaded models: data_ptr() cannot group "
             "weights that are not resident. A model with tied quantized modules would "
@@ -166,12 +148,9 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
 def transient_module_state(module: nn.Module):
     """Undo everything export does to ``module``, so calibration can continue through it.
 
-    Export is destructive -- packed weights, new scale buffers, grafted per-expert
-    submodules. An offloaded model discards that when its materialization window closes; a
-    resident one has no window, and calibration still has every later layer to run.
-
-    Restoring the dicts suffices, and costs references rather than a deep copy, because
-    export rebinds them instead of mutating tensors in place.
+    A resident model has no materialization window to discard the packed weights, grafted
+    expert submodules and new buffers export leaves behind. Restoring the dicts suffices,
+    and costs references not a deep copy, since export rebinds rather than mutates.
     """
     snapshot = [
         (m, dict(m._parameters), dict(m._buffers), dict(m._modules)) for m in module.modules()
@@ -191,19 +170,9 @@ def transient_module_state(module: nn.Module):
 class LayerwiseExporter:
     """Writes one decoder layer's quantized shard per call, then the tail and index.
 
-    Constructed before calibration begins, driven once per layer from inside the window
-    calibration already opens, and finalized after the last one::
-
-        exporter = LayerwiseExporter(model, export_dir)
-        ...
-        with persistent_materialization(layer, writeback=False):
-            calib_func(layer, ...)
-            exporter.export_layer(layer_idx, layer)
-        ...
-        quant_config = exporter.finalize(extra_state_dict=mtp_state_dict)
-
-    ``finalize()`` rebuilds the index from the shards present on disk, so layers exported
-    by an earlier run that this one skipped are picked up without being re-exported.
+    Built before calibration, driven per layer from inside the window calibration opens,
+    finalized after the last. ``finalize`` indexes the shards on disk, so layers an earlier
+    run exported are picked up without being re-exported.
     """
 
     def __init__(
@@ -215,8 +184,8 @@ class LayerwiseExporter:
     ) -> None:
         """Validate support and capture model-level state, before calibration runs.
 
-        Only quantizer *configuration* is read here, which ``mtq.quantize`` fixes when it
-        swaps modules; anything amax-dependent belongs in :meth:`finalize`.
+        Only quantizer *configuration* is read here; anything amax-dependent belongs in
+        :meth:`finalize`.
         """
         from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -257,16 +226,12 @@ class LayerwiseExporter:
                 self._layer_names[idx] = name
         # Descendants too: the tail pass must skip anything a layer shard already covered.
         self._decoder_owned_ids = {id(m) for layer in layers for m in layer.modules()}
-        # Materialization dispatch rebuilds this map per call when not supplied; only the
-        # handful of tail modules reach it, but the map is model-sized either way.
+        # Materialization dispatch rebuilds this map per call when not supplied.
         self._name_to_module = dict(model.named_modules())
 
-        # The context is the single owner of the model, dtype and qlora flag; keeping
-        # parallel copies on self would leave two sources of truth for the same facts.
-        # Dedup is off for the reason the offload path turns it off (registry.py
-        # __post_init__): data_ptr() cannot identify a tensor across an export that keeps
-        # rolling packed weights back. Ties are refused anyway, and with both caches None
-        # the context is immutable, so one instance serves every pass.
+        # Sole owner of model/dtype/qlora: parallel copies on self would be a second
+        # source of truth. Dedup off as registry.py does for non-resident weights --
+        # data_ptr cannot identify a tensor across an export that keeps rolling them back.
         self._ctx = ExportContext(
             model=model,
             dtype=_resolve_export_dtype(model, dtype),
@@ -277,8 +242,8 @@ class LayerwiseExporter:
 
         self._export_dir = Path(export_dir)
         self._export_dir.mkdir(parents=True, exist_ok=True)
-        # Not get_kv_cache_dtype(model): it does not recurse, so given the root it always
-        # answers None, which then trips the KV assert in the per-tensor pass.
+        # Not get_kv_cache_dtype(model): it does not recurse, so given the root it answers
+        # None, which trips the KV assert in the per-tensor pass.
         self._kv_cache_format = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)[
             "quantization"
         ]["kv_cache_quant_algo"]
@@ -292,8 +257,7 @@ class LayerwiseExporter:
                 f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
                 "match the original HF hub checkpoint."
             )
-        # By name, not data_ptr: layers and tail are separate passes, so there is never a
-        # whole-dict view to compare pointers across.
+        # By name, not data_ptr: layers and tail are separate passes.
         raw_tied_keys: set[str] = (
             set(getattr(model, "_tied_weights_keys", None) or [])
             if getattr(model.config, "tie_word_embeddings", False)
@@ -311,11 +275,10 @@ class LayerwiseExporter:
         layer_module: nn.Module,
         probe_forward: Callable[[nn.Module], None] | None = None,
     ) -> None:
-        """Pack one calibrated layer into its shard, leaving the layer itself untouched.
+        """Pack one calibrated layer into its shard, leaving the layer untouched.
 
-        ``probe_forward`` runs the layer once on real activations; a fusing format needs it
-        to rediscover which modules share an input. Omitting it is only valid when no
-        format present fuses.
+        ``probe_forward`` runs the layer on real activations so a fusing format can
+        rediscover which modules share an input; only omit it when nothing fuses.
         """
         from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
@@ -331,8 +294,7 @@ class LayerwiseExporter:
         layer_name = self._layer_names[layer_idx]
         tensors: dict[str, torch.Tensor] = {}
         with transient_module_state(layer_module):
-            # Per-block, so neither fits a whole-model prep pass: earlier there is no amax
-            # yet, later the layer is already written.
+            # Per-block: earlier there is no amax yet, later the layer is written.
             _prepare_moe_inputs(layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora)
             self._fuse_shared_inputs(layer_module, probe_forward)
             sync_moe_gate_up_amax(layer_module)
@@ -346,24 +308,24 @@ class LayerwiseExporter:
             for key, tensor in layer_module.state_dict().items():
                 self._collect(tensors, prefix + key, tensor)
 
-        save_file(_copy_storage_aliases(tensors), str(self._export_dir / layer_shard_name(layer_idx)))
+        save_file(
+            _copy_storage_aliases(tensors), str(self._export_dir / layer_shard_name(layer_idx))
+        )
 
     def _fuse_shared_inputs(
         self, layer_module: nn.Module, probe_forward: Callable[[nn.Module], None] | None
     ) -> None:
         """Unify scales across the modules of this layer that share an input.
 
-        The whole-model exporters get these groups from one forward over the entire model.
-        Rediscovering them per layer is equivalent because the groups never cross a layer
-        boundary, and it uses the layer's real activations rather than a synthetic probe.
+        Equivalent to the whole-model pass because the groups never cross a layer boundary,
+        and it uses real activations rather than a synthetic probe.
         """
         from .quant_utils import get_quantization_format
         from .unified_export_hf import _fuse_shared_input_modules, collect_shared_input_modules
 
-        # Per-module scan, not get_quantization_format(layer_module): that returns the first
-        # format found, so a layer with FP8 attention and NVFP4 experts reports fp8 and
-        # would skip fusing its NVFP4 groups. _fuse_shared_input_modules re-evaluates the
-        # format per group, so the value passed below is only a fallback.
+        # Per-module scan: get_quantization_format returns the first format found, so an
+        # FP8-attention/NVFP4-expert layer would report fp8 and skip fusing. The value
+        # passed below is only a fallback -- _fuse_shared_input_modules re-checks per group.
         if not (_module_formats(layer_module) - FUSION_FREE_FORMATS):
             return
         layer_format = get_quantization_format(layer_module)
@@ -376,13 +338,14 @@ class LayerwiseExporter:
         input_to_linear, _ = collect_shared_input_modules(
             layer_module, lambda: probe_forward(layer_module)
         )
-        _fuse_shared_input_modules(self._ctx.model, input_to_linear, quantization_format=layer_format)
+        _fuse_shared_input_modules(
+            self._ctx.model, input_to_linear, quantization_format=layer_format
+        )
 
     def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
-        """Export the tail, write every config artifact, and index all shards.
+        """Export the tail, write the config artifacts, and index all shards.
 
-        Leaves ``export_dir`` a complete, loadable checkpoint, so no separate
-        ``export_hf_checkpoint()`` call is needed. Returns the quant config.
+        Leaves ``export_dir`` a complete checkpoint; no ``export_hf_checkpoint()`` needed.
         """
         from modelopt.torch.quantization.utils.core_utils import (
             enable_weight_access_and_writeback,
@@ -407,8 +370,8 @@ class LayerwiseExporter:
         _warn_on_unsynced_moe_gate_up(model)
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
-        # Module references in the config must use the same hub names the tensors were
-        # written under, or a loader will treat an excluded BF16 layer as quantized.
+        # Config module names must match the tensors', or a loader treats an excluded
+        # BF16 layer as quantized.
         if self._name_mapper is not None and quant_config:
             with contextlib.suppress(Exception):
                 revert_quant_config_names(quant_config.get("quantization", {}), self._name_mapper)
@@ -419,10 +382,8 @@ class LayerwiseExporter:
         # Decoder tensors are already in their own shards.
         skip_prefixes = tuple(f"{n}." for n in self._layer_names.values() if n)
 
-        # Non-decoder modules whose weights are not directly readable -- embeddings, norms,
-        # lm_head on an offloaded model. Each needs its own materialization window, or its
-        # tensors are still on meta here and _collect drops them silently. Containers are
-        # skipped: their children get their own window.
+        # Offloaded embeddings/norms/lm_head are on meta here, and _collect would drop them
+        # silently; each needs its own window. Containers are skipped -- children get one.
         for name, module in model.named_modules():
             if id(module) in self._decoder_owned_ids:
                 continue
@@ -445,9 +406,8 @@ class LayerwiseExporter:
             if id(module) in self._decoder_owned_ids or id(module) in handled_ids:
                 continue
             if _holds_meta_tensor(module):
-                # requires_weight_materialization said no window was needed, yet the weights
-                # are not here. Packing would raise deep inside the export handler; skipping
-                # would drop the tensor silently. Neither is acceptable.
+                # No window was offered yet the weights are absent. Packing would raise
+                # deep in the handler, skipping would drop it silently.
                 raise RuntimeError(
                     f"{name!r} holds meta tensors but was not offered a materialization "
                     "window, so its weights cannot be exported. Export without export_dir "
@@ -459,9 +419,8 @@ class LayerwiseExporter:
                 continue
             self._collect(tail, name, tensor)
 
-        # Tensors the model never held -- e.g. MTP weights, which HF leaves orphaned because
-        # it only builds num_hidden_layers decoders. Already materialized and already in
-        # export form, so only the hub-name reversal applies.
+        # Tensors the model never held (e.g. orphaned MTP weights), already in export
+        # form, so only the hub-name reversal applies.
         for name, tensor in (extra_state_dict or {}).items():
             mapped = self._name_mapper(name) if self._name_mapper is not None else name
             tail.setdefault(mapped, tensor.detach().contiguous().cpu())
@@ -475,10 +434,8 @@ class LayerwiseExporter:
     def assert_shards_present(self, upto: int) -> None:
         """Require shards for layers ``[0, upto)``, which a resume intends to skip.
 
-        Calibration resumes from its own checkpoint directory, which knows nothing about
-        what was exported. If the two were produced by different runs, the skipped layers
-        have no shards and the gap would only surface at :meth:`finalize`, after the whole
-        calibration had run. Fail before any of that work instead.
+        The checkpoint directory knows nothing about what was exported, so a mismatched
+        pair would only surface at :meth:`finalize` -- after a full calibration.
         """
         missing = [i for i in range(upto) if not (self._export_dir / layer_shard_name(i)).exists()]
         if missing:
@@ -506,11 +463,10 @@ class LayerwiseExporter:
         out[new_key] = new_value.detach().contiguous().cpu()
 
     def _write_index(self) -> None:
-        """Build ``model.safetensors.index.json`` by reading back the shards on disk.
+        """Build ``model.safetensors.index.json`` from the shards on disk.
 
-        Read from disk rather than accumulated in memory, because shards this run resumed
-        past were never seen by this process. Enumerated from the layer count rather than
-        globbed, so leftovers from a longer previous run cannot leak into the index.
+        From disk because shards this run resumed past were never seen in memory; from the
+        layer count rather than a glob, so a longer previous run's leftovers cannot leak in.
         """
         from safetensors import safe_open
 
@@ -537,11 +493,10 @@ def _holds_meta_tensor(module: nn.Module) -> bool:
 
 
 def _copy_storage_aliases(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Copy tensors that share storage with an earlier key.
+    """Copy tensors sharing storage with an earlier key.
 
-    ``save_file`` rejects two keys backed by the same storage, and ``_collect``'s ``.cpu()``
-    is a no-op rather than a copy when the tensor is already there. Copy rather than drop:
-    every key has to survive. Mirrors ``_StreamingShardWriter.add``.
+    ``save_file`` rejects those, and ``_collect``'s ``.cpu()`` is a no-op when the tensor is
+    already there. Copy rather than drop: every key must survive.
     """
     seen: set[int] = set()
     for key, tensor in tensors.items():
@@ -553,11 +508,9 @@ def _copy_storage_aliases(tensors: dict[str, torch.Tensor]) -> dict[str, torch.T
 
 
 def _shard_data_bytes(path: Path) -> int:
-    """Payload size of a safetensors file, excluding its header.
+    """Payload size of a safetensors file: total minus its 8-byte length prefix and header.
 
-    Layout is an 8-byte little-endian header length, that much JSON, then tensor data.
-    Subtracting is exact and avoids a dtype-size table that would have to track every
-    safetensors dtype name.
+    Exact, and avoids a dtype-size table that would have to track every safetensors name.
     """
     with open(path, "rb") as f:
         header_len = int.from_bytes(f.read(8), "little")

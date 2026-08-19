@@ -2098,8 +2098,7 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
-    # Before any calibration, so unsupported models fail immediately rather than after
-    # hours of work with nothing exportable.
+    # Before calibration, so unsupported models fail in seconds not hours.
     exporter = None
     if export_dir is not None:
         from modelopt.torch.export.layerwise_export import LayerwiseExporter
@@ -2190,16 +2189,13 @@ def layerwise_calibrate(
                 elif is_last:
                     next_inputs = None
 
-                # After the next-layer capture in both orderings, so the shard reflects
-                # the layer's final state.
+                # After the next-layer capture in both orderings: final state.
                 if exporter is not None:
-                    # One real batch, so a fusing format can rediscover which modules share
-                    # an input without the whole-model forward this path never runs.
+                    # One real batch, so a fusing format can rediscover shared inputs.
                     def _fusion_probe(m, _inputs=layer_inputs):
                         args, kwargs_input = _inputs[0]
-                        # Same reset _layer_forward_loop does: these tuples were already
-                        # replayed once, so the cache holds this layer's keys and the probe
-                        # would see kv_len twice the mask width.
+                        # As _layer_forward_loop does: these tuples were replayed once, so
+                        # the cache would give the probe kv_len twice the mask width.
                         cache = kwargs_input.get("past_key_values")
                         if cache is not None:
                             kwargs_input = dict(kwargs_input)

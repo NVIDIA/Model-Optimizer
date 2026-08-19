@@ -1182,8 +1182,7 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     """
     quant_cfg = copy.deepcopy(quant_cfg)
     algorithm = quant_cfg.get("algorithm")
-    # A recipe may carry one algorithm or a list of them; detection accepts both, so the
-    # retarget has to as well or a list-shaped recipe dies on a str index.
+    # Detection accepts one algorithm or a list, so the retarget must too.
     for entry in algorithm if isinstance(algorithm, list) else [algorithm]:
         if isinstance(entry, dict) and isinstance(entry.get("layerwise"), dict):
             entry["layerwise"]["export_dir"] = export_path
