@@ -689,8 +689,12 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
    |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
-   +-- huggingface/                # Model-specific recipes
+   +-- huggingface/                # Architecture-specific recipes (by model_type)
    |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   |       +-- <task>/
+   |           +-- <recipe>.yaml
+   +-- models/                     # Checkpoint-specific recipes (by model-hub path)
+   |   +-- <org>/<model_id>/       # see modelopt_recipes/models/README.md
    |       +-- <task>/
    |           +-- <recipe>.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)

@@ -1,4 +1,4 @@
-# Model-specific recipes for Hugging Face models
+# Architecture-specific recipes for Hugging Face models
 
 This folder holds model-optimization recipes (e.g. PTQ recipes) whose
 behavior is tied to a **specific Hugging Face `model_type` (architecture)** — one
