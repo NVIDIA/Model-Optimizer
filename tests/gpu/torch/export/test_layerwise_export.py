@@ -203,6 +203,22 @@ def test_export_without_checkpoint_dir_may_overwrite(tmp_path):
     mtq.quantize(_build_model(), copy.deepcopy(cfg), _calib)  # must not raise
 
 
+def test_shards_from_a_different_config_refuse(tmp_path):
+    """Same layer count, different quantization: the shards must not be reused.
+
+    The resume manifest records no model or quantization identity and
+    assert_shards_present only checks that files exist, so without a binding one run's
+    manifest could finalize another run's shards into a valid-looking, wrong checkpoint.
+    """
+    export_dir = tmp_path / "fused"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_fp8"), _calib)
+
+    # Same model and layer count, NVFP4 instead of FP8, pointed at the same shards.
+    nvfp4 = _layerwise_cfg(export_dir, tmp_path / "ckpt_nvfp4", base=_nvfp4_cfg())
+    with pytest.raises(RuntimeError, match="different run"):
+        mtq.quantize(_build_model(), nvfp4, _calib)
+
+
 def test_kv_cache_quantized_export_matches(tmp_path):
     """KV-cache scales must survive: the format has to be read off the whole quant config.
 

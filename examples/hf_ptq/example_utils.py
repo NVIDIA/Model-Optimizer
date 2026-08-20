@@ -1160,9 +1160,20 @@ def colocate_layerwise_checkpoint_dir(quant_cfg: dict, export_path: str) -> tupl
     Co-locating the two makes the invariant structural rather than a thing the user has to
     know. Only applied when per-layer export is on; without it ``checkpoint_dir`` is an
     ordinary resume directory whose placement is the caller's business.
+
+    A *sibling* of the export directory, not a child: the resume state outlives the run
+    (nothing deletes it on success) and ``next_inputs.pt`` holds cached activations, so
+    inside ``export_path`` it would ship as part of the checkpoint. Deleting it on success
+    instead would make re-running a finished command trip ``assert_no_orphan_shards``,
+    which cannot tell "already done" from "resume record lost".
+
+    Named ``.layerwise_resume`` rather than ``...checkpoint``: with per-layer export on,
+    the shards *are* the weights, so this directory holds no checkpoint at all -- only the
+    resume point, the cached activations feeding the next layer, and the shape metadata
+    skip mode needs.
     """
     current = _layerwise_checkpoint_dir(quant_cfg.get("algorithm"))
-    target = os.path.join(export_path, ".layerwise_checkpoint")
+    target = export_path.rstrip("/") + ".layerwise_resume"
     if current is None or current == target:
         return quant_cfg, False
 
@@ -1209,16 +1220,31 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     The recipe opts in by setting ``layerwise.export_dir``; its value is a placeholder,
     since the destination is per-run rather than per-recipe. Mirrors how
     :func:`resolve_checkpoint_dir` rewrites ``layerwise.checkpoint_dir``.
+
+    Raises ``ValueError`` if nothing was retargeted. The caller decides to skip the real
+    export from the parsed recipe, but the rewrite happens on a separately materialized
+    dict; if the two ever disagree, silently returning the config unchanged would send the
+    shards to the recipe's placeholder directory and leave ``--export_path`` empty, with
+    the run reporting success.
     """
     quant_cfg = copy.deepcopy(quant_cfg)
     algorithm = quant_cfg.get("algorithm")
     # Detection accepts one algorithm or a list, so the retarget must too.
+    retargeted = 0
     for entry in algorithm if isinstance(algorithm, list) else [algorithm]:
         # Only entries that already opted in: writing export_dir into a layerwise entry
         # that did not ask for it would switch per-layer export on behind the user's back.
         layerwise = entry.get("layerwise") if isinstance(entry, dict) else None
         if isinstance(layerwise, dict) and layerwise.get("export_dir") is not None:
             layerwise["export_dir"] = export_path
+            retargeted += 1
+
+    if not retargeted:
+        raise ValueError(
+            "layerwise export is enabled but no layerwise.export_dir was found to retarget "
+            f"in algorithm={algorithm!r}. The exported shards would go to the recipe's "
+            "placeholder path instead of --export_path."
+        )
     return quant_cfg
 
 

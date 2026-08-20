@@ -46,6 +46,7 @@ SUPPORTED_FORMATS = FUSION_FREE_FORMATS | _PER_LAYER_FUSABLE_FORMATS
 
 _TAIL_SHARD = "model-tail.safetensors"
 _INDEX_FILE = "model.safetensors.index.json"
+_IDENTITY_FILE = ".layerwise_export.json"
 
 
 def layer_shard_name(layer_idx: int) -> str:
@@ -279,6 +280,8 @@ class LayerwiseExporter:
             else raw_tied_keys
         )
 
+        self._bind_identity()
+
     def export_layer(
         self,
         layer_idx: int,
@@ -443,6 +446,35 @@ class LayerwiseExporter:
         save_non_weight_artifacts(model, self._export_dir)
         _write_hf_export_config(model, quant_config, self._export_dir)
         return quant_config
+
+    def _bind_identity(self) -> None:
+        """Tie the shards to the run that produced them.
+
+        Nothing else does: the resume manifest records no model or quantization identity,
+        and :meth:`assert_shards_present` only checks that files exist. Two runs pointed at
+        one export directory with the same layer count would otherwise let one run's
+        manifest finalize the other's shards into a structurally valid, wrong checkpoint.
+        """
+        identity = {
+            "model_class": type(self._ctx.model).__name__,
+            "num_layers": len(self._layers),
+            "formats": sorted(str(f) for f in _module_formats(self._ctx.model) if f),
+            "kv_cache": str(self._kv_cache_format),
+        }
+        path = self._export_dir / _IDENTITY_FILE
+        if path.exists():
+            previous = json.loads(path.read_text())
+            if previous != identity:
+                differing = sorted(
+                    k for k in set(previous) | set(identity) if previous.get(k) != identity.get(k)
+                )
+                raise RuntimeError(
+                    f"{self._export_dir} holds shards from a different run (differing: "
+                    f"{differing}); resuming would finalize them against this run's "
+                    "manifest. Use a fresh export directory."
+                )
+        else:
+            path.write_text(json.dumps(identity, indent=2))
 
     def completed_layers(self) -> int:
         """How many leading layers already have a shard on disk.
