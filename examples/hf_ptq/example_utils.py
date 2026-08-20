@@ -1142,44 +1142,36 @@ def _layerwise_checkpoint_dir(algorithm) -> str | None:
     return nested.get("checkpoint_dir") if isinstance(nested, dict) else None
 
 
-def colocate_layerwise_checkpoint_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
-    """Move the layerwise checkpoint dir under ``export_path``. Returns ``(cfg, moved)``.
+def default_layerwise_resume_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
+    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset. ``(cfg, set)``.
 
-    Per-layer export describes its shards as the resume artifact, but the resume *point*
-    still comes from ``checkpoint_dir``'s manifest -- ``_CheckpointState.from_folder``
-    returns ``start = info[0] if info else 0``, and nothing derives it from the shards. So
-    if the manifest and the shards do not share a lifetime, losing the manifest silently
-    restarts calibration at layer 0 and overwrites every finished shard, with
-    ``assert_shards_present(0)`` passing trivially on the way through.
+    Per-layer export calls its shards the resume artifact, but the resume *point* comes
+    from this directory's manifest -- ``_CheckpointState.from_folder`` returns
+    ``start = info[0] if info else 0`` and nothing derives it from the shards. Leaving it
+    unset therefore means no resume at all, which is the one thing this recipe is for.
 
-    That is not hypothetical: the shipped recipes default ``checkpoint_dir`` to
-    ``/tmp/modelopt_layerwise_ckpt``, and ``/tmp`` is container-local. A run that outlasts
-    its GPU session -- the case this whole path exists for -- comes back to a wiped
-    manifest and redoes everything.
+    Only fills a gap; an explicit ``checkpoint_dir`` is the caller's choice and is left
+    alone. A *sibling* of the export directory rather than a child: nothing deletes the
+    resume state on success, and ``next_inputs.pt`` holds cached activations, so inside
+    ``export_path`` it would ship as part of the checkpoint. Deleting it on success instead
+    would make re-running a finished command trip ``assert_no_orphan_shards``, which cannot
+    tell "already done" from "resume record lost".
 
-    Co-locating the two makes the invariant structural rather than a thing the user has to
-    know. Only applied when per-layer export is on; without it ``checkpoint_dir`` is an
-    ordinary resume directory whose placement is the caller's business.
-
-    A *sibling* of the export directory, not a child: the resume state outlives the run
-    (nothing deletes it on success) and ``next_inputs.pt`` holds cached activations, so
-    inside ``export_path`` it would ship as part of the checkpoint. Deleting it on success
-    instead would make re-running a finished command trip ``assert_no_orphan_shards``,
-    which cannot tell "already done" from "resume record lost".
-
-    Named ``.layerwise_resume`` rather than ``...checkpoint``: with per-layer export on,
-    the shards *are* the weights, so this directory holds no checkpoint at all -- only the
-    resume point, the cached activations feeding the next layer, and the shape metadata
-    skip mode needs.
+    ``resume`` rather than ``checkpoint``: with per-layer export on the shards *are* the
+    weights, so this directory holds no checkpoint -- only the resume point, the next
+    layer's cached activations, and the shape metadata skip mode needs.
     """
-    current = _layerwise_checkpoint_dir(quant_cfg.get("algorithm"))
-    target = export_path.rstrip("/") + ".layerwise_resume"
-    if current is None or current == target:
+    if _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None:
+        return quant_cfg, False
+
+    algorithm = quant_cfg.get("algorithm")
+    if not isinstance(algorithm, dict) or not isinstance(algorithm.get("layerwise"), dict):
         return quant_cfg, False
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    algo = quant_cfg["algorithm"]
-    algo["layerwise"] = {**algo["layerwise"], "checkpoint_dir": target}
+    quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = (
+        export_path.rstrip("/") + ".layerwise_resume"
+    )
     return quant_cfg, True
 
 

@@ -32,9 +32,9 @@ from example_utils import (
     add_mlflow_args,
     build_quant_cfg,
     cleanup_distributed,
-    colocate_layerwise_checkpoint_dir,
     copy_custom_model_files,
     create_vlm_calibration_loop,
+    default_layerwise_resume_dir,
     get_model,
     get_processor,
     get_tokenizer,
@@ -809,7 +809,13 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
     for flag, value, exporter in (
         ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
         ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
-        ("--qformat int8_sq", "int8_sq" in args.qformat, "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant; the --qformat preset is
+            # int8_smoothquant. Match both so this keeps holding either way.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
         (
             "an encoder-decoder model_type (t5/bart/whisper)",
             getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
@@ -1370,8 +1376,8 @@ def quantize_main(
             quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
             print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
             # The shards are only a resume artifact if the manifest that names the resume
-            # point survives alongside them; see colocate_layerwise_checkpoint_dir.
-            quant_cfg, moved = colocate_layerwise_checkpoint_dir(quant_cfg, args.export_path)
+            # point survives alongside them; see default_layerwise_resume_dir.
+            quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
             if moved:
                 print(
                     "Layerwise checkpoint_dir co-located with the export path so a resumed "

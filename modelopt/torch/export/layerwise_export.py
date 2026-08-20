@@ -16,6 +16,7 @@
 """Write each decoder layer's quantized checkpoint shard as soon as it is calibrated."""
 
 import contextlib
+import hashlib
 import json
 import warnings
 from collections.abc import Callable
@@ -455,11 +456,28 @@ class LayerwiseExporter:
         one export directory with the same layer count would otherwise let one run's
         manifest finalize the other's shards into a structurally valid, wrong checkpoint.
         """
+        model = self._ctx.model
+        # The quant config carries the per-module contract -- algo, kv-cache algo and the
+        # exclude list -- so two runs differing in which modules are quantized, or in block
+        # settings, hash differently even when the format names match. Digested rather than
+        # stored so the file stays small and diffable.
+        quant_contract = hashlib.sha256(
+            json.dumps(
+                get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora),
+                sort_keys=True,
+                default=str,
+            ).encode()
+        ).hexdigest()[:16]
         identity = {
-            "model_class": type(self._ctx.model).__name__,
+            "model_class": type(model).__name__,
+            # Identifies the source checkpoint. Digesting the weights themselves would mean
+            # reading the whole model, so a run started from differently-trained weights at
+            # the same path is not distinguished.
+            "source": str(getattr(model.config, "_name_or_path", "") or ""),
             "num_layers": len(self._layers),
-            "formats": sorted(str(f) for f in _module_formats(self._ctx.model) if f),
+            "formats": sorted(str(f) for f in _module_formats(model) if f),
             "kv_cache": str(self._kv_cache_format),
+            "quant_contract": quant_contract,
         }
         path = self._export_dir / _IDENTITY_FILE
         if path.exists():

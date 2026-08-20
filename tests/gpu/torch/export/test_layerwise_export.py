@@ -192,7 +192,12 @@ def test_shards_without_manifest_refuse(tmp_path):
 
 
 def test_export_without_checkpoint_dir_may_overwrite(tmp_path):
-    """Without checkpoint_dir there is no resume to lose, so re-export is allowed."""
+    """Used directly, without checkpoint_dir, there is no resume to lose.
+
+    ``hf_ptq`` derives one from ``--export_path`` so its users get resume by default; a
+    library caller that omits it is opting out, and re-exporting from scratch is then the
+    documented behaviour rather than an error.
+    """
     export_dir = tmp_path / "fused"
     cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     cfg["algorithm"] = {
@@ -217,6 +222,23 @@ def test_shards_from_a_different_config_refuse(tmp_path):
     nvfp4 = _layerwise_cfg(export_dir, tmp_path / "ckpt_nvfp4", base=_nvfp4_cfg())
     with pytest.raises(RuntimeError, match="different run"):
         mtq.quantize(_build_model(), nvfp4, _calib)
+
+
+def test_shards_from_a_different_module_selection_refuse(tmp_path):
+    """Same format and layer count, different modules quantized: still a different run.
+
+    Format names alone cannot tell these apart -- both are FP8 -- so the identity has to
+    carry the per-module contract from the quant config.
+    """
+    export_dir = tmp_path / "fused"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_a"), _calib)
+
+    narrowed = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    narrowed["quant_cfg"].append({"quantizer_name": "*mlp*", "enable": False})
+    with pytest.raises(RuntimeError, match="different run"):
+        mtq.quantize(
+            _build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_b", base=narrowed), _calib
+        )
 
 
 def test_kv_cache_quantized_export_matches(tmp_path):
