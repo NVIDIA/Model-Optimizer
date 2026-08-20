@@ -32,6 +32,7 @@ from modelopt.torch.opt.searcher import ConstraintsDict, ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import (
+    preserve_quantizer_attributes_context,
     set_quantizer_attributes_partial,
     set_quantizer_by_cfg,
 )
@@ -781,7 +782,6 @@ def temporarily_fold_weights(
             fold_pairs.append((local_weight, quantizer))
 
     weight_snapshots = {}
-    quantizer_states = {}
     for weight, quantizer in fold_pairs:
         if (
             quantizer.is_enabled
@@ -796,29 +796,14 @@ def temporarily_fold_weights(
                     if snapshot_device is None
                     else weight.detach().to(snapshot_device, copy=True),
                 )
-        quantizer_states.setdefault(
-            quantizer,
-            (
-                quantizer._disabled,
-                quantizer._rotate,
-                quantizer._enable_pre_quant_scale,
-                quantizer._input_dtype,
-            ),
-        )
-    try:
-        fold_weight(model, keep_attrs=True)
-        yield
-    finally:
-        with torch.no_grad():
-            for weight, snapshot in weight_snapshots.values():
-                weight.copy_(snapshot)
-        for quantizer, state in quantizer_states.items():
-            (
-                quantizer._disabled,
-                quantizer._rotate,
-                quantizer._enable_pre_quant_scale,
-                quantizer._input_dtype,
-            ) = state
+    with preserve_quantizer_attributes_context(model):
+        try:
+            fold_weight(model, keep_attrs=True)
+            yield
+        finally:
+            with torch.no_grad():
+                for weight, snapshot in weight_snapshots.values():
+                    weight.copy_(snapshot)
 
 
 @torch.no_grad()

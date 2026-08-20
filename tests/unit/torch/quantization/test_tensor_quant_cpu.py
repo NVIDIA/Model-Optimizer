@@ -538,3 +538,24 @@ def test_set_quantizer_cxt_restores_on_exception():
         if isinstance(module, TensorQuantizer)
     }
     assert post_state == pre_state
+
+
+def test_preserve_quantizer_attributes_context_restores_type_and_properties():
+    model = QuantModuleRegistry.convert(torch.nn.Linear(4, 3, bias=False))
+    model.weight_quantizer = SequentialQuantizer(TensorQuantizer(), TensorQuantizer())
+    original_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+
+    with mtq.preserve_quantizer_attributes_context(model):
+        mtq.set_quantizer_by_cfg(
+            model,
+            [{"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4}}],
+        )
+        assert isinstance(model.weight_quantizer, TensorQuantizer)
+
+    assert isinstance(model.weight_quantizer, SequentialQuantizer)
+    restored_states = [
+        quantizer.get_modelopt_state(properties_only=True) for quantizer in model.weight_quantizer
+    ]
+    assert restored_states == original_states

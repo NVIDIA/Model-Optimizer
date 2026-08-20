@@ -148,14 +148,14 @@ class QuantModule(DynamicModule):
             weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
-        if hasattr(quantizer, "_pre_quant_scale"):
-            if keep_attrs:
-                # The scale is already baked into the folded weight.
-                quantizer._enable_pre_quant_scale = False
-            else:
-                delattr(quantizer, "_pre_quant_scale")
-        if not keep_attrs and hasattr(quantizer, "_amax"):
-            delattr(quantizer, "_amax")
+        if keep_attrs and hasattr(quantizer, "_pre_quant_scale"):
+            # The scale is already baked into the folded weight.
+            # Disable pre-quant scaling so it is not applied twice.
+            quantizer._enable_pre_quant_scale = False
+        elif not keep_attrs:
+            for attr_name in ("_pre_quant_scale", "_amax"):
+                if hasattr(quantizer, attr_name):
+                    delattr(quantizer, attr_name)
 
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
