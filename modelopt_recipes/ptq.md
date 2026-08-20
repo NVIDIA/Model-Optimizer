@@ -3,10 +3,9 @@
 This doc walks through the **PTQ quantization schemes** in two parts: the
 model-agnostic recipes under [`general/ptq/`](general/ptq/) (the recommended
 starting point for any model), and then the
-[model-specific recipes](#model-specific-recipes-huggingface) under
-`huggingface/` — per-`model_type` folders plus the
-`models/<org>/<checkpoint>/` tier — comparing each to its general
-baseline and explaining why it deviates.
+[model-specific recipes](#model-specific-recipes) — per-`model_type` folders
+under `huggingface/` plus the checkpoint-mirror `models/<org>/<checkpoint>/`
+tier — comparing each to its general baseline and explaining why it deviates.
 
 ---
 
@@ -227,7 +226,7 @@ These can also be **stacked** when a single method isn't enough — e.g. `mse` +
 
 ---
 
-## Model-specific recipes (`huggingface/`)
+## Model-specific recipes
 
 The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
@@ -297,7 +296,7 @@ general recipes never enable output quantizers, and the pattern must stay scoped
 to GEMM outputs — a `DynamicQuantize` on non-GEMM outputs (embedding lookup,
 pooling) fails to compile in TensorRT.
 
-A lighter case: **`step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only`** is close to
+A lighter case: **`models/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only`** is close to
 `general/ptq/nvfp4_mlp_only` (NVFP4 on MoE/MLP weights+inputs, FP8 KV) but pinned
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).

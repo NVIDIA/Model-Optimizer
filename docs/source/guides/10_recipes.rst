@@ -519,11 +519,14 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
 Model-specific recipes
 ----------------------
 
-Model-specific recipes are tuned for a particular Hugging Face ``model_type``
-(or a specific released model) and live under
-``huggingface/<model_type>/[<specific_model>/]<task>/``. See
+Model-specific recipes come in two tiers: architecture recipes keyed by a
+Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
+checkpoint mirrors keyed by a model-hub path under
+``models/<org>/<model_id>/<task>/``. See
 `modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
-for the layout convention and recipe-lookup order.
+and
+`modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
+for the layout conventions and recipe-lookup order.
 
 .. list-table::
    :header-rows: 1
