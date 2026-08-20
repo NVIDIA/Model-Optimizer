@@ -5,7 +5,7 @@ model-agnostic recipes under [`general/ptq/`](general/ptq/) (the recommended
 starting point for any model), and then the
 [model-specific recipes](#model-specific-recipes-huggingface) under
 `huggingface/` — per-`model_type` folders plus the
-`huggingface/models/<org>/<checkpoint>/` tier — comparing each to its general
+`models/<org>/<checkpoint>/` tier — comparing each to its general
 baseline and explaining why it deviates.
 
 ---
@@ -234,7 +234,7 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
 earns a place under `huggingface/<model_type>/` or
-`huggingface/models/<org>/<checkpoint>/` when a model has to **deviate** from
+`models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
@@ -344,7 +344,7 @@ everything else matches the general recipe.
 
 ### Checkpoint mirrors — `models/<org>/<checkpoint>`
 
-The `huggingface/models/` tier reproduces a **single published (or planned)
+The `models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
 - **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
