@@ -83,6 +83,74 @@ def _assert_same_checkpoint(expected, actual):
         assert torch.equal(got.float(), want.float()), f"{key}: values differ"
 
 
+def _fp8_cfg():
+    return copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+
+
+def _narrowed_fp8_cfg():
+    """FP8 with the MLP left unquantized: same format, different module selection."""
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["quant_cfg"].append({"quantizer_name": "*mlp*", "enable": False})
+    return cfg
+
+
+def _kv_cache_cfg():
+    return mtq.update_quant_cfg_with_kv_cache_quant(
+        copy.deepcopy(mtq.FP8_DEFAULT_CFG), copy.deepcopy(mtq.FP8_KV_CFG["quant_cfg"])
+    )
+
+
+def _nvfp4_cfg():
+    """NVFP4 with o_proj left unquantized.
+
+    Layerwise calibration leaves ``self_attn.o_proj``'s input amax at 0 on every layer but
+    the last, so a full-NVFP4 model cannot be exported by *any* path -- a pre-existing bug
+    unrelated to per-layer export. The shipped NVFP4 layerwise recipes are experts-only and
+    never quantize o_proj, which is why it has gone unnoticed. Excluding it here keeps this
+    test on the behaviour it is meant to cover: q/k/v and gate/up scale fusion.
+    """
+    cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    cfg["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
+    return cfg
+
+
+def _mixed_fp8_nvfp4_cfg():
+    """FP8 attention, NVFP4 MLP -- a layer whose format depends on where you look.
+
+    ``get_quantization_format`` returns the first format found, so gating fusion on it
+    reports fp8 here and silently skips fusing the NVFP4 groups. o_proj stays unquantized
+    for the reason in :func:`_nvfp4_cfg`.
+    """
+    nvfp4 = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+    numerics = next(
+        e["cfg"] for e in nvfp4["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
+    )
+    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    fp8_numerics = next(
+        e["cfg"] for e in fp8["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
+    )
+    return {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {"quantizer_name": "*self_attn*weight_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
+            {"quantizer_name": "*self_attn*input_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
+            {"quantizer_name": "*mlp*weight_quantizer", "cfg": copy.deepcopy(numerics)},
+            {"quantizer_name": "*mlp*input_quantizer", "cfg": copy.deepcopy(numerics)},
+            {"quantizer_name": "*o_proj*", "enable": False},
+        ]
+    }
+
+
+def _int4_awq_cfg():
+    return copy.deepcopy(mtq.INT4_AWQ_CFG)
+
+
+def _nvfp4_awq_cfg():
+    cfg = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
+    cfg["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
+    return cfg
+
+
 @pytest.fixture(scope="module")
 def baseline_checkpoint(tmp_path_factory):
     """A normal layerwise calibration followed by a separate whole-model export."""
@@ -94,12 +162,47 @@ def baseline_checkpoint(tmp_path_factory):
     return _load_checkpoint(export_dir)
 
 
-def test_layerwise_export_matches_whole_model_export(tmp_path, baseline_checkpoint):
+@pytest.mark.parametrize(
+    ("make_cfg", "layerwise_extra", "expected_key_suffix"),
+    [
+        # NVFP4 fuses q/k/v and gate/up scales, so per-layer rediscovery has to match.
+        pytest.param(_nvfp4_cfg, {}, ("weight_scale_2",), id="nvfp4"),
+        # The probe runs the layer directly, so the capture must leave it in "original".
+        pytest.param(
+            _nvfp4_cfg,
+            {"get_qdq_activations_from_prev_layer": True},
+            ("weight_scale_2",),
+            id="nvfp4_qdq_from_prev_layer",
+        ),
+        # A layer holding two formats must still fuse the one that needs it.
+        pytest.param(_mixed_fp8_nvfp4_cfg, {}, None, id="mixed_fp8_nvfp4"),
+        # KV scales only survive if the format is read off the whole quant config: from
+        # the root module alone it is None, and the per-tensor pass then asserts on the
+        # first *_bmm_quantizer._amax it sees.
+        pytest.param(_kv_cache_cfg, {}, ("k_scale", "v_scale"), id="kv_cache"),
+        pytest.param(_fp8_cfg, {}, None, id="fp8"),
+    ],
+)
+def test_export_matches_whole_model_export(
+    tmp_path, make_cfg, layerwise_extra, expected_key_suffix
+):
     """Exporting per layer during calibration must yield the same checkpoint."""
-    export_dir = tmp_path / "fused"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+    baseline_dir = tmp_path / "baseline"
+    base = make_cfg()
+    base["algorithm"] = {"method": "max", "layerwise": {"enable": True, **layerwise_extra}}
+    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
 
-    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
+    export_dir = tmp_path / "fused"
+    cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt", base=make_cfg())
+    cfg["algorithm"]["layerwise"].update(layerwise_extra)
+    mtq.quantize(_build_model(), cfg, _calib)
+
+    exported = _load_checkpoint(export_dir)
+    if expected_key_suffix:
+        assert any(k.endswith(expected_key_suffix) for k in exported), (
+            f"no {expected_key_suffix} keys in the exported checkpoint"
+        )
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
     # The directory must be loadable on its own, with no follow-up export call.
     for artifact in ("config.json", "hf_quant_config.json", "model.safetensors.index.json"):
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
@@ -208,20 +311,29 @@ def test_export_without_checkpoint_dir_may_overwrite(tmp_path):
     mtq.quantize(_build_model(), copy.deepcopy(cfg), _calib)  # must not raise
 
 
-def test_shards_from_a_different_config_refuse(tmp_path):
-    """Same layer count, different quantization: the shards must not be reused.
+@pytest.mark.parametrize(
+    "make_second_cfg",
+    [
+        # Same layer count, NVFP4 instead of FP8.
+        pytest.param(_nvfp4_cfg, id="different_format"),
+        # Same format and layer count: only the per-module contract in the quant config
+        # tells these apart, so format names alone are not enough to bind a run.
+        pytest.param(_narrowed_fp8_cfg, id="different_module_selection"),
+    ],
+)
+def test_shards_from_a_different_run_refuse(tmp_path, make_second_cfg):
+    """One run's manifest must not finalize another run's shards.
 
-    The resume manifest records no model or quantization identity and
-    assert_shards_present only checks that files exist, so without a binding one run's
-    manifest could finalize another run's shards into a valid-looking, wrong checkpoint.
+    The resume manifest records no identity of its own and assert_shards_present only
+    checks that files exist, so without a binding this would produce a valid-looking,
+    wrong checkpoint.
     """
     export_dir = tmp_path / "fused"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_fp8"), _calib)
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_a"), _calib)
 
-    # Same model and layer count, NVFP4 instead of FP8, pointed at the same shards.
-    nvfp4 = _layerwise_cfg(export_dir, tmp_path / "ckpt_nvfp4", base=_nvfp4_cfg())
+    second = _layerwise_cfg(export_dir, tmp_path / "ckpt_b", base=make_second_cfg())
     with pytest.raises(RuntimeError, match="different run"):
-        mtq.quantize(_build_model(), nvfp4, _calib)
+        mtq.quantize(_build_model(), second, _calib)
 
 
 def test_identity_without_shards_does_not_block_a_rerun(tmp_path):
@@ -233,62 +345,6 @@ def test_identity_without_shards_does_not_block_a_rerun(tmp_path):
     mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
 
     assert _load_checkpoint(export_dir), "rerun produced no checkpoint"
-
-
-def test_shards_from_a_different_module_selection_refuse(tmp_path):
-    """Same format and layer count, different modules quantized: still a different run.
-
-    Format names alone cannot tell these apart -- both are FP8 -- so the identity has to
-    carry the per-module contract from the quant config.
-    """
-    export_dir = tmp_path / "fused"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_a"), _calib)
-
-    narrowed = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    narrowed["quant_cfg"].append({"quantizer_name": "*mlp*", "enable": False})
-    with pytest.raises(RuntimeError, match="different run"):
-        mtq.quantize(
-            _build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt_b", base=narrowed), _calib
-        )
-
-
-def test_kv_cache_quantized_export_matches(tmp_path):
-    """KV-cache scales must survive: the format has to be read off the whole quant config.
-
-    Deriving it from the root module alone yields None, which makes the per-tensor pass
-    assert on the first ``*_bmm_quantizer._amax`` it sees.
-    """
-    kv_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
-        copy.deepcopy(mtq.FP8_DEFAULT_CFG), copy.deepcopy(mtq.FP8_KV_CFG["quant_cfg"])
-    )
-
-    baseline_dir = tmp_path / "baseline"
-    base = copy.deepcopy(kv_cfg)
-    base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
-
-    export_dir = tmp_path / "fused"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=kv_cfg), _calib)
-
-    exported = _load_checkpoint(export_dir)
-    assert any(k.endswith(("k_scale", "v_scale")) for k in exported), (
-        "no KV cache scales were exported"
-    )
-    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
-
-
-def _nvfp4_cfg():
-    """NVFP4 with o_proj left unquantized.
-
-    Layerwise calibration leaves ``self_attn.o_proj``'s input amax at 0 on every layer but
-    the last, so a full-NVFP4 model cannot be exported by *any* path -- a pre-existing bug
-    unrelated to per-layer export. The shipped NVFP4 layerwise recipes are experts-only and
-    never quantize o_proj, which is why it has gone unnoticed. Excluding it here keeps this
-    test on the behaviour it is meant to cover: q/k/v and gate/up scale fusion.
-    """
-    cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-    cfg["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
-    return cfg
 
 
 def test_export_does_not_mutate_the_model(tmp_path):
@@ -313,102 +369,22 @@ def test_export_does_not_mutate_the_model(tmp_path):
     assert not drifted, f"per-layer export mutated the model: {drifted[:5]}"
 
 
-def test_nvfp4_export_matches(tmp_path):
-    """NVFP4 fuses q/k/v and gate/up scales; per-layer rediscovery must match."""
-    baseline_dir = tmp_path / "baseline"
-    base = _nvfp4_cfg()
-    base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
-
-    export_dir = tmp_path / "fused"
-    mtq.quantize(
-        _build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg()), _calib
-    )
-
-    exported = _load_checkpoint(export_dir)
-    assert any(k.endswith("weight_scale_2") for k in exported), "no NVFP4 global scales exported"
-    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
-
-
-def test_nvfp4_awq_is_refused_once_calibrated(tmp_path):
-    """AWQ is only distinguishable after calibration, so the gate must run again there.
-
-    Before the layer-0 re-check this exported unfused ``pre_quant_scale`` and a layernorm
-    the whole-model path had folded them into -- a valid-looking, wrong checkpoint.
-    """
-    base = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
-    base["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
-    cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=base)
-    cfg["algorithm"]["method"] = "awq_lite"
-    cfg["algorithm"]["layerwise"]["calib_mutates_weights"] = True
-
-    with pytest.raises(NotImplementedError, match="nvfp4_awq"):
-        mtq.quantize(_build_model(), cfg, _calib)
-
-
-def test_nvfp4_export_matches_with_qdq_from_prev_layer(tmp_path):
-    """The fusion probe runs the layer directly, so the capture must leave it in 'original'."""
-    baseline_dir = tmp_path / "baseline"
-    base = _nvfp4_cfg()
-    base["algorithm"] = {
-        "method": "max",
-        "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": True},
-    }
-    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
-
-    export_dir = tmp_path / "fused"
-    cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg())
-    cfg["algorithm"]["layerwise"]["get_qdq_activations_from_prev_layer"] = True
-    mtq.quantize(_build_model(), cfg, _calib)
-
-    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
-
-
-def _mixed_fp8_nvfp4_cfg():
-    """FP8 attention, NVFP4 MLP -- a layer whose format depends on where you look.
-
-    ``get_quantization_format`` returns the first format found, so gating fusion on it
-    reports fp8 here and silently skips fusing the NVFP4 groups. o_proj stays unquantized
-    for the reason in :func:`_nvfp4_cfg`.
-    """
-    nvfp4 = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
-    numerics = next(
-        e["cfg"] for e in nvfp4["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
-    )
-    fp8 = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    fp8_numerics = next(
-        e["cfg"] for e in fp8["quant_cfg"] if e.get("quantizer_name") == "*weight_quantizer"
-    )
-    return {
-        "quant_cfg": [
-            {"quantizer_name": "*", "enable": False},
-            {"quantizer_name": "*self_attn*weight_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
-            {"quantizer_name": "*self_attn*input_quantizer", "cfg": copy.deepcopy(fp8_numerics)},
-            {"quantizer_name": "*mlp*weight_quantizer", "cfg": copy.deepcopy(numerics)},
-            {"quantizer_name": "*mlp*input_quantizer", "cfg": copy.deepcopy(numerics)},
-            {"quantizer_name": "*o_proj*", "enable": False},
-        ]
-    }
-
-
-def test_mixed_format_export_matches(tmp_path):
-    """A layer holding two formats must still fuse the one that needs it."""
-    baseline_dir = tmp_path / "baseline"
-    base = _mixed_fp8_nvfp4_cfg()
-    base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
-
-    export_dir = tmp_path / "fused"
-    mtq.quantize(
-        _build_model(),
-        _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_mixed_fp8_nvfp4_cfg()),
-        _calib,
-    )
-    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
-
-
-def test_awq_is_refused(tmp_path):
+@pytest.mark.parametrize(
+    ("make_cfg", "method", "match"),
+    [
+        # Visible from the config: int4_awq is keyed on num_bits/SequentialQuantizer.
+        pytest.param(_int4_awq_cfg, "max", "awq", id="int4_awq_from_config"),
+        # Only visible afterwards: the NVFP4 discriminators (_pre_quant_scale,
+        # svdquant_lora_a) are registered by the calibrator, so the constructor's gate
+        # sees plain nvfp4 and the check has to run again on the first exported layer.
+        pytest.param(_nvfp4_awq_cfg, "awq_lite", "nvfp4_awq", id="nvfp4_awq_after_calibration"),
+    ],
+)
+def test_awq_is_refused(tmp_path, make_cfg, method, match):
     """AWQ needs the pre-quant-scale steps, which are still whole-model."""
-    cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=mtq.INT4_AWQ_CFG)
-    with pytest.raises(NotImplementedError, match="awq"):
+    cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=make_cfg())
+    cfg["algorithm"]["method"] = method
+    cfg["algorithm"]["layerwise"]["calib_mutates_weights"] = method != "max"
+
+    with pytest.raises(NotImplementedError, match=match):
         mtq.quantize(_build_model(), cfg, _calib)
