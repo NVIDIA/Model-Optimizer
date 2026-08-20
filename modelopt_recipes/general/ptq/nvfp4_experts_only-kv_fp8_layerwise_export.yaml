@@ -31,7 +31,7 @@ metadata:
     its GPU session. Export rediscovers the q/k/v and gate/up scale-fusion groups per layer,
     so the checkpoint matches a whole-model export byte for byte.
 
-    Resident (non-offloaded), single-process models only. A resumed run never recalibrates
+    Single-process models, resident or accelerate-offloaded. A resumed run never recalibrates
     the layers it skipped, so the exported checkpoint is complete but the in-memory model is
     not and must not be used for inference.
 quantize:

@@ -2114,6 +2114,20 @@ def layerwise_calibrate(
         save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+
+    if exporter is not None and checkpoint_dir is not None:
+        # detect_resume_point returns None once the manifest is complete, which would put
+        # start_layer back at 0 and recalibrate every layer. In export mode the shards are
+        # already on disk; all that can be missing is the tail, index and configs, which
+        # finalize writes. So a completed manifest means finalize-only, and a rerun after a
+        # crash between the last ckpt.save and finalize costs nothing.
+        manifest = _read_manifest(checkpoint_dir)
+        if manifest is not None and manifest.get("last_completed_layer", -1) + 1 >= num_layers:
+            exporter.assert_shards_present(num_layers)
+            exporter.finalize()
+            print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
+            return
+
     if exporter is not None:
         if start_layer > 0:
             exporter.assert_shards_present(start_layer)

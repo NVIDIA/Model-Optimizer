@@ -150,11 +150,22 @@ def transient_module_state(module: nn.Module):
     """Undo everything export does to ``module``, so calibration can continue through it.
 
     A resident model has no materialization window to discard the packed weights, grafted
-    expert submodules and new buffers export leaves behind. Restoring the dicts suffices,
-    and costs references not a deep copy, since export rebinds rather than mutates.
+    expert submodules and new buffers export leaves behind.
+
+    Rebound names are restored by putting the dicts back, which costs references rather
+    than a copy. Buffer *contents* need more: scale fusion unifies a group's amax through
+    ``_amax.data.copy_()``, an in-place write the dict restore cannot see. Buffers are
+    clone-restored for that reason; parameters are not, since export replaces weights by
+    rebinding and cloning them would cost a full copy of the layer.
     """
     snapshot = [
-        (m, dict(m._parameters), dict(m._buffers), dict(m._modules)) for m in module.modules()
+        (
+            m,
+            dict(m._parameters),
+            {k: (v.clone() if v is not None else None) for k, v in m._buffers.items()},
+            dict(m._modules),
+        )
+        for m in module.modules()
     ]
     try:
         yield
@@ -285,10 +296,13 @@ class LayerwiseExporter:
         from .unified_export_hf import _dispatch_export_handler, _prepare_moe_inputs
 
         assert not self._finalized, "export_layer() called after finalize()"
-        assert layer_module is self._layers[layer_idx], (
-            f"layer_idx {layer_idx} does not match the module passed; calibration and export "
-            "disagree on decoder layer order."
-        )
+        if layer_module is not self._layers[layer_idx]:
+            # Not an assert: -O would strip it, and the failure is silent -- layer N's
+            # tensors land in layer M's shard and the index looks perfectly well formed.
+            raise RuntimeError(
+                f"layer_idx {layer_idx} does not match the module passed; calibration and "
+                "export disagree on decoder layer order."
+            )
 
         layer_name = self._layer_names[layer_idx]
         tensors: dict[str, torch.Tensor] = {}

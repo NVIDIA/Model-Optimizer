@@ -1214,8 +1214,11 @@ def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     algorithm = quant_cfg.get("algorithm")
     # Detection accepts one algorithm or a list, so the retarget must too.
     for entry in algorithm if isinstance(algorithm, list) else [algorithm]:
-        if isinstance(entry, dict) and isinstance(entry.get("layerwise"), dict):
-            entry["layerwise"]["export_dir"] = export_path
+        # Only entries that already opted in: writing export_dir into a layerwise entry
+        # that did not ask for it would switch per-layer export on behind the user's back.
+        layerwise = entry.get("layerwise") if isinstance(entry, dict) else None
+        if isinstance(layerwise, dict) and layerwise.get("export_dir") is not None:
+            layerwise["export_dir"] = export_path
     return quant_cfg
 
 

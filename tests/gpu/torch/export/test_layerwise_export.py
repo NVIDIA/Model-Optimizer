@@ -152,6 +152,31 @@ def test_resume_without_matching_shards_fails_fast(tmp_path):
         )
 
 
+def test_complete_manifest_finalizes_without_recalibrating(tmp_path, baseline_checkpoint):
+    """A crash between the last shard and finalize must cost only the finalize.
+
+    detect_resume_point returns None once the manifest is complete, so start_layer falls
+    back to 0 and every layer would be recalculated and overwritten.
+    """
+    export_dir = tmp_path / "fused"
+    checkpoint_dir = tmp_path / "ckpt"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+    # What a crash after the final ckpt.save looks like: every shard and a complete
+    # manifest on disk, but no tail, index or config yet.
+    (export_dir / "model-tail.safetensors").unlink()
+    (export_dir / "model.safetensors.index.json").unlink()
+    layer_mtimes = {p.name: p.stat().st_mtime for p in export_dir.glob("model-layer-*.safetensors")}
+    assert layer_mtimes
+
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+    # The layer shards must be reused verbatim, not rewritten.
+    for name, mtime in layer_mtimes.items():
+        assert (export_dir / name).stat().st_mtime == mtime, f"{name} was rewritten"
+    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
+
+
 def test_shards_without_manifest_refuse(tmp_path):
     """A lost resume record must not silently overwrite finished shards."""
     export_dir = tmp_path / "fused"
@@ -215,6 +240,28 @@ def _nvfp4_cfg():
     cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
     cfg["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
     return cfg
+
+
+def test_export_does_not_mutate_the_model(tmp_path):
+    """Exporting a layer must leave the model exactly as calibration left it.
+
+    Scale fusion unifies a group's amax with an in-place ``_amax.data.copy_()``, which
+    restoring the buffer *dict* does not undo -- only restoring buffer contents does. FP8
+    cannot catch this: it never fuses.
+    """
+    plain = _nvfp4_cfg()
+    plain["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    expected = mtq.quantize(_build_model(), plain, _calib).state_dict()
+    expected = {k: v.clone() for k, v in expected.items()}
+
+    exported = mtq.quantize(
+        _build_model(),
+        _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=_nvfp4_cfg()),
+        _calib,
+    ).state_dict()
+
+    drifted = [k for k in expected if k in exported and not torch.equal(expected[k], exported[k])]
+    assert not drifted, f"per-layer export mutated the model: {drifted[:5]}"
 
 
 def test_nvfp4_export_matches(tmp_path):
