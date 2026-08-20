@@ -126,7 +126,7 @@ def get_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
+            f"Quantization config. Preset names: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
         ),
@@ -240,7 +240,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         mtq_config = getattr(mtq, args.quant_cfg)
     else:
         raise ValueError(
-            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name / short alias "
+            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name "
             f"({', '.join(QUANT_CFG_CHOICES)}) or a full config name from {mtq.config.choices}."
         )
 
@@ -454,5 +454,7 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

@@ -51,48 +51,175 @@ The unified HF export API supports the following quantization formats:
 5. INT4_AWQ - 4-bit integer with AWQ optimization
 6. W4A8_AWQ - 4-bit weights and 8-bit activations with AWQ optimization
 
-Framework-Specific Support
+Minimum Framework Versions
 --------------------------
 
-TensorRT-LLM
-~~~~~~~~~~~~
+===============  =================
+Framework        Minimum version
+===============  =================
+TensorRT-LLM     v1.2.0
+vLLM             v0.10.1
+SGLang           v0.4.10
+===============  =================
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Qwen 3-VL (FP8, NVFP4)
-  * Deepseek R1/V3 (NVFP4)
-  * Mixtral 8x7B (FP8, NVFP4)
-  * Medusa (FP8)
-  * Eagle (FP8)
+These are the oldest versions expected to load a unified HF checkpoint. The deployment suite itself
+targets newer ones — TensorRT-LLM containers in ``.github/workflows/`` are on the 1.3.x line. Older
+TensorRT-LLM releases may still serve FP8 checkpoints; that is simply not exercised, so v1.2.0 is
+the oldest version stated here rather than the oldest that works.
 
-Requirements: TensorRT-LLM v0.17.0 or later
+.. _unified-hf-support-matrix:
 
-vLLM
-~~~~
+Model Support Matrix
+--------------------
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Mixtral 8x7B (FP8)
-  * Deepseek R1/V3 (NVFP4)
+What this matrix is based on
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Requirements: vLLM v0.10.1 or later
+Entries are drawn from the release deployment suite,
+`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`_.
+For each entry it loads the exported checkpoint in the framework and generates from four short text
+prompts, asserting that each returns non-empty output.
 
-SGLang
-~~~~~~
+Two limits are worth stating plainly, because they bound what any ✅ below can mean:
 
-Models:
-  * Llama 4, 3.x (FP8, NVFP4)
-  * Qwen 3, 2.5 (FP8, NVFP4)
-  * Qwen 3 MoE (FP8, NVFP4)
-  * Deepseek R1/V3 (NVFP4)
+* **These are declared cases, not PR-gated coverage.** The suite is marked ``release`` and collects
+  only when pytest is given ``--run-release``, which no workflow in ``.github/workflows/`` currently
+  passes. A green check on a pull request does not mean these cases ran.
+* **Each case is a load-and-generate smoke check on the text path.** It does not verify accuracy,
+  image or audio inputs, diffusion output, or that speculative decoding actually engages.
 
-Requirements: SGLang v0.4.10 or later
+Legend:
 
-Note: While other models and quantization formats may work, they have not been thoroughly tested and validated.
+* ✅ — declared in the release deployment suite, subject to the two limits above.
+* ⚠ — expected to work, but not a suite entry: either carried over from earlier documentation, or
+  present as a case that does not exercise the feature the row names.
+* ``-`` — not in the suite. It may still work; see `Models not listed here`_.
+
+Language models
+~~~~~~~~~~~~~~~
+
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Llama 3.1, 3.3                                FP8, NVFP4      ✅             ✅       ✅
+Llama 4 Scout, Maverick                       FP8             ✅             ✅       ✅
+Llama 4 Scout                                 NVFP4           ✅             ✅       ✅
+Llama 4 Maverick                              NVFP4           ⚠             \-      \-
+Llama Nemotron Super 49B v1, v1.5             FP8             ✅             ✅       ✅
+Llama Nemotron Ultra 253B v1                  FP8             ✅             ✅       ✅
+Nemotron 3 Nano 30B-A3B                       FP8, NVFP4      ✅             ✅       ✅
+Nemotron 3 Super 120B-A12B                    FP8, NVFP4      ✅             ✅       ✅
+Nemotron 3 Ultra 550B-A55B                    NVFP4           ✅             ✅       ✅
+DeepSeek R1, R1-0528                          NVFP4           ✅             ✅       ✅
+DeepSeek R1, V3                               FP8             ⚠             ⚠       ⚠
+DeepSeek V3, V3.1, V3.2                       NVFP4           ✅             ✅       ✅
+DeepSeek V4 Flash                             NVFP4           ✅             ✅       ✅
+DeepSeek V4 Pro                               NVFP4           \-            ✅       ✅
+Qwen 3 8B, 14B                                FP8, NVFP4      ✅             ✅       ✅
+Qwen 3 32B                                    NVFP4           ✅             ✅       ✅
+Qwen 3 MoE 235B-A22B                          FP8, NVFP4      ✅             ✅       ✅
+Qwen 3 MoE 30B-A3B                            NVFP4           ✅             ✅       ✅
+Qwen 3 Coder 480B-A35B                        NVFP4           ✅             ✅       ✅
+Qwen 3-Next 80B-A3B                           NVFP4           ✅             ✅       ✅
+Qwen 3.5 397B-A17B                            NVFP4           ✅             ✅       ✅
+Qwen 3.5 122B-A10B, Qwen 3.6 35B-A3B          NVFP4           \-            ✅       \-
+Qwen 2.5                                      FP8             ⚠             ⚠       ⚠
+Qwen 2.5                                      NVFP4           ⚠             ⚠       \-
+QwQ-32B                                       FP8             ⚠             ⚠       ⚠
+QwQ-32B                                       NVFP4           ⚠             ⚠       \-
+Gemma 4 31B                                   NVFP4           ✅             ✅       ✅
+Gemma 4 26B-A4B                               NVFP4           \-            ✅       \-
+GLM-4.7, GLM-5, GLM-5.2                       NVFP4           ✅             ✅       ✅
+GLM-5.1                                       NVFP4           \-            ✅       ✅
+Kimi K2-Thinking, K2.5                        NVFP4           ✅             ✅       ✅
+Kimi K2.6                                     NVFP4           \-            ✅       \-
+MiniMax M2.5, M3                              NVFP4           ✅             ✅       ✅
+Mixtral 8x7B                                  FP8             ⚠             ⚠       ⚠
+Mixtral 8x7B                                  NVFP4           ⚠             \-      \-
+============================================  ==============  ============  ======  ========
+
+Vision-language and multimodal models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For VLMs, modelopt quantizes the language model only; the vision encoder is kept in high precision.
+The exported checkpoint therefore relies on the serving framework's own multimodal support for that
+architecture — see the
+`TensorRT-LLM multimodal support matrix <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend>`_.
+
+.. important::
+   ✅ in this table is **text-only smoke coverage**. The suite sends the same plain-text prompts it
+   uses for language models, so no image or audio input reaches the processor or vision encoder.
+   These entries show that the quantized checkpoint loads and that its language path generates —
+   they do not demonstrate multimodal serving.
+
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Qwen 2.5-VL 7B                                FP8, NVFP4      ✅             ✅       ✅
+Qwen 3-VL 235B-A22B                           NVFP4           ✅             ✅       ✅
+Nemotron 3 Nano Omni 30B-A3B                  FP8, NVFP4      ✅             ✅       ✅
+============================================  ==============  ============  ======  ========
+
+Speculative decoding drafters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Drafters are deployed on top of their base checkpoint.
+
+Two caveats specific to this table:
+
+* **Most entries are doubly conditional.** Beyond the ``--run-release`` gate, the drafter cases in
+  ``test_eagle`` also require ``MODELOPT_LOCAL_EAGLE_MODEL`` to point at a directory containing the
+  drafter, and skip otherwise. The exception is EAGLE3 for Kimi K2.6, which is declared in
+  ``test_kimi`` without that gate — which is also why it is the one row with vLLM coverage.
+* **Medusa is marked ⚠ because the case does not exercise Medusa.** The shared harness builds a
+  speculative-decoding configuration only when the model ID contains ``eagle``, so the Medusa entry
+  performs ordinary generation. It shows the checkpoint loads and serves; it does not validate
+  Medusa decoding.
+
+============================================================  ============  ============  ======  ========
+Drafter                                                       Quant format  TensorRT-LLM  vLLM    SGLang
+============================================================  ============  ============  ======  ========
+EAGLE3 for Llama 3.3 70B, Llama 4 Maverick                    FP8           ✅             \-      ✅
+EAGLE3 for Qwen 3 235B-A22B (incl. Thinking-2507, FP4)        BF16, NVFP4   ✅             \-      ✅
+EAGLE3 for Qwen 3 30B-A3B-Thinking-2507                       BF16          ✅             \-      ✅
+EAGLE3 for Kimi K2-Thinking, K2.5                             NVFP4         ✅             \-      ✅
+EAGLE3 for Kimi K2.6                                          NVFP4         ✅             ✅      ✅
+EAGLE3 for gpt-oss-120b                                       BF16          ✅             \-      ✅
+Medusa for Llama 3.1 8B                                       FP8           ⚠             \-      ⚠
+============================================================  ============  ============  ======  ========
+
+Diffusion models
+~~~~~~~~~~~~~~~~
+
+============================================  ==============  ============  ======  ========
+Model                                         Quant format    TensorRT-LLM  vLLM    SGLang
+============================================  ==============  ============  ======  ========
+Wan 2.2 T2V A14B                              FP8, NVFP4      ⚠             \-      ⚠
+DiffusionGemma 26B-A4B                        NVFP4           ✅             ✅       ✅
+============================================  ==============  ============  ======  ========
+
+Wan 2.2 is marked ⚠ because its cases run through the same autoregressive text helper as the
+language models and assert on generated text. They never call a diffusion or video serving API, so
+they do not substantiate text-to-video deployment.
+
+.. note::
+   NVFP4 inference requires Blackwell GPUs. Hopper can produce an NVFP4 checkpoint but cannot serve
+   it. On B300/GB300 (``sm_103``) use a CUDA-13 build of the serving framework; CUDA-12 builds lack
+   the ``sm_103`` FP4 kernels.
+
+Models not listed here
+~~~~~~~~~~~~~~~~~~~~~~
+
+This matrix records the combinations modelopt validates. It is not an exhaustive list of what will
+run: vLLM, SGLang, and TensorRT-LLM load unified HF checkpoints generically, so a model built from
+standard ``nn.Linear`` layers with an ``hf_quant_config.json`` will often deploy without any modelopt
+change. Check the serving framework's own model support list first, then try it.
+
+The exact checkpoints behind every ✅ above, including tensor-parallel size and minimum SM
+version, are listed in
+`tests/examples/hf_ptq/test_deploy.py <https://github.com/NVIDIA/Model-Optimizer/blob/main/tests/examples/hf_ptq/test_deploy.py>`__;
+most are published under the
+`NVIDIA Hugging Face organization <https://huggingface.co/nvidia>`_.
 
 
 Deployment with Selected Inference Frameworks
@@ -102,7 +229,7 @@ Deployment with Selected Inference Frameworks
 
     Follow the `TensorRT-LLM installation instructions. <https://nvidia.github.io/TensorRT-LLM/quick-start-guide.html#installation>`_
 
-    Currently we support fp8 and nvfp4 quantized models for TensorRT-LLM deployment, you need v0.17.0 or later version of TensorRT-LLM.
+    FP8 and NVFP4 quantized models are supported; you need v1.2.0 or later version of TensorRT-LLM.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 
@@ -136,7 +263,8 @@ Deployment with Selected Inference Frameworks
 
     Follow `vLLM installation instructions. <https://github.com/vllm-project/vllm?tab=readme-ov-file#getting-started>`_
 
-    Currently we support fp8 quantized models (without fp8 kv cache) for vLLM deployment, you need v0.6.5 or later version of vLLM.
+    FP8 and NVFP4 quantized models are supported; you need v0.10.1 or later version of vLLM. Pass
+    ``quantization="modelopt"`` for FP8 and ``quantization="modelopt_fp4"`` for NVFP4.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 
@@ -171,7 +299,8 @@ Deployment with Selected Inference Frameworks
 
     Follow the `SGLang installation instructions. <https://docs.sglang.ai/get_started/install.html>`_
 
-    Currently we support fp8 quantized models (without fp8 kv cache) for SGLang deployment, you need to use the main branch of SGLang (since Jan 6, 2025) and build it from source.
+    FP8 and NVFP4 quantized models are supported; you need v0.4.10 or later version of SGLang. Pass
+    ``quantization="modelopt"`` for FP8 and ``quantization="modelopt_fp4"`` for NVFP4.
 
     To run modelopt quantized model from Huggingface model hub, e.g., `nvidia/Llama-3.1-8B-Instruct-FP8`_, refer to the sample code below:
 

@@ -26,6 +26,17 @@ from modelopt.torch.opt.dynamic import (
 )
 
 
+def test_force_configurable_restores_state_after_exception():
+    hp = Hparam([1, 2])
+    hp._is_configurable = False
+
+    with pytest.raises(RuntimeError, match="forced failure"), hp._force_configurable():
+        assert hp.is_configurable
+        raise RuntimeError("forced failure")
+
+    assert not hp.is_configurable
+
+
 def test_register_rejects_non_module_classes():
     """Registering a non-class (e.g. a factory function) must fail at the registration site."""
     registry = _DMRegistryCls(prefix="Test")

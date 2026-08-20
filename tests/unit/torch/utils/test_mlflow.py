@@ -28,11 +28,17 @@ from modelopt.torch.utils.mlflow import (
     MlflowRunLogger,
     _git_sha,
     _redact_argv,
+    command_text,
     default_experiment_name,
     validate_tracking_uri,
 )
 
 URI = "https://mlflow.example.com"
+# Fake credentials for the redaction tests. TruffleHog's URI detector flags any
+# scheme://user:pass@host, so the marker sits on the definitions; these tests exist
+# precisely to prove such credentials are masked.
+CREDS_URI = "https://user:tok@mlflow.example.com"  # trufflehog:ignore
+SHORT_CREDS_URI = "https://u:tok@host"  # trufflehog:ignore
 
 
 class FakeMlflow:
@@ -302,6 +308,54 @@ def test_command_flags_the_invisible_torchrun_wrapper(fake_mlflow, monkeypatch):
     assert "WORLD_SIZE=8" in command and "not part of sys.argv" in command
 
 
+def test_command_can_record_another_processs_invocation(monkeypatch):
+    """A worker's own sys.argv is spawn plumbing, so the caller can supply the real one."""
+    monkeypatch.setattr(sys, "argv", ["-c", "from multiprocessing.spawn import spawn_main"])
+
+    command = command_text(["vllm_serve_fakequant.py", "/ckpts/model", "--api-key", "sk-secret"])
+
+    assert "vllm_serve_fakequant.py /ckpts/model" in command
+    assert "sk-secret" not in command
+    assert "spawn_main" not in command
+
+
+def test_log_text_uploads_while_the_run_is_open(fake_mlflow):
+    """For a value settled midway through, which a later crash would otherwise lose."""
+    logger = _logger()
+    logger.start()
+
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    uploaded_before_finish = fake_mlflow.texts.get("recipe/quant_cfg.yaml")
+
+    logger.finish("FAILED")
+    assert uploaded_before_finish == "quant_cfg: {}\n"
+
+
+def test_log_text_is_inert_outside_an_open_run(fake_mlflow):
+    logger = _logger(enabled=False)
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    logger = _logger()  # enabled, but never started
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+
+    assert fake_mlflow.texts == {}
+
+
+def test_log_text_never_raises_when_the_upload_fails(fake_mlflow, capsys):
+    """Losing one artifact must not take down the quantization that produced it."""
+    logger = _logger()
+    logger.start()
+
+    def explode(*args, **kwargs):
+        raise ConnectionError("no route to host")
+
+    fake_mlflow.log_text = explode
+    logger.log_text("recipe/quant_cfg.yaml", "quant_cfg: {}\n")
+    logger.finish("FINISHED")
+
+    assert "could not upload recipe/quant_cfg.yaml" in capsys.readouterr().out
+
+
 def test_capture_includes_preconfigured_library_logging(fake_mlflow, monkeypatch):
     """transformers/huggingface_hub bind sys.stderr at import, long before capture starts."""
     monkeypatch.setattr(sys, "argv", ["hf_ptq.py"])
@@ -409,7 +463,7 @@ def test_unreachable_server_fails_before_the_work_starts(monkeypatch):
         (["--password", "hunter2", "--verbose"], ["--password", "***", "--verbose"]),
         # Credentials embedded in a URI are masked wherever they appear.
         (
-            ["--mlflow", "https://user:tok@mlflow.example.com"],
+            ["--mlflow", CREDS_URI],
             ["--mlflow", "https://***@mlflow.example.com"],
         ),
         # Ordinary arguments are untouched, including values that merely contain the word.
@@ -426,7 +480,7 @@ def test_redact_argv_masks_credentials(argv, expected):
 def test_command_artifact_carries_no_secrets(fake_mlflow, monkeypatch):
     """argv reaches the server as command.txt, so secrets in it must not."""
     monkeypatch.setattr(
-        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", "https://u:tok@host"]
+        sys, "argv", ["run.py", "--hf_token", "hf_abc123", "--mlflow", SHORT_CREDS_URI]
     )
     logger = _logger()
 
@@ -444,9 +498,7 @@ def test_params_and_run_url_mask_credentials(monkeypatch):
     fake = FakeMlflow()
     monkeypatch.setitem(sys.modules, "mlflow", fake)
     monkeypatch.setattr(sys, "argv", ["run.py"])
-    logger = MlflowRunLogger(
-        "https://user:tok@mlflow.example.com", "tester/hf_ptq/m-nvfp4", run_name="masked"
-    )
+    logger = MlflowRunLogger(CREDS_URI, "tester/hf_ptq/m-nvfp4", run_name="masked")
 
     logger.start(params={"hf_token": "secret", "endpoint": "https://u:p@host", "qformat": "nvfp4"})
     url = logger.run_url
@@ -455,7 +507,7 @@ def test_params_and_run_url_mask_credentials(monkeypatch):
     assert fake.params == {"hf_token": "***", "endpoint": "https://***@host", "qformat": "nvfp4"}
     assert "tok" not in url and "https://***@mlflow.example.com" in url
     # The real URI is still what talks to the server.
-    assert fake.tracking_uri == "https://user:tok@mlflow.example.com"
+    assert fake.tracking_uri == CREDS_URI
 
 
 def test_failure_after_start_run_does_not_orphan_the_run(monkeypatch):

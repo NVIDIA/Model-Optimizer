@@ -71,6 +71,7 @@ from ..functional import normalized_hadamard_transform
 _FP8_E4M3_MIN_POSITIVE = torch.finfo(torch.float8_e4m3fn).smallest_normal / (2**3)
 
 __all__ = [
+    "GroupedQuantizer",
     "HardDisabledTensorQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
@@ -1733,7 +1734,67 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 NVFP4StaticQuantizer = StaticBlockScaleQuantizer
 
 
-class SequentialQuantizer(nn.Sequential):
+class _QuantizerContainerBase:
+    """Shared delegation helpers for quantizer containers."""
+
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
+    _delegated_methods = [
+        "reset_amax",
+        "disable",
+        "disable_rotate",
+        "enable",
+        "load_calib_amax",
+        "load_calib_bias",
+    ]
+
+    def __getitem__(self, idx) -> Any:
+        return super().__getitem__(idx)  # type: ignore[misc]
+
+    def __iter__(self):
+        return super().__iter__()  # type: ignore[misc]
+
+    def __getattr__(self, name):
+        """Delegate configured properties and methods to contained quantizers."""
+        if name in self._delegated_properties:
+            return getattr(self[0], name)
+
+        if name in self._delegated_methods:
+
+            def method_wrapper(*args, **kwargs):
+                outputs = [getattr(quantizer, name)(*args, **kwargs) for quantizer in self]
+                return self._format_delegated_method_outputs(outputs)
+
+            return method_wrapper
+
+        return super().__getattr__(name)  # type: ignore[misc]
+
+    def __setattr__(self, name, value) -> None:
+        if name in self._delegated_properties:
+            for quantizer in self:
+                setattr(quantizer, name, value)
+        else:
+            super().__setattr__(name, value)
+
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> Any:
+        """Preserve each container's existing delegated-method return convention."""
+        raise NotImplementedError
+
+    def _validate_broadcast_attribute_config(self, attributes) -> None:
+        """Validate a single config before broadcasting it to all members."""
+
+    def set_from_attribute_config(
+        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
+    ) -> None:
+        """Set the attributes of contained quantizers from one or more configs."""
+        if not isinstance(attributes, (list, tuple)):
+            self._validate_broadcast_attribute_config(attributes)
+            attributes = [attributes] * len(self)
+
+        for attribute, quantizer in zip(attributes, self):
+            quantizer.set_from_attribute_config(attribute)
+
+
+class SequentialQuantizer(_QuantizerContainerBase, nn.Sequential):
     """A sequential container for  :class:`TensorQuantizer` modules.
 
     This modules is used to quantize a tensor in multiple formats sequentially. It takes as input
@@ -1752,16 +1813,6 @@ class SequentialQuantizer(nn.Sequential):
 
     """
 
-    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
-    _delegated_methods = [
-        "reset_amax",
-        "disable",
-        "disable_rotate",
-        "enable",
-        "load_calib_amax",
-        "load_calib_bias",
-    ]
-
     def __init__(self, *quantizers: TensorQuantizer):
         """Initialize SequentialQuantizer module."""
         super().__init__(*quantizers)
@@ -1769,48 +1820,17 @@ class SequentialQuantizer(nn.Sequential):
             "All quantizers must be a TensorQuantizer."
         )
 
-    def __getattr__(self, name):
-        """Delegate properties and methods to all contained quantizers."""
-        if name in self._delegated_properties:
-            # Return the property of the first quantizer
-            return getattr(self[0], name)
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> Any:
+        return outputs[-1]
 
-        if name in self._delegated_methods:
-
-            def method_wrapper(*args, **kwargs):
-                outputs = getattr(self[0], name)(*args, **kwargs)
-                for quantizer in self[1:]:
-                    outputs = getattr(quantizer, name)(*args, **kwargs)
-                return outputs
-
-            return method_wrapper
-
-        # Defer to super class for attributes not handled here
-        return super().__getattr__(name)
-
-    def __setattr__(self, name, value):
-        if name in self._delegated_properties:
-            for quantizer in self:
-                setattr(quantizer, name, value)
-        else:
-            super().__setattr__(name, value)
+    def _validate_broadcast_attribute_config(self, attributes) -> None:
+        assert isinstance(attributes, (dict, QuantizerAttributeConfig)), (
+            "attributes must be a list or a dict."
+        )
 
     def get_modelopt_state(self) -> dict[str, Any]:
         """Get meta state to be saved in checkpoint."""
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
-
-    def set_from_attribute_config(
-        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
-    ):
-        """Set the attributes of contained quantizers from a list of attribute_dicts."""
-        if not isinstance(attributes, (list, tuple)):
-            assert isinstance(attributes, (dict, QuantizerAttributeConfig)), (
-                "attributes must be a list or a dict."
-            )
-            attributes = [attributes] * len(self)
-
-        for attribute, quantizer in zip(attributes, self):
-            quantizer.set_from_attribute_config(attribute)
 
     @staticmethod
     @contextlib.contextmanager
@@ -1840,3 +1860,33 @@ class SequentialQuantizer(nn.Sequential):
         ) in original_sequential_quantizers.items():
             for name, sequential_quantizer in sequential_quantizers_list:
                 setattr(parent_module, name, sequential_quantizer)
+
+
+class GroupedQuantizer(_QuantizerContainerBase, nn.ModuleList):
+    """A container for per-group :class:`TensorQuantizer` modules.
+
+    Used when a single linear holds several independently-quantized weights — e.g. the
+    fused experts of a TEGroupedLinear, where each of the ``num_gemms`` weights needs its
+    own ``amax``. Unlike :class:`SequentialQuantizer` (an ``nn.Sequential`` that *chains*
+    quantizers over one tensor), the contained quantizers act on *different* tensors, so
+    there is no inherent forward path: index in with ``grouped[i](weight_i)``.
+
+    Property reads (``amax``, ``is_enabled``) delegate to the first quantizer — all members
+    share one config, so the first is representative for "is this calibrated/enabled"
+    checks; the real per-group values live on the members and are used via indexing.
+    Lifecycle/config methods broadcast to every member.
+    """
+
+    def __init__(self, *quantizers: "TensorQuantizer | SequentialQuantizer"):
+        """Initialize GroupedQuantizer module."""
+        super().__init__(quantizers)
+        assert all(isinstance(q, (TensorQuantizer, SequentialQuantizer)) for q in self), (
+            "All quantizers must be a TensorQuantizer or SequentialQuantizer."
+        )
+
+    def forward(self, inputs):
+        """Apply the representative quantizer for single-weight compatibility paths."""
+        return self[0](inputs)
+
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> list[Any]:
+        return outputs

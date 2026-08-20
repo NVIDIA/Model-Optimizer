@@ -116,7 +116,8 @@ html_theme_options = {
 html_static_path = ["_static"]
 
 html_title = f"Model Optimizer {version}"
-html_css_files = ["custom.css"]
+html_css_files = ["custom.css", "announcements.css"]
+html_js_files = ["announcements.js"]
 html_permalinks_icon = "#"  # default icon not rendering properly
 
 # TODO: left here as reference for future
