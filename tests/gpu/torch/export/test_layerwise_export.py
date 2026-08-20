@@ -224,6 +224,17 @@ def test_shards_from_a_different_config_refuse(tmp_path):
         mtq.quantize(_build_model(), nvfp4, _calib)
 
 
+def test_identity_without_shards_does_not_block_a_rerun(tmp_path):
+    """A run that dies before layer 0 leaves an identity file guarding nothing."""
+    export_dir = tmp_path / "fused"
+    export_dir.mkdir()
+    (export_dir / ".layerwise_export.json").write_text('{"model_class": "Other"}')
+
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+
+    assert _load_checkpoint(export_dir), "rerun produced no checkpoint"
+
+
 def test_shards_from_a_different_module_selection_refuse(tmp_path):
     """Same format and layer count, different modules quantized: still a different run.
 
@@ -317,6 +328,24 @@ def test_nvfp4_export_matches(tmp_path):
     exported = _load_checkpoint(export_dir)
     assert any(k.endswith("weight_scale_2") for k in exported), "no NVFP4 global scales exported"
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
+
+
+def test_nvfp4_export_matches_with_qdq_from_prev_layer(tmp_path):
+    """The fusion probe runs the layer directly, so the capture must leave it in 'original'."""
+    baseline_dir = tmp_path / "baseline"
+    base = _nvfp4_cfg()
+    base["algorithm"] = {
+        "method": "max",
+        "layerwise": {"enable": True, "get_qdq_activations_from_prev_layer": True},
+    }
+    export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
+
+    export_dir = tmp_path / "fused"
+    cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg())
+    cfg["algorithm"]["layerwise"]["get_qdq_activations_from_prev_layer"] = True
+    mtq.quantize(_build_model(), cfg, _calib)
+
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
 
 
 def _mixed_fp8_nvfp4_cfg():

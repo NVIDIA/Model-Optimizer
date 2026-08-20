@@ -471,18 +471,19 @@ class LayerwiseExporter:
             "quant_contract": quant_contract,
         }
         path = self._export_dir / _IDENTITY_FILE
-        if path.exists():
-            previous = json.loads(path.read_text())
-            if previous != identity:
-                differing = sorted(
-                    k for k in set(previous) | set(identity) if previous.get(k) != identity.get(k)
-                )
-                raise RuntimeError(
-                    f"{self._export_dir} holds shards from a different run (differing: "
-                    f"{differing}); resuming would finalize them against this run's "
-                    "manifest. Use a fresh export directory."
-                )
-        else:
+        previous = json.loads(path.read_text()) if path.exists() else None
+        # Only committed shards make it binding: this is written before layer 0, so a run
+        # that died early would otherwise poison the directory with nothing to protect.
+        if previous is not None and previous != identity and self.completed_layers():
+            differing = sorted(
+                k for k in set(previous) | set(identity) if previous.get(k) != identity.get(k)
+            )
+            raise RuntimeError(
+                f"{self._export_dir} holds shards from a different run (differing: "
+                f"{differing}); resuming would finalize them against this run's "
+                "manifest. Use a fresh export directory."
+            )
+        if previous != identity:
             path.write_text(json.dumps(identity, indent=2))
 
     def completed_layers(self) -> int:
