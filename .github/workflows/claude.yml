@@ -48,7 +48,7 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
       pull-requests: write
@@ -71,7 +71,7 @@ jobs:
         # local developer commit — preventing PRs that fail CI on
         # code-quality.
         run: |
-          pip install pre-commit
+          pip install -e ".[all,dev-lint]"
           pre-commit install
 
       - name: Run Claude

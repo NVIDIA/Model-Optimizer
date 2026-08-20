@@ -29,16 +29,22 @@ repos:
       - id: ruff-format
         exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
+  - repo: local
     hooks:
       - id: mypy
-        # --interactive clears legacy non_interactive config while automatic installs stay off.
-        args: [--no-install-types, --interactive]
-        additional_dependencies:
-          - nox==2026.4.10
-          - types-docutils==0.22.3.20260724
-          - types-PyYAML==6.0.12.20260724
+        name: mypy
+        entry: python -m mypy
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+        # Keep automatic stub installation disabled and imported-module diagnostics quiet without
+        # discarding their type information.
+        args:
+          - --no-install-types
+          - --interactive
+          - --ignore-missing-imports
+          - --follow-imports=silent
+          - --scripts-are-modules
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v21.1.0

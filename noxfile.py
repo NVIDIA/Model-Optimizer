@@ -127,7 +127,7 @@ def _cov_args():
 @nox.parametrize("torch_ver", [nox.param(k, id=k) for k in TORCH_VERSIONS])
 def unit(session, torch_ver, tf_ver):
     """Non-Puzzletron unit tests across the generic dependency matrix."""
-    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
+    session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-lint,dev-test]")
     tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
     if tf_pin:
         session.install(tf_pin)
@@ -301,8 +301,17 @@ def regression(session):
 # ─── Code quality ─────────────────────────────────────────────────────────────
 @nox.session
 def pre_commit_all(session):
-    session.install("-e", ".[all,dev-lint]")
+    session.install("-e", ".[all,dev-lint]", "pytest", "pytest-timeout")
     session.run("pre-commit", "run", "--all-files", "--show-diff-on-failure")
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "--confcutdir=tests/unit/tools/ci",
+        "tests/unit/tools/ci/test_mypy_hook_config.py",
+    )
 
 
 @dataclass(frozen=True)
@@ -329,7 +338,6 @@ _MYPY_LOCATION = re.compile(
     r"^(?P<path>.*?):(?P<line>\d+)(?::(?P<column>\d+))?: error: (?P<message>.*)$"
 )
 _MYPY_CODE = re.compile(r"^(?P<message>.*)  \[(?P<code>[^]]+)\]$")
-_MYPY_DIFF_DEPENDENCIES = ("types-PyYAML==6.0.12.20260724",)
 
 
 def _normalize_diagnostic_path(path):
@@ -425,8 +433,9 @@ def _run_mypy(session, checkout, paths, cache_dir):
             "--no-pretty",
             "--show-column-numbers",
             "--show-error-codes",
-            "--follow-imports=skip",
+            "--follow-imports=silent",
             "--ignore-missing-imports",
+            "--scripts-are-modules",
             "--cache-dir",
             str(cache_dir),
             "--",
@@ -537,7 +546,7 @@ def pre_commit_diff(session):
     from_ref, to_ref = session.posargs or ("origin/main", "HEAD")
     from_ref = _resolve_git_commit(session, from_ref)
     to_ref = _resolve_git_commit(session, to_ref)
-    session.install("-e", ".[all,dev-lint]", *_MYPY_DIFF_DEPENDENCIES)
+    session.install("-e", ".[all,dev-lint]", "pytest", "pytest-timeout")
     skip_hooks = {hook for hook in os.environ.get("SKIP", "").split(",") if hook}
     skip_hooks.add("mypy")
     session.run(
@@ -551,6 +560,15 @@ def pre_commit_diff(session):
         env={"SKIP": ",".join(sorted(skip_hooks))},
     )
     _run_changed_file_mypy(session, from_ref, to_ref)
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        "--confcutdir=tests/unit/tools/ci",
+        "tests/unit/tools/ci/test_mypy_hook_config.py",
+    )
 
 
 # ─── Docs ─────────────────────────────────────────────────────────────────────

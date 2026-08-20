@@ -98,6 +98,7 @@ puzzletron = [ # Dependedencies for modelopt.torch.puzzletron subpackage
 dev-lint = [
     "bandit[toml]==1.7.9", # security/compliance checks
     "mypy==1.17.1",
+    "nox==2026.4.10",
     "pre-commit==4.3.0",
     "ruff==0.12.11",
     "types-docutils==0.22.3.20260724",
