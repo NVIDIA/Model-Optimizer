@@ -1134,45 +1134,38 @@ def copy_custom_model_files(
         print("No checkpoint sidecar files found to copy")
 
 
+def _layerwise_blocks(algorithm) -> list[dict]:
+    """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [
+        e["layerwise"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("layerwise"), dict)
+    ]
+
+
 def _layerwise_checkpoint_dir(algorithm) -> str | None:
-    """Return the nested ``layerwise.checkpoint_dir``, or None."""
-    if not isinstance(algorithm, dict):
-        return None
-    nested = algorithm.get("layerwise") or {}
-    return nested.get("checkpoint_dir") if isinstance(nested, dict) else None
+    """First ``layerwise.checkpoint_dir`` across the algorithm entries, or None."""
+    return next(
+        (b["checkpoint_dir"] for b in _layerwise_blocks(algorithm) if b.get("checkpoint_dir")),
+        None,
+    )
 
 
 def default_layerwise_resume_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
-    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset. ``(cfg, set)``.
+    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset.
 
-    Per-layer export calls its shards the resume artifact, but the resume *point* comes
-    from this directory's manifest -- ``_CheckpointState.from_folder`` returns
-    ``start = info[0] if info else 0`` and nothing derives it from the shards. Leaving it
-    unset therefore means no resume at all, which is the one thing this recipe is for.
-
-    Only fills a gap; an explicit ``checkpoint_dir`` is the caller's choice and is left
-    alone. A *sibling* of the export directory rather than a child: nothing deletes the
-    resume state on success, and ``next_inputs.pt`` holds cached activations, so inside
-    ``export_path`` it would ship as part of the checkpoint. Deleting it on success instead
-    would make re-running a finished command trip ``assert_no_orphan_shards``, which cannot
-    tell "already done" from "resume record lost".
-
-    ``resume`` rather than ``checkpoint``: with per-layer export on the shards *are* the
-    weights, so this directory holds no checkpoint -- only the resume point, the next
-    layer's cached activations, and the shape metadata skip mode needs.
+    A sibling, not a child: nothing deletes the resume state, so inside ``export_path`` it
+    would ship in the checkpoint. An explicit path is left alone.
     """
     if _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None:
         return quant_cfg, False
 
-    algorithm = quant_cfg.get("algorithm")
-    if not isinstance(algorithm, dict) or not isinstance(algorithm.get("layerwise"), dict):
-        return quant_cfg, False
-
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = (
-        export_path.rstrip("/") + ".layerwise_resume"
-    )
-    return quant_cfg, True
+    blocks = _layerwise_blocks(quant_cfg.get("algorithm"))
+    for block in blocks:
+        block["checkpoint_dir"] = export_path.rstrip("/") + ".layerwise_resume"
+    return quant_cfg, bool(blocks)
 
 
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
@@ -1202,22 +1195,18 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     resolved = os.path.join(base_dir, f"{name}_{config_hash}")
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = resolved
+    for block in _layerwise_blocks(quant_cfg.get("algorithm")):
+        block["checkpoint_dir"] = resolved
     return quant_cfg, resolved
 
 
 def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
     """Retarget layerwise per-layer export at ``export_path``.
 
-    The recipe opts in by setting ``layerwise.export_dir``; its value is a placeholder,
-    since the destination is per-run rather than per-recipe. Mirrors how
-    :func:`resolve_checkpoint_dir` rewrites ``layerwise.checkpoint_dir``.
-
-    Raises ``ValueError`` if nothing was retargeted. The caller decides to skip the real
-    export from the parsed recipe, but the rewrite happens on a separately materialized
-    dict; if the two ever disagree, silently returning the config unchanged would send the
-    shards to the recipe's placeholder directory and leave ``--export_path`` empty, with
-    the run reporting success.
+    The recipe opts in via ``layerwise.export_dir``; its value is a placeholder, since the
+    destination is per-run. Raises when nothing was retargeted: the caller decides to skip
+    the real export from a separately parsed recipe, so a silent no-op would leave
+    ``--export_path`` empty on a run reporting success.
     """
     quant_cfg = copy.deepcopy(quant_cfg)
     algorithm = quant_cfg.get("algorithm")

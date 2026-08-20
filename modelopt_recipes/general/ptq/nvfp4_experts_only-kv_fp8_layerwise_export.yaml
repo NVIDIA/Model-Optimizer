@@ -31,7 +31,8 @@ metadata:
     which is the point for a PTQ run that outlasts its GPU session. The resume state lives
     beside the checkpoint at <export_path>.layerwise_resume unless you set
     layerwise.checkpoint_dir yourself. Export rediscovers the q/k/v and gate/up scale-fusion
-    groups per layer, so the checkpoint matches a whole-model export byte for byte.
+    groups per layer, so every tensor matches a whole-model export in key, dtype, shape and
+    value. Only the shard layout differs: one file per layer instead of packed shards.
 
     Single-process models, resident or accelerate-offloaded. A resumed run never recalibrates
     the layers it skipped, so the exported checkpoint is complete but the in-memory model is
