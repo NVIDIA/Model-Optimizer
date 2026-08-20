@@ -330,6 +330,22 @@ def test_nvfp4_export_matches(tmp_path):
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
 
 
+def test_nvfp4_awq_is_refused_once_calibrated(tmp_path):
+    """AWQ is only distinguishable after calibration, so the gate must run again there.
+
+    Before the layer-0 re-check this exported unfused ``pre_quant_scale`` and a layernorm
+    the whole-model path had folded them into -- a valid-looking, wrong checkpoint.
+    """
+    base = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
+    base["quant_cfg"].append({"quantizer_name": "*o_proj*", "enable": False})
+    cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=base)
+    cfg["algorithm"]["method"] = "awq_lite"
+    cfg["algorithm"]["layerwise"]["calib_mutates_weights"] = True
+
+    with pytest.raises(NotImplementedError, match="nvfp4_awq"):
+        mtq.quantize(_build_model(), cfg, _calib)
+
+
 def test_nvfp4_export_matches_with_qdq_from_prev_layer(tmp_path):
     """The fusion probe runs the layer directly, so the capture must leave it in 'original'."""
     baseline_dir = tmp_path / "baseline"

@@ -149,11 +149,13 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
 
 @contextlib.contextmanager
 def transient_module_state(module: nn.Module):
-    """Undo everything export does to ``module``, so calibration can continue through it.
+    """Undo the parameter, buffer and child-module changes export makes to ``module``.
 
     A resident model has no materialization window to discard what export leaves behind.
     Restoring the dicts covers rebinding; buffers are additionally clone-restored because
     scale fusion writes amax in place. Parameters are not -- that would copy the layer.
+    Attributes outside those three dicts are not restored (e.g. the layer-relative ``name``
+    that ``collect_shared_input_modules`` sets), so handlers must keep their state there.
     """
     snapshot = [
         (
@@ -251,9 +253,10 @@ class LayerwiseExporter:
         self._export_dir.mkdir(parents=True, exist_ok=True)
         # Not get_kv_cache_dtype(model): it does not recurse, so given the root it answers
         # None, which trips the KV assert in the per-tensor pass.
-        self._kv_cache_format = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)[
-            "quantization"
-        ]["kv_cache_quant_algo"]
+        # One walk, shared with _bind_identity: get_quant_config re-derives every module's
+        # format, which is not free on a large MoE.
+        quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
+        self._kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
         self._finalized = False
 
         self._name_mapper = None
@@ -276,7 +279,8 @@ class LayerwiseExporter:
             else raw_tied_keys
         )
 
-        self._bind_identity()
+        self._calibrated_format_checked = False
+        self._bind_identity(quant_config)
 
     def export_layer(
         self,
@@ -284,7 +288,7 @@ class LayerwiseExporter:
         layer_module: nn.Module,
         probe_forward: Callable[[nn.Module], None] | None = None,
     ) -> None:
-        """Pack one calibrated layer into its shard, leaving the layer untouched.
+        """Pack one calibrated layer into its shard, leaving that layer untouched.
 
         ``probe_forward`` runs the layer on real activations so a fusing format can
         rediscover which modules share an input; only omit it when nothing fuses.
@@ -302,6 +306,8 @@ class LayerwiseExporter:
                 f"layer_idx {layer_idx} does not match the module passed; calibration and "
                 "export disagree on decoder layer order."
             )
+
+        self._assert_calibrated_format_supported(layer_module)
 
         layer_name = self._layer_names[layer_idx]
         tensors: dict[str, torch.Tensor] = {}
@@ -323,6 +329,27 @@ class LayerwiseExporter:
         save_file(
             _copy_storage_aliases(tensors), str(self._export_dir / layer_shard_name(layer_idx))
         )
+
+    def _assert_calibrated_format_supported(self, layer_module: nn.Module) -> None:
+        """Re-run the format gate once real calibration state exists.
+
+        AWQ and SVDQuant are only distinguishable after calibration -- their discriminators
+        (``_pre_quant_scale``, ``svdquant_lora_a``) are registered by the calibrator -- so
+        the constructor's gate sees plain NVFP4 and passes. Checking again on the first
+        exported layer fails loudly instead of shipping unfused pre_quant_scale.
+        """
+        if self._calibrated_format_checked:
+            return
+        self._calibrated_format_checked = True
+        unsupported = sorted(str(f) for f in _module_formats(layer_module) - SUPPORTED_FORMATS)
+        if unsupported:
+            raise NotImplementedError(
+                f"layerwise export does not support quantization format(s) {unsupported}: "
+                "they need requantize_resmooth_fused_llm_layers' pre-quant-scale steps, "
+                "which are still whole-model. Only visible now that the first layer is "
+                "calibrated. Supported today: "
+                f"{sorted(str(f) for f in SUPPORTED_FORMATS if f)}."
+            )
 
     def _fuse_shared_inputs(
         self, layer_module: nn.Module, probe_forward: Callable[[nn.Module], None] | None
@@ -374,6 +401,9 @@ class LayerwiseExporter:
         )
 
         assert not self._finalized, "finalize() called twice"
+        # Unlike export_layer, the tail is converted in place: its tensors are read from
+        # model.state_dict() after dispatch, so restoring first would collect unpacked
+        # weights. The model is left in export form and must not be used for inference.
         self._finalized = True
 
         model = self._ctx.model
@@ -443,7 +473,7 @@ class LayerwiseExporter:
         _write_hf_export_config(model, quant_config, self._export_dir)
         return quant_config
 
-    def _bind_identity(self) -> None:
+    def _bind_identity(self, quant_config: dict) -> None:
         """Tie the shards to the run that produced them.
 
         The manifest records no model or quantization identity and
@@ -455,7 +485,7 @@ class LayerwiseExporter:
         # modules are quantized hash differently even when the format names match.
         quant_contract = hashlib.sha256(
             json.dumps(
-                get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora),
+                quant_config,
                 sort_keys=True,
                 default=str,
             ).encode()

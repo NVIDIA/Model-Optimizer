@@ -2069,8 +2069,9 @@ def layerwise_calibrate(
     checkpoint shard as soon as it is calibrated, leaving a complete checkpoint when the
     last layer lands and removing the need for a separate ``export_hf_checkpoint()`` pass.
     Those shards then serve as the resume artifact, so the per-layer weight and quantizer
-    files are not written and finished layers are skipped rather than restored -- which
-    also means a resumed run leaves the in-memory model unusable for inference.
+    files are not written and finished layers are skipped rather than restored. The model
+    is left unusable for inference either way: export converts the non-decoder modules in
+    place, and a resumed run additionally never re-calibrates the layers it skipped.
 
     ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
     whether the cached inputs handed to layer N+1 come from a forward through
@@ -2247,12 +2248,16 @@ def layerwise_calibrate(
     if exporter is not None:
         exporter.finalize()
         print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
-        if start_layer > 0:
-            warn_rank_0(
-                f"This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} "
-                "were never re-calibrated: the exported checkpoint is complete, but the "
-                "in-memory model is not and must not be used for inference."
-            )
+        resumed = (
+            f" This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} were "
+            "never re-calibrated either."
+            if start_layer > 0
+            else ""
+        )
+        warn_rank_0(
+            "The exported checkpoint is complete, but per-layer export leaves the model's "
+            "non-decoder modules in export form: it must not be used for inference." + resumed
+        )
 
     print_rank_0("Layerwise calibration completed")
 
