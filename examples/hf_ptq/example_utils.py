@@ -1161,20 +1161,14 @@ def colocate_layerwise_checkpoint_dir(quant_cfg: dict, export_path: str) -> tupl
     know. Only applied when per-layer export is on; without it ``checkpoint_dir`` is an
     ordinary resume directory whose placement is the caller's business.
     """
-    location = _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm"))
-    if location is None:
-        return quant_cfg, False
-    shape, current = location
+    current = _layerwise_checkpoint_dir(quant_cfg.get("algorithm"))
     target = os.path.join(export_path, ".layerwise_checkpoint")
-    if current == target:
+    if current is None or current == target:
         return quant_cfg, False
 
     quant_cfg = copy.deepcopy(quant_cfg)
     algo = quant_cfg["algorithm"]
-    if shape == "flat":
-        algo["layerwise_checkpoint_dir"] = target
-    else:
-        algo["layerwise"] = {**algo["layerwise"], "checkpoint_dir": target}
+    algo["layerwise"] = {**algo["layerwise"], "checkpoint_dir": target}
     return quant_cfg, True
 
 

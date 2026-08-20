@@ -116,8 +116,7 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
     gate is the central one: this path never runs ``requantize_resmooth_fused_llm_layers``,
     so it is limited to formats whose scales it can reproduce per layer.
 
-    .. todo::
-        AWQ and SVDQuant need that pass's pre-quant-scale steps made per-layer.
+    Supporting AWQ and SVDQuant needs that pass's pre-quant-scale steps made per-layer.
     """
     from modelopt.torch.utils import distributed as dist
 
