@@ -1937,8 +1937,9 @@ def test_load_recipe_kv_autoquantize_contract():
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
             assert entry.quantizer_name == "*[kv]_bmm_quantizer"
-            assert entry.cfg.use_constant_amax
-        assert fmt.algorithm["skip_forward_without_activation_calib"]
+            assert not entry.cfg.use_constant_amax
+            assert entry.cfg.constant_amax is None
+        assert fmt.algorithm == "max"
 
 
 def _all_shipped_ptq_recipe_paths():

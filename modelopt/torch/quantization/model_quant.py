@@ -680,7 +680,7 @@ def auto_quantize_kv_cache(
     together and declare config-level ``effective_bits`` equal to their packed
     storage cost per K-or-V scalar, including scale overhead. The budget is weighted
     by the K/V projection widths of eligible layers. Formats use their own calibration
-    algorithm; cast-mode constant-amax candidates skip calibration forwards.
+    algorithm; candidates with persistent ``constant_amax`` skip calibration forwards.
 
     Args:
         model: Model whose attention K/V quantizers will be searched.
@@ -702,6 +702,16 @@ def auto_quantize_kv_cache(
         The converted model with the selected per-layer K/V quantizers and a
         JSON-safe sensitivity report.
     """
+    if (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+    ):
+        raise RuntimeError(
+            "auto_quantize_kv_cache is single-process only; distributed scoring, selection, "
+            "and checkpoint writes are not synchronized."
+        )
+
     processed_formats = []
     for idx, candidate in enumerate(quantization_formats):
         if isinstance(candidate, tuple):

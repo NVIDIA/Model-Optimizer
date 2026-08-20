@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import fnmatch
+import math
 import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,20 @@ if TYPE_CHECKING:
 
 _KV_QUANTIZER_ATTRS = ("k_bmm_quantizer", "v_bmm_quantizer")
 _KV_AUTOQUANT_SCHEMA_VERSION = 1
+_KV_CANDIDATE_HOLDER_NAME = "layer"
+_KV_CANDIDATE_NAMES = {f"{_KV_CANDIDATE_HOLDER_NAME}.{attr}" for attr in _KV_QUANTIZER_ATTRS}
+_NON_KV_PROBE_NAMES = {
+    f"{_KV_CANDIDATE_HOLDER_NAME}.{name}"
+    for name in (
+        "q_bmm_quantizer",
+        "p_bmm_quantizer",
+        "input_quantizer",
+        "output_quantizer",
+        "q_proj.input_quantizer",
+        "q_proj.weight_quantizer",
+        "q_proj.output_quantizer",
+    )
+}
 
 
 def _disabled_quantizer() -> TensorQuantizer:
@@ -50,17 +65,14 @@ def _disabled_quantizer() -> TensorQuantizer:
 
 
 def _candidate_quantizers(config: QuantizeConfig) -> dict[str, TensorQuantizer]:
-    """Build a candidate on a holder that exposes only the K/V quantizers.
-
-    Applying an untrusted wildcard config to an attention module can match and mutate
-    unrelated nested quantizers (for example ``q_proj.*_quantizer``). Keeping candidate
-    construction isolated makes such entries no-ops and guarantees that the search can
-    only retain K/V quantizer state.
-    """
+    """Build a candidate with the same qualified K/V names used by a full model."""
+    _validate_candidate_patterns(config)
+    root = nn.Module()
     holder = nn.Module()
+    root.add_module(_KV_CANDIDATE_HOLDER_NAME, holder)
     for attr in _KV_QUANTIZER_ATTRS:
         setattr(holder, attr, _disabled_quantizer())
-    set_quantizer_by_cfg(holder, config.quant_cfg)
+    set_quantizer_by_cfg(root, config.quant_cfg)
     quantizers = {attr: getattr(holder, attr) for attr in _KV_QUANTIZER_ATTRS}
     for attr, quantizer in quantizers.items():
         if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
@@ -70,50 +82,101 @@ def _candidate_quantizers(config: QuantizeConfig) -> dict[str, TensorQuantizer]:
     return quantizers
 
 
-def _validate_kv_only_config(config: QuantizeConfig) -> None:
-    if config.effective_bits is None:
-        raise ValueError(
-            "Each KV-cache AutoQuant candidate must declare config-level effective_bits."
-        )
-    allowed_names = set(_KV_QUANTIZER_ATTRS)
+def _validate_candidate_patterns(config: QuantizeConfig) -> None:
+    """Require every ordered config entry to match only a qualified K/V name."""
     matched_names: set[str] = set()
-    probe_names = {
-        *allowed_names,
-        "q_bmm_quantizer",
-        "p_bmm_quantizer",
-        "input_quantizer",
-        "weight_quantizer",
-        "output_quantizer",
-    }
+    probe_names = _KV_CANDIDATE_NAMES | _NON_KV_PROBE_NAMES
     for entry in config.quant_cfg:
-        pattern = entry.quantizer_name
-        matches = {name for name in probe_names if fnmatch.fnmatch(name, pattern)}
-        if matches - allowed_names:
+        if entry.parent_class is not None:
+            raise ValueError("KV-cache AutoQuant candidates do not support parent_class filters.")
+        matches = {name for name in probe_names if fnmatch.fnmatch(name, entry.quantizer_name)}
+        if not matches:
+            raise ValueError(
+                "KV-cache AutoQuant candidate pattern "
+                f"{entry.quantizer_name!r} does not match a supported qualified K/V quantizer."
+            )
+        non_kv_matches = matches - _KV_CANDIDATE_NAMES
+        if non_kv_matches:
             raise ValueError(
                 "KV-cache AutoQuant candidates may configure only k_bmm_quantizer and "
-                f"v_bmm_quantizer; pattern {pattern!r} also matches {sorted(matches - allowed_names)}."
+                f"v_bmm_quantizer; pattern {entry.quantizer_name!r} also matches "
+                f"{sorted(non_kv_matches)}."
             )
         matched_names.update(matches)
-    if matched_names != allowed_names:
+    if matched_names != _KV_CANDIDATE_NAMES:
         raise ValueError(
             "KV-cache AutoQuant candidates must completely configure both "
             "k_bmm_quantizer and v_bmm_quantizer."
         )
 
+
+def _algorithm_method(config: QuantizeConfig) -> str | None:
     algorithm = config.algorithm
-    if algorithm is None:
-        return
-    if isinstance(algorithm, str):
-        algorithm_method = algorithm
-    elif isinstance(algorithm, dict):
-        algorithm_method = algorithm.get("method")
-    else:
-        algorithm_method = getattr(algorithm, "method", None)
-    if algorithm_method != "max":
+    if algorithm is None or isinstance(algorithm, str):
+        return algorithm
+    if isinstance(algorithm, dict):
+        return algorithm.get("method")
+    return getattr(algorithm, "method", None)
+
+
+def _deployable_kv_bits(quantizer: TensorQuantizer) -> float:
+    """Return storage bits for the narrow K/V formats supported by unified export."""
+    if quantizer.bias is not None:
+        raise ValueError("KV-cache AutoQuant does not support affine candidates yet.")
+    if quantizer.is_fp8:
+        return 8.0
+    if quantizer.is_nvfp4_dynamic and quantizer.block_sizes.get(-1) == 16:
+        return 4.5
+    raise ValueError(
+        "KV-cache AutoQuant candidates must use unified-export-compatible per-tensor FP8 "
+        "or block-16 dynamic NVFP4 quantizers."
+    )
+
+
+def _validate_deployable_candidate(config: QuantizeConfig) -> None:
+    quantizers = _candidate_quantizers(config)
+    k_quantizer = quantizers["k_bmm_quantizer"]
+    v_quantizer = quantizers["v_bmm_quantizer"]
+    k_bits = _deployable_kv_bits(k_quantizer)
+    v_bits = _deployable_kv_bits(v_quantizer)
+    if k_bits != v_bits and (k_bits, v_bits) != (8.0, 4.5):
         raise ValueError(
-            "KV-cache AutoQuant supports only non-structural calibration algorithms "
-            f"None and 'max'; got {algorithm_method!r}."
+            "Unified export supports only uniform FP8, uniform NVFP4, or FP8-K/NVFP4-V "
+            "KV-cache AutoQuant candidates."
         )
+
+    algorithm_method = _algorithm_method(config)
+    for attr, quantizer in quantizers.items():
+        will_calibrate = algorithm_method == "max" and not quantizer._use_constant_amax
+        if not hasattr(quantizer, "_amax") and not will_calibrate:
+            raise ValueError(
+                f"KV-cache AutoQuant candidate {attr} has no persistent export scale. "
+                "Use max calibration or constant_amax; dynamic and use_constant_amax-only "
+                "candidates cannot be exported."
+            )
+
+    assert config.effective_bits is not None
+    actual_effective_bits = (k_bits + v_bits) / 2.0
+    if not math.isclose(config.effective_bits, actual_effective_bits, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(
+            "KV-cache AutoQuant candidate effective_bits does not match its configured K/V "
+            f"storage cost: declared {config.effective_bits}, actual {actual_effective_bits}."
+        )
+
+
+def _validate_kv_only_config(config: QuantizeConfig) -> None:
+    if config.effective_bits is None:
+        raise ValueError(
+            "Each KV-cache AutoQuant candidate must declare config-level effective_bits."
+        )
+    algorithm_method = _algorithm_method(config)
+    if algorithm_method != "max":
+        if algorithm_method is not None:
+            raise ValueError(
+                "KV-cache AutoQuant supports only non-structural calibration algorithms "
+                f"None and 'max'; got {algorithm_method!r}."
+            )
+    _validate_deployable_candidate(config)
 
 
 def _validate_search_inputs(
@@ -357,7 +420,7 @@ def auto_quantize_kv_cache(
     configure K and V together and declare ``effective_bits`` matching its packed
     storage per K-or-V scalar, including scale overhead. Candidate calibration is scoped
     to the candidate K/V quantizers, while pre-existing fixed quantizers keep executing
-    with frozen state. Cast-style constant-amax formats may skip calibration forwards.
+    with frozen state. Persistent ``constant_amax`` formats may skip calibration forwards.
     """
     target_bits, candidates = _validate_search_inputs(
         constraints, quantization_formats, num_calib_steps, num_score_steps
