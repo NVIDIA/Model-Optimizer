@@ -560,3 +560,86 @@ def test_get_model_deepseek_honors_trust_remote_code(
     example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
 
     assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
+
+
+def _layerwise(**kwargs):
+    return {"enable": True, **kwargs}
+
+
+def _blocks(quant_cfg):
+    algorithm = quant_cfg["algorithm"]
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [e["layerwise"] for e in entries if "layerwise" in e]
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        pytest.param(
+            {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ["/out.layerwise_resume"],
+            id="single-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise()},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            [None, "/out.layerwise_resume"],
+            id="only-the-exporting-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            ["/theirs", "/out.layerwise_resume"],
+            id="another-entrys-explicit-path-is-not-this-ones",
+        ),
+    ],
+)
+def test_default_layerwise_resume_dir_targets_the_exporting_entry(algorithm, expected):
+    """Only the pass that exports gets a derived resume dir, and only if it lacks one."""
+    updated, changed = example_utils.default_layerwise_resume_dir({"algorithm": algorithm}, "/out")
+
+    assert [b.get("checkpoint_dir") for b in _blocks(updated)] == expected
+    assert changed is True
+
+
+def test_resolve_checkpoint_dir_keeps_each_entrys_base():
+    """Two layerwise passes must not resolve onto one manifest."""
+    algorithm = [
+        {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+        {"method": "max", "layerwise": _layerwise(checkpoint_dir="/ours", export_dir="/ph")},
+    ]
+
+    updated, resolved = example_utils.resolve_checkpoint_dir({"algorithm": algorithm}, "/m/Model")
+
+    theirs, ours = (b["checkpoint_dir"] for b in _blocks(updated))
+    assert theirs.startswith("/theirs/") and ours.startswith("/ours/")
+    assert theirs != ours
+    # The exporting pass owns the path the caller reports.
+    assert resolved == ours
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "match"),
+    [
+        pytest.param(
+            [
+                {"layerwise": _layerwise(export_dir="/a")},
+                {"layerwise": _layerwise(export_dir="/b")},
+            ],
+            "only one calibration pass",
+            id="two-exporting-entries",
+        ),
+        pytest.param(
+            [{"layerwise": _layerwise(export_dir="/a")}, {"method": "max"}],
+            "must be the last",
+            id="a-later-pass-would-change-the-model",
+        ),
+    ],
+)
+def test_set_layerwise_export_dir_refuses_ambiguous_ownership(algorithm, match):
+    with pytest.raises(ValueError, match=match):
+        example_utils.set_layerwise_export_dir({"algorithm": algorithm}, "/out")

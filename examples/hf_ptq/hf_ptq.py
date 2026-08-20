@@ -1200,33 +1200,35 @@ def quantize_main(
         aq_config = None
         fixed_quantize_config = None
 
-    def _layerwise_cfg(obj):
-        """The recipe's ``layerwise`` block, or None.
+    def _layerwise_cfgs(obj) -> list:
+        """The recipe's ``layerwise`` blocks, in algorithm order.
 
         An algorithm parsed from YAML arrives as a plain dict, while the deprecated
         ``--auto_quantize_*`` path builds config objects, so both shapes reach here.
         """
         if isinstance(obj, ModelOptPTQRecipe):
-            return _layerwise_cfg(obj.quantize.algorithm)
+            return _layerwise_cfgs(obj.quantize.algorithm)
         if isinstance(obj, ModelOptAutoQuantizeRecipe):
-            return _layerwise_cfg(obj.quantize.algorithm) if obj.quantize is not None else None
+            return _layerwise_cfgs(obj.quantize.algorithm) if obj.quantize is not None else []
         if isinstance(obj, list):
-            return next((cfg for cfg in map(_layerwise_cfg, obj) if cfg is not None), None)
-        if isinstance(obj, dict):
-            return obj.get("layerwise")
-        return getattr(obj, "layerwise", None)
+            return [cfg for entry in obj for cfg in _layerwise_cfgs(entry)]
+        cfg = obj.get("layerwise") if isinstance(obj, dict) else getattr(obj, "layerwise", None)
+        return [cfg] if cfg is not None else []
 
     def _layerwise_get(cfg, key, default=None):
         if cfg is None:
             return default
         return cfg.get(key, default) if isinstance(cfg, dict) else getattr(cfg, key, default)
 
-    layerwise_cfg = _layerwise_cfg(recipe)
-    is_layerwise = bool(_layerwise_get(layerwise_cfg, "enable", False))
+    layerwise_cfgs = _layerwise_cfgs(recipe)
+    is_layerwise = any(_layerwise_get(cfg, "enable", False) for cfg in layerwise_cfgs)
 
     # Setting layerwise.export_dir is the switch; the value is replaced with --export_path
-    # below, the way resolve_checkpoint_dir already rewrites layerwise.checkpoint_dir.
-    args.layerwise_export = _layerwise_get(layerwise_cfg, "export_dir") is not None
+    # below, the way resolve_checkpoint_dir already rewrites layerwise.checkpoint_dir. Any
+    # entry may hold it -- set_layerwise_export_dir settles which one legally owns it.
+    args.layerwise_export = any(
+        _layerwise_get(cfg, "export_dir") is not None for cfg in layerwise_cfgs
+    )
     if args.layerwise_export:
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
             # Only the mono-quantize path retargets export_dir and runs the refusals;
