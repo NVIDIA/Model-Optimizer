@@ -55,6 +55,30 @@ def _import_attention_type() -> type:
 _VLLM_ATTENTION = _import_attention_type()
 
 
+def _import_mla_attention_type() -> type | None:
+    """Import the concrete vLLM MLAAttention type, or None when unavailable."""
+    for module_name in (
+        "vllm.attention.layer",
+        "vllm.model_executor.layers.attention",
+        "vllm.attention",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "MLAAttention"):
+            return module.MLAAttention
+    return None
+
+
+def _load_mla_plugin():
+    # MLA support is optional: imported lazily so regular FlashAttention and
+    # FlashInfer users never acquire the TRITON_MLA import requirements.
+    from . import vllm_mla
+
+    return vllm_mla
+
+
 @dataclass(frozen=True, slots=True)
 class VllmAttentionInstallReport:
     """Summary of attention modules changed by a vLLM runtime installation."""
@@ -86,6 +110,7 @@ class _AttentionPlan:
     device: object | None
     dtype: torch.dtype | None
     requires_flashinfer_patch: bool
+    is_mla: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +258,37 @@ def _layer_errors(module) -> list[str]:
     return errors
 
 
+def _layer_errors_mla(module, sparse_kw: dict[str, Any]) -> list[str]:
+    """Per-layer gates for MLA attention (decoder-only latent attention)."""
+    errors = []
+    if str(getattr(module, "kv_cache_dtype", "auto")).startswith("fp8"):
+        errors.append("FP8 KV cache is unsupported for MLA")
+    if getattr(module, "use_sparse", False) or getattr(module, "indexer", None) is not None:
+        errors.append("sparse-indexer MLA (DeepSeek V3.2-style) is unsupported")
+    num_heads = getattr(module, "num_heads", None)
+    q_pad = getattr(module, "q_pad_num_heads", None)
+    if q_pad not in (None, num_heads):
+        errors.append(f"q_pad_num_heads={q_pad!r} padding is unsupported")
+    for dim_name in ("kv_lora_rank", "qk_rope_head_dim", "qk_head_dim", "v_head_dim"):
+        dim = getattr(module, dim_name, None)
+        if not isinstance(dim, int) or dim <= 0 or dim % 16:
+            errors.append(f"{dim_name}={dim!r} must be a positive multiple of 16")
+    if "skip_softmax_threshold" in sparse_kw or "threshold_scale_factor" in sparse_kw:
+        errors.append("skip-softmax is unsupported on MLA layers (N:M sparsity only)")
+    return errors
+
+
+def _select_new_mla_impl(module) -> tuple[object | None, str | None]:
+    try:
+        mla_plugin = _load_mla_plugin()
+    except ImportError as err:
+        return None, f"MLA attention support requires a TRITON_MLA-capable vLLM: {err}"
+    try:
+        return mla_plugin.clone_mla_impl(module.impl), None
+    except (NotImplementedError, TypeError) as err:
+        return None, str(err)
+
+
 def _device_capability_error(device) -> str | None:
     if device is None:
         return None
@@ -331,15 +387,19 @@ def _plan_vllm_attention(
 ) -> _InstallPlan:
     model = _unwrapped_model(model_runner)
     resolved_sparse_cfg, sparse_algorithm = _resolve_sparse_config(model_runner, sparse_cfg)
+    # MLA layers are quantize-only: the sparse-only entry point keeps ignoring
+    # them (MLAAttention is a sibling of Attention, so they never matched).
+    mla_type = _import_mla_attention_type() if quantize else None
     candidates = []
     attention_count = 0
     for name, module in model.named_modules():
-        if not isinstance(module, _VLLM_ATTENTION):
+        is_mla = mla_type is not None and isinstance(module, mla_type)
+        if not is_mla and not isinstance(module, _VLLM_ATTENTION):
             continue
         attention_count += 1
         sparse_kw = _sparse_kwargs(name, resolved_sparse_cfg)
         if quantize or sparse_kw:
-            candidates.append((name, module, sparse_kw))
+            candidates.append((name, module, sparse_kw, is_mla))
 
     if not candidates and not quantize:
         return _InstallPlan(
@@ -351,8 +411,8 @@ def _plan_vllm_attention(
     mode = _cudagraph_mode(model_runner) if quantize else None
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
-    for name, module, sparse_kw in candidates:
-        reasons = _layer_errors(module)
+    for name, module, sparse_kw, is_mla in candidates:
+        reasons = _layer_errors_mla(module, sparse_kw) if is_mla else _layer_errors(module)
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -368,7 +428,11 @@ def _plan_vllm_attention(
         if quantize:
             if graph_error := _sparse_graph_error(sparse_kw, mode):
                 reasons.append(graph_error)
-        new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
+        requires_flashinfer_patch = False
+        if is_mla:
+            new_impl, backend_error = _select_new_mla_impl(module)
+        else:
+            new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
         if backend_error:
             reasons.append(backend_error)
         if reasons:
@@ -383,10 +447,11 @@ def _plan_vllm_attention(
                 device,
                 dtype,
                 requires_flashinfer_patch,
+                is_mla,
             )
         )
     if quantize and attention_count == 0:
-        errors.append("no regular attention layers were found")
+        errors.append("no attention layers were found")
     _raise_unsupported(errors, "NVFP4 attention" if quantize else "sparse attention")
     return _InstallPlan(
         model_runner,
@@ -428,11 +493,43 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
     plan.model_runner.cascade_attn_enabled = False
     for layer in plan.layers:
         layer.new_impl.sparse_kw = layer.sparse_kw
-        if plan.quantize:
+        default_formats = (plan.q_format, plan.k_format, plan.p_format, plan.v_format) == (
+            "nvfp4",
+            "nvfp4",
+            "nvfp4",
+            "nvfp4",
+        )
+        if plan.quantize and layer.is_mla:
+            _cfg_kwargs = (
+                {}
+                if default_formats
+                else {
+                    "cfg": quant_plugin.build_vllm_mla_attention_quant_cfg(
+                        q_format=plan.q_format,
+                        k_format=plan.k_format,
+                        p_format=plan.p_format,
+                        v_format=plan.v_format,
+                    )
+                }
+            )
+            converted = quant_plugin.configure_vllm_nvfp4_mla_quantizers(
+                layer.module,
+                device=layer.device,
+                dtype=layer.dtype,
+                **_cfg_kwargs,
+            )
+            if converted is not None and converted is not layer.module:
+                raise RuntimeError("vLLM attention quantization must convert modules in place")
+            layer.new_impl.quant_kw = _load_mla_plugin().mla_quant_kw_from_layer(
+                layer.module, query_in_kernel=plan.q_format != "fp8"
+            )
+        elif plan.quantize:
             # Pass cfg only for non-default formats: keeps the default call
             # signature stable for callers/fakes that predate the cfg parameter.
             _cfg_kwargs = (
-                {
+                {}
+                if default_formats
+                else {
                     "cfg": quant_plugin.build_vllm_attention_quant_cfg(
                         q_format=plan.q_format,
                         k_format=plan.k_format,
@@ -440,9 +537,6 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                         v_format=plan.v_format,
                     )
                 }
-                if (plan.q_format, plan.k_format, plan.p_format, plan.v_format)
-                != ("nvfp4", "nvfp4", "nvfp4", "nvfp4")
-                else {}
             )
             converted = quant_plugin.configure_vllm_nvfp4_attention_quantizers(
                 layer.module,
@@ -473,7 +567,10 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
             # fp8 Q is module-level (bf16 losslessly carries E4M3 QDQ values);
             # the kernel then runs a plain bf16 BMM1 with no Q transform.
             layer.module._query_quant_in_kernel = plan.q_format != "fp8"
-            layer.module._value_quant_in_kernel = plan.v_format != "fp8"
+            if not layer.is_mla:
+                # MLA V is either in-kernel (prefill projected V) or the
+                # write-once quantized cache (decode) — no module-level flag.
+                layer.module._value_quant_in_kernel = plan.v_format != "fp8"
         try:
             # Publish the adapter last so a native impl never runs with in-kernel
             # quantization flags that only the ModelOpt adapter understands.
@@ -485,7 +582,8 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                     ("_value_quant_in_kernel", old_value_flag),
                 ):
                     if value is missing:
-                        delattr(layer.module, name)
+                        if hasattr(layer.module, name):
+                            delattr(layer.module, name)
                     else:
                         setattr(layer.module, name, value)
             raise

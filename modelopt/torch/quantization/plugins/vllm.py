@@ -84,6 +84,52 @@ def build_vllm_attention_quant_cfg(
     ]
 
 
+# MLA operand -> quantizer-name mapping: k_format governs the write-once
+# latent-cache QDQ (kv_c, k_pe) and the prefill projected K; v_format governs
+# the prefill projected V (decode BMM2 consumes the quantized cache as-is).
+_MLA_FORMAT_QUANTIZERS = {
+    "q": ("q",),
+    "k": ("kv_c", "k_pe", "k_mha"),
+    "p": ("p",),
+    "v": ("v_mha",),
+}
+
+
+def build_vllm_mla_attention_quant_cfg(
+    *,
+    q_format: str = "nvfp4",
+    k_format: str = "nvfp4",
+    p_format: str = "nvfp4",
+    v_format: str = "nvfp4",
+) -> list:
+    """Build the MLA attention quantizer config with per-operand formats.
+
+    Same format set as :func:`build_vllm_attention_quant_cfg`; the MLA operand
+    knobs fan out per :data:`_MLA_FORMAT_QUANTIZERS`.
+    """
+    formats = {"q": q_format, "k": k_format, "p": p_format, "v": v_format}
+    for name, fmt in formats.items():
+        if fmt not in _BMM2_FORMAT_CFGS:
+            raise ValueError(
+                f"{name}_format must be one of {sorted(_BMM2_FORMAT_CFGS)}, got {fmt!r}"
+            )
+    return [
+        {"quantizer_name": "*_bmm_quantizer", "enable": False},
+        *(
+            {
+                "quantizer_name": f"*{quantizer}_bmm_quantizer",
+                "cfg": _BMM2_FORMAT_CFGS[fmt],
+                "enable": True,
+            }
+            for name, fmt in formats.items()
+            for quantizer in _MLA_FORMAT_QUANTIZERS[name]
+        ),
+    ]
+
+
+_VLLM_NVFP4_MLA_ATTENTION_QUANT_CFG = build_vllm_mla_attention_quant_cfg()
+
+
 def _import_attention_module():
     """Import a vLLM module that exports the concrete ``Attention`` class."""
     for module_name in (
@@ -324,7 +370,14 @@ CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 def _set_vllm_attention_kv_default_amax(module, device: torch.device) -> None:
     """Set a global-scale-one amax on uncalibrated block-16 NVFP4 K/V quantizers."""
-    for name in ("k_bmm_quantizer", "v_bmm_quantizer"):
+    for name in (
+        "k_bmm_quantizer",
+        "v_bmm_quantizer",
+        "kv_c_bmm_quantizer",
+        "k_pe_bmm_quantizer",
+        "k_mha_bmm_quantizer",
+        "v_mha_bmm_quantizer",
+    ):
         quantizer = getattr(module, name, None)
         if (
             not isinstance(quantizer, TensorQuantizer)
@@ -344,6 +397,10 @@ def _set_vllm_attention_fp8_bmm2_default_amax(module, device: torch.device) -> N
         ("k_bmm_quantizer", 448.0),
         ("p_bmm_quantizer", 1.0),
         ("v_bmm_quantizer", 448.0),
+        ("kv_c_bmm_quantizer", 448.0),
+        ("k_pe_bmm_quantizer", 448.0),
+        ("k_mha_bmm_quantizer", 448.0),
+        ("v_mha_bmm_quantizer", 448.0),
     ):
         quantizer = getattr(module, name, None)
         if (
@@ -392,6 +449,51 @@ def configure_vllm_nvfp4_attention_quantizers(
 
     set_quantizer_by_cfg(module, _VLLM_NVFP4_ATTENTION_QUANT_CFG if cfg is None else cfg)
     for name in ("q", "k", "p", "v"):
+        getattr(module, f"{name}_bmm_quantizer").to(device=device)
+    _set_vllm_attention_kv_default_amax(module, device)
+    _set_vllm_attention_fp8_bmm2_default_amax(module, device)
+    return module
+
+
+def configure_vllm_nvfp4_mla_quantizers(
+    module: torch.nn.Module,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    cfg: list | None = None,
+) -> torch.nn.Module:
+    """Configure one vLLM ``MLAAttention`` module for fused fake quantization.
+
+    MLA counterpart of :func:`configure_vllm_nvfp4_attention_quantizers`.
+    ``kv_c``/``k_pe`` quantizers stay module-level (write-once latent-cache QDQ
+    — the single representation both decode BMMs consume); ``k``/``v``
+    quantizers drive the prefill kernel's projected-K/V QDQ; ``q`` and ``p``
+    drive both phases. The caller remains responsible for installing the
+    ModelOpt MLA impl and setting ``_query_quant_in_kernel``.
+
+    Args:
+        module: A vLLM ``MLAAttention`` module to convert and configure in place.
+        device: Device on which the attention quantizer state should reside.
+        dtype: Model compute dtype associated with the attention module.
+        cfg: Optional quantizer config (default: all-NVFP4).
+
+    Returns:
+        The supplied module, converted in place to ``_QuantVLLMMLAAttention``.
+    """
+    if VllmMLAAttention is None or not isinstance(module, VllmMLAAttention):
+        raise TypeError(f"Expected vLLM MLAAttention, got {type(module).__name__}")
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"Expected torch.dtype, got {type(dtype).__name__}")
+
+    device = torch.device(device)
+    module.device, module.dtype = device, dtype
+    if not isinstance(module, _QuantVLLMMLAAttention):
+        module = QuantModuleRegistry.convert(module)
+    if not hasattr(module, "p_bmm_quantizer"):
+        module.p_bmm_quantizer = TensorQuantizer()
+
+    set_quantizer_by_cfg(module, _VLLM_NVFP4_MLA_ATTENTION_QUANT_CFG if cfg is None else cfg)
+    for name in ("q", "kv_c", "k_pe", "k_mha", "p", "v_mha"):
         getattr(module, f"{name}_bmm_quantizer").to(device=device)
     _set_vllm_attention_kv_default_amax(module, device)
     _set_vllm_attention_fp8_bmm2_default_amax(module, device)
@@ -765,10 +867,23 @@ if VllmMLAAttention is not None:
             self.q_bmm_quantizer = TensorQuantizer()
             self.kv_c_bmm_quantizer = TensorQuantizer()
             self.k_pe_bmm_quantizer = TensorQuantizer()
+            # Prefill-only quantizers for the up-projected per-head K/V; the
+            # ModelOpt MLA kernels consume them in-kernel. Disabled by default
+            # so pre-existing MLA checkpoints restore unchanged.
+            self.k_mha_bmm_quantizer = TensorQuantizer()
+            self.k_mha_bmm_quantizer.disable()
+            self.v_mha_bmm_quantizer = TensorQuantizer()
+            self.v_mha_bmm_quantizer.disable()
             self.parallel_state = create_parallel_state()
 
         def forward(self, query, kv_c, k_pe, *args, **kwargs):
-            query = self.q_bmm_quantizer(query)
+            # With in-kernel Q quantization, prefill quantizes the projected
+            # 192-d q inside the kernel and decode quantizes the absorbed
+            # 576-d q (FP32 carrier) — skip the module-level QDQ entirely.
+            if not getattr(self, "_query_quant_in_kernel", False):
+                query = self.q_bmm_quantizer(query)
+            # Write-once latent-cache QDQ: the single representation both
+            # decode BMMs consume from the paged cache.
             kv_c = self.kv_c_bmm_quantizer(kv_c)
             k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)

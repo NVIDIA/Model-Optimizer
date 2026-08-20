@@ -219,7 +219,27 @@ K is QDQ before its cache write, while V is written pristine. Complete 16-token 
 
 Supported configurations are regular decoder self-attention with FlashInfer or FlashAttention, fp16/bf16 model and KV cache, equal Q/K/V head dimensions that are multiples of 16, and DCP 1. The FlashInfer adapter preserves both NHD and HND cache strides and separates mixed decode/prefill launches so each phase keeps its own kernel contract. The default `FULL_AND_PIECEWISE` mode remains enabled for fixed N:M and attention-only NVFP4; checkpoints with calibrated decode `threshold_scale_factor` must use a non-`FULL` decode graph mode such as `--enforce-eager` because the live sequence length is not replayed as a Python scalar.
 
-Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder/MLA attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
+Unsupported features are sliding window, ALiBi, softcap, sinks, FP8 KV cache, cross/encoder attention, KV sharing or transfer, prefix caching, speculative decoding, DBO/ubatching, and `FULL` mixed/prefill CUDA graphs.
+
+#### MLA attention (DeepSeek-family)
+
+The quantized worker also supports dense MLA text attention on the `TRITON_MLA` backend (pass `--attention-backend TRITON_MLA` when it is not the platform default):
+
+```bash
+python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
+  --no-enable-prefix-caching --enforce-eager \
+  --attention-backend TRITON_MLA \
+  --worker-cls sparse_attn_worker.QuantSparseAttnWorker
+```
+
+The MLA operand mapping differs from regular attention because the latent cache is shared by both BMMs:
+
+- `q_format`: prefill quantizes the projected 192-d query in-kernel; decode quantizes the absorbed `kv_lora_rank + rope`-d query (FP32 QDQ carrier). With `q_format=fp8` the module-level quantizer QDQs the pre-projection query instead.
+- `k_format`: governs the write-once latent-cache QDQ (`kv_c`, `k_pe` before the cache write) and the prefill projected K (in-kernel).
+- `v_format`: governs the prefill projected V (in-kernel) only. Decode BMM2 consumes the write-once quantized latent cache as-is — a single stored representation with no on-read re-quantization.
+- `p_format`: fused into both the prefill and decode kernels; the softmax denominator stays unquantized and P amax defaults to 1.0.
+
+MLA decode uses a fixed 32-split, 32-key-tile schedule with tile boundaries at absolute token positions, so quantized decode results are stable as the sequence grows and reproducible across batch shapes and devices. Optional checkpoint N:M sparsity applies to prefill new-token attention only (cached-context chunks run dense); skip-softmax is rejected on MLA layers. Sparse-only installation ignores MLA layers. DeepSeek V3.2-style sparse-indexer MLA and FP8 latent caches are unsupported.
 
 ## Known Problems
 

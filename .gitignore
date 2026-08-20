@@ -20,6 +20,7 @@ htmlcov/
 .coverage.*
 coverage.xml
 .pytest_cache/
+.cache/
 
 # Sphinx documentation
 docs/build
