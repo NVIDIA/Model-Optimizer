@@ -2117,10 +2117,8 @@ def layerwise_calibrate(
 
     if exporter is not None and checkpoint_dir is not None:
         # detect_resume_point returns None once the manifest is complete, which would put
-        # start_layer back at 0 and recalibrate every layer. In export mode the shards are
-        # already on disk; all that can be missing is the tail, index and configs, which
-        # finalize writes. So a completed manifest means finalize-only, and a rerun after a
-        # crash between the last ckpt.save and finalize costs nothing.
+        # start_layer back at 0 and recalibrate everything. The shards are already on disk,
+        # so a completed manifest means finalize-only.
         manifest = _read_manifest(checkpoint_dir)
         if manifest is not None and manifest.get("last_completed_layer", -1) + 1 >= num_layers:
             exporter.assert_shards_present(num_layers)
@@ -2132,10 +2130,9 @@ def layerwise_calibrate(
         if start_layer > 0:
             exporter.assert_shards_present(start_layer)
         elif checkpoint_dir is not None:
-            # Shards but no manifest means the resume record was lost (a checkpoint_dir on
-            # ephemeral storage is the usual cause); calibration would silently restart at
-            # layer 0 and overwrite finished shards. Without checkpoint_dir there is no
-            # resume to lose, and re-exporting from scratch is the documented behaviour.
+            # Shards but no manifest means the resume record was lost; calibration would
+            # restart at 0 and overwrite them. Without checkpoint_dir there is no resume to
+            # lose, so re-exporting is the documented behaviour.
             exporter.assert_no_orphan_shards(
                 manifest_present=_read_manifest(checkpoint_dir) is not None
             )

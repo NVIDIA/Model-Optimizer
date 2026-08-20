@@ -1447,14 +1447,10 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
 def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
     """Write config.json, generation_config.json, and trust_remote_code modeling files.
 
-    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need to
-    load at all, so they are copied across from the source directory.
-
-    For exporters that stream weights out themselves and so never hand a state dict to
-    ``save_pretrained``. Calling ``save_pretrained(state_dict={})`` instead is not an
-    option: MoE models (e.g. DSR1) have expert weights that share underlying storage across
-    layers, and safetensors' shared-tensor check fires even when the dict is empty --
-    crashing the export after every shard is already written correctly.
+    For exporters that stream weights out themselves and never hand a state dict to
+    ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
+    storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
+    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need.
     """
     _sanitize_generation_config_for_save(model)
     # transformers' own revert_weight_conversion cannot handle quantized state dicts.

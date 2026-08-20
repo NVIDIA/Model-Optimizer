@@ -151,14 +151,9 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
 def transient_module_state(module: nn.Module):
     """Undo everything export does to ``module``, so calibration can continue through it.
 
-    A resident model has no materialization window to discard the packed weights, grafted
-    expert submodules and new buffers export leaves behind.
-
-    Rebound names are restored by putting the dicts back, which costs references rather
-    than a copy. Buffer *contents* need more: scale fusion unifies a group's amax through
-    ``_amax.data.copy_()``, an in-place write the dict restore cannot see. Buffers are
-    clone-restored for that reason; parameters are not, since export replaces weights by
-    rebinding and cloning them would cost a full copy of the layer.
+    A resident model has no materialization window to discard what export leaves behind.
+    Restoring the dicts covers rebinding; buffers are additionally clone-restored because
+    scale fusion writes amax in place. Parameters are not -- that would copy the layer.
     """
     snapshot = [
         (
@@ -451,16 +446,13 @@ class LayerwiseExporter:
     def _bind_identity(self) -> None:
         """Tie the shards to the run that produced them.
 
-        Nothing else does: the resume manifest records no model or quantization identity,
-        and :meth:`assert_shards_present` only checks that files exist. Two runs pointed at
-        one export directory with the same layer count would otherwise let one run's
-        manifest finalize the other's shards into a structurally valid, wrong checkpoint.
+        The manifest records no model or quantization identity and
+        :meth:`assert_shards_present` only checks existence, so one run's manifest could
+        otherwise finalize another's shards into a valid-looking, wrong checkpoint.
         """
         model = self._ctx.model
-        # The quant config carries the per-module contract -- algo, kv-cache algo and the
-        # exclude list -- so two runs differing in which modules are quantized, or in block
-        # settings, hash differently even when the format names match. Digested rather than
-        # stored so the file stays small and diffable.
+        # The quant config carries the per-module contract, so two runs differing in which
+        # modules are quantized hash differently even when the format names match.
         quant_contract = hashlib.sha256(
             json.dumps(
                 get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora),
@@ -470,9 +462,8 @@ class LayerwiseExporter:
         ).hexdigest()[:16]
         identity = {
             "model_class": type(model).__name__,
-            # Identifies the source checkpoint. Digesting the weights themselves would mean
-            # reading the whole model, so a run started from differently-trained weights at
-            # the same path is not distinguished.
+            # Digesting the weights would mean reading the whole model, so retrained
+            # weights at the same path are not distinguished.
             "source": str(getattr(model.config, "_name_or_path", "") or ""),
             "num_layers": len(self._layers),
             "formats": sorted(str(f) for f in _module_formats(model) if f),
@@ -508,11 +499,9 @@ class LayerwiseExporter:
     def assert_no_orphan_shards(self, manifest_present: bool) -> None:
         """Refuse to silently redo work when shards exist but the resume record does not.
 
-        The shards cannot say where to resume: that needs ``next_inputs`` and the skipped
-        layers' ``output_meta``, neither reconstructible from quantized weights. So the
-        resume point comes from the manifest, and shards-without-manifest is dangerous --
-        ``start_layer`` is 0, :meth:`assert_shards_present` checks an empty range and
-        passes, and calibration overwrites every finished layer without a word.
+        The resume point comes from the manifest -- the shards cannot supply it. Without
+        one ``start_layer`` is 0, :meth:`assert_shards_present` checks an empty range, and
+        calibration overwrites every finished layer without a word.
         """
         if manifest_present:
             return

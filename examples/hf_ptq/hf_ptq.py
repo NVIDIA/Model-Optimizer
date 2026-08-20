@@ -810,8 +810,7 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
         ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
         ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
         (
-            # int8_sq is the export-format constant; the --qformat preset is
-            # int8_smoothquant. Match both so this keeps holding either way.
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
             "--qformat int8_smoothquant",
             any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
             "export_tensorrt_llm_checkpoint()",
