@@ -29,7 +29,16 @@ from modelopt.torch.export.quant_utils import (
     postprocess_state_dict,
     sync_tied_input_amax,
 )
+from modelopt.torch.export.unified_export_hf import _resolve_export_dtype
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+def test_resolve_export_dtype_uses_explicit_dtype_without_configured_dtype(recwarn):
+    model = torch.nn.Module()
+    model.config = object()
+
+    assert _resolve_export_dtype(model, torch.float16) == torch.float16
+    assert not recwarn
 
 
 def test_hf_all_tied_weights_keys_contract():
