@@ -88,9 +88,8 @@ def test_every_model_specific_ptq_dir_is_mentioned():
     """Every model dir under huggingface/ or models/ with PTQ recipes must appear in ptq.md.
 
     The identifier checked is the directory containing the ptq/ folder — the
-    HF model_type (e.g. ``gemma4``), a nested checkpoint dir (e.g.
-    ``Step3.5-Flash``), or a models/<org>/<checkpoint> leaf (e.g.
-    ``Nemotron-3-Nano-4B``).
+    HF ``model_type`` (e.g. ``gemma4``) or a models/<org>/<model_id> leaf
+    (e.g. ``Step-3.5-Flash``, ``Nemotron-3-Nano-4B-BF16``).
     """
     doc = _ptq_md_text()
     search_dirs = (RECIPES_DIR / "huggingface", RECIPES_DIR / "models")
