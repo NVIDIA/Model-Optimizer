@@ -255,6 +255,23 @@ To use remote autotuning during Q/DQ placement optimization, run with ``trtexec`
 
 Replace ``<remote autotuning config>`` with an actual remote autotuning configuration string (see ``trtexec --help`` for more details). Other TensorRT benchmark options (e.g. ``--timing_cache``, ``--warmup_runs``, ``--timing_runs``, ``--plugin_libraries``) are also available; run ``--help`` for details.
 
+**Connectivity pre-check:**
+
+When ``--remoteAutoTuningConfig`` is detected, the autotuner tests TCP connectivity to the remote board before each trtexec invocation. If the board is unreachable after retries, the autotuner saves state and exits cleanly — preventing transient network failures from permanently marking schemes as errored.
+
+Configure the retry count with ``--remote_connection_retries`` (default: 3):
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./model_remote_autotuned \
+       --use_trtexec \
+       --trtexec_benchmark_args "--remoteAutoTuningConfig=\"ssh://admin@192.168.1.100\" --safe --skipInference" \
+       --remote_connection_retries 5
+
+Each failed attempt is logged as a warning. If all retries fail, the process exits with an error message and preserved state. On restart (same ``--output_dir``), autotuning resumes from where it left off without re-testing already-profiled schemes.
+
 Low-Level API Usage
 ===================
 

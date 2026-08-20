@@ -42,6 +42,7 @@ Changelog
 
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix ONNX Autotune remote autotuning to pre-check board connectivity (configurable retries via ``--remote_connection_retries``) before each trtexec invocation. If unreachable, the autotuner saves state and exits cleanly instead of running trtexec and permanently marking schemes as errored.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
