@@ -696,20 +696,15 @@ def _force_attn_implementation(model, attn_implementation: str) -> None:
 
 
 def _pin_offloaded_modules(model, suffixes: tuple[str, ...]) -> int:
-    """Make the named offloaded modules permanently resident; returns how many.
+    """Make the named offloaded modules resident; returns how many were pinned.
 
-    accelerate materializes an offloaded weight in *that module's* pre-forward hook and
-    re-metas it afterwards, so a weight read from a sibling's forward is on meta when used
-    (Kimi-K3's ``_apply_attn_res`` reads the residual proj/norm pairs that way).
-
-    Setting the tensor is not enough -- ``post_forward`` re-metas everything the module owns
-    -- and detaching alone is not either, since ``detach_hook`` restores ``original_devices``,
-    which is meta for an offloaded param. Retargeting those first makes detach materialize
-    through accelerate's own path.
-
-    Only valid for modules whose ``forward`` is never called, so the caller names them.
+    accelerate materializes an offloaded weight in *that module's* pre-forward hook, so a
+    weight read from a sibling's forward is on meta when used -- Kimi-K3's ``_apply_attn_res``
+    reads the residual proj/norm weights from the decoder layer's forward without ever
+    calling those modules. Writing the values in once is enough precisely because their
+    ``forward`` never runs, so no post-forward hook puts them back.
     """
-    from accelerate.hooks import remove_hook_from_module
+    from accelerate.utils import set_module_tensor_to_device
 
     from modelopt.torch.quantization.plugins.accelerate import _get_offload_hook
 
@@ -722,10 +717,12 @@ def _pin_offloaded_modules(model, suffixes: tuple[str, ...]) -> int:
         hook = _get_offload_hook(getattr(module, "_hf_hook", None))
         if hook is None:
             continue
-        hook.original_devices = dict.fromkeys(
-            getattr(hook, "original_devices", {}), hook.execution_device
-        )
-        remove_hook_from_module(module)
+        tensors = [n for n, _ in module.named_parameters(recurse=False)]
+        tensors += [n for n, _ in module.named_buffers(recurse=False)]
+        for tname in tensors:
+            value = hook.weights_map.get(tname)
+            if value is not None:
+                set_module_tensor_to_device(module, tname, hook.execution_device, value=value)
         pinned += 1
     return pinned
 
