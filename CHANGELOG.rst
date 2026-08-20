@@ -41,6 +41,7 @@ Changelog
 
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix the DFlash draft inheriting the wrong RoPE base from a Transformers 5 target. Such a config can carry both a ``rope_parameters`` dict holding the model's real base and a top-level ``rope_theta`` left at the config-class default, and ModelOpt read the flat field first — so a Qwen3-8B draft trained and exported with ``rope_theta`` 10000 against a target using 1000000. Retrain and re-export any DFlash-family draft (DFlash, Domino, DSpark) built against such a target.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^

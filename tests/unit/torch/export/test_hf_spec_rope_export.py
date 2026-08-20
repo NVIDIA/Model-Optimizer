@@ -20,7 +20,11 @@ from unittest.mock import MagicMock
 
 import torch
 
-from modelopt.torch.export.plugins.hf_spec_export import DFlashExporter, EagleExporter
+from modelopt.torch.export.plugins.hf_spec_export import (
+    DFlashExporter,
+    EagleExporter,
+    _get_rope_theta,
+)
 
 DEFAULT_ROPE_SCALING = {
     "rope_type": "yarn",
@@ -152,3 +156,30 @@ def test_dflash_rope_theta_inherits_base_rope_parameters():
     config = exporter._export_config()
 
     assert config["rope_theta"] == 5000000.0
+
+
+def test_get_rope_theta_prefers_rope_parameters_over_flat_field():
+    """rope_parameters wins when a config carries both fields with different values.
+
+    A real Transformers 5 Qwen3-8B config keeps the true base (1e6) in
+    rope_parameters while the Qwen3Config class default (1e4) stays visible as a
+    top-level rope_theta. Reading the flat field first yields a draft whose RoPE
+    base is 100x off the target's.
+    """
+    config = SimpleNamespace(
+        rope_theta=10000.0,  # class default, NOT the model's real base
+        rope_parameters={"rope_theta": 1000000, "rope_type": "default"},
+    )
+    assert _get_rope_theta(config) == 1000000
+
+
+def test_get_rope_theta_falls_back_to_flat_field():
+    """Legacy configs that only have the flat field still resolve."""
+    config = SimpleNamespace(rope_theta=500000.0, rope_parameters=None)
+    assert _get_rope_theta(config) == 500000.0
+
+
+def test_get_rope_theta_default_when_absent():
+    """No rope information anywhere returns the caller's default."""
+    config = SimpleNamespace(rope_theta=None, rope_parameters=None, rope_scaling=None)
+    assert _get_rope_theta(config, default=1234) == 1234
