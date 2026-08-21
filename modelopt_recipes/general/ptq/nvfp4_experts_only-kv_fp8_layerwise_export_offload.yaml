@@ -34,9 +34,11 @@ metadata:
     projections; shared_experts is missed because its path contains '_experts.' rather than
     '.experts.' (fnmatch semantics, conversion.py).
 
-    Pairs checkpoint_dir with export_dir so an interrupted run resumes without recalibrating
-    or re-exporting finished layers. That is the point of the combination for a run that
-    outlasts its GPU session: a killed run loses at most the in-flight layer.
+    An interrupted run resumes without recalibrating or re-exporting finished layers, losing
+    at most the in-flight one -- the point of the combination for a run that outlasts its GPU
+    session. The resume state lives beside the checkpoint at <export_path>.layerwise_resume
+    unless you set layerwise.checkpoint_dir yourself; do not point it at container-local
+    storage, or a run that survives its session comes back to a wiped manifest.
 
     A resumed run never recalibrates the layers it skipped, so the exported checkpoint is
     complete but the in-memory model is not and must not be used for inference.
@@ -47,7 +49,6 @@ quantize:
       enable: true
       # max only updates _amax, so the exported shard stays valid for its layer.
       calib_mutates_weights: false
-      checkpoint_dir: /tmp/modelopt_layerwise_ckpt
       # Presence enables per-layer export; the value is replaced with --export_path.
       export_dir: /tmp/modelopt_layerwise_export
   quant_cfg:
