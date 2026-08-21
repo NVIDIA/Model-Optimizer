@@ -1,0 +1,22 @@
+# Auto-quantize with kv_cache and disabled_patterns (existing test coverage)
+_test:
+  description: "Auto-quantize with KV cache and disabled_patterns"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: auto_quantize_kwargs
+    check_config:
+      auto_quantize_kwargs:
+        disabled_layers: ["*lm_head*"]
+
+version: "1.0"
+auto_quantize:
+  effective_bits: 4.5
+  formats:
+    - preset: fp8
+  kv_cache:
+    format: fp8
+  disabled_patterns:
+    - "*lm_head*"
