@@ -34,6 +34,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _read_manifest,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
@@ -2064,12 +2065,21 @@ def layerwise_calibrate(
     are saved after each layer completes. On restart, calibration resumes from
     the last completed layer.
 
+    If ``export_dir`` is passed, each layer is additionally written to a quantized HF
+    checkpoint shard as soon as it is calibrated, leaving a complete checkpoint when the
+    last layer lands and removing the need for a separate ``export_hf_checkpoint()`` pass.
+    Those shards then serve as the resume artifact, so the per-layer weight and quantizer
+    files are not written and finished layers are skipped rather than restored. The model
+    is left unusable for inference either way: export converts the non-decoder modules in
+    place, and a resumed run additionally never re-calibrates the layers it skipped.
+
     ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
     whether the cached inputs handed to layer N+1 come from a forward through
     the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
     temporarily disabled (False; matches non-layerwise max-calib semantics).
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
@@ -2090,13 +2100,50 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
+    # Before calibration, so unsupported models fail in seconds not hours.
+    exporter = None
+    if export_dir is not None:
+        from modelopt.torch.export.layerwise_export import LayerwiseExporter
+
+        exporter = LayerwiseExporter(model, export_dir)
+
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
         calib_mutates_weights=calib_mutates_weights,
+        save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+
+    if exporter is not None and checkpoint_dir is not None:
+        # detect_resume_point returns None once the manifest is complete, which would put
+        # start_layer back at 0 and recalibrate everything. The shards are already on disk,
+        # so a completed manifest means finalize-only.
+        manifest = _read_manifest(checkpoint_dir) or {}
+        last, total = manifest.get("last_completed_layer"), manifest.get("num_layers")
+        if total is not None and total != num_layers:
+            raise ValueError(
+                f"Layerwise checkpoint at {checkpoint_dir} was written for {total} layers "
+                f"but this model has {num_layers}. Use a fresh checkpoint_dir."
+            )
+        # None, not -1: a truncated or hand-edited manifest must not arithmetic-error here.
+        if last is not None and last + 1 >= num_layers:
+            exporter.assert_shards_present(num_layers)
+            exporter.finalize()
+            print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
+            return
+
+    if exporter is not None:
+        if start_layer > 0:
+            exporter.assert_shards_present(start_layer)
+        elif checkpoint_dir is not None:
+            # Shards but no manifest means the resume record was lost; calibration would
+            # restart at 0 and overwrite them. Without checkpoint_dir there is no resume to
+            # lose, so re-exporting is the documented behaviour.
+            exporter.assert_no_orphan_shards(
+                manifest_present=_read_manifest(checkpoint_dir) is not None
+            )
 
     layer_pbar = tqdm(
         total=num_layers,
@@ -2168,8 +2215,30 @@ def layerwise_calibrate(
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
+                    if exporter is not None:
+                        # As above, for the fusion probe. Only when one runs: without an
+                        # exporter nothing touches the layer before _set_layer_states does.
+                        layer._layerwise_calib.mode = "original"
                 elif is_last:
                     next_inputs = None
+
+                # After the next-layer capture in both orderings: final state.
+                if exporter is not None:
+                    # One real batch, so a fusing format can rediscover shared inputs.
+                    def _fusion_probe(m, _inputs=layer_inputs):
+                        args, kwargs_input = _inputs[0]
+                        # As _layer_forward_loop does: these tuples were replayed once, so
+                        # the cache would give the probe kv_len twice the mask width.
+                        cache = kwargs_input.get("past_key_values")
+                        if cache is not None:
+                            kwargs_input = dict(kwargs_input)
+                            if hasattr(cache, "reset"):
+                                cache.reset()
+                            else:
+                                kwargs_input["past_key_values"] = None
+                        m(*args, **kwargs_input)
+
+                    exporter.export_layer(layer_idx, layer, _fusion_probe)
 
                 if ckpt:
                     ckpt.save(layer_idx, model, transformer_layers, next_inputs)
@@ -2184,6 +2253,20 @@ def layerwise_calibrate(
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    if exporter is not None:
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
+        resumed = (
+            f" This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} were "
+            "never re-calibrated either."
+            if start_layer > 0
+            else ""
+        )
+        warn_rank_0(
+            "The exported checkpoint is complete, but per-layer export leaves the model's "
+            "non-decoder modules in export form: it must not be used for inference." + resumed
+        )
 
     print_rank_0("Layerwise calibration completed")
 

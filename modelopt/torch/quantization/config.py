@@ -754,6 +754,23 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    export_dir: str | None = ModeloptField(
+        default=None,
+        title="Export each layer's quantized checkpoint as soon as it is calibrated.",
+        description=(
+            "If set, each decoder layer is written to a quantized HF checkpoint shard in "
+            "this directory the moment its calibration finishes, leaving a complete, "
+            "loadable checkpoint when the last layer lands. Removes the separate "
+            "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Combined with ``checkpoint_dir``, an interrupted run resumes without "
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
+            "weight-tied quantized modules, multimodal and MTP models raise "
+            "NotImplementedError. The model left in memory afterwards is not valid for "
+            "inference if the run resumed."
+        ),
+    )
+
     calib_mutates_weights: bool = ModeloptField(
         default=True,
         title="Whether layerwise calibration mutates layer weights.",
@@ -822,12 +839,13 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
-        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
-            raise ValueError(
-                "layerwise.checkpoint_dir requires layerwise.enable=True. "
-                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
-            )
+        """Raise if a layerwise directory is set but layerwise.enable is False."""
+        for field in ("checkpoint_dir", "export_dir"):
+            if getattr(self.layerwise, field) is not None and not self.layerwise.enable:
+                raise ValueError(
+                    f"layerwise.{field} requires layerwise.enable=True. "
+                    f"Set layerwise.enable=True or remove layerwise.{field}."
+                )
         return self
 
     @model_validator(mode="after")
