@@ -895,6 +895,7 @@ def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
+    keep_fused_experts: bool = False,
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
@@ -908,7 +909,12 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        keep_fused_experts=keep_fused_experts,
+    )
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():
@@ -929,8 +935,9 @@ def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
+    defer_distributed_fsdp2_write: bool = False,
     **kwargs,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
 
     The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
@@ -992,14 +999,39 @@ def _export_transformers_checkpoint(
             f"{synced_input} tied module group(s)"
         )
 
+    # No-gather distributed FSDP2 export keeps MoE experts FUSED + sharded during the quantize fold
+    # (each rank materializes only its LOCAL experts instead of all N on every rank -- the split
+    # happens later on the sharded weight in the writer). Same condition as the deferred write below.
+    keep_fused_experts = (
+        defer_distributed_fsdp2_write
+        and is_fsdp2_model(model)
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    )
+
     # Process all quantized modules and export weights
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    _process_quantized_modules(
+        model, dtype, is_modelopt_qlora, keep_fused_experts=keep_fused_experts
+    )
     _reconstruct_fused_moe_linear(model)
 
+    if (
+        defer_distributed_fsdp2_write
+        and is_fsdp2_model(model)
+        and torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+    ):
+        # No-gather distributed FSDP2 export: leave the model SHARDED and signal the caller
+        # (export_hf_checkpoint) to write it per-rank via distributed_save_hf_checkpoint -- the
+        # kv-cache/postprocess fold runs inside that writer. Returning a None state dict avoids the
+        # full-model rank-0 host-RAM gather below (which does not scale to 100s of GB). Gated on the
+        # flag so other callers (e.g. hf_spec_export) keep the gather behavior.
+        return None, quant_config
+
     if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
+        # FSDP2 without the deferred-write opt-in (or no live process group): gather to CPU on rank 0.
         quantized_state_dict = get_model_state_dict(
             model,
             options=StateDictOptions(full_state_dict=True, cpu_offload=True),
@@ -1445,6 +1477,22 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         gc.do_sample = True
 
 
+def _write_base_config(model: nn.Module, export_dir: "Path | str") -> None:
+    """Write the base config.json + generation_config for the distributed (no-gather) export path.
+
+    ``distributed_save_hf_checkpoint`` writes only the weight shards (no config), so on that path rank 0
+    calls this to emit what ``save_pretrained`` would have written on the gather path. The weight half of
+    ``save_pretrained`` must NOT run here -- the weights are already on disk and the model may still be
+    sharded -- so only the config files are written.
+    """
+    model.config.save_pretrained(export_dir)
+    if model.can_generate() and getattr(model, "generation_config", None) is not None:
+        try:
+            model.generation_config.save_pretrained(export_dir)
+        except Exception as gen_err:
+            warnings.warn(f"Could not save generation_config: {gen_err}")
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
@@ -1550,6 +1598,25 @@ def export_hf_checkpoint(
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
+    # An offloaded model takes the streaming path below; otherwise a distributed FSDP2 model takes
+    # the no-gather path, which writes weights and config itself instead of going through
+    # save_pretrained and returns before the gather path's extra_state_dict merge. Neither option
+    # can be honoured there, so reject explicitly rather than dropping them silently (the streaming
+    # path declines save_modelopt_state the same way).
+    if is_distributed and not _offloaded:
+        if extra_state_dict:
+            raise NotImplementedError(
+                "extra_state_dict is not supported by the no-gather FSDP2 distributed export: "
+                "each rank writes its own shards, so the extra tensors are never merged in. "
+                "Export without it, or outside torch.distributed to take the gather path."
+            )
+        if save_modelopt_state:
+            raise NotImplementedError(
+                "save_modelopt_state=True is not supported by the no-gather FSDP2 distributed "
+                "export: it writes the checkpoint directly rather than through "
+                "model.save_pretrained(). Save the ModelOpt state separately with mto.save()."
+            )
+
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
@@ -1583,11 +1650,63 @@ def export_hf_checkpoint(
             _write_hf_export_config(model, hf_quant_config, export_dir)
             return
 
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, dtype, defer_distributed_fsdp2_write=True, **kwargs
+        )
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
+
+        if post_state_dict is None:
+            # FSDP2 no-gather distributed export (signalled by _export_transformers_checkpoint returning
+            # a None state dict). Every rank writes its own weight shards via torch DCP -- collective,
+            # so this MUST run on all ranks, before the rank-0-only config work -- with no full-model
+            # rank-0 host-RAM gather. Rank 0 then writes config.json + the deployment quant config,
+            # mirroring the gather path's tail below.
+            #
+            # NOTE: unlike the gather path, this does NOT run revert_weight_conversion_quant_aware on
+            # the weights. The fused->per-expert un-fusing is handled inside the writer's expert
+            # split; any *other* transformers>=5 key renames are not reverted here. Validate on a model
+            # that triggers those renames before relying on it. extra_state_dict is likewise not merged
+            # into the distributed write yet.
+            from .distribute import distributed_save_hf_checkpoint
+
+            kv_cache_format = (hf_quant_config or {}).get("quantization", {}).get(
+                "kv_cache_quant_algo"
+            )
+            distributed_save_hf_checkpoint(
+                model,
+                export_dir,
+                maxbound=448,
+                kv_cache_format=kv_cache_format,
+                max_shard_size=max_shard_size,
+            )
+            if not (is_distributed and torch.distributed.get_rank() != 0):
+                _write_base_config(model, export_dir)
+                quantization_details = (hf_quant_config or {}).get("quantization", {})
+                is_quantized_export = (
+                    quantization_details.get("quant_algo") is not None
+                    or quantization_details.get("kv_cache_quant_algo") is not None
+                )
+                folded_quant_config = None
+                if is_quantized_export:
+                    with open(f"{export_dir}/hf_quant_config.json", "w") as file:
+                        json.dump(hf_quant_config, file, indent=4)
+                    folded_quant_config = convert_hf_quant_config_format(hf_quant_config)
+                original_config = f"{export_dir}/config.json"
+                with open(original_config) as file:
+                    config_data = json.load(file)
+                sanitize_hf_config_for_deployment(config_data, model)
+                if folded_quant_config is not None:
+                    config_data["quantization_config"] = folded_quant_config
+                if export_sparse_attention_config is not None:
+                    sparse_attn_config = export_sparse_attention_config(model)
+                    if sparse_attn_config is not None:
+                        config_data["sparse_attention_config"] = sparse_attn_config
+                with open(original_config, "w") as file:
+                    json.dump(config_data, file, indent=4)
+            return
 
         export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
 

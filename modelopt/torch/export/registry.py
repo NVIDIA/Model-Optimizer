@@ -54,6 +54,10 @@ class ExportContext:
     model: nn.Module
     dtype: torch.dtype
     is_modelopt_qlora: bool = False
+    # Distributed (no-gather) export: keep MoE experts FUSED + sharded instead of splitting them
+    # into full per-expert tensors, so each rank materializes only its local experts (the split
+    # happens post-consolidation on the sharded fused weight). See _export_fused_experts_keep_fused.
+    keep_fused_experts: bool = False
 
 
 ExportHandler = Callable[[str, nn.Module, ExportContext], None]
