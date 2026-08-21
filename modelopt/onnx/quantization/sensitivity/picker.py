@@ -27,11 +27,21 @@ granularity) for :func:`modelopt.onnx.quantization.quantize`. Supports two polic
   score exceeds an absolute cutoff. Simpler and more predictable when the
   operator already knows what per-target sensitivity score magnitude they
   consider "too sensitive to quantize" for a given model.
+
+The picker also supports **block-aware grouping** via the ``blocks`` argument:
+per-node scores can be aggregated into user-defined architectural groups
+(transformer blocks, residual blocks, MBConv stages, ...) and the picker's
+coverage / threshold semantics apply to the group ranking rather than
+individual nodes. This is useful for transformer / attention-heavy
+architectures where per-node picking leaves precision boundaries scrambled
+inside the affected blocks and softmax numerics degrade.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
+from typing import Literal
 
 from modelopt.onnx.logging_config import logger
 
@@ -41,6 +51,8 @@ def suggest_exclusion(
     coverage: float = 0.90,
     *,
     threshold: float | None = None,
+    blocks: Mapping[str, Sequence[str | re.Pattern]] | None = None,
+    block_agg: Literal["sum", "max", "mean"] = "sum",
     max_nodes: int | None = None,
     min_score_floor: float = 0.0,
     near_tie_ratio: float | None = 0.99,
@@ -97,11 +109,46 @@ def suggest_exclusion(
             the load-bearing targets; on CoAtNet-0 or larger models
             ``0.05 - 0.5`` is a similar magnitude in relative terms. Use
             coverage mode if you need portability across models.
-        max_nodes: Optional cap on the exclusion set size. Prevents
-            long-tail-heavy distributions from producing very large
-            exclusion sets that fragment the graph and hurt latency.
-            Applied in both modes; whichever limit triggers first stops
-            the accumulation.
+        blocks: Optional mapping from group name to a list of regex patterns
+            (either compiled ``re.Pattern`` objects or plain regex strings)
+            that match node paths. When provided, the picker ranks *groups*
+            rather than individual nodes: each node in ``scores`` is
+            assigned to at most one group (first-match wins across the
+            ``blocks`` dict); nodes matching no pattern become their own
+            singleton group named after themselves. Group scores are
+            computed via ``block_agg``, and coverage / threshold /
+            ``max_nodes`` / ``near_tie_ratio`` apply identically to the
+            group ranking. The returned exclusion list is the union of
+            member node names across the selected groups. Default ``None``
+            -- every node is its own singleton group, equivalent to
+            per-node picking.
+        block_agg: Aggregation function used to compute a group's score
+            from its members' individual scores when ``blocks`` is set.
+            One of ``"sum"``, ``"max"``, ``"mean"``. Natural pairings with
+            the two policy modes:
+
+            * ``block_agg="sum"`` with **coverage** (recommended default):
+              identical "fraction of total KL mass" semantic as per-node
+              coverage, because summing group sums equals summing all node
+              scores. Portable across granularity choices.
+            * ``block_agg="max"`` with **threshold**: same units as
+              per-node threshold (excludes any group whose peak-node score
+              exceeds the cutoff). Preserves operator intuition when
+              transferring per-node threshold guidance to the block level.
+            * Other combinations are valid but change what ``coverage``
+              and ``threshold`` mean in units. Under ``block_agg="max"``
+              coverage counts fraction-of-total-group-max-scores (not
+              fraction-of-total-KL-mass). Under ``block_agg="sum"``
+              threshold operates in summed-KL units per group, so
+              per-node threshold values must be scaled up to be
+              meaningful. Ignored when ``blocks`` is ``None``.
+        max_nodes: Optional cap on the exclusion set size. When ``blocks``
+            is set, this caps the number of *groups* included in the
+            aggregate ranking before expansion; when ``blocks`` is ``None``,
+            it caps the number of individual targets. Prevents long-tail-
+            heavy distributions from producing very large exclusion sets
+            that fragment the graph and hurt latency. Applied in both
+            modes; whichever limit triggers first stops the accumulation.
         min_score_floor: Targets with individual score below this value are
             never included, even if the coverage target has not been
             reached (coverage mode) or the target exceeds ``threshold``
@@ -121,7 +168,53 @@ def suggest_exclusion(
         ``modelopt.onnx.quantization.quantize(..., nodes_to_exclude=...)`` if
         ``scores`` came from per-node granularity, or to
         ``modelopt.onnx.quantization.quantize(..., op_types_to_exclude=...)``
-        if it came from per-op-type granularity.
+        if it came from per-op-type granularity. When ``blocks`` is set the
+        returned list is always suitable for ``nodes_to_exclude=`` because
+        it is the union of member node names across the selected groups.
+    """
+    if blocks is not None:
+        if block_agg not in {"sum", "max", "mean"}:
+            raise ValueError(
+                f"block_agg must be 'sum', 'max', or 'mean' (got {block_agg!r})"
+            )
+        groups = _assign_groups(scores, blocks)
+        group_scores = _aggregate_group_scores(scores, groups, block_agg)
+        selected_groups = _pick_from_scores(
+            group_scores,
+            coverage=coverage,
+            threshold=threshold,
+            max_nodes=max_nodes,
+            min_score_floor=min_score_floor,
+            near_tie_ratio=near_tie_ratio,
+        )
+        return [n for g in selected_groups for n in groups[g]]
+
+    return _pick_from_scores(
+        scores,
+        coverage=coverage,
+        threshold=threshold,
+        max_nodes=max_nodes,
+        min_score_floor=min_score_floor,
+        near_tie_ratio=near_tie_ratio,
+    )
+
+
+def _pick_from_scores(
+    scores: Mapping[str, float],
+    *,
+    coverage: float,
+    threshold: float | None,
+    max_nodes: int | None,
+    min_score_floor: float,
+    near_tie_ratio: float | None,
+) -> list[str]:
+    """Core picker: coverage / threshold selection on any ``{name: score}`` dict.
+
+    Called for per-node picking (from :func:`suggest_exclusion` with
+    ``blocks=None``) and for per-group picking (from :func:`suggest_exclusion`
+    with ``blocks`` set, after aggregating per-node scores into per-group
+    scores). Extracted so both paths share identical coverage / threshold /
+    near-tie / ``max_nodes`` / ``min_score_floor`` semantics.
     """
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     if not ranked:
@@ -164,6 +257,55 @@ def suggest_exclusion(
 
     _warn_near_tie(ranked, excluded, near_tie_ratio, mode="coverage")
     return excluded
+
+
+def _assign_groups(
+    scores: Mapping[str, float],
+    blocks: Mapping[str, Sequence[str | re.Pattern]],
+) -> dict[str, list[str]]:
+    """Assign each node in ``scores`` to at most one group.
+
+    Rules:
+
+    * A node matching any regex in ``blocks[name]`` joins group ``name``.
+    * First-match wins across the iteration order of ``blocks`` -- callers
+      that need mixed-depth grouping should list more-specific groups
+      earlier.
+    * Nodes matching no pattern become their own singleton group named
+      after themselves, so architecturally-important standalone nodes
+      compete for exclusion on equal footing with multi-node blocks.
+    """
+    compiled = {
+        gname: [re.compile(p) if isinstance(p, str) else p for p in patterns]
+        for gname, patterns in blocks.items()
+    }
+    groups: dict[str, list[str]] = {}
+    for node_name in scores:
+        matched: str | None = None
+        for gname, pats in compiled.items():
+            if any(pat.match(node_name) for pat in pats):
+                matched = gname
+                break
+        key = matched if matched is not None else node_name
+        groups.setdefault(key, []).append(node_name)
+    return groups
+
+
+def _aggregate_group_scores(
+    scores: Mapping[str, float],
+    groups: Mapping[str, Sequence[str]],
+    block_agg: Literal["sum", "max", "mean"],
+) -> dict[str, float]:
+    """Aggregate per-node scores into per-group scores using ``block_agg``."""
+    if block_agg == "sum":
+        return {g: sum(scores[n] for n in members) for g, members in groups.items()}
+    if block_agg == "max":
+        return {g: max(scores[n] for n in members) for g, members in groups.items()}
+    # mean
+    return {
+        g: (sum(scores[n] for n in members) / len(members)) if members else 0.0
+        for g, members in groups.items()
+    }
 
 
 def _warn_near_tie(
