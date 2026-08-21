@@ -72,6 +72,40 @@ _SAFETENSORS_INDEX_FILENAME = "model.safetensors.index.json"
 _SAFETENSORS_SINGLE_FILENAMES = ["model.safetensors", "consolidated.safetensors"]
 
 
+def _resolve_rope_theta(base_cfg, attn_kind: str = "sliding_attention") -> float | None:
+    """Return the base model's RoPE theta, handling nested ``rope_parameters``.
+
+    Most models expose a flat ``rope_theta``. Gemma 4 instead nests per-attention-kind RoPE
+    settings under ``rope_parameters``, e.g.::
+
+        {"full_attention":    {"rope_theta": 1e6, "rope_type": "proportional",
+                               "partial_rotary_factor": 0.25},
+         "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"}}
+
+    A flat ``getattr(base_cfg, "rope_theta", None)`` returns ``None`` there, and the draft then
+    silently trains on the draft class's default theta instead of the base's — training loss and
+    accuracy still improve while MT-Bench AAL is capped, because RoPE frequencies get baked into
+    the trained weights.
+
+    ``attn_kind`` selects which entry to read; it must match the attention the DRAFT uses. The
+    default is ``sliding_attention`` because SWA drafts are the common case for Gemma 4, and its
+    ``rope_type`` is plain ``default`` (the ``full_attention`` entry uses ``proportional`` rope
+    with ``partial_rotary_factor``, which the draft classes do not implement).
+    """
+    theta = getattr(base_cfg, "rope_theta", None)
+    if theta is not None:
+        return theta
+    params = getattr(base_cfg, "rope_parameters", None)
+    if not isinstance(params, dict):
+        return None
+    entry = params.get(attn_kind)
+    if entry is None:
+        # Single-kind nested form, or an unknown kind name: fall back to the sole entry.
+        values = [v for v in params.values() if isinstance(v, dict) and "rope_theta" in v]
+        entry = values[0] if len(values) == 1 else None
+    return entry.get("rope_theta") if isinstance(entry, dict) else None
+
+
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -203,7 +237,7 @@ class FakeBaseModel(PreTrainedModel):
             num_key_value_heads=getattr(base_cfg, "num_key_value_heads", None),
             intermediate_size=getattr(base_cfg, "intermediate_size", None),
             rms_norm_eps=getattr(base_cfg, "rms_norm_eps", 1e-6),
-            rope_theta=getattr(base_cfg, "rope_theta", None),
+            rope_theta=_resolve_rope_theta(base_cfg),
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),

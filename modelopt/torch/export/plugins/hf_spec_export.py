@@ -412,6 +412,16 @@ class DFlashExporter(SpeculativeDecodingExporter):
         else:
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
+        # Gemma4 sizes attention PER LAYER, so the serving side cannot reconstruct the
+        # draft's shapes from head_dim / num_key_value_heads alone: full-attention layers
+        # use ``global_head_dim`` and, under ``attention_k_eq_v``, ``num_global_key_value_heads``
+        # (see gemma4_layer_config in vLLM). Omitting these makes vLLM rebuild the draft with
+        # the sliding-layer dims and fail with a shape mismatch on q/k/o and the q/k norms.
+        for _attr in ("global_head_dim", "num_global_key_value_heads", "attention_k_eq_v"):
+            _val = getattr(draft_config, _attr, None)
+            if _val is not None:
+                config[_attr] = _val
+
         # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
         # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
         # layer_types left all "full_attention" it applies a non-causal sliding window to

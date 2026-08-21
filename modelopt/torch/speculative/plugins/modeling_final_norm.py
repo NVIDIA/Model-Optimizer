@@ -93,6 +93,14 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     # M3's final norm is always gemma-style; map it here too so a config that lost its
     # use_gemma_norm flag still gets the correct flavor instead of silently dropping the +1.
     "minimax_m3_vl_text": "gemma_rmsnorm",
+    # Gemma 4 VLM nests the LLM as text_config with model_type "gemma4_text"; from_source
+    # reads the NESTED config, so a "gemma4" key alone would never match. Verified numerically
+    # on gemma-4-E4B-it that Gemma4RMSNorm is plain ``normed * weight`` — NOT the ``(1 + weight)``
+    # form used by Gemma 2/3 — reproducing HF ``hidden_states[-1]`` at cos=0.999999 (vs 0.9719
+    # and maxabs_err 47.6 for the ``(1 + weight)`` form), so plain ``rmsnorm`` is correct here
+    # and ``gemma_rmsnorm`` would be wrong. Both keys listed so a text-only checkpoint works too.
+    "gemma4_text": "rmsnorm",
+    "gemma4": "rmsnorm",
     # gpt_oss intentionally DISABLED: GptOssRMSNorm uses an fp32 weight + multiply-then-cast,
     # unlike _FinalRMSNorm's bf16 weight, so reusing it would silently bias reconstructed logits.
     # Re-enable once a gpt_oss-style class (fp32 weight, multiply-then-cast) is in _FINAL_NORM_CLASSES.

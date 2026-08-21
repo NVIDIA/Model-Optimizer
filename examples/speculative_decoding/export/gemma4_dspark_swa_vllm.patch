@@ -1,0 +1,108 @@
+Make Gemma4 DSpark drafts honour dflash_config.use_swa / swa_window_size.
+
+Applies to (vLLM): vllm/model_executor/models/gemma4_dspark.py
+
+WHY
+    A DFlash/DSpark draft declares its sliding window through
+    dflash_config.use_swa + swa_window_size, and keeps layer_types all
+    "full_attention" on purpose -- that is what keeps attention_k_eq_v uniform,
+    which Gemma4DSparkModel._build_fused_kv_buffers() asserts.
+
+    vLLM's Qwen3 DFlash layer resolves its window through
+    _resolve_layer_attention(), which reads exactly those fields.
+    Gemma4DSparkAttention does not: it inherits Gemma4MTPAttention.__init__,
+    which derives the window from the BASE model's layer pattern --
+
+        self.is_sliding = layer_type == "sliding_attention"
+        sliding_window  = config.sliding_window if self.is_sliding else None
+
+    so for an all-full_attention draft, per_layer_sliding_window is None on
+    every layer. A draft TRAINED with a window is then SERVED with full
+    attention. Nothing errors; acceptance length just quietly drops.
+
+WHAT
+    Resolve the window via _resolve_layer_attention(config, layer_idx) -- the
+    same call the Qwen3 DFlash layer makes -- and rebuild self.attn with
+    per_layer_sliding_window when a window applies. self.attn is already
+    replaced further down for the k_proj/v_proj rework, so rebuilding it here
+    follows the class's existing pattern; the stale static_forward_context entry
+    is popped first, exactly as Gemma4DSparkDecoderLayer does for
+    "{prefix}.self_attn.attn".
+
+    Layers with no window are untouched, so the existing full-attention path
+    (deepseek-ai/dspark_gemma4_12b_block7 and the recipe it matches) is
+    bit-identical.
+
+VERIFIED (by config simulation, against the config ModelOpt's exporter emits
+for modelopt_recipes/general/speculative_decoding/dspark_gemma4_e4b_swa.yaml)
+    - all 5 layers get sliding_window=512
+    - all 5 layers stay causal=False  (dflash_config.causal is pinned False)
+    - all 5 layers keep use_k_eq_v=True -> the fused-KV assert still passes
+    - layer_types stays uniform -> the V2 model runner is NOT required
+    NOT yet validated end-to-end on GPU; no acceptance-length number exists.
+
+APPLY
+    cd <vllm> && git apply /path/to/gemma4_dspark_swa_vllm.patch
+
+--- a/vllm/model_executor/models/gemma4_dspark.py
++++ b/vllm/model_executor/models/gemma4_dspark.py
+@@ -8,8 +8,9 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+ 
+ from vllm import _custom_ops as ops
++from vllm.attention import Attention
+ from vllm.compilation.decorators import support_torch_compile
+ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+ from vllm.model_executor.layers.layernorm import RMSNorm
+ from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+@@ -22,9 +23,13 @@
+ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+ from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
+ 
+ from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
+-from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
++from .qwen3_dflash import (
++    DFlashQwen3Model,
++    _dflash_layer_causal,
++    _resolve_layer_attention,
++)
+ from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
+ from .utils import extract_layer_index, maybe_prefix
+ 
+ 
+@@ -61,8 +66,34 @@
+         )
+         self.is_kv_shared_layer = False
+         self.causal = _dflash_layer_causal(config, layer_idx)
+         self.kv_size = self.num_kv_heads * self.head_dim
++
++        # Gemma4MTPAttention derives the sliding window from the BASE model's
++        # layer pattern (layer_type == "sliding_attention"). That is wrong for a
++        # DFlash/DSpark draft: the draft declares its window via
++        # dflash_config.use_swa / swa_window_size, and deliberately keeps
++        # layer_types all "full_attention" so that attention_k_eq_v stays uniform
++        # for the fused context-KV precompute. Without this, a draft TRAINED with
++        # a sliding window is SERVED with full attention -- no error is raised,
++        # acceptance length just quietly drops. Resolve the window the same way
++        # the Qwen3 DFlash layer does, and rebuild self.attn when it applies.
++        sliding_window, _ = _resolve_layer_attention(config, layer_idx)
++        if sliding_window is not None:
++            get_current_vllm_config().compilation_config.static_forward_context.pop(
++                f"{prefix}.attn", None
++            )
++            self.attn = Attention(
++                self.num_heads,
++                self.head_dim,
++                self.scaling,
++                num_kv_heads=self.num_kv_heads,
++                cache_config=cache_config,
++                quant_config=quant_config,
++                logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
++                per_layer_sliding_window=sliding_window,
++                prefix=f"{prefix}.attn",
++            )
+         attn_bias = getattr(config, "attention_bias", False)
+         self.k_proj = ColumnParallelLinear(
+             config.hidden_size,
+             self.total_num_kv_heads * self.head_dim,
