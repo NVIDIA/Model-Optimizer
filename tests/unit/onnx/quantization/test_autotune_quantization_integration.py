@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import importlib
 import json
 import sys
@@ -106,3 +107,149 @@ def test_quantization_cli_forwards_input_shapes_profile(monkeypatch, tmp_path):
 
     assert captured["onnx_path"] == str(onnx_path)
     assert captured["input_shapes_profile"] == profile
+
+
+# --- autotune_network_timeout_minutes: CLI → quantize() ---
+
+
+def test_quantization_cli_network_timeout_default_is_10(monkeypatch, tmp_path):
+    """Without ``--autotune_network_timeout_minutes`` the default of 10 reaches ``quantize``."""
+    import modelopt.onnx.quantization.__main__ as quantization_cli
+
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"onnx")
+    captured = {}
+
+    def fake_quantize(onnx_path_arg, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(quantization_cli, "quantize", fake_quantize)
+    monkeypatch.setattr(sys, "argv", ["modelopt.onnx.quantization", "--onnx_path", str(onnx_path)])
+
+    quantization_cli.main()
+
+    assert captured["autotune_network_timeout_minutes"] == 10
+
+
+def test_quantization_cli_network_timeout_custom_value_forwarded(monkeypatch, tmp_path):
+    """``--autotune_network_timeout_minutes N`` is forwarded to ``quantize``."""
+    import modelopt.onnx.quantization.__main__ as quantization_cli
+
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"onnx")
+    captured = {}
+
+    def fake_quantize(onnx_path_arg, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(quantization_cli, "quantize", fake_quantize)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "modelopt.onnx.quantization",
+            "--onnx_path",
+            str(onnx_path),
+            "--autotune_network_timeout_minutes",
+            "25",
+        ],
+    )
+
+    quantization_cli.main()
+
+    assert captured["autotune_network_timeout_minutes"] == 25
+
+
+def test_quantization_cli_network_timeout_is_integer(monkeypatch, tmp_path):
+    """``--autotune_network_timeout_minutes`` is parsed as int, not string."""
+    import modelopt.onnx.quantization.__main__ as quantization_cli
+
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"onnx")
+    captured = {}
+
+    def fake_quantize(onnx_path_arg, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(quantization_cli, "quantize", fake_quantize)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "modelopt.onnx.quantization",
+            "--onnx_path",
+            str(onnx_path),
+            "--autotune_network_timeout_minutes",
+            "7",
+        ],
+    )
+
+    quantization_cli.main()
+
+    assert isinstance(captured["autotune_network_timeout_minutes"], int)
+
+
+# --- quantize(): autotune_network_timeout_minutes → _find_nodes_to_quantize_autotune ---
+
+
+def test_quantize_threads_network_timeout_to_autotune(monkeypatch, tmp_path):
+    """``autotune_network_timeout_minutes`` reaches ``_find_nodes_to_quantize_autotune``.
+
+    Follows the same heavy-mock pattern used in ``test_quantize_api.py`` to
+    exercise the wiring inside ``quantize()`` without running TensorRT or real
+    calibration.
+    """
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    onnx_path = tmp_path / "model.onnx"
+    onnx_path.write_bytes(b"")
+    captured = {}
+
+    def fake_preprocess(*args, **kwargs):
+        return str(onnx_path), object(), [], False, False, False, {}, {}
+
+    def fake_find_nodes_autotune(*args, network_timeout_minutes=10, **kwargs):
+        captured["network_timeout_minutes"] = network_timeout_minutes
+        return [], [], [], []
+
+    monkeypatch.setattr(quantize_module, "_preprocess_onnx", fake_preprocess)
+    monkeypatch.setattr(quantize_module, "update_trt_ep_support", lambda *a, **k: None)
+    monkeypatch.setattr(quantize_module, "validate_op_types_spelling", lambda *a: None)
+    monkeypatch.setattr(quantize_module, "find_nodes_from_mha_to_exclude", lambda *a, **k: [])
+    monkeypatch.setattr(
+        quantize_module, "_find_nodes_to_quantize_autotune", fake_find_nodes_autotune
+    )
+    monkeypatch.setattr(quantize_module, "quantize_int8", lambda **k: None)
+    monkeypatch.setattr(quantize_module.onnx.checker, "check_model", lambda *a: None)
+
+    quantize_module.quantize(
+        str(onnx_path),
+        autotune=True,
+        calibration_data_reader=object(),
+        autotune_network_timeout_minutes=42,
+    )
+
+    assert captured.get("network_timeout_minutes") == 42
+
+
+def test_find_nodes_to_quantize_autotune_passes_timeout_to_init(monkeypatch):
+    """``_find_nodes_to_quantize_autotune`` forwards ``network_timeout_minutes`` to init."""
+    quantize_module = importlib.import_module("modelopt.onnx.quantization.quantize")
+    captured = {}
+
+    def fake_init(*, network_timeout_minutes=10, **kwargs):
+        captured["network_timeout_minutes"] = network_timeout_minutes
+
+    monkeypatch.setattr(
+        "modelopt.onnx.quantization.autotune.workflows.init_benchmark_instance",
+        fake_init,
+    )
+
+    with contextlib.suppress(RuntimeError):
+        quantize_module._find_nodes_to_quantize_autotune(
+            onnx_model=None,
+            quantize_mode="int8",
+            trt_plugins=None,
+            network_timeout_minutes=15,
+        )
+
+    assert captured.get("network_timeout_minutes") == 15
