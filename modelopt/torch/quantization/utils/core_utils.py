@@ -358,11 +358,12 @@ def calibrate_with_adapters(model, args):
         print_rank_0("Disabling LoRA adapters during calibration...")
         model.disable_adapters()
 
-    yield
-
-    if is_lora:
-        print_rank_0("Enabling LoRA adapters after calibration...")
-        model.enable_adapters()
+    try:
+        yield
+    finally:
+        if is_lora:
+            print_rank_0("Enabling LoRA adapters after calibration...")
+            model.enable_adapters()
 
 
 def disable_lora_quantizers_in_config(config, layers):
@@ -387,9 +388,11 @@ def replace_function(package, name, new_func, og_func_cache_name=None):
     old_func = getattr(package, name)
     setattr(package, name, new_func)
     setattr(package, og_func_cache_name, old_func)
-    yield
-    setattr(package, name, old_func)
-    delattr(package, og_func_cache_name)
+    try:
+        yield
+    finally:
+        setattr(package, name, old_func)
+        delattr(package, og_func_cache_name)
 
 
 @contextmanager
@@ -898,10 +901,12 @@ def enable_fake_quant(module):
         if hasattr(m, "weight_quantizer"):
             original_fake_quant.append(m.weight_quantizer._fake_quant)
             m.weight_quantizer._fake_quant = True
-    yield
-    for m in module.modules():
-        if hasattr(m, "weight_quantizer"):
-            m.weight_quantizer._fake_quant = original_fake_quant.pop(0)
+    try:
+        yield
+    finally:
+        for m in module.modules():
+            if hasattr(m, "weight_quantizer"):
+                m.weight_quantizer._fake_quant = original_fake_quant.pop(0)
 
 
 @contextmanager
