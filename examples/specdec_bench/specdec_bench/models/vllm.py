@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import asyncio
+import json
+import os
 import time
 
 from .base import Model
@@ -114,13 +116,47 @@ class VLLMModel(Model):
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
             }
+        elif kwargs.get("speculative_algorithm") == "DSPARK":
+            # Match draft sampling to the target's verify mode: a greedy target with a
+            # probabilistic draft (or the reverse) crushes acceptance at temp > 0.
+            temperature = sampling_kwargs.get("temperature", 1.0)
+            specdec = {
+                "method": "dspark",
+                "model": kwargs.get("draft_model_dir"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
+                "draft_sample_method": kwargs.get("dspark_draft_sample_method")
+                or ("greedy" if temperature == 0 else "probabilistic"),
+            }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+
+        # vLLM copies the target's quantization onto the draft, so a quantized drafter under
+        # a bf16 target is built as bf16 and dies loading the packed weights. Read the format
+        # from the drafter's own config.json; --draft_quantization overrides.
+        if specdec is not None and specdec.get("model"):
+            draft_quantization = kwargs.get("draft_quantization")
+            if draft_quantization is None:
+                draft_config = os.path.join(specdec["model"], "config.json")
+                if os.path.isfile(draft_config):
+                    with open(draft_config) as f:
+                        quant_config = json.load(f).get("quantization_config") or {}
+                    draft_quantization = quant_config.get("quant_method")
+            if draft_quantization:
+                specdec["quantization"] = draft_quantization
+                print(f"Draft model quantization: {draft_quantization}")
 
         if specdec is None:
             num_speculative_tokens = 1
         else:
             num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
+
+        # DSpark's block-parallel draft can outgrow the pre-allocated workspace during
+        # CUDA-graph capture; acceptance length is unaffected by graph capture, so skip it.
+        # SPECDEC_ENFORCE_EAGER=1 forces the same for other algorithms.
+        enforce_eager = (
+            kwargs.get("speculative_algorithm") == "DSPARK"
+            or os.environ.get("SPECDEC_ENFORCE_EAGER") == "1"
+        )
 
         engine_args = AsyncEngineArgs(
             model=model_dir,
@@ -133,8 +169,25 @@ class VLLMModel(Model):
             max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
             async_scheduling=kwargs.get("async_scheduling", True),
-            enforce_eager=False,
+            enforce_eager=enforce_eager,
             max_model_len=kwargs.get("max_model_len"),
+            # Engine knobs a model card may pin, passed through from
+            # --runtime_params engine_args.<key>. Only keys the caller actually set are
+            # forwarded, so vLLM keeps its own defaults otherwise. Hybrid Mamba models
+            # need these: on Nemotron-3.5-Lightning the SSM-cache settings decide whether
+            # the first draft token is accepted, and leaving them at vLLM's defaults costs
+            # ~65% of acceptance length while every later position looks normal.
+            **{
+                key: kwargs[key]
+                for key in (
+                    "mamba_backend",
+                    "mamba_ssm_cache_dtype",
+                    "mamba_cache_mode",
+                    "mamba_cache_philox_rounds",
+                    "enable_mamba_cache_stochastic_rounding",
+                )
+                if kwargs.get(key) is not None
+            },
         )
         self.engine_args = engine_args
         self.model = AsyncLLM.from_engine_args(engine_args)

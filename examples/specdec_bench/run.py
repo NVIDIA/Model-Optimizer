@@ -188,6 +188,7 @@ def run_simple(args):
         sampling_kwargs=sampling_kwargs,
         speculative_algorithm=args.speculative_algorithm,
         draft_model_dir=args.draft_model_dir,
+        draft_quantization=args.draft_quantization,
         speculative_num_steps=args.draft_length,
         speculative_num_draft_tokens=args.block_size,
         tensor_parallel_size=args.tp_size,
@@ -305,7 +306,7 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="EAGLE3",
-        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "DFLASH", "NONE"],
+        choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "DFLASH", "DSPARK", "NONE"],
         help="Speculative algorithm to use",
     )
     parser.add_argument("--model_dir", type=str, required=True, help="Path to the model directory")
@@ -315,6 +316,14 @@ if __name__ == "__main__":
         required=False,
         default=None,
         help="Path to the draft model directory",
+    )
+    parser.add_argument(
+        "--draft_quantization",
+        type=str,
+        required=False,
+        default=None,
+        help="Quantization method of the draft checkpoint (e.g. modelopt, modelopt_fp4). "
+        "Read from the draft's config.json when omitted; set it only to override.",
     )
     parser.add_argument(
         "--runtime_params",
