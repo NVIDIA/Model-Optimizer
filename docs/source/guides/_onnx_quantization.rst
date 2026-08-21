@@ -121,3 +121,214 @@ The following command will build the engine using fp16 precision. After building
 .. note::
 
     If you replace ``--fp16`` flag with ``--best`` flag, this command will create an int8 engine with TensorRT's implicit quantization.
+
+Quantization Sensitivity Scan
+=============================
+
+Post-training quantization of any ONNX model often runs into the same friction: it is unclear
+which ops or nodes destroy accuracy at INT8/FP8, and practitioners iterate through hand-crafted
+exclusion policies until they find one that works. The
+:func:`modelopt.onnx.quantization.sensitivity.score` primitive automates that investigation for
+any ONNX model with a calibration dataset. It ranks quantizable targets (op types or individual
+nodes) by a proxy metric between the reference and per-target quantized activations, so a
+downstream picker can decide which ops to keep at higher precision. Works across CNN,
+Transformer, and hybrid architectures alike -- the ranking reflects each model's own
+precision-sensitive pathways (residual paths, normalization boundaries, SE gating, attention
+projections, etc.) without any architecture-specific configuration. The primitive reuses
+:func:`modelopt.onnx.quantization.quantize` internally for each per-target probe, so scales are
+properly calibrated (not autotune's placement-only descriptors).
+
+.. _sensitivity-supported-options:
+
+Supported options
+-----------------
+
+- ``granularity``: ``op_type`` (default; probes each quantizable op type once, ~10-15 probes) or
+  ``node`` (probes each ONNX node individually, N_nodes probes; slower but per-instance).
+- ``metric``: ``kl_div`` (default; softmax-normalized KL divergence — recommended), ``mse``
+  (raw mean squared error; cheaper but scale-sensitive) or ``cos`` (``1 - cosine_similarity``;
+  scale-invariant, robust to activation magnitude variance).
+- ``target_precision``: ``int8`` (default) or ``fp8``.
+- ``calibration_method``: passed through to the underlying quantize call — ``entropy`` (default),
+  ``max``, ``mse``, ``percentile``, etc.
+- ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
+  directory), or ``None`` to fall back to synthetic random tensors (directional-only; see note
+  below).
+- ``op_types_scope``: optional whitelist of op types to probe. If omitted, defaults to the
+  intersection of ops actually present in the graph and the union of ORT's default quantizable
+  set, activation ops, normalization ops, and fusible reduction ops. Graph plumbing (``Cast`` /
+  ``Constant`` / ``Shape`` / ...) is skipped so wall-clock is not wasted on zero-drift probes.
+  Any ops that slip past the filter but still produce zero drift are hidden from the CLI table
+  by default (pass ``--show_zero_scores`` to see them; they always appear in the JSON).
+
+Python API:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization.sensitivity import score
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="op_type",  # or "node"
+        metric="kl_div",        # or "mse" or "cos"
+        target_precision="int8",
+    )
+    # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
+
+The ``imagenet_calib_500.npz`` in the example above is a 500-sample ImageNet-1k calibration set
+prepared with the same preprocessing as the exported ONNX. For a CoAtNet-0 checkpoint exported
+from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks like:
+
+.. code-block:: python
+
+    import numpy as np, onnx, timm, torch
+    from datasets import load_dataset
+    from timm.data import resolve_model_data_config, create_transform
+
+    # 1. Export the timm checkpoint to ONNX.
+    model = timm.create_model("coatnet_0_rw_224.sw_in1k", pretrained=True).eval()
+    cfg = resolve_model_data_config(model)
+    dummy = torch.randn(1, *cfg["input_size"])   # (1, 3, 224, 224)
+    torch.onnx.export(
+        model, dummy, "coatnet-0.onnx",
+        input_names=["input"], output_names=["output"],
+        opset_version=17,
+    )
+
+    # 2. Prepare the calibration NPZ with matching preprocessing.
+    m = onnx.load("coatnet-0.onnx")
+    input_name = m.graph.input[0].name
+    tfm = create_transform(**cfg, is_training=False)
+    ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
+    samples = [tfm(ex["image"].convert("RGB")).numpy()
+               for i, ex in enumerate(ds) if i < 500]
+    np.savez("imagenet_calib_500.npz",
+             **{input_name: np.stack(samples).astype(np.float32)})
+
+Use the analogous timm handle for any other model family (``resnet50``, ``mobilenetv3_large_100``,
+``vit_base_patch16_224``, ...); the ``resolve_model_data_config`` +``create_transform`` pair keeps
+preprocessing consistent with the exported ONNX regardless of architecture.
+
+Command line:
+
+.. code-block:: bash
+
+    # Op-type ranking with real calibration data (one probe per op class; ~14 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity op_type \
+        --metric kl_div
+
+    # Per-node ranking with real calibration data (one probe per quantizable node; ~60 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity node \
+        --metric kl_div
+
+Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
+
+    Sensitivity scan (int8 / kl_div / op_type):
+      Add                 2.848  <-- highest impact
+      Mul                 1.890
+      LayerNormalization  1.653
+      ReduceMean          1.570
+      BatchNormalization  0.355
+      Conv                0.181
+      AveragePool         0.057
+      Sigmoid             0.039
+      MatMul              0.015
+      Relu               ~0
+      Softmax            ~0
+      GlobalAveragePool  ~0
+      Gemm                0     <-- lowest impact
+      (1 target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)
+    Wrote coatnet-0.sensitivity.json
+
+.. note::
+
+    Omitting ``--calibration_data_path`` falls back to synthetic random inputs. Absolute scores are
+    then directional-only and must not be paired with absolute thresholds -- attention-heavy models
+    are the highest-risk degradation case because random Q times K^T produces near-uniform softmax
+    that hides real-input MHA quantization pathology. The ``calibration_source`` field of the
+    output JSON records which mode was used.
+
+In per-node granularity the scanner iterates over every quantizable node in the graph and runs
+one probe per node; each probe uses the existing ``--nodes_to_quantize <regex>`` flag on the main
+quantize CLI to quantize that node alone (everything else stays FP16) so the resulting output
+drift attributes to that specific node.
+
+Turning scores into an exclusion list
+-------------------------------------
+
+The :func:`sensitivity.score` output is a dictionary from target name to sensitivity score
+(see ``metric`` in :ref:`sensitivity-supported-options` above). The picker
+function :func:`sensitivity.suggest_exclusion` turns that dictionary into an actionable
+``--nodes_to_exclude`` or ``--op_types_to_exclude`` list, depending on granularity, for
+:func:`modelopt.onnx.quantization.quantize`, and :func:`sensitivity.summarize_exclusion`
+reports what the exclusion set covers.
+
+In the rest of this documentation, we'll assume ``per-node`` granularity for simplicity,
+but the same logic goes for ``per-op-type`` granularity.
+
+Two policy modes are supported:
+
+- **Coverage mode** (default): return the largest node set whose cumulative sensitivity
+  score stays at or below ``coverage * total_mass``. The actual coverage is always less
+  than or equal to the requested value ("at most X%"). Architecture-portable because the
+  target is a fraction, not an absolute number -- ``coverage=0.90`` means the same thing
+  on any model regardless of sensitivity score magnitudes.
+- **Threshold mode**: return every node whose individual sensitivity score exceeds
+  ``threshold`` (no cumulative-mass logic). Simpler and more predictable when the
+  operator already knows the per-node sensitivity score magnitude that separates
+  "quantize safely" from "keep at higher precision" for a specific model. Per-node
+  sensitivity score magnitudes are not portable across models. When ``threshold`` is
+  set, ``coverage`` is ignored.
+
+Python API -- coverage mode:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization import quantize
+    from modelopt.onnx.quantization.sensitivity import (
+        score, suggest_exclusion, summarize_exclusion,
+    )
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="node",
+    )
+
+    # Leave at most 90% of the total sensitivity score mass at FP16; quantize the rest.
+    excluded = suggest_exclusion(result["scores"], coverage=0.90)
+
+    quantize(
+        onnx_path="coatnet-0.onnx",
+        quantize_mode="int8",
+        calibration_data="imagenet_calib_500.npz",
+        nodes_to_exclude=excluded,
+        output_path="coatnet-0.quant.onnx",
+    )
+
+Python API -- threshold mode:
+
+.. code-block:: python
+
+    # The threshold value is determined empirically by looking at the per-node sensitivity scores.
+    # For CoAtNet-0, a threshold of 0.02 captures the load-bearing sensitivity
+    # (roughly the top 25 nodes as per the KL scores, ~89% of total mass).
+    excluded = suggest_exclusion(result["scores"], threshold=0.02)
+
+.. note::
+
+    The picker emits a ``logger.warning`` when the boundary between included and
+    excluded nodes is a near-tie -- specifically, if the first-excluded node's sensitivity
+    score is at least 99% of the last-included node's sensitivity score. In that case two
+    nodes with nearly
+    equivalent sensitivity end up in different precisions (one FP16, one INT8), which
+    can produce intra-group precision fragmentation. The warning suggests a slightly
+    larger ``coverage`` (or smaller ``threshold``) to include the near-tied node. Set
+    ``near_tie_ratio=None`` to disable the warning entirely.

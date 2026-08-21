@@ -316,6 +316,18 @@ def get_tensor_by_name(
     return tensor_val or tensor_init or tensor_inp or tensor_out
 
 
+def get_op_types_in_graph(onnx_model: onnx.ModelProto) -> set[str]:
+    """Return the set of unique op types that appear as nodes in the graph.
+
+    Args:
+        onnx_model: Loaded ONNX model.
+
+    Returns:
+        Set of unique op-type strings appearing in ``onnx_model.graph.node``.
+    """
+    return {node.op_type for node in onnx_model.graph.node if node.op_type}
+
+
 def gen_random_inputs(
     model: onnx.ModelProto, shapes_spec: str | None = None
 ) -> dict[str, np.ndarray]:
