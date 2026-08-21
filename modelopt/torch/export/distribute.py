@@ -581,7 +581,25 @@ def _distributed_save_hf_checkpoint_impl(
             num_threads=8,
         )
 
-    # (5) Drop the intermediate per-rank sharded/ dir.
+    # (5) Write the HF weight index. torch's consolidation helper does NOT emit
+    # model.safetensors.index.json, and without it transformers / vLLM cannot map keys to shards, so a
+    # multi-shard checkpoint is unloadable. No extra collective is needed: fqn_to_index_mapping and
+    # all_sizes were already unioned across ranks above (all_gather_object) and are identical on every
+    # rank, so rank 0 builds the index locally. The file names must match what HuggingFaceStorageWriter
+    # emitted from the same mapping -- model-<i>-of-<n>.safetensors, 5-digit zero-padded.
+    if rank == 0:
+        weight_map = {
+            fqn: f"model-{idx:05d}-of-{n_files:05d}.safetensors"
+            for fqn, idx in fqn_to_index_mapping.items()
+        }
+        index = {
+            "metadata": {"total_size": sum(all_sizes.values())},
+            "weight_map": weight_map,
+        }
+        with open(export_dir / "model.safetensors.index.json", "w") as f:
+            json.dump(index, f, indent=2)
+
+    # (6) Drop the intermediate per-rank sharded/ dir.
     if rank == 0:
         shutil.rmtree(sharded_dir, ignore_errors=True)
     dist.barrier()
