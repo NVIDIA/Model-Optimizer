@@ -44,6 +44,7 @@ Changelog
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
+- Fix HuggingFace export of an FSDP2-sharded MoE leaving the fused expert weights in the checkpoint. The exporter splits each fused 3-D expert weight into per-expert quantized weights, but the original unquantized ``mlp.experts.gate_up_proj`` / ``mlp.experts.down_proj`` tensors were still written alongside them, so every expert appeared twice and a consumer keying off the fused names loaded unquantized weights. On Qwen3-30B-A3B FP8 this was 96 stale BF16 tensors and 58 GB of a 89 GB checkpoint, which is 31 GB once they are gone.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
