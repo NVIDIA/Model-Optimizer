@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Layer-wise KV-cache search over calibrated FP8 and NVFP4 at 5.4 bits/scalar.
+# Isolated full-vocabulary forward KL is measured with every other eligible
+# attention layer kept in BF16.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+  kv_fp8: configs/ptq/units/kv_fp8
+  kv_nvfp4: configs/ptq/units/kv_nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: Layer-wise calibrated FP8/NVFP4 KV-cache search at 5.4 bits using forward KL.
+
+auto_quantize:
+  constraints:
+    kv_effective_bits: 5.4
+
+  candidate_formats:
+    - quant_cfg:
+        - $import: kv_fp8
+      algorithm: max
+      effective_bits: 8.0
+    - quant_cfg:
+        - $import: kv_nvfp4
+      algorithm: max
+      effective_bits: 4.5
+
+  auto_quantize_method: kl_div
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers

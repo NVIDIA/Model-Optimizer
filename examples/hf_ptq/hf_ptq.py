@@ -96,6 +96,23 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+_FSDP2_AUTOQUANT_ERROR = (
+    "AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
+    "selection, and checkpoint writes are synchronized across ranks."
+)
+
+
+def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
+    """Return logits only for token positions selected by ``attention_mask``."""
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is None:
+        return logits
+    if logits.shape[:-1] != attention_mask.shape:
+        raise ValueError(
+            "AutoQuant KL logits and attention_mask must have matching token dimensions; "
+            f"got {tuple(logits.shape[:-1])} and {tuple(attention_mask.shape)}."
+        )
+    return logits[attention_mask.bool()]
 
 
 def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
@@ -338,6 +355,24 @@ def _mtq_candidate_formats(formats) -> list[dict]:
     return quantization_formats
 
 
+def _mtq_kv_candidate_formats(formats) -> list[tuple[dict, str]]:
+    """Translate format-agnostic KV candidates while preserving useful preset names."""
+    candidates = []
+    for idx, fmt in enumerate(formats):
+        quant_cfg = fmt.model_dump(exclude_none=True)
+        candidate_quantizers = quant_cfg.get("quant_cfg", [])
+        name = None
+        for preset_name, preset in KV_QUANT_CFG_CHOICES.items():
+            normalized_preset_quantizers = (
+                type(fmt)(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
+            )
+            if normalized_preset_quantizers == candidate_quantizers:
+                name = preset_name
+                break
+        candidates.append((quant_cfg, name or f"KV_CACHE_FORMAT_{idx}"))
+    return candidates
+
+
 def _mtq_inputs_from_auto_quantize_config(
     aq_config, args: argparse.Namespace, fixed_quantize_config=None
 ) -> dict:
@@ -349,6 +384,16 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
+    is_kv_search = aq_config.constraints.kv_effective_bits is not None
+    if is_kv_search:
+        return {
+            "search_domain": "kv_cache",
+            "constraints": {"kv_effective_bits": constraints["kv_effective_bits"]},
+            "quantization_formats": _mtq_kv_candidate_formats(aq_config.candidate_formats),
+            "disabled_layers": aq_config.disabled_layers,
+            "method": aq_config.auto_quantize_method,
+            "score_size": aq_config.score_size,
+        }
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
@@ -380,6 +425,7 @@ def _mtq_inputs_from_auto_quantize_config(
         for search_space in aq_config.module_search_spaces
     ]
     return {
+        "search_domain": "weight",
         "constraints": constraints,
         "quantization_formats": quantization_formats,
         "fixed_quantization_config": fixed_quantization_config,
@@ -414,11 +460,7 @@ def auto_quantize(
     )
 
     if args.use_fsdp2:
-        warnings.warn(
-            "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-            "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-            "synchronization across ranks); use at your own risk."
-        )
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
 
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
@@ -461,13 +503,32 @@ def auto_quantize(
             output = model(**inputs_)
             if is_base_model:
                 assert full_model is not None
-                return full_model.lm_head(output.last_hidden_state)
-            return output.logits
+                logits = full_model.lm_head(output.last_hidden_state)
+            else:
+                logits = output.logits
+            return _select_unpadded_logits(logits, batch)
 
     else:
         raise ValueError(
             f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
         )
+
+    if inputs["search_domain"] == "kv_cache":
+        language_model, _ = mtq.auto_quantize_kv_cache(
+            language_model,
+            constraints=inputs["constraints"],
+            data_loader=calib_dataloader,
+            forward_step=forward_step,
+            quantization_formats=inputs["quantization_formats"],
+            num_calib_steps=len(calib_dataloader),
+            num_score_steps=min(
+                len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+            ),
+            verbose=True,
+            disabled_layers=inputs["disabled_layers"],
+            checkpoint=args.auto_quantize_checkpoint,
+        )
+        return language_model
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -512,6 +573,8 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
+    if args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code

@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -81,6 +82,65 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     # Candidates resolve to the exact preset dicts mtq expects (preset identity preserved).
     assert inputs["quantization_formats"][0] == QUANT_CFG_CHOICES["nvfp4"]
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
+
+
+def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "fp8_cast"
+    )
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["search_domain"] == "kv_cache"
+    assert inputs["constraints"] == {"kv_effective_bits": 5.4}
+    assert inputs["method"] == "kl_div"
+    assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
+        8.0,
+        4.5,
+    ]
+    assert "kv_cache_quant_cfg" not in inputs
+
+
+def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    logits = torch.arange(2 * 4 * 3).reshape(2, 4, 3)
+    attention_mask = torch.tensor([[1, 1, 0, 0], [0, 1, 1, 0]])
+
+    selected = hf_ptq._select_unpadded_logits(logits, {"attention_mask": attention_mask})
+
+    assert torch.equal(selected, logits[attention_mask.bool()])
+
+
+def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    with pytest.raises(ValueError, match="matching token dimensions"):
+        hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
+
+
+def test_autoquant_rejects_fsdp2(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+        hf_ptq.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
+
+
+def test_fsdp2_autoquant_rejected_before_model_load(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(hf_ptq, "_recipe_is_auto_quantize", lambda _: True)
+    monkeypatch.setattr(
+        hf_ptq.AutoConfig,
+        "from_pretrained",
+        lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
+    )
+
+    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+        hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
