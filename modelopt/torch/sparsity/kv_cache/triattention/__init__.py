@@ -13,14 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API for sparsification algorithms.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+"""TriAttention: Trigonometric KV cache compression."""
 
-This module provides access to both weight sparsity and attention sparsity algorithms.
-For backward compatibility, weight sparsity APIs are re-exported at the module level.
-"""
+from .rope_utils import build_geometric_offsets, invert_rope, rotate_half, to_complex_pairs
+from .scoring import (
+    HeadFrequencyStats,
+    compute_frequency_statistics_from_means,
+    score_keys_for_round,
+    select_keys_to_keep,
+)
 
-# Import weight sparsity for backward compatibility
-# Import kv_cache to register KV cache sparsity modes
-from . import kv_cache
-from .weight_sparsity import mode, module, plugins
-from .weight_sparsity.sparsification import *
+__all__ = [
+    "HeadFrequencyStats",
+    "build_geometric_offsets",
+    "compute_frequency_statistics_from_means",
+    "invert_rope",
+    "rotate_half",
+    "score_keys_for_round",
+    "select_keys_to_keep",
+    "to_complex_pairs",
+]
