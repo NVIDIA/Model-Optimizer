@@ -146,15 +146,41 @@ def _write_source_checkpoint(tmp_path: Path) -> tuple[Path, str, dict[str, torch
     return source, shard_name, state
 
 
-def test_split_w1_w3_pair_fails_instead_of_using_independent_scales(tmp_path):
-    source, shard_name, _ = _write_source_checkpoint(tmp_path)
+def test_split_w1_w3_pair_fails_instead_of_using_independent_scales():
     base = "language_model.model.layers.1.block_sparse_moe.experts.0.w1"
 
-    with (
-        safe_open(source / shard_name, framework="pt", device="cpu") as f,
-        pytest.raises(RuntimeError, match="split across shards"),
-    ):
-        k3_cast._build_w13_kmax_overrides(f, [base], "cpu")
+    with pytest.raises(RuntimeError, match="split across shards"):
+        k3_cast.build_w13_kmax_overrides(
+            [base],
+            lambda _: torch.tensor([127], dtype=torch.uint8),
+            "cpu",
+        )
+
+
+def test_link_aux_files_preserves_sidecars_and_skips_checkpoint_data(tmp_path):
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    (source / "assets").mkdir(parents=True)
+    (source / ".cache").mkdir()
+    (source / "tokenizer_config.json").write_text("{}")
+    (source / "model-00001-of-00001.safetensors").write_bytes(b"shard")
+    (source / "assets" / "config.txt").write_text("keep")
+    (source / "assets" / "nested.safetensors").write_bytes(b"skip")
+    (source / ".cache" / "stale.json").write_text("{}")
+
+    k3_cast.link_aux_files(
+        source,
+        output,
+        skip_top_level=k3_cast._SKIP_TOP_LEVEL,
+        skip_dir_names=k3_cast._SKIP_SUBDIR_NAMES | k3_cast._SKIP_TOP_LEVEL,
+        skip_file=lambda path: path.suffix == ".safetensors",
+    )
+
+    assert (output / "tokenizer_config.json").read_text() == "{}"
+    assert (output / "assets" / "config.txt").read_text() == "keep"
+    assert not (output / "model-00001-of-00001.safetensors").exists()
+    assert not (output / "assets" / "nested.safetensors").exists()
+    assert not (output / ".cache").exists()
 
 
 def test_convert_shard_casts_experts_and_quantizes_attention(tmp_path):
@@ -211,6 +237,35 @@ def test_convert_shard_casts_experts_and_quantizes_attention(tmp_path):
     assert report["stats"]["cast_blocks_lossless"] == 24
     assert report["banks"] == ["language_model.model.layers.1.block_sparse_moe.experts"]
     assert report["attn_modules"] == [b_proj, f_a_proj, q_proj]
+
+
+def test_convert_shard_requantizes_w1_w3_with_shared_scale(tmp_path):
+    source, shard_name, _ = _write_source_checkpoint(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    report = k3_cast.convert_shard(
+        source / shard_name,
+        output / shard_name,
+        device="cpu",
+        cast=False,
+        attn_fp8=False,
+        input_scale_value=1.0,
+    )
+
+    expert = "language_model.model.layers.1.block_sparse_moe.experts.0"
+    with safe_open(output / shard_name, framework="pt", device="cpu") as f:
+        assert torch.equal(
+            f.get_tensor(expert + ".w1.weight_scale_2"),
+            f.get_tensor(expert + ".w3.weight_scale_2"),
+        )
+        assert not torch.equal(
+            f.get_tensor(expert + ".w1.weight_scale_2"),
+            f.get_tensor(expert + ".w2.weight_scale_2"),
+        )
+
+    assert report["stats"]["experts_converted"] == 3
+    assert "cast_blocks_total" not in report["stats"]
 
 
 def test_convert_shard_quantizes_attention_to_mxfp8_without_input_scale(tmp_path):
