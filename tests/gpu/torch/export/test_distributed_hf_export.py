@@ -32,6 +32,10 @@ error, plausible file sizes) but is wrong or unloadable, so they are asserted he
    is survival: the writer creates and removes a ``sharded/`` staging dir inside ``export_dir``, and
    must not take the sidecars with it.
 
+It also covers the two things the writer must not quietly drop on the way: a declared tied
+weight still gets deduplicated, and options the path cannot honour are rejected rather than
+ignored.
+
 Run with >=2 GPUs so the expert axis and the FSDP2 shard axis are both actually split.
 """
 
@@ -256,3 +260,82 @@ def test_fsdp2_distributed_export_is_complete(dist_workers, tmp_path, moe, quant
     assert json.loads((export_dir / "hf_quant_config.json").read_text())["quantization"][
         "quant_algo"
     ] == algo
+
+
+def _export_with(rank, size, *, src_dir, export_dir, **export_kwargs):
+    """Export once with ``export_kwargs``, for the rejection checks below."""
+    from transformers import AutoModelForCausalLM
+
+    with patch_fsdp_mp_dtypes():
+        model = AutoModelForCausalLM.from_pretrained(src_dir, dtype=torch.bfloat16).to("cuda")
+        model.eval()
+        fsdp2_wrap(model)
+        assert is_fsdp2_model(model)
+        torch.distributed.barrier()
+        export_hf_checkpoint(model, export_dir=export_dir, **export_kwargs)
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"extra_state_dict": {"extra.tensor": torch.zeros(1)}}, "extra_state_dict"),
+        ({"save_modelopt_state": True}, "save_modelopt_state"),
+    ],
+    ids=["extra_state_dict", "save_modelopt_state"],
+)
+def test_fsdp2_distributed_export_rejects_unsupported_options(
+    dist_workers, tmp_path, kwargs, needle
+):
+    """Options the no-gather path cannot honour must raise, not be silently ignored.
+
+    Both are handled by the gather path (``extra_state_dict`` is merged into the exported state
+    dict, ``save_modelopt_state`` is forwarded to ``save_pretrained``). The distributed path writes
+    the checkpoint itself and returns before either, so a caller passing them would otherwise get a
+    checkpoint quietly missing what they asked for.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    src_dir = Path(create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **TINY_KWARGS))
+    with pytest.raises(Exception, match=needle):
+        dist_workers.run(
+            partial(
+                _export_with, src_dir=src_dir, export_dir=tmp_path / "rejected", **kwargs
+            )
+        )
+
+
+@pytest.mark.timeout(600)
+def test_fsdp2_distributed_export_dedups_tied_weights(dist_workers, tmp_path):
+    """A declared tie is deduplicated by name in the distributed write, as on the gather path.
+
+    ``fully_shard`` splits the shared parameter into distinct per-module shards, so the tie survives
+    only as matching names -- both sides reach the writer as independent DTensors and would both be
+    written unless the writer applies the same ``TiedWeightMap`` the gather path uses.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    src_dir = Path(
+        create_tiny_qwen3_dir(
+            tmp_path, with_tokenizer=True, tie_word_embeddings=True, **TINY_KWARGS
+        )
+    )
+    export_dir = tmp_path / "export_tied"
+    dist_workers.run(
+        partial(
+            _ptq_and_export,
+            src_dir=src_dir,
+            export_dir=export_dir,
+            quant_cfg=mtq.FP8_DEFAULT_CFG,
+        )
+    )
+
+    exported = _safetensors_meta(export_dir)
+    assert exported, "nothing exported"
+    assert "model.embed_tokens.weight" in exported, "canonical tied weight missing"
+    assert "lm_head.weight" not in exported, (
+        "tied alias 'lm_head.weight' was written alongside its canonical -- "
+        "name-based dedup did not run in the distributed writer"
+    )

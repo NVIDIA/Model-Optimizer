@@ -413,7 +413,15 @@ def _distributed_save_hf_checkpoint_impl(
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
     from torch.distributed.tensor import DTensor
 
+    from .model_utils import TiedWeightMap
     from .quant_utils import postprocess_state_dict
+
+    # Name-based tied-weight dedup, matching the gather path. ``fully_shard`` splits a shared
+    # nn.Parameter into distinct per-module shards, so a declared tie surfaces here as two
+    # independent DTensors and both sides would be written. The map is derived from names and is
+    # identical on every rank, so the alias is dropped consistently; postprocess_state_dict skips a
+    # group whose canonical is missing from this rank's slice rather than orphaning the alias.
+    tied_map = TiedWeightMap(model)
 
     export_dir = Path(export_dir)
     rank, world = dist.get_rank(), dist.get_world_size()
@@ -519,7 +527,9 @@ def _distributed_save_hf_checkpoint_impl(
                     prefix, sharded_sd, ep_rank=ep_rank, total_experts=total_experts
                 )
             )
-        local_sd = postprocess_state_dict(local_sd, maxbound, kv_cache_format, is_modelopt_qlora)
+        local_sd = postprocess_state_dict(
+            local_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+        )
         # In place (see above): avoid a transient 2x copy of the per-expert split.
         for _k in list(local_sd.keys()):
             local_sd[_k] = local_sd[_k].detach().contiguous()
@@ -530,7 +540,9 @@ def _distributed_save_hf_checkpoint_impl(
     # every rank (dict-level key renaming + small scalar scale math -- safe on DTensors).
     nonexpert_keys = [k for k in sharded_sd if not _is_expert_key(k)]
     dense_sd = {k: sharded_sd[k] for k in nonexpert_keys}
-    dense_sd = postprocess_state_dict(dense_sd, maxbound, kv_cache_format, is_modelopt_qlora)
+    dense_sd = postprocess_state_dict(
+        dense_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
+    )
     local_sd.update(dense_sd)
     del sharded_sd, dense_sd
     gc.collect()
