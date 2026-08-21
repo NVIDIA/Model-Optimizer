@@ -1796,17 +1796,30 @@ def is_homogeneous_hf_model(model: nn.Module) -> bool:
     return len(layer_classes) == 1
 
 
+#: How deep to unwrap before giving up. Each level is one of the wrappers below, and no
+#: released architecture nests more than a handful; the bound only stops a cycle.
+_MAX_DECODER_UNWRAP_DEPTH = 8
+
+
 def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
+    # Unwrap iteratively rather than testing each wrapper once: multimodal models nest them
+    # in either order and to arbitrary depth. Kimi-K3 keeps its layers at
+    # ``language_model.model.layers``, so a single ``.model`` then ``.language_model`` walk
+    # stops on the intermediate wrapper and reports the architecture unsupported.
     decoder = model
-    if hasattr(decoder, "model"):
-        decoder = decoder.model
-    if hasattr(decoder, "language_model"):
-        decoder = decoder.language_model
-    if hasattr(decoder, "layers"):
-        return decoder.layers
+    for _ in range(_MAX_DECODER_UNWRAP_DEPTH):
+        if hasattr(decoder, "layers"):
+            return decoder.layers
+        for attr in ("model", "language_model"):
+            inner = getattr(decoder, attr, None)
+            if isinstance(inner, nn.Module):
+                decoder = inner
+                break
+        else:
+            return None
 
     return None
 
