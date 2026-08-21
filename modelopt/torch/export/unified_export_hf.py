@@ -100,6 +100,7 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
+    assert_lsq_export_supported,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -606,6 +607,7 @@ def _export_quantized_weight(
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
     )
+    assert_lsq_export_supported(weight_quantizer)
 
     # Already real-quantized weights (``mtq.compress`` / ``hf_ptq --low_memory_mode``) hold packed
     # nibbles -- half the logical last dim -- so per-block scales cannot be recomputed from them.
