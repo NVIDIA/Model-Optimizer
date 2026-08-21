@@ -498,111 +498,200 @@ class GPTModelExporter:
             return None, None
         return fused_key, weight
 
-    def _get_transformer_layer_state_dict(self, layer, layer_id):
+    def _get_transformer_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.input_layernorm, IdentityOp):
-            self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+            self.rules["input_layernorm"](layer.input_layernorm, layer_id, is_mtp=is_mtp)
         else:
             fused_key, norm_weight = self._get_fused_norm_weight(
                 getattr(layer.self_attention, "linear_qkv", None),
                 primary_key="fused_input_layernorm",
             )
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
                 if hasattr(layer.self_attention, "linear_q_proj"):
-                    self.rules["linear_q_proj"](layer.self_attention.linear_q_proj, layer_id)
+                    self.rules["linear_q_proj"](
+                        layer.self_attention.linear_q_proj, layer_id, is_mtp=is_mtp
+                    )
                 else:
                     self.rules["linear_q_down_proj"](
-                        layer.self_attention.linear_q_down_proj, layer_id
+                        layer.self_attention.linear_q_down_proj, layer_id, is_mtp=is_mtp
                     )
-                    self.rules["linear_q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                    self.rules["linear_q_up_proj"](layer.self_attention.linear_q_up_proj, layer_id)
+                    self.rules["linear_q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["linear_q_up_proj"](
+                        layer.self_attention.linear_q_up_proj, layer_id, is_mtp=is_mtp
+                    )
 
                 self.rules["linear_kv_down_proj"](
-                    layer.self_attention.linear_kv_down_proj, layer_id
+                    layer.self_attention.linear_kv_down_proj, layer_id, is_mtp=is_mtp
                 )
-                self.rules["linear_kv_layernorm"](layer.self_attention.kv_layernorm, layer_id)
-                self.rules["linear_kv_up_proj"](layer.self_attention.linear_kv_up_proj, layer_id)
-                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                self.rules["linear_kv_layernorm"](
+                    layer.self_attention.kv_layernorm, layer_id, is_mtp=is_mtp
+                )
+                self.rules["linear_kv_up_proj"](
+                    layer.self_attention.linear_kv_up_proj, layer_id, is_mtp=is_mtp
+                )
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id, is_mtp=is_mtp)
             else:
                 if layer.self_attention.q_layernorm is not None and not isinstance(
                     layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
                 ):
-                    self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                    self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
-                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+                    self.rules["q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["k_layernorm"](
+                        layer.self_attention.k_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id, is_mtp=is_mtp)
                 if (
                     hasattr(layer.self_attention, "core_attention")
                     and "core_attention" in self.rules
                 ):  # KV cache quant export
-                    self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
-                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                    self.rules["core_attention"](
+                        layer.self_attention.core_attention, layer_id, is_mtp=is_mtp
+                    )
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id, is_mtp=is_mtp)
                 if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
                     self.rules["softmax_offset"](
-                        layer.self_attention.core_attention.softmax_offset, layer_id
+                        layer.self_attention.core_attention.softmax_offset, layer_id, is_mtp=is_mtp
                     )
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
-            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id, is_mtp=is_mtp)
         elif not isinstance(layer.mlp, IdentityOp) and "MoE" not in str(type(layer.mlp)):
             fused_key, norm_weight = self._get_fused_norm_weight(
                 getattr(layer.mlp, "linear_fc1", None),
                 primary_key="fused_pre_mlp_layernorm",
             )
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
-                self.rules["router"](layer.mlp.router, layer_id, dtype=self.moe_router_dtype)
+                self.rules["router"](
+                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype, is_mtp=is_mtp
+                )
                 if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
-                    self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                    self.rules["fc1_latent_proj"](
+                        layer.mlp.fc1_latent_proj, layer_id, is_mtp=is_mtp
+                    )
                 if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
-                    self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
+                    self.rules["fc2_latent_proj"](
+                        layer.mlp.fc2_latent_proj, layer_id, is_mtp=is_mtp
+                    )
                 if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
                     self.rules["shared_experts.linear_fc1"](
-                        layer.mlp.shared_experts.linear_fc1, layer_id
+                        layer.mlp.shared_experts.linear_fc1, layer_id, is_mtp=is_mtp
                     )
                     self.rules["shared_experts.linear_fc2"](
-                        layer.mlp.shared_experts.linear_fc2, layer_id
+                        layer.mlp.shared_experts.linear_fc2, layer_id, is_mtp=is_mtp
                     )
                 if hasattr(layer.mlp.experts, "local_experts"):
                     if not self.rules.get("use_packed_local_experts", False):
                         for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
                             self.rules["local_experts.linear_fc1"](
-                                expert.linear_fc1, layer_id, expert_id
+                                expert.linear_fc1, layer_id, expert_id, is_mtp=is_mtp
                             )
                             self.rules["local_experts.linear_fc2"](
-                                expert.linear_fc2, layer_id, expert_id
+                                expert.linear_fc2, layer_id, expert_id, is_mtp=is_mtp
                             )
                     else:
                         # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
-                            layer.mlp.experts.local_experts, layer_id
+                            layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
                         )
                         self.rules["local_experts.linear_fc2"](
-                            layer.mlp.experts.local_experts, layer_id
+                            layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
                         )
                 elif "experts.linear_fc1" in self.rules:
                     # TEGroupedMLP: experts use fused grouped GEMM with a single
                     # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
                     # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
                     # "local_experts.linear_fc1" which expects per-expert iteration.
-                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
-                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
+                    self.rules["experts.linear_fc1"](
+                        layer.mlp.experts.linear_fc1, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["experts.linear_fc2"](
+                        layer.mlp.experts.linear_fc2, layer_id, is_mtp=is_mtp
+                    )
             else:
-                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
 
     def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
-        """Export the MTP module.
+        """Export the MTP (Multi-Token Prediction) module.
 
-        Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
+        Walks the live MCore ``model.mtp`` module and applies the same quantization
+        rules used for the base decoder, so the exported draft head reflects the
+        actual (quantized / co-trained) weights. Falls back to copying the BF16 MTP
+        weights from the pretrained model only when the live model has no ``mtp``
+        module (e.g. exporting a base-only checkpoint that grafts a pretrained head).
         """
-        # TODO Implement MTP export for quantized MTP
-        # Hacky version for now: copy MTP weights from pretrained model
+        mtp = getattr(self.model, "mtp", None)
+        if mtp is None or not hasattr(mtp, "layers") or len(mtp.layers) == 0:
+            return self._copy_mtp_state_dict_from_pretrained()
+
+        # The MTP inner attention / MoE layers are structurally identical to the base
+        # decoder layers, so the same layer walker + rules are reused with is_mtp=True,
+        # which swaps the ``backbone``/``model`` target root for ``mtp`` (mirroring the
+        # importer). Only the predictor-specific projections (enorm/hnorm/eh_proj) and the
+        # MTP block's own final_layernorm use dedicated ``mtp.*`` rules.
+        saved_state_dict = self._state_dict
+        self._state_dict = OrderedDict()
+        try:
+            for mtp_layer in mtp.layers:
+                inner_layers = mtp_layer.mtp_model_layer.layers
+                first_id = inner_layers[0].layer_number - 1
+                last_id = inner_layers[-1].layer_number - 1
+
+                # Outer predictor projections attach to the first inner HF index.
+                if "mtp.enorm" in self.rules:
+                    self.rules["mtp.enorm"](mtp_layer.enorm, first_id)
+                if "mtp.hnorm" in self.rules:
+                    self.rules["mtp.hnorm"](mtp_layer.hnorm, first_id)
+                if "mtp.eh_proj" in self.rules:
+                    self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
+
+                # Inner hybrid stack (e.g. [attention, MoE] for the ``*E`` pattern)
+                # reuses the base decoder walker; is_mtp=True retargets to mtp.layers.{}.
+                for inner in inner_layers:
+                    hf_layer_id = inner.layer_number - 1
+                    if isinstance(inner, MambaLayer):
+                        self._get_mamba_layer_state_dict(inner, hf_layer_id, is_mtp=True)
+                    elif isinstance(inner, TransformerLayer):
+                        self._get_transformer_layer_state_dict(inner, hf_layer_id, is_mtp=True)
+                    else:
+                        raise ValueError(
+                            "Only TransformerLayer or MambaLayer are supported in the MTP block."
+                        )
+
+                # The MTP block's own final layernorm attaches to the last inner HF index.
+                final_layernorm = getattr(mtp_layer, "final_layernorm", None)
+                if (
+                    "mtp.final_layernorm" in self.rules
+                    and final_layernorm is not None
+                    and not isinstance(final_layernorm, IdentityOp)
+                ):
+                    self.rules["mtp.final_layernorm"](final_layernorm, last_id)
+
+            mtp_state_dict = self._state_dict
+        finally:
+            self._state_dict = saved_state_dict
+
+        if len(mtp_state_dict) > 0:
+            print(f"Exported {len(mtp_state_dict)} MTP tensors from the live model")
+        return mtp_state_dict
+
+    def _copy_mtp_state_dict_from_pretrained(self) -> dict[str, torch.Tensor]:
+        """Fallback: copy the BF16 MTP weights from the pretrained model.
+
+        Used only when the live model has no ``mtp`` module. This does not reflect any
+        quantization or co-training applied to the MTP head.
+        """
         mtp_state_dict = {}
         if not self._hf_pretrained_model_name:
             return mtp_state_dict
@@ -659,24 +748,24 @@ class GPTModelExporter:
             self.exclude_modules.append("mtp*")
         return mtp_state_dict
 
-    def _get_mamba_layer_state_dict(self, layer, layer_id):
+    def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):
-            self.rules["norm"](layer.norm, layer_id)
+            self.rules["norm"](layer.norm, layer_id, is_mtp=is_mtp)
         else:
             # TE spec: norm is fused into in_proj (QuantTELayerNormColumnParallelLinear).
             # Mamba uses the legacy single-key `fused_norm` rule (Nemotron-H style).
             fused_key, norm_weight = self._get_fused_norm_weight(layer.mixer.in_proj)
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
-        self.rules["mixer_norm"](layer.mixer.norm, layer_id)
-        self.rules["A_log"](layer.mixer.A_log, layer_id)
-        self.rules["D"](layer.mixer.D, layer_id)
-        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
+        self.rules["mixer_norm"](layer.mixer.norm, layer_id, is_mtp=is_mtp)
+        self.rules["A_log"](layer.mixer.A_log, layer_id, is_mtp=is_mtp)
+        self.rules["D"](layer.mixer.D, layer_id, is_mtp=is_mtp)
+        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id, is_mtp=is_mtp)
 
-        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
-        self.rules["in_proj"](layer.mixer.in_proj, layer_id)
-        self.rules["out_proj"](layer.mixer.out_proj, layer_id)
+        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id, is_mtp=is_mtp)
+        self.rules["in_proj"](layer.mixer.in_proj, layer_id, is_mtp=is_mtp)
+        self.rules["out_proj"](layer.mixer.out_proj, layer_id, is_mtp=is_mtp)
 
     def _get_medusa_heads_state_dict(self):
         medusa_heads = getattr(self.model, "medusa_heads", None)
@@ -937,6 +1026,18 @@ class GPTModelExporter:
         if layer_name not in self.exclude_modules:
             self.exclude_modules.append(layer_name)
 
+    @staticmethod
+    def _mtp_prefix(prefix: str) -> str:
+        """Rewrite a base-model target prefix to its MTP counterpart.
+
+        Mirrors the importer so import/export naming stays symmetric: the MTP inner
+        layers reuse the base decoder rules, only the ``backbone``/``model`` root is
+        swapped for ``mtp``.
+        """
+        if "backbone" in prefix:
+            return prefix.replace("backbone", "mtp")
+        return prefix.replace("model", "mtp")
+
     def _name_remapping(
         self,
         module: torch.nn.Module | torch.Tensor,
@@ -944,7 +1045,10 @@ class GPTModelExporter:
         skip_output_scale: bool = True,
         mapping={},
         dtype: torch.dtype | None = None,
+        is_mtp: bool = False,
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         if dtype is None:
             dtype = self.dtype
 
@@ -983,8 +1087,10 @@ class GPTModelExporter:
                 self._state_dict[prefix + source_key] = val
 
     def _gated_mlp_slicing(
-        self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
+        self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj", is_mtp=False
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         name_to_value, qformat, block_size = self._get_quantized_state(
             module, self.dtype, prefix=prefix
         )
@@ -1044,7 +1150,7 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
-    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
+    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None, is_mtp=False):
         """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
 
         At EP>1, local ids are mapped to global via ``module.local_expert_indices``
@@ -1053,6 +1159,8 @@ class GPTModelExporter:
 
         Reverse of _grouped_mlp_merging in the importer.
         """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         num_experts = module.num_gemms
         state_dict = module.state_dict()
 
@@ -1227,7 +1335,10 @@ class GPTModelExporter:
         q_proj_name="q_proj",
         k_proj_name="k_proj",
         v_proj_name="v_proj",
+        is_mtp=False,
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         name_to_value, qformat, block_size = self._get_quantized_state(
             module, self.dtype, prefix=prefix
         )
@@ -1356,9 +1467,11 @@ class GPTModelExporter:
                 self._state_dict[v_proj_key] = val.detach().clone()
 
     def _self_attention_scaling(
-        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"
+        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale", is_mtp=False
     ):
         """KV cache scaling for CoreAttention module."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         k_scale_key = prefix + k_scale_name
         v_scale_key = prefix + v_scale_name
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
@@ -1372,8 +1485,10 @@ class GPTModelExporter:
                 # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
                 self.kv_cache_dtype = kv_cache_dtype
 
-    def _pack_name_remapping(self, module, prefix, layer_type=None):
+    def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False):
         """Pack name remapping into one tensor."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         weight_list = []
         weight_scale_list = []
         weight_scale_2_list = []
@@ -1438,8 +1553,10 @@ class GPTModelExporter:
         if merged_input_scale is not None:
             self._state_dict[prefix + "_input_scale"] = merged_input_scale
 
-    def _pack_name_remapping_gpt_oss(self, module, prefix, layer_type=None):
+    def _pack_name_remapping_gpt_oss(self, module, prefix, layer_type=None, is_mtp=False):
         """Pack name remapping into one tensor."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         weight_list = []
         weight_scale_list = []
         weight_scale_2_list = []

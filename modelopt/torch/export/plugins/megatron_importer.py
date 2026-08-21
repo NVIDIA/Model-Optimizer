@@ -860,6 +860,11 @@ class GPTModelImporter:
                         )
 
                     layer_id += 1
+
+                # Import the MTP block's own final_layernorm into the last inner layer
+                # index; without this it is left random-initialized. Mirrors the export
+                # side, which writes mtp.layers.{last}.final_layernorm.
+                self.rules["mtp.final_layernorm"](mtp.final_layernorm, layer_id - 1)
             else:  # non-repeated MTP
                 # MTP is the last layer in DeepSeek V3/R1
                 layer_id += 1
