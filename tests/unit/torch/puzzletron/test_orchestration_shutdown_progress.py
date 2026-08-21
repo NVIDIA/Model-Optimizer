@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Tests for orchestrator shutdown and progress reporting."""
 
 from __future__ import annotations
@@ -41,8 +38,15 @@ from puzzletron_orchestrator.compiler import (
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
 from puzzletron_orchestrator.progress import summarize_active_progress, summarize_stage_artifacts
-from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, JobHandle, JobState, JobStatus
-from puzzletron_orchestrator.state import StageRunRecord
+from puzzletron_orchestrator.schema import (
+    AttemptSpec,
+    CommandSpec,
+    JobHandle,
+    JobState,
+    JobStatus,
+    ValidatedResult,
+)
+from puzzletron_orchestrator.state import PersistedAttempt, StageRunRecord
 from puzzletron_orchestrator.terminal import ShutdownAction
 
 if TYPE_CHECKING:
@@ -260,6 +264,7 @@ class _TrackingFakeExecutor(_FakeExecutor):
             },
         )
         self._handles[handle.handle_id] = handle
+        self._attempts[handle.handle_id] = attempt
         return handle
 
     @staticmethod
@@ -277,6 +282,76 @@ def _blocked_descendants(plan, failed_stages: set[str]) -> set[str]:
                 blocked.add(node.stage_id)
                 changed = True
     return blocked
+
+
+def _compile_test_plan(
+    tmp_path: Path,
+    *,
+    stage_filter: str | None = None,
+    overrides: list[str] | None = None,
+    execution_defaults: dict | None = None,
+):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    execution = load_execution_config(execution_path)
+    execution["defaults"].update(execution_defaults or {})
+    return compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=execution,
+        overrides=overrides,
+        stage_filter=stage_filter,
+    )
+
+
+def _compile_changed_convert_plans(tmp_path: Path):
+    experiment, runner_path, execution_path = _write_configs(tmp_path)
+    runner = load_runner_config(runner_path)
+    execution = load_execution_config(execution_path)
+    baseline = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=runner,
+        execution=execution,
+        stage_filter="convert",
+    )
+    config = yaml.safe_load(experiment.read_text())
+    config["convert"]["model_path"] = "/models/replacement"
+    experiment.write_text(yaml.safe_dump(config))
+    changed = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=runner,
+        execution=execution,
+        stage_filter="convert",
+    )
+    return baseline, changed
+
+
+def _record_completed_attempt(
+    controller: CampaignController,
+    node,
+    *,
+    handle: JobHandle | None = None,
+) -> AttemptSpec:
+    adapter = adapter_for_stage(node)
+    work_plan = adapter.plan(controller.plan, node)
+    item = work_plan.items[0]
+    attempt = controller._bind_attempt_to_stage_execution(
+        node,
+        work_plan,
+        adapter.command(
+            plan=controller.plan,
+            node=node,
+            item=item,
+            attempt_id="completed-attempt",
+            runner=controller.plan.runner,
+        ),
+    )
+    controller.store.save_attempt(attempt, None, JobState.RUNNING.value)
+    controller.store.update_attempt_status(
+        item.work_id,
+        attempt.attempt_id,
+        JobStatus(handle=handle, state=JobState.COMPLETED),
+    )
+    return attempt
 
 
 def test_depth_progress_reports_removal_and_candidate_counts(tmp_path: Path):
@@ -424,13 +499,7 @@ def test_summarize_active_progress_prefers_stage_lines(tmp_path: Path):
 
 
 def test_controller_shutdown_cancels_active_jobs(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
     result = controller.run(once=True)
@@ -448,13 +517,7 @@ def test_controller_shutdown_cancels_active_jobs(tmp_path: Path):
 
 
 def test_controller_waits_for_parent_job_after_artifact_appears(tmp_path: Path, monkeypatch):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="vllm_stats",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="vllm_stats")
     controller = CampaignController(plan, executor=_FakeExecutor())
     child = next(node for node in plan.stages if node.stage_id == "vllm_stats")
     handle = JobHandle(backend="fake", handle_id="parent", attempt_id="a1")
@@ -469,33 +532,430 @@ def test_controller_waits_for_parent_job_after_artifact_appears(tmp_path: Path, 
     assert controller._parents_ready(child)
 
 
-def test_controller_completed_retry_satisfies_work_plan(tmp_path: Path, monkeypatch):
+def test_controller_resubmits_legacy_completed_attempt_without_execution_identity(
+    tmp_path: Path,
+):
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    item = delegate.plan(plan, node).items[0]
+    attempt = delegate.command(
+        plan=plan,
+        node=node,
+        item=item,
+        attempt_id="legacy-completed-attempt",
+        runner=plan.runner,
+    )
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
+    controller.store.write_stage_record(
+        StageRunRecord(
+            stage_id="convert",
+            status=JobState.FAILED.value,
+            attempts=[
+                PersistedAttempt(
+                    attempt_id=attempt.attempt_id,
+                    work_id=attempt.work_id,
+                    stage_id=node.stage_id,
+                    status=JobState.COMPLETED.value,
+                    contract_hash=plan.contract_hash,
+                    metadata={"stage_execution_identity_incompatible": True},
+                )
+            ],
+        )
+    )
+
+    result = controller.run(once=True)
+
+    assert result["halted"] is False
+    assert result["failed_stages"] == []
+    assert executor.submitted_stage_ids == ["convert"]
+    attempts = controller.store.list_attempts("convert")
+    assert len(attempts) == 2
+    attempts_by_id = {attempt["attempt_id"]: attempt for attempt in attempts}
+    legacy = attempts_by_id.pop("legacy-completed-attempt")
+    assert "stage_execution_identity" not in legacy["metadata"]
+    submitted = next(iter(attempts_by_id.values()))
+    assert submitted["metadata"]["stage_execution_identity"] == (
+        controller._stage_execution_identity(node)
+    )
+    assert not list(
+        controller.store.events_root.glob("*_stage_execution_identity_incompatible.json")
+    )
+
+
+def test_controller_resubmits_completed_work_when_stage_semantics_change(
+    tmp_path: Path, monkeypatch
+):
+    plan_a, plan_b = _compile_changed_convert_plans(tmp_path)
+    executor = _TrackingFakeExecutor()
+    controller_a = CampaignController(plan_a, executor=_FakeExecutor())
+    controller_b = CampaignController(plan_b, executor=executor)
+    identity_a = controller_a._stage_execution_identity(plan_a.stages[0])
+    identity_b = controller_b._stage_execution_identity(plan_b.stages[0])
+    attempts = [
+        {
+            "work_id": "convert:0",
+            "status": JobState.COMPLETED.value,
+            "contract_hash": plan_a.contract_hash,
+            "metadata": {"stage_execution_identity": identity_a},
+        }
+    ]
+    monkeypatch.setattr(controller_b.store, "list_attempts", lambda _stage_id=None: attempts)
+
+    assert plan_a.contract_hash == plan_b.contract_hash
+    assert identity_a != identity_b
+    assert not controller_b._required_work_is_completed(plan_b.stages[0], attempts)
+    assert controller_b._submit_stage(plan_b.stages[0])
+    assert executor.submitted_stage_ids == ["convert"]
+    submitted_attempt = next(iter(executor._attempts.values()))
+    assert submitted_attempt.metadata["stage_execution_identity"] == identity_b
+    persisted_attempts = CampaignController(plan_b, executor=_FakeExecutor()).store.list_attempts(
+        "convert"
+    )
+    assert persisted_attempts[-1]["metadata"]["stage_execution_identity"] == identity_b
+
+
+def test_controller_cancels_stale_active_attempt_before_current_resubmission(tmp_path: Path):
+    old_plan, plan = _compile_changed_convert_plans(tmp_path)
+    old_node = old_plan.stages[0]
+    old_controller = CampaignController(old_plan, executor=_FakeExecutor())
+    handle = JobHandle(
+        backend="fake",
+        handle_id="stale-active-handle",
+        attempt_id="completed-attempt",
+        metadata={"work_id": "convert:0"},
+    )
+    attempt = _record_completed_attempt(old_controller, old_node, handle=handle)
+    old_controller.store.save_attempt(attempt, handle, JobState.RUNNING.value)
+    old_controller.store.track_live_job(handle)
+
+    class _FailsIfPolledExecutor(_TrackingFakeExecutor):
+        def poll(self, handles):
+            raise AssertionError("a stale active attempt must not enter the current poll set")
+
+    executor = _FailsIfPolledExecutor()
+    controller = CampaignController(plan, executor=executor)
+
+    with pytest.raises(RuntimeError, match="stale active attempts were cancelled"):
+        controller.run(once=True)
+
+    assert executor.cancelled == [handle]
+    assert executor.submitted_stage_ids == []
+    assert controller._active == {}
+    assert controller._failed_stages == set()
+    assert controller.store.load_attempt(attempt.work_id, attempt.attempt_id)["status"] == "running"
+    assert (
+        len(
+            list(
+                controller.store.events_root.glob(
+                    "*_stale_active_attempt_cancellation_requested.json"
+                )
+            )
+        )
+        == 1
+    )
+
+
+def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: Path):
     experiment, runner_path, execution_path = _write_configs(tmp_path)
+    compiled_overrides = ["convert.model_path=/models/compiled"]
     plan = compile_campaign_plan(
+        experiment_config_path=experiment,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        overrides=compiled_overrides,
+        stage_filter="convert",
+    )
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    baseline_plan = compile_campaign_plan(
         experiment_config_path=experiment,
         runner=load_runner_config(runner_path),
         execution=load_execution_config(execution_path),
         stage_filter="convert",
     )
-    controller = CampaignController(plan, executor=_FakeExecutor())
-    attempts = [
-        {"work_id": "convert:0", "status": JobState.CANCELLED.value},
-        {"work_id": "convert:0", "status": JobState.COMPLETED.value},
-    ]
 
-    assert controller._required_work_is_completed(plan.stages[0], attempts)
-    monkeypatch.setattr(controller.store, "list_attempts", lambda _stage_id=None: attempts)
-    assert not controller._stage_has_active_or_completed_work(plan.stages[0])
+    with pytest.raises(ValueError, match="must match the overrides compiled"):
+        controller.run(overrides=["convert.model_path=/models/runtime"], once=True)
+
+    assert executor.submitted_stage_ids == []
+    assert controller.store.list_attempts("convert") == []
+
+    result = controller.run(overrides=compiled_overrides, once=True)
+
+    assert result["halted"] is False
+    assert executor.submitted_stage_ids == ["convert"]
+    submitted_attempt = next(iter(executor._attempts.values()))
+    override_index = submitted_attempt.command.argv.index("--override")
+    assert submitted_attempt.command.argv[override_index + 1] == compiled_overrides[0]
+    assert submitted_attempt.metadata["stage_execution_identity"] == (
+        controller._stage_execution_identity(plan.stages[0])
+    )
+    baseline_identity = CampaignController(
+        baseline_plan, executor=_FakeExecutor()
+    )._stage_execution_identity(baseline_plan.stages[0])
+    assert submitted_attempt.metadata["stage_execution_identity"] != baseline_identity
+
+
+def test_controller_revalidates_recent_completed_work_before_resubmitting(
+    tmp_path: Path, monkeypatch
+):
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
+    node = plan.stages[0]
+    delegate = adapter_for_stage(node)
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor, poll_interval_seconds=45.0)
+    now = [1000.0]
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+    monkeypatch.setattr(
+        controller,
+        "_interruptible_sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    _record_completed_attempt(
+        controller,
+        node,
+        handle=JobHandle(
+            backend="fake",
+            handle_id="completed-handle",
+            attempt_id="completed-attempt",
+        ),
+    )
+
+    class _DelayedVisibilityAdapter:
+        def __init__(self) -> None:
+            self.validation_count = 0
+
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def aggregate(self, *, plan, node, work_plan):
+            return None
+
+        def validate(self, *, plan, node):
+            self.validation_count += 1
+            return ValidatedResult(
+                valid=self.validation_count >= 4,
+                reason="stage outputs missing",
+                artifacts=("ckpts/teacher/config.json",),
+            )
+
+    delayed = _DelayedVisibilityAdapter()
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage", lambda _node: delayed
+    )
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.stage_is_complete",
+        lambda _config, stage_id: controller.store.stage_is_complete(stage_id),
+    )
+
+    result = controller.run(max_iterations=4)
+
+    assert result["halted"] is False
+    assert delayed.validation_count == 4
+    assert "convert" not in executor.submitted_stage_ids
+    assert len(controller.store.list_attempts("convert")) == 1
+    assert controller.store.stage_is_complete("convert")
+
+
+def test_controller_artifact_settling_deadline_survives_restart(tmp_path: Path, monkeypatch):
+    plan = _compile_test_plan(
+        tmp_path,
+        stage_filter="convert",
+        execution_defaults={"artifact_settling_timeout_seconds": 120},
+    )
+    node = plan.stages[0]
+    first_controller = CampaignController(plan, executor=_FakeExecutor())
+    now = [1000.0]
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+    _record_completed_attempt(first_controller, node)
+
+    now[0] += 120.0
+    restarted = CampaignController(plan, executor=_FakeExecutor())
+
+    assert (
+        restarted._completed_work_artifact_settling_elapsed(
+            node,
+            restarted.store.list_attempts(node.stage_id),
+        )
+        == 120.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("attempt", "expected_elapsed"),
+    [
+        ({"completed_at": "invalid", "submitted_at": 990.0}, 10.0),
+        ({"completed_at": float("nan"), "submitted_at": False}, 120.0),
+    ],
+    ids=("submitted-at-fallback", "no-usable-timestamp"),
+)
+def test_controller_settling_elapsed_handles_legacy_attempt_timestamps(
+    tmp_path: Path, monkeypatch, attempt, expected_elapsed
+):
+    plan = _compile_test_plan(
+        tmp_path,
+        stage_filter="convert",
+        execution_defaults={"artifact_settling_timeout_seconds": 120},
+    )
+    controller = CampaignController(plan, executor=_FakeExecutor())
+    monkeypatch.setattr(
+        controller,
+        "_required_completed_attempts",
+        lambda _node, _attempts: [attempt],
+    )
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: 1000.0)
+
+    assert controller._completed_work_artifact_settling_elapsed(None, []) == expected_elapsed
+
+
+@pytest.mark.parametrize("aggregation_failure", [False, True])
+def test_controller_fails_when_completed_work_artifacts_do_not_settle(
+    tmp_path: Path, monkeypatch, aggregation_failure: bool
+):
+    plan = _compile_test_plan(
+        tmp_path,
+        stage_filter="convert",
+        execution_defaults={"artifact_settling_timeout_seconds": 120},
+    )
+    node = plan.stages[0]
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor, poll_interval_seconds=60.0)
+    now = [1000.0]
+    delegate = adapter_for_stage(node)
+    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
+    monkeypatch.setattr(
+        controller,
+        "_interruptible_sleep",
+        lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    _record_completed_attempt(
+        controller,
+        node,
+        handle=JobHandle(
+            backend="fake",
+            handle_id="completed-handle",
+            attempt_id="completed-attempt",
+        ),
+    )
+
+    class _MissingArtifactsAdapter:
+        aggregation_ready = False
+
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def aggregate(self, *, plan, node, work_plan):
+            if aggregation_failure and not self.aggregation_ready:
+                raise FileNotFoundError("shards are still publishing")
+            return {"status": "complete"}
+
+        def validate(self, *, plan, node):
+            if aggregation_failure:
+                assert self.aggregation_ready
+                return ValidatedResult(valid=True, reason="stage outputs present")
+            return ValidatedResult(
+                valid=False,
+                reason="stage outputs missing",
+                artifacts=("ckpts/teacher/config.json",),
+            )
+
+    missing = _MissingArtifactsAdapter()
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.adapter_for_stage", lambda _node: missing
+    )
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.controller.stage_is_complete",
+        lambda _config, stage_id: controller.store.stage_is_complete(stage_id),
+    )
+
+    result = controller.run(max_iterations=3)
+
+    assert result["halted"] is True
+    assert result["failed_stages"] == ["convert"]
+    assert executor.submitted_stage_ids == []
+    assert len(controller.store.list_attempts("convert")) == 1
+    phase = "aggregation" if aggregation_failure else "validation"
+    event_name = f"stage_{phase}_failed"
+    event_paths = list(controller.store.events_root.glob(f"*_{event_name}.json"))
+    assert len(event_paths) == 1
+    event = json.loads(event_paths[0].read_text())
+    assert event["payload"]["stage_id"] == "convert"
+    assert event["payload"]["failure_class"] == "timeout_fatal"
+    assert event["payload"]["contract_hash"] == plan.contract_hash
+    assert event["payload"]["stage_execution_identity"] == controller._stage_execution_identity(
+        node
+    )
+    assert event["payload"]["phase"] == phase
+    assert event["payload"]["exception_type"] == (
+        "FileNotFoundError" if aggregation_failure else None
+    )
+    assert event["payload"]["attempt_ids"] == ["completed-attempt"]
+    assert event["payload"]["elapsed_seconds"] == 120.0
+    assert event["payload"]["timeout_seconds"] == 120.0
+    expected_reason = (
+        "stage aggregation failed: FileNotFoundError: shards are still publishing"
+        if aggregation_failure
+        else "stage outputs missing"
+    )
+    assert event["payload"]["reason"] == expected_reason
+    assert event["payload"]["expected_artifacts"] == (
+        [] if aggregation_failure else ["ckpts/teacher/config.json"]
+    )
+    stage_record = controller.store.load_stage_record("convert")
+    assert stage_record is not None
+    assert stage_record.status == JobState.FAILED.value
+    assert stage_record.attempts[0].status == JobState.COMPLETED.value
+    assert stage_record.attempts[0].metadata["stage_finalization_failure"]["phase"] == phase
+
+    recovered_executor = _TrackingFakeExecutor()
+    missing.aggregation_ready = aggregation_failure
+    recovered = CampaignController(plan, executor=recovered_executor)
+    recovered_result = recovered.run(once=True)
+
+    assert recovered_result["halted"] is (not aggregation_failure)
+    assert recovered_result["failed_stages"] == ([] if aggregation_failure else ["convert"])
+    assert recovered_executor.submitted_stage_ids == (
+        ["final_report"] if aggregation_failure else []
+    )
+    assert len(list(controller.store.events_root.glob(f"*_{event_name}.json"))) == 1
+    assert recovered.store.stage_is_complete("convert") is aggregation_failure
+
+
+def test_controller_ignores_failed_record_from_stale_stage_execution(tmp_path: Path):
+    old_plan, plan = _compile_changed_convert_plans(tmp_path)
+    old_identity = CampaignController(old_plan, executor=_FakeExecutor())._stage_execution_identity(
+        old_plan.stages[0]
+    )
+    executor = _TrackingFakeExecutor()
+    controller = CampaignController(plan, executor=executor)
+    controller.store.write_stage_record(
+        StageRunRecord(
+            stage_id="convert",
+            status=JobState.FAILED.value,
+            attempts=[
+                PersistedAttempt(
+                    attempt_id="stale-attempt",
+                    work_id="convert:0",
+                    stage_id="convert",
+                    status=JobState.COMPLETED.value,
+                    contract_hash=plan.contract_hash,
+                    metadata={"stage_execution_identity": old_identity},
+                )
+            ],
+        )
+    )
+
+    result = controller.run(once=True)
+
+    assert result["failed_stages"] == []
+    assert executor.submitted_stage_ids == ["convert"]
 
 
 def test_controller_completed_summary_excludes_store_only_completion(tmp_path: Path, monkeypatch):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     controller = CampaignController(plan, executor=_FakeExecutor())
     controller.store.write_stage_record(
         StageRunRecord(
@@ -517,13 +977,7 @@ def test_controller_completed_summary_excludes_store_only_completion(tmp_path: P
 def test_controller_aggregates_completed_work_before_resubmitting(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     node = plan.stages[0]
     delegate = adapter_for_stage(node)
     item = delegate.plan(plan, node).items[0]
@@ -536,6 +990,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(
     )
     executor = _FakeExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
+    attempt = controller._bind_attempt_to_stage_execution(node, delegate.plan(plan, node), attempt)
     controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
 
     class _AggregateAdapter:
@@ -559,13 +1014,7 @@ def test_controller_aggregates_completed_work_before_resubmitting(
 
 
 def test_controller_shutdown_cancels_store_tracked_jobs(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
     controller.run(once=True)
@@ -579,13 +1028,7 @@ def test_controller_shutdown_cancels_store_tracked_jobs(tmp_path: Path):
 
 
 def test_controller_preserves_live_job_when_cancel_fails(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
 
     class _FailingCancelExecutor(_FakeExecutor):
         def cancel(self, handles: Sequence[JobHandle]) -> None:
@@ -860,13 +1303,7 @@ def test_unknown_stage_progress_does_not_echo_arbitrary_log_tail(tmp_path: Path)
 
 
 def test_controller_keyboard_interrupt_cancels_jobs(tmp_path: Path, monkeypatch):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
 
@@ -885,13 +1322,7 @@ def test_controller_keyboard_interrupt_cancels_jobs(tmp_path: Path, monkeypatch)
 
 
 def test_controller_can_resume_quit_menu_then_detach_live_jobs(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
 
     class _Controls:
@@ -1267,13 +1698,7 @@ def test_controller_multiple_failures_drain_both_sanity_branches(
 
 
 def test_controller_sigint_during_recovery_cancels_jobs(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     first_executor = _FakeExecutor()
     CampaignController(plan, executor=first_executor, poll_interval_seconds=0.01).run(once=True)
 
@@ -1293,13 +1718,7 @@ def test_controller_sigint_during_recovery_cancels_jobs(tmp_path: Path):
 
 
 def test_controller_shutdown_flag_cancels_without_keyboard_interrupt(tmp_path: Path, monkeypatch):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-        stage_filter="convert",
-    )
+    plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
     controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.05)
 
