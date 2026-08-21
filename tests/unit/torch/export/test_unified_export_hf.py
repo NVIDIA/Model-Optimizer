@@ -15,13 +15,14 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
-from diffusers.configuration_utils import FrozenDict
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_utils import TiedWeightMap
@@ -35,18 +36,20 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 
 
 @pytest.mark.parametrize(
-    ("config", "dtype", "expected_dtype", "warning_count"),
+    ("configured_dtype", "dtype", "expected_dtype", "warning_count"),
     [
-        (object(), None, torch.float32, 0),
-        (object(), torch.float16, torch.float16, 0),
-        (FrozenDict(torch_dtype=torch.bfloat16), None, torch.bfloat16, 0),
-        (FrozenDict(torch_dtype=torch.bfloat16), torch.bfloat16, torch.bfloat16, 0),
-        (FrozenDict(torch_dtype=torch.bfloat16), torch.float16, torch.float16, 1),
+        (None, None, torch.float32, 0),
+        (None, torch.float16, torch.float16, 0),
+        (torch.bfloat16, None, torch.bfloat16, 0),
+        (torch.bfloat16, torch.bfloat16, torch.bfloat16, 0),
+        (torch.bfloat16, torch.float16, torch.float16, 1),
     ],
 )
-def test_resolve_export_dtype(config, dtype, expected_dtype, warning_count, recwarn):
+def test_resolve_export_dtype(configured_dtype, dtype, expected_dtype, warning_count, recwarn):
     model = torch.nn.Linear(1, 1)
-    model.config = config
+    model.config = (
+        SimpleNamespace(torch_dtype=configured_dtype) if configured_dtype is not None else object()
+    )
 
     assert _resolve_export_dtype(model, dtype) == expected_dtype
     assert len(recwarn) == warning_count
@@ -55,6 +58,14 @@ def test_resolve_export_dtype(config, dtype, expected_dtype, warning_count, recw
             "Model's original dtype (torch.bfloat16) differs from target dtype "
             "(torch.float16), which may lead to numerical errors."
         )
+
+
+def test_resolve_export_dtype_with_empty_diffusers_config():
+    frozen_dict = pytest.importorskip("diffusers.configuration_utils").FrozenDict()
+    model = torch.nn.Linear(1, 1)
+    model.config = frozen_dict
+
+    assert _resolve_export_dtype(model, None) == torch.float32
 
 
 def test_hf_all_tied_weights_keys_contract():
