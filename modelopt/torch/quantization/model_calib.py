@@ -2215,8 +2215,10 @@ def layerwise_calibrate(
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
-                    # As above: reset so the export fusion probe hits the real forward.
-                    layer._layerwise_calib.mode = "original"
+                    if exporter is not None:
+                        # As above, for the fusion probe. Only when one runs: without an
+                        # exporter nothing touches the layer before _set_layer_states does.
+                        layer._layerwise_calib.mode = "original"
                 elif is_last:
                     next_inputs = None
 
