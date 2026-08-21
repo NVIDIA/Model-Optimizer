@@ -1,0 +1,11 @@
+runs:
+  - dataset: speed
+    dataset_path: /data/speed/qualitative
+    concurrency: [32]
+    num_requests: 880
+    output_length: 4096
+  - dataset: speed
+    dataset_path: /data/speed/throughput_1k
+    concurrency: [1, 2, 4, 8, 16, 32, 64]
+    num_requests: [8, 16, 32, 32, 64, 128, 256]
+    output_length: 2048

@@ -3,8 +3,8 @@
 ## Installation
 
 This benchmark is meant to be a lightweight layer ontop of an existing vLLM/SGLang/TRTLLM installation. For example, no install
-is required if one is running in the following dockers: `vllm/vllm-openai:v0.11.0` (vLLM), `lmsysorg/sglang:v0.5.4.post2` (SGLang), or
-`nvcr.io/nvidia/tensorrt-llm/release:1.2.0` (TRT-LLM).
+is required if one is running in the following dockers: `vllm/vllm-openai:v0.19.0` (vLLM), `lmsysorg/sglang:v0.5.10.post1` (SGLang), or
+`nvcr.io/nvidia/tensorrt-llm/release:1.3.0.rc10` (TRT-LLM).
 
 Next
 
@@ -145,6 +145,107 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
+#### Agentic split
+
+Make sure that you use the updated data from HuggingFace.
+
+```bash
+python3 run.py \
+      --model_dir nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+      --tokenizer nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+      --dataset speed \
+      --dataset_path data/speed/agentic \
+      --agentic --agentic_skip_turns_delta 4 \
+      --engine SGLANG \
+      --speculative_algorithm MTP \
+      --output_length 2048 \
+      --draft_length 7 \
+      --tp_size 8 \
+      --ep_size 1 \
+      --concurrency 32 \
+      --show_progress
+```
+
+The split contains generated trajectories from three models: Kimi K2.5, Qwen3.5 and gpt-oss-120b, across two benchmarks: SWE-Bench and Tau2-Bench (airline, retail, telecom).
+Since running every trajectory with all turns is very time-consuming, we added the `--agentic_skip_turns_delta`, which skips every Nth turn in the trajectory.
+
+In terms of metrics, we report the standard per-request ALs (similar to the qualitative split), alongside:
+* per-step ALs
+* per-trajectory ALs
+
+Specifically, we record the AL for each step, average the per-step ALs to obtain the trajectory AL, and then average the trajectory ALs to compute the final overall average.
+
+## Running Sweeps
+
+A sweep runs multiple dataset/concurrency combinations in a single invocation — useful for
+throughput curves, ablations over concurrency levels, or multi-dataset evaluations.
+
+### Sweep config format
+
+Create a YAML file with a `runs` key (or a flat list). Each entry supports:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `dataset` | string (required) | Dataset name (same choices as `--dataset`) |
+| `dataset_path` | string | Path to dataset (can also be supplied via CLI) |
+| `random_isl` | int | Input sequence length for the `random` dataset |
+| `concurrency` | int or list | Concurrency level(s) to sweep over |
+| `num_requests` | int or list | Requests per concurrency level (list must match length of `concurrency`) |
+| `output_length` | int or list | Output token limit per concurrency level |
+| `temperature` | float or list | Sampling temperature per concurrency level |
+| `category` | string | Category filter (for datasets that support it) |
+
+`concurrency` accepts a single integer or a list. When a list, `num_requests`,
+`output_length`, and `temperature` can each be a matching-length list to set per-level
+values, or a single scalar to apply the same value to all levels.
+
+**Example `sweep_example.yaml`:**
+
+```yaml
+runs:
+  - dataset: speed
+    dataset_path: /data/speed/qualitative
+    concurrency: [32]
+    num_requests: 880
+    output_length: 4096
+  - dataset: speed
+    dataset_path: /data/speed/throughput_1k
+    concurrency: [1, 2, 4, 8, 16, 32, 64]
+    num_requests: [8, 16, 32, 32, 64, 128, 256]
+    output_length: 2048
+```
+
+### Running a sweep
+
+Pass `--sweep_config` in place of the usual dataset flags:
+
+```bash
+python3 run.py \
+    --model_dir meta-llama/Llama-3.3-70B-Instruct \
+    --tokenizer meta-llama/Llama-3.3-70B-Instruct \
+    --draft_model_dir yuhuili/EAGLE3-LLaMA3.3-Instruct-70B \
+    --tp_size 8 \
+    --ep_size 1 \
+    --draft_length 3 \
+    --engine TRTLLM \
+    --sweep_config sweep_example.yaml \
+    --sweep_output_root ./my_sweep_results
+```
+
+### Output structure
+
+Each run is saved to its own subdirectory under the sweep output root:
+
+```text
+my_sweep_results/
+  000_speed_c32/       # first entry, concurrency=32
+  001_speed_c1/        # second entry, concurrency=1
+  002_speed_c2/        # second entry, concurrency=2
+  ...
+```
+
+If `--sweep_output_root` is not set, outputs go to `./sweep_outputs/<timestamp>/`.
+
 ## Uploading results to S3
 
 Each `run.py` invocation writes a result directory containing `configuration.json`,
@@ -166,8 +267,8 @@ runs already present at the destination instead of failing.
 
 The tool handles two directory layouts and mirrors them into S3:
 
-- **Flat** — `LOCAL_DIR/run_name/{configuration,timing,...}.json`
-- **Sweep** — `LOCAL_DIR/sweep_name/run_name/{configuration,timing,...}.json`
+* **Flat** — `LOCAL_DIR/run_name/{configuration,timing,...}.json`
+* **Sweep** — `LOCAL_DIR/sweep_name/run_name/{configuration,timing,...}.json`
 
 `LOCAL_DIR`'s basename is preserved in the destination prefix, so re-uploads from the same
 source land in the same place.
