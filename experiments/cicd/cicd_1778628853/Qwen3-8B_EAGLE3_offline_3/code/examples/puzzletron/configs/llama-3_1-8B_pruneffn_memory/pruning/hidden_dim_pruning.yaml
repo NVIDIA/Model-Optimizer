@@ -1,0 +1,15 @@
+defaults:
+  - pruning_defaults
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/hidden_dim_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+activation_hooks_kwargs:
+  method: layer_norm_contribution
+  target_layer: "layernorm"
+
+# Hidden dimension pruning specific settings
+hidden_size_list: [3072, 2048]  # Target hidden sizes to prune to
+hidden_size_init_mode: "PruneByChannelRanking"
+mlp_init_mode: "Truncate" # TODO, make it work with CopyAsIs/FromTeacher
+gqa_init_mode: "AverageKV" # TODO, make it work with CopyAsIs/FromTeacher
+linear_init_mode: "FromTeacher"

@@ -1,0 +1,93 @@
+# Augmentation specs for make_nemotron_ptv2_dataset.py and make_nemotron_ptv3_dataset.py
+#
+# Each entry defines one augmentation variant applied cyclically across the dataset.
+# The augmented copy is the same size as the source — each row gets exactly one variant.
+#
+# Supported types:
+#
+#   user_suffix
+#     Appends `text` to the content of every user message in the conversation.
+#     Example use: language-redirect instructions, style/length hints.
+#
+#   system_prompt
+#     Prepends a {"role": "system", "content": <content>} message to the conversation.
+#     Use this for model-specific flags (e.g. /no_think) or persona instructions.
+#     Set `enabled: false` for variants that are not supported by your target model.
+#
+# To disable an entry without deleting it, add `enabled: false`.
+# To add a new variant, append a new entry following the same schema.
+
+augmentations:
+
+  # --- Language redirects (user_suffix) ------------------------------------
+
+  - type: user_suffix
+    text: " Please reply in French instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Italian instead of English."
+
+  - type: user_suffix
+    text: " Please reply in German instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Spanish instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Mandarin Chinese instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Japanese instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Korean instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Turkish instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Modern Standard Arabic instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Russian instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Brazilian Portuguese instead of English."
+
+  - type: user_suffix
+    text: " Please reply in Vietnamese instead of English."
+
+  # --- Style / format hints (user_suffix) ----------------------------------
+
+  - type: user_suffix
+    text: " Be concise and answer in as few words as possible."
+
+  - type: user_suffix
+    text: " Provide a detailed, step-by-step explanation."
+
+  - type: user_suffix
+    text: " Format your response using Markdown (headers, bullet points, code blocks where appropriate)."
+
+  - type: user_suffix
+    text: " Do not use Markdown formatting; reply in plain text only."
+
+  - type: user_suffix
+    text: " Explain your answer as if I am a complete beginner with no prior knowledge."
+
+  - type: user_suffix
+    text: " Assume I am an expert; skip basic explanations and go straight to the details."
+
+  - type: user_suffix
+    text: " Think step by step before giving your final answer."
+
+  # --- System-prompt variants (system_prompt) ------------------------------
+
+  # /no_think: suppresses chain-of-thought in models that support it (e.g. Qwen3).
+  # Set enabled: false if your target model does not support this flag.
+  - type: system_prompt
+    content: "You are a helpful assistant. /no_think"
+    enabled: false
+
+  # Generic helpful-assistant system prompt (no special flags).
+  - type: system_prompt
+    content: "You are a helpful, respectful, and honest assistant."
