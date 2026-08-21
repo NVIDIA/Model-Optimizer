@@ -401,12 +401,7 @@ def _build_moe_model():
 
 
 def test_moe_export_matches(tmp_path):
-    """MoE layers take a different path: fused expert inputs and gate/up amax sync.
-
-    This fixture uses the fused expert representation (one ``mlp.experts`` module), so it
-    does not cover the per-expert sibling replay in ``_fuse_unrouted_experts`` -- that
-    needs a checkpoint whose experts are separate ``experts.N.gate_proj`` modules.
-    """
+    """MoE layers take a different path: fused expert inputs and gate/up amax sync."""
     baseline_dir = tmp_path / "baseline"
     base = _nvfp4_cfg()
     base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}

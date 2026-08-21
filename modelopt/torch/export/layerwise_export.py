@@ -18,7 +18,6 @@
 import contextlib
 import hashlib
 import json
-import re
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -64,37 +63,6 @@ def _is_quantized_module(module: nn.Module) -> bool:
     return any(
         isinstance(child, (TensorQuantizer, SequentialQuantizer)) for child in module.children()
     )
-
-
-def _fuse_unrouted_experts(layer_module: nn.Module, fused_linears: dict[str, list[str]]) -> None:
-    """Fuse the sibling experts the probe never routed a token to.
-
-    ``sync_moe_gate_up_amax`` covers ``weight_quantizer.amax`` but not a static
-    quantizer's ``global_amax``, so unrouted pairs would keep unmerged scales.
-    """
-    from .quant_utils import preprocess_linear_fusion
-
-    names = {name for name, _ in layer_module.named_modules()}
-    for group, members in fused_linears.items():
-        if not re.search(r"experts?\.\d+", group):
-            continue
-        expert_id = 0
-        while True:
-            sibling = re.sub(r"(experts?\.)\d+", rf"\g<1>{expert_id}", group, count=1)
-            if sibling in fused_linears:  # the probe already fused this one
-                expert_id += 1
-                continue
-            if sibling not in names:
-                break
-            preprocess_linear_fusion(
-                [
-                    layer_module.get_submodule(
-                        re.sub(r"(experts?\.)\d+", rf"\g<1>{expert_id}", member)
-                    )
-                    for member in members
-                ]
-            )
-            expert_id += 1
 
 
 def _module_formats(model: nn.Module) -> set:
@@ -376,7 +344,7 @@ class LayerwiseExporter:
         layernorm pre_quant_scale fold  refused (AWQ/SVDQuant)
         MoE expert resmooth             refused (AWQ/SVDQuant)
         shared-input group fusion       this method, on real activations
-        sibling-expert replay           :func:`_fuse_unrouted_experts`
+        sibling-expert replay           unneeded -- sync below covers every expert
         gate/up amax sync               ``sync_moe_gate_up_amax`` in export_layer
         ==============================  ==========================================
         """
@@ -398,10 +366,9 @@ class LayerwiseExporter:
         input_to_linear, _ = collect_shared_input_modules(
             layer_module, lambda: probe_forward(layer_module)
         )
-        fused = _fuse_shared_input_modules(
+        _fuse_shared_input_modules(
             self._ctx.model, input_to_linear, quantization_format=layer_format
         )
-        _fuse_unrouted_experts(layer_module, fused)
 
     def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
         """Export the tail, write the config artifacts, and index all shards.
