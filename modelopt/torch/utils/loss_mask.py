@@ -79,18 +79,32 @@ def get_loss_mask_recovery(tokenizer) -> LossMaskRecovery | None:
 
 _KIMI_ROLE_MARKERS = ("<|im_user|>", "<|im_assistant|>", "<|im_system|>")
 
+# Kimi-K3's XTML structural tags (see the Kimi-K3 section below). Declared here
+# because ``_kimi_detect`` uses them to hand K3 tokenizers off to the K3 recovery.
+_K3_MARKERS = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
 
-def _kimi_detect(tokenizer) -> bool:
-    """Whether ``tokenizer`` defines Kimi's chat role markers as real tokens."""
+
+def _has_all_tokens(tokenizer, tokens) -> bool:
+    """Whether ``tokenizer`` maps every one of ``tokens`` to a real (non-unk) id."""
     unk = getattr(tokenizer, "unk_token_id", None)
     try:
-        ids = [
-            tokenizer.convert_tokens_to_ids(t)
-            for t in (*_KIMI_ROLE_MARKERS, "<|im_middle|>", "<|im_end|>")
-        ]
+        ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
     except Exception:
         return False
     return all(i is not None and i != unk for i in ids)
+
+
+def _kimi_detect(tokenizer) -> bool:
+    """Whether ``tokenizer`` defines Kimi's chat role markers as real tokens.
+
+    K3 keeps the K2 ``<|im_*|>`` markers for back-compat but *also* defines the XTML
+    structural tags that classic Kimi lacks. When those are present the tokenizer is
+    K3, so defer to the ``kimi_k3`` recovery whose ``compute`` understands the XTML
+    turn layout; matching here would silently produce an empty mask.
+    """
+    if not _has_all_tokens(tokenizer, (*_KIMI_ROLE_MARKERS, "<|im_middle|>", "<|im_end|>")):
+        return False
+    return not _has_all_tokens(tokenizer, _K3_MARKERS)
 
 
 def _kimi_compute(tokenizer, input_ids) -> torch.Tensor:
@@ -135,4 +149,78 @@ def _kimi_compute(tokenizer, input_ids) -> torch.Tensor:
 
 register_loss_mask_recovery(
     LossMaskRecovery(name="kimi", detect=_kimi_detect, compute=_kimi_compute)
+)
+
+
+# ---------------------------------------------------------------------------
+# Kimi-K3
+#
+# K3 replaces the K2/K2.5 <|im_*|> turn markers with an XTML tag format:
+#   <|open|> {tag} {attrs..} <|sep|> {content} <|close|> {tag} <|sep|>  [<|end_of_msg|>]
+# Tag names and attribute values (including the role) are ORDINARY text tokens;
+# only open/close/sep/end_of_msg are special tokens. An assistant turn reads
+#   <|open|> message role assistant <|sep|> {content} <|close|> message <|sep|>
+# and its content may nest further tags (``think``, ``response``), so the content
+# span is found by tracking open/close depth rather than by scanning for the next
+# marker.
+# ---------------------------------------------------------------------------
+
+
+def _k3_detect(tokenizer) -> bool:
+    """Whether ``tokenizer`` defines K3's XTML structural markers as real tokens."""
+    return _has_all_tokens(tokenizer, _K3_MARKERS)
+
+
+def _k3_compute(tokenizer, input_ids) -> torch.Tensor:
+    """Recover the assistant-content mask from already-tokenized K3 chat ids.
+
+    Marks the content of each ``message role=assistant`` turn -- from the token after
+    the message-open ``<|sep|>`` up to (excluding) the matching ``<|close|>`` -- which
+    includes the nested ``think``/``response`` sub-tags the model generates. Role
+    headers, other roles, and the turn-closing tokens stay unmasked, matching the
+    ``{% generation %}`` span a fast tokenizer would report.
+    """
+    ids = input_ids.tolist() if hasattr(input_ids, "tolist") else list(input_ids)
+    open_id = tokenizer.convert_tokens_to_ids("<|open|>")
+    close_id = tokenizer.convert_tokens_to_ids("<|close|>")
+    sep_id = tokenizer.convert_tokens_to_ids("<|sep|>")
+
+    n = len(ids)
+    mask = [0] * n
+    i = 0
+    while i < n:
+        if ids[i] != open_id:
+            i += 1
+            continue
+        # The header tokens sit between this <|open|> and its <|sep|>.
+        j = i + 1
+        while j < n and ids[j] != sep_id:
+            j += 1
+        if j >= n:
+            break
+        header = tokenizer.decode(ids[i + 1 : j]).lower()
+        if "message" not in header or "assistant" not in header:
+            i = j + 1
+            continue
+        # Content = [after this <|sep|>, matching <|close|>), skipping nested tags.
+        start = j + 1
+        depth = 1
+        k = start
+        while k < n:
+            if ids[k] == open_id:
+                depth += 1
+            elif ids[k] == close_id:
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        for t in range(start, k):
+            mask[t] = 1
+        i = k + 1
+
+    return torch.tensor(mask, dtype=torch.long)
+
+
+register_loss_mask_recovery(
+    LossMaskRecovery(name="kimi_k3", detect=_k3_detect, compute=_k3_compute)
 )

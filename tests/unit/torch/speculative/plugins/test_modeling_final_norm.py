@@ -37,6 +37,11 @@ _HIDDEN_SIZE = 16
         ("deepseek_v3", "rmsnorm"),
         ("kimi_k2", "rmsnorm"),
         ("kimi_k25", "rmsnorm"),
+        # Kimi-K3's text backbone reports "kimi_linear"; the outer VLM config's
+        # "kimi_k3" is deliberately NOT a key, since this table is keyed on the
+        # resolved text config.
+        ("kimi_linear", "rmsnorm"),
+        ("kimi_k3", None),
         # gpt_oss is intentionally DISABLED: its RMSNorm forward/weight dtype differs from the
         # Llama variant we reuse, so it must not resolve to a norm type until a matching class
         # is added.
