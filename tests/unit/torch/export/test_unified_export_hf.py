@@ -21,6 +21,7 @@ from _test_utils.torch.quantization.tied_modules import (
     make_tied_linear_pair,
     wrap_in_parent_with_tied_keys,
 )
+from diffusers.configuration_utils import FrozenDict
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_utils import TiedWeightMap
@@ -33,14 +34,27 @@ from modelopt.torch.export.unified_export_hf import _resolve_export_dtype
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-@pytest.mark.parametrize("dtype", [None, torch.float16])
-def test_resolve_export_dtype_without_configured_dtype(dtype, recwarn):
+@pytest.mark.parametrize(
+    ("config", "dtype", "expected_dtype", "warning_count"),
+    [
+        (object(), None, torch.float32, 0),
+        (object(), torch.float16, torch.float16, 0),
+        (FrozenDict(torch_dtype=torch.bfloat16), None, torch.bfloat16, 0),
+        (FrozenDict(torch_dtype=torch.bfloat16), torch.bfloat16, torch.bfloat16, 0),
+        (FrozenDict(torch_dtype=torch.bfloat16), torch.float16, torch.float16, 1),
+    ],
+)
+def test_resolve_export_dtype(config, dtype, expected_dtype, warning_count, recwarn):
     model = torch.nn.Linear(1, 1)
-    model.config = object()
+    model.config = config
 
-    expected_dtype = model.weight.dtype if dtype is None else dtype
     assert _resolve_export_dtype(model, dtype) == expected_dtype
-    assert not recwarn
+    assert len(recwarn) == warning_count
+    if warning_count:
+        assert str(recwarn[0].message) == (
+            "Model's original dtype (torch.bfloat16) differs from target dtype "
+            "(torch.float16), which may lead to numerical errors."
+        )
 
 
 def test_hf_all_tied_weights_keys_contract():
