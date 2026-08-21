@@ -17,14 +17,15 @@
 
 import copy
 import json
-import shutil
+from unittest.mock import patch
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -215,28 +216,41 @@ def test_layerwise_export_replaces_resume_artifacts(tmp_path):
 
     assert not list(checkpoint_dir.rglob("weights.pt"))
     assert not list(checkpoint_dir.rglob("quantizer_buffers.pt"))
-    # next_inputs and output_meta are not reconstructible from exported weights, so they stay.
+    # output_meta is not reconstructible from exported weights, so it stays.
     assert list(checkpoint_dir.rglob("output_meta.pt"))
+    # The cached activations are the bulk of the resume dir, and only the committed
+    # boundary's are resumable -- keeping one per layer would dwarf the checkpoint.
+    assert not list(checkpoint_dir.rglob("next_inputs.pt")), (
+        "a completed run has nothing to resume from, so no activation cache should remain"
+    )
 
 
 def test_resume_skips_exported_layers(tmp_path, baseline_checkpoint):
     """A run resuming mid-model must still produce the full, correct checkpoint."""
     export_dir = tmp_path / "fused"
     checkpoint_dir = tmp_path / "ckpt"
+    # Die partway, the way a lost GPU session would: only the committed boundary is
+    # resumable, so rewinding a *finished* run's manifest would not reproduce this state.
+    real_export_layer = LayerwiseExporter.export_layer
+
+    def die_at_layer_2(self, layer_idx, *args, **kwargs):
+        if layer_idx == 2:
+            raise RuntimeError("simulated interruption")
+        return real_export_layer(self, layer_idx, *args, **kwargs)
+
+    with (
+        patch.object(LayerwiseExporter, "export_layer", die_at_layer_2),
+        pytest.raises(RuntimeError, match="simulated interruption"),
+    ):
+        mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+
+    assert (export_dir / layer_shard_name(1)).is_file(), "layer 1 was never committed"
+    assert not (export_dir / layer_shard_name(2)).exists(), "layer 2 should not have landed"
+
+    # Shards 0..1 are on disk and must be reused rather than recalculated.
     mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
 
-    # Rewind the manifest so the next run believes only layers 0..1 finished; their shards
-    # are on disk and must be reused rather than recalculated.
-    manifest_path = checkpoint_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["last_completed_layer"] = 1
-    manifest_path.write_text(json.dumps(manifest))
-
-    resumed_dir = tmp_path / "resumed"
-    shutil.copytree(export_dir, resumed_dir)
-    mtq.quantize(_build_model(), _layerwise_cfg(resumed_dir, checkpoint_dir), _calib)
-
-    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(resumed_dir))
+    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
 
 
 def test_resume_without_matching_shards_fails_fast(tmp_path):
@@ -345,6 +359,33 @@ def test_identity_without_shards_does_not_block_a_rerun(tmp_path):
     mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
 
     assert _load_checkpoint(export_dir), "rerun produced no checkpoint"
+
+
+def _build_moe_model():
+    torch.manual_seed(0)
+    model = get_tiny_qwen3_moe(num_experts=16, num_experts_per_tok=1).cuda().eval()
+    model.config.architectures = ["Qwen3MoeForCausalLM"]
+    return model
+
+
+def test_moe_export_matches(tmp_path):
+    """MoE layers take a different path: fused expert inputs and gate/up amax sync.
+
+    This fixture uses the fused expert representation (one ``mlp.experts`` module), so it
+    does not cover the per-expert sibling replay in ``_fuse_unrouted_experts`` -- that
+    needs a checkpoint whose experts are separate ``experts.N.gate_proj`` modules.
+    """
+    baseline_dir = tmp_path / "baseline"
+    base = _nvfp4_cfg()
+    base["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    export_hf_checkpoint(mtq.quantize(_build_moe_model(), base, _calib), export_dir=baseline_dir)
+
+    export_dir = tmp_path / "fused"
+    mtq.quantize(
+        _build_moe_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg()), _calib
+    )
+
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
 
 
 def test_export_does_not_mutate_the_model(tmp_path):

@@ -18,6 +18,7 @@
 import contextlib
 import hashlib
 import json
+import re
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -28,13 +29,6 @@ from safetensors.torch import save_file
 
 from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .quant_utils import get_quant_config, get_quantization_format
-
-__all__ = [
-    "LayerwiseExporter",
-    "assert_layerwise_export_supported",
-    "layer_shard_name",
-    "transient_module_state",
-]
 
 # Fusing formats this path can handle itself. The groups _fuse_shared_input_modules works
 # on -- q/k/v behind input_layernorm, gate/up behind post_attention_layernorm -- live
@@ -70,6 +64,40 @@ def _is_quantized_module(module: nn.Module) -> bool:
     return any(
         isinstance(child, (TensorQuantizer, SequentialQuantizer)) for child in module.children()
     )
+
+
+def _fuse_unrouted_experts(layer_module: nn.Module, fused_linears: dict[str, list[str]]) -> None:
+    """Fuse the sibling experts the probe never routed a token to.
+
+    The probe runs one real batch, so on a 256-expert layer it activates a handful and the
+    rest would keep unmerged gate/up scales -- ``sync_moe_gate_up_amax`` covers
+    ``weight_quantizer.amax`` but not the static quantizer's ``global_amax``. Mirrors the
+    replay ``requantize_resmooth_fused_llm_layers`` does for the same reason, scoped to
+    this layer because experts never span one.
+    """
+    from .quant_utils import preprocess_linear_fusion
+
+    names = {name for name, _ in layer_module.named_modules()}
+    for group, members in fused_linears.items():
+        if not re.search(r"experts?\.\d+", group):
+            continue
+        expert_id = 0
+        while True:
+            sibling = re.sub(r"(experts?\.)\d+", rf"\g<1>{expert_id}", group, count=1)
+            if sibling in fused_linears:  # the probe already fused this one
+                expert_id += 1
+                continue
+            if sibling not in names:
+                break
+            preprocess_linear_fusion(
+                [
+                    layer_module.get_submodule(
+                        re.sub(r"(experts?\.)\d+", rf"\g<1>{expert_id}", member)
+                    )
+                    for member in members
+                ]
+            )
+            expert_id += 1
 
 
 def _module_formats(model: nn.Module) -> set:
@@ -279,7 +307,6 @@ class LayerwiseExporter:
             else raw_tied_keys
         )
 
-        self._calibrated_format_checked = False
         self._bind_identity(quant_config)
 
     def export_layer(
@@ -335,12 +362,10 @@ class LayerwiseExporter:
 
         AWQ and SVDQuant are only distinguishable after calibration -- their discriminators
         (``_pre_quant_scale``, ``svdquant_lora_a``) are registered by the calibrator -- so
-        the constructor's gate sees plain NVFP4 and passes. Checking again on the first
-        exported layer fails loudly instead of shipping unfused pre_quant_scale.
+        the constructor's gate sees plain NVFP4 and passes. Every layer, not just the
+        first: a recipe may apply such a format to a subset, and a resumed run starts
+        part-way through. One walk per layer is one whole-model walk in total.
         """
-        if self._calibrated_format_checked:
-            return
-        self._calibrated_format_checked = True
         unsupported = sorted(str(f) for f in _module_formats(layer_module) - SUPPORTED_FORMATS)
         if unsupported:
             raise NotImplementedError(
@@ -377,9 +402,10 @@ class LayerwiseExporter:
         input_to_linear, _ = collect_shared_input_modules(
             layer_module, lambda: probe_forward(layer_module)
         )
-        _fuse_shared_input_modules(
+        fused = _fuse_shared_input_modules(
             self._ctx.model, input_to_linear, quantization_format=layer_format
         )
+        _fuse_unrouted_experts(layer_module, fused)
 
     def finalize(self, extra_state_dict: dict[str, torch.Tensor] | None = None) -> dict:
         """Export the tail, write the config artifacts, and index all shards.
@@ -395,7 +421,6 @@ class LayerwiseExporter:
         from .unified_export_hf import (
             _add_mtp_exclusions,
             _dispatch_export_handler,
-            _warn_on_unsynced_moe_gate_up,
             _write_hf_export_config,
             save_non_weight_artifacts,
         )
@@ -409,7 +434,9 @@ class LayerwiseExporter:
         model = self._ctx.model
         quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         _add_mtp_exclusions(model, quant_config)
-        _warn_on_unsynced_moe_gate_up(model)
+        # No _warn_on_unsynced_moe_gate_up: export_layer syncs each layer inside
+        # transient_module_state, so the shards are synced but the live model is not --
+        # the check would fire on every MoE run and report a miss that did not happen.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
         # Config module names must match the tensors', or a loader treats an excluded
@@ -584,6 +611,12 @@ class LayerwiseExporter:
         layer count rather than a glob, so a longer previous run's leftovers cannot leak in.
         """
         from safetensors import safe_open
+
+        # A longer previous run's shards are already out of the index; delete them too,
+        # so the directory *is* the checkpoint rather than the checkpoint plus leftovers.
+        for stale in self._export_dir.glob("model-layer-*.safetensors"):
+            if int(stale.stem.rsplit("-", 1)[1]) >= len(self._layers):
+                stale.unlink()
 
         shards = [self._export_dir / layer_shard_name(i) for i in range(len(self._layers))]
         shards.append(self._export_dir / _TAIL_SHARD)

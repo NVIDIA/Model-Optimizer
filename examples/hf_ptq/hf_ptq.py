@@ -1363,6 +1363,11 @@ def quantize_main(
         # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
         # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
+        if args.layerwise_export and not mtp_layer_prefixes:
+            # Only the FSDP2 loader flags these before quantization. Per-layer export has
+            # to refuse *before* calibration, or the run writes a complete-looking
+            # checkpoint and only then discovers it is missing the MTP weights.
+            mtp_layer_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:

@@ -737,6 +737,15 @@ class _CheckpointState:
 
         print_rank_0(f"Checkpoint: restored {self.start_layer} previously calibrated layers")
 
+    def _prune_stale_next_inputs(self, keep: int) -> None:
+        """Drop every layer's cached activations but the committed boundary's."""
+        for idx in range(self.num_layers):
+            if idx == keep:
+                continue
+            stale = os.path.join(_layer_dir(self.checkpoint_dir, idx), "next_inputs.pt")
+            if os.path.exists(stale):
+                os.remove(stale)
+
     def save(
         self,
         layer_idx: int,
@@ -803,6 +812,12 @@ class _CheckpointState:
             calib_mutates_weights=self.calib_mutates_weights,
             save_layer_state=self.save_layer_state,
         )
+        # Per-layer export only, whose resume dir is auto-derived and so was never opted
+        # into: without this it keeps one activation set per layer, which dwarfs the
+        # checkpoint it sits beside. After the manifest commits the boundary, so a crash
+        # mid-write still leaves the previous one resumable.
+        if not self.save_layer_state:
+            self._prune_stale_next_inputs(keep=layer_idx)
         window_start = self._last_saved_layer + 1
         self._last_saved_layer = layer_idx
         window_size = layer_idx - window_start + 1

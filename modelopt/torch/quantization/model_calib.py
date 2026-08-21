@@ -2120,8 +2120,15 @@ def layerwise_calibrate(
         # detect_resume_point returns None once the manifest is complete, which would put
         # start_layer back at 0 and recalibrate everything. The shards are already on disk,
         # so a completed manifest means finalize-only.
-        manifest = _read_manifest(checkpoint_dir)
-        if manifest is not None and manifest.get("last_completed_layer", -1) + 1 >= num_layers:
+        manifest = _read_manifest(checkpoint_dir) or {}
+        last, total = manifest.get("last_completed_layer"), manifest.get("num_layers")
+        if total is not None and total != num_layers:
+            raise ValueError(
+                f"Layerwise checkpoint at {checkpoint_dir} was written for {total} layers "
+                f"but this model has {num_layers}. Use a fresh checkpoint_dir."
+            )
+        # None, not -1: a truncated or hand-edited manifest must not arithmetic-error here.
+        if last is not None and last + 1 >= num_layers:
             exporter.assert_shards_present(num_layers)
             exporter.finalize()
             print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
