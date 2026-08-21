@@ -85,19 +85,22 @@ def test_general_ptq_recipe_count_in_ptq_md():
 
 
 def test_every_model_specific_ptq_dir_is_mentioned():
-    """Every model dir under huggingface/ with PTQ recipes must appear in ptq.md.
+    """Every model dir under huggingface/ or models/ with PTQ recipes must appear in ptq.md.
 
     The identifier checked is the directory containing the ptq/ folder — the
-    HF model_type (e.g. ``gemma4``), a nested checkpoint dir (e.g.
-    ``Step3.5-Flash``), or a models/<org>/<checkpoint> leaf (e.g.
-    ``Nemotron-3-Nano-4B``).
+    HF ``model_type`` (e.g. ``gemma4``) or a models/<org>/<model_id> leaf
+    (e.g. ``Step-3.5-Flash``, ``Nemotron-3-Nano-4B-BF16``).
     """
     doc = _ptq_md_text()
-    hf_dir = RECIPES_DIR / "huggingface"
+    search_dirs = (RECIPES_DIR / "huggingface", RECIPES_DIR / "models")
     model_dirs = sorted(
-        {yaml_path.parent.parent.name for yaml_path in hf_dir.glob("**/ptq/*.yaml")}
+        {
+            yaml_path.parent.parent.name
+            for base in search_dirs
+            for yaml_path in base.glob("**/ptq/*.yaml")
+        }
     )
-    assert model_dirs, "No model-specific PTQ recipes found under huggingface/"
+    assert model_dirs, "No model-specific PTQ recipes found under huggingface/ or models/"
     missing = [name for name in model_dirs if name not in doc]
     assert not missing, (
         f"Model-specific PTQ recipe folders are missing from "

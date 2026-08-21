@@ -65,7 +65,7 @@ pipeline:
       --tp_size 1
       --pp_size 1
       --ep_size 1
-      --recipe huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
+      --recipe models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
       --calib_batch_size 1
       --calib_num_samples 1000
       --seq_length 32768
