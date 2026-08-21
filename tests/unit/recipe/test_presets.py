@@ -63,6 +63,10 @@ def test_kv_none_sentinel_is_not_a_discovered_preset():
     assert presets.KV_CACHE_NONE not in presets.KV_QUANT_CFG_CHOICES
 
 
+def test_nvfp4_mse_preset_uses_nvfp4_storage_cost():
+    assert presets.QUANT_CFG_CHOICES["nvfp4_w4a4_weight_mse_fp8_sweep"]["effective_bits"] == 4.5
+
+
 def test_w4a16_nvfp4_preset_disables_vllm_marlin_incompatible_projections():
     disabled_quantizers = {
         entry["quantizer_name"]
