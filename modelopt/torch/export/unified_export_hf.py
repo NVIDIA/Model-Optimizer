@@ -1598,6 +1598,25 @@ def export_hf_checkpoint(
     # buffer instead of the whole quantized state dict.
     _offloaded = has_accelerate_offload(model)
 
+    # An offloaded model takes the streaming path below; otherwise a distributed FSDP2 model takes
+    # the no-gather path, which writes weights and config itself instead of going through
+    # save_pretrained and returns before the gather path's extra_state_dict merge. Neither option
+    # can be honoured there, so reject explicitly rather than dropping them silently (the streaming
+    # path declines save_modelopt_state the same way).
+    if is_distributed and not _offloaded:
+        if extra_state_dict:
+            raise NotImplementedError(
+                "extra_state_dict is not supported by the no-gather FSDP2 distributed export: "
+                "each rank writes its own shards, so the extra tensors are never merged in. "
+                "Export without it, or outside torch.distributed to take the gather path."
+            )
+        if save_modelopt_state:
+            raise NotImplementedError(
+                "save_modelopt_state=True is not supported by the no-gather FSDP2 distributed "
+                "export: it writes the checkpoint directly rather than through "
+                "model.save_pretrained(). Save the ModelOpt state separately with mto.save()."
+            )
+
     try:
         if _offloaded:
             # Imported here rather than at module scope: the streaming exporter imports the
