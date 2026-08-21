@@ -1749,6 +1749,23 @@ _AQ_MINIMAL_BODY = (
 )
 
 
+def test_load_recipe_autoquantize_method_options(tmp_path):
+    """method_options reaches the config from YAML, so recipe users can select a method's
+    settings (e.g. the aumann_shapley damage bound) rather than only its name."""
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    num_path_nodes: 2\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+
+    assert aq.auto_quantize_method == "aumann_shapley"
+    assert aq.method_options == {"num_path_nodes": 2, "max_predicted_damage": 0.05}
+
+
 def test_load_recipe_autoquantize_minimal(tmp_path):
     """Minimal AutoQuantize recipe loads with the right type and field defaults."""
     recipe_file = tmp_path / "aq.yml"
@@ -1759,6 +1776,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
+    assert aq.method_options is None
     assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8

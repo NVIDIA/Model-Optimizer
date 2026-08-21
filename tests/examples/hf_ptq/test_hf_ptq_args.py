@@ -83,6 +83,46 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
 
 
+def test_autoquant_recipe_damage_bound_drops_effective_bits(monkeypatch):
+    """A recipe asking for a predicted-damage bound must not also send effective_bits.
+
+    effective_bits carries a schema default so a recipe cannot omit it, but the searcher
+    rejects being given both targets -- without this the damage-bound mode is unreachable
+    from any recipe.
+    """
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    aq.auto_quantize_method = "aumann_shapley"
+    aq.method_options = {"max_predicted_damage": 0.05}
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert "effective_bits" not in inputs["constraints"]
+    assert inputs["method_options"] == {"max_predicted_damage": 0.05}
+
+    # The searcher accepts that combination (it rejects both targets together).
+    from modelopt.torch.quantization.algorithms import AUTO_QUANTIZE_SEARCHERS
+
+    AUTO_QUANTIZE_SEARCHERS["aumann_shapley"]().validate_search_input(
+        inputs["constraints"], inputs["method_options"]
+    )
+
+
+def test_autoquant_recipe_keeps_effective_bits_without_a_damage_bound(monkeypatch):
+    """Other method_options leave the bit-budget target untouched."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    aq.auto_quantize_method = "aumann_shapley"
+    aq.method_options = {"num_path_nodes": 2}
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"]["effective_bits"] == 5.4
+    assert inputs["method_options"] == {"num_path_nodes": 2}
+
+
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
     """Top-level cost_excluded_layers maps to the mtq constraints.cost.excluded_module_name_patterns
     key (distinct from disabled_layers), so a cost-exclusion recipe matches the nested mtq dict."""

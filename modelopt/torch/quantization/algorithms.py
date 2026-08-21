@@ -17,6 +17,7 @@
 
 import copy
 import fnmatch
+import functools
 import gc
 import types
 import warnings
@@ -268,6 +269,12 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
+@functools.cache
+def _no_quant_signature() -> str:
+    """Canonical signature of the no-quant recipe, used to pin it last in the format ladder."""
+    return QuantRecipe(quant_cfg=None).checkpoint_signature
+
+
 class QuantRecipe(CustomHPType):
     """A subclass of QuantizeConfig enabling auto_quantize specific configurations.
 
@@ -308,6 +315,11 @@ class QuantRecipe(CustomHPType):
         """Return the canonical identity used for ordering and checkpoint validation."""
         return getattr(self, "_config_signature", self.config.model_dump_json())
 
+    @property
+    def is_no_quant(self) -> bool:
+        """Whether this recipe leaves the module unquantized."""
+        return self.checkpoint_signature == _no_quant_signature()
+
     @staticmethod
     def get_auto_name_for_config(quant_cfg: str | dict[str, Any] | None) -> str | None:
         """Get a name for the quantization configuration."""
@@ -332,8 +344,11 @@ class QuantRecipe(CustomHPType):
         return self._str_repr
 
     def __lt__(self, other: "QuantRecipe"):
-        return (self.compression, self.checkpoint_signature) < (
+        # Pin no_quant last among equal-compression recipes: callers read ``choices[0]`` as the
+        # most aggressive candidate and the last entry as the unquantized end.
+        return (self.compression, self.is_no_quant, self.checkpoint_signature) < (
             other.compression,
+            other.is_no_quant,
             other.checkpoint_signature,
         )
 
@@ -413,8 +428,10 @@ class QuantRecipeHparam(Hparam):
         self.allow_no_quant = allow_no_quant
         self.is_fixed = fixed_recipe is not None
 
-        self.quant_modules = list(set(quant_modules or []))
-        self.score_modules = list(set(score_modules or self.quant_modules))
+        # dict.fromkeys, not set: nn.Module hashes by identity, so set order differs between
+        # ranks, and get_score picks a representative from this list to supply collective groups.
+        self.quant_modules = list(dict.fromkeys(quant_modules or []))
+        self.score_modules = list(dict.fromkeys(score_modules or self.quant_modules))
 
         fixed_quantizers = (
             {
@@ -531,7 +548,18 @@ class QuantRecipeHparam(Hparam):
             if importance is None:
                 continue
 
+            # A group scoring at a plain container has no parallel_state of its own, but its
+            # importance is still a per-rank partial sum: fall back to the group's quant modules.
             parallel_state = getattr(score_module, "parallel_state", None)
+            if parallel_state is None:
+                parallel_state = next(
+                    (
+                        state
+                        for module in self.quant_modules
+                        if (state := getattr(module, "parallel_state", None)) is not None
+                    ),
+                    None,
+                )
 
             if parallel_state is None:
                 total_score += importance.cpu().item()
@@ -632,10 +660,12 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     # certain modules to share the same format. Sensitivity scores are computed from perturbations
     # at score modules. See AutoQuantizeGradientSearcher for detailed documentation.
 
-    candidate_stats: dict[str, dict[str, list[float]]]
+    candidate_stats: dict[str, dict[str, Any]]
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
+    # Config keys settable through ``auto_quantize(method_options=...)``.
+    method_options_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -660,7 +690,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     @property
     def default_search_config(self):
-        """Get the default config for the searcher."""
+        """Get the default config for the searcher.
+
+        A fresh literal, not an extension of ``BaseSearcher``'s defaults: ``score_func`` is
+        intentionally absent for every AutoQuantize method.
+        """
         return {
             "quantization_formats": ["NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"],
             "fixed_quantization_config": None,
@@ -708,6 +742,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "`forward_step` must be provided for `auto_quantize`."
         )
         return config
+
+    def validate_search_input(self, constraints, config) -> None:
+        """Hook for cross-field input validation before the model is converted."""
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
@@ -1056,7 +1093,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs = [], [], []
+            formats, raw_scores, scores, costs = [], [], [], []
             prev_score = float("inf")
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
@@ -1064,12 +1101,16 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 score = hparam.get_score(recipe)
                 cost = hparam.get_cost(recipe)
 
+                raw_scores.append(score)
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
                 costs.append(cost)
                 prev_score = score
 
             self.candidate_stats[name]["formats"] = formats
+            # Unclamped values, aligned with ``formats``, for method-specific fitting and
+            # diagnostics (the reduction in get_score is a collective; run it only once).
+            self.candidate_stats[name]["raw_scores"] = raw_scores
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
@@ -1358,6 +1399,49 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             return [0.99, 0.90, None]
         return [None, 0.99, 0.90]
 
+    def _run_linear_program_search(self, max_weight_size, verbose=False):
+        """Select recipes with the standard AutoQuantize linear program."""
+        # TODO: Do this only for rank 0 in the respective pipeline group
+        for lower_bound in self._get_search_lower_bounds():
+            # The solver can fail without a lower bound. Retry with progressively looser
+            # bounds before reporting that the constraint could not be satisfied.
+            constraints, constraint_name = self._get_constraints_for_search(
+                max_weight_size, lower_bound
+            )
+            lps = LPS(
+                name="AutoQuantize",
+                constraints=constraints,
+                constraints_to_candidate_costs={
+                    constraint_name: [
+                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
+                    ]
+                },
+                candidate_scores=[
+                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
+                ],
+                objective_type="minimize",
+                verbose=verbose,
+            )
+            selections, self.status = lps()
+            if self.status == "Optimal":
+                break
+
+        is_satisfied = self.status == "Optimal"
+        if not is_satisfied:
+            warnings.warn(
+                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
+            )
+
+        best_recipes = {}
+        for name, selected_idx in zip(self.candidate_stats, selections):
+            best_recipes[name] = {
+                "format": self.candidate_stats[name]["formats"][selected_idx],
+                "costs": self.candidate_stats[name]["costs"][selected_idx],
+                "scores": self.candidate_stats[name]["scores"][selected_idx],
+            }
+
+        return best_recipes, is_satisfied
+
     @abstractmethod
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Run the search with stats to get the best recipe and whether the constraints are satisfied."""
@@ -1438,7 +1522,74 @@ def _add_auto_quantize_score(grad_output, output_diff, score_tensor):
     score_tensor += _get_auto_quantize_score(grad_output, output_diff)
 
 
-class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
+class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
+    """Shared activation-backward orchestration for AutoQuantize scoring methods."""
+
+    _custom_support: list[tuple[Callable, Callable, Callable]] = []
+
+    score_module_rules = [
+        # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
+        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
+        r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
+        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
+    ]
+
+    @classmethod
+    def register_custom_support(
+        cls,
+        is_supported_checker: Callable,
+        grad_ckpt_context: Callable,
+        is_param_grad_enabled: Callable,
+    ) -> None:
+        """(Optional) Register custom support for `AutoQuantize` score estimation.
+
+        This custom support is used to enable memory/compute efficient backward gradient
+        propagation. This involves:
+
+        - `grad_ckpt_context`: backward pass with gradient checkpointing enabled
+        - `is_param_grad_enabled`: AutoQuantize only needs activation gradients to be computed
+          (not weight gradients). `is_param_grad_enabled` is used to select which parameters
+          should have gradients enabled, limiting gradient computation to only what's needed for
+          activation gradients. For LLMs, to trigger all activation gradient computation, just
+          enabling the embedding layer weight gradient is sufficient. This will enable gradient
+          computation for all the activation gradients downstream.
+
+        If the `is_supported_checker(model)` returns True, the `grad_ckpt_context(model)` will be
+        used to enable gradient checkpointing and `is_param_grad_enabled(pname, model)` will be
+        used to select which parameters have gradients enabled to minimize gradient computation.
+        """
+        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
+
+    @abstractmethod
+    def _estimate_auto_quantize_scores(self, is_param_grad_enabled: Callable) -> None:
+        """Estimate scores while activation gradients are enabled."""
+
+    def estimate_sensitivity_scores(self) -> None:
+        """Run backward scoring with the first matching model-specific support hook."""
+        self.model.eval()
+
+        grad_checkpointing_context = None
+
+        def is_param_grad_enabled(_name, _model):
+            return True
+
+        for is_supported, context_candidate, grad_candidate in self._custom_support:
+            if is_supported(self.model):
+                grad_checkpointing_context = context_candidate
+                is_param_grad_enabled = grad_candidate
+                break
+
+        context = (
+            grad_checkpointing_context(self.model)
+            if grad_checkpointing_context is not None
+            else nullcontext()
+        )
+        with context:
+            self._estimate_auto_quantize_scores(is_param_grad_enabled)
+
+
+class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
     """A searcher for AutoQuantize algorithm that uses gradient based score estimation.
 
     In AutoQuantize, we search for the best per-layer quantization configuration that minimizes the sum of per-layer
@@ -1472,17 +1623,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     method_name = "gradient"
 
-    score_module_rules = [
-        # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
-        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
-        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
-        r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
-    ]
-
-    # See `register_custom_support` for details
-    _custom_support: list[tuple[Callable, Callable, Callable]] = []
-
     @property
     def default_search_config(self):
         """Get the default config for the searcher."""
@@ -1510,30 +1650,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
             config["forward_backward_step"] = self._get_default_forward_backward_step()
 
         return config
-
-    @classmethod
-    def register_custom_support(
-        cls,
-        is_supported_checker: Callable,
-        grad_ckpt_context: Callable,
-        is_param_grad_enabled: Callable,
-    ) -> None:
-        """(Optional) Register custom support for `AutoQuantize` score estimation.
-
-        This custom support is used to enable memory/compute efficient backward gradient propagation. This involves:
-
-        - `grad_ckpt_context`: backward pass with gradient checkpointing enabled
-        - `is_param_grad_enabled`: AutoQuantize only needs activation gradients to be computed (not weight
-          gradients). `is_param_grad_enabled` is used to select which parameters should have gradients enabled,
-          limiting gradient computation to only what's needed for activation gradients. For LLMs, to trigger all
-          activation gradient computation, just enabling the embedding layer weight gradient is sufficient. This will
-          enable gradient computation for all the activation gradients downstream.
-
-        If the `is_supported_checker(model)` returns True, the `grad_ckpt_context(model)` will be
-        used to enable gradient checkpointing and `is_param_grad_enabled(pname, model)`
-        will be used to select which parameters have gradients enabled to minimize gradient computation.
-        """
-        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
 
     def _get_default_forward_backward_step(self):
         def forward_backward_step(model, data):
@@ -1671,76 +1787,13 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
         del params_metadata
         gc.collect()
 
-    def estimate_sensitivity_scores(self) -> None:
-        """Estimate sensitivity scores using hessian approximation."""
-        self.model.eval()
-
-        def _default_is_param_grad_enabled(pname, model):
-            return True
-
-        grad_checkpointing_ctxt = None
-        is_param_grad_enabled = _default_is_param_grad_enabled
-        for is_supported_checker, ctxt_candidate, grad_enabled_candidate in self._custom_support:
-            if is_supported_checker(self.model):
-                grad_checkpointing_ctxt = ctxt_candidate
-                is_param_grad_enabled = grad_enabled_candidate
-                break
-
-        with grad_checkpointing_ctxt(self.model) if grad_checkpointing_ctxt else nullcontext():
-            self._estimate_auto_quantize_scores(is_param_grad_enabled)
-
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Linear Programming Solve for gradient based auto_quantize.
 
         AutoQuantize uses Linear Programming Solver to find the optimal quantization configuration which
         minimizes the sum of per-layer auto_quantize scores while meeting the specified constraint.
         """
-        # TODO: Do this only for rank 0 in the respective pipeline group
-
-        for lower_bound in self._get_search_lower_bounds():
-            # The LP solver for auto_quantize sometimes fails to find a solution if a lower bound is not
-            # specified. I dont know why this happens.
-            # As a workaround, lets specify a lower bound for the weight compression if previous
-            # search without lower bound fails.
-            constraints, constraint_name = self._get_constraints_for_search(
-                max_weight_size, lower_bound
-            )
-
-            lps = LPS(
-                name="AutoQuantize",
-                constraints=constraints,
-                constraints_to_candidate_costs={
-                    constraint_name: [
-                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
-                    ]
-                },
-                candidate_scores=[
-                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
-                ],
-                objective_type="minimize",
-                verbose=verbose,
-            )
-            selections, self.status = lps()
-            if self.status == "Optimal":
-                break
-
-        if self.status != "Optimal":
-            warnings.warn(
-                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
-            )
-            is_satisfied = False
-        else:
-            is_satisfied = True
-
-        best_recipes = {}
-        for name, selected_idx in zip(self.candidate_stats.keys(), selections):
-            best_recipes[name] = {
-                "format": self.candidate_stats[name]["formats"][selected_idx],
-                "costs": self.candidate_stats[name]["costs"][selected_idx],
-                "scores": self.candidate_stats[name]["scores"][selected_idx],
-            }
-
-        return best_recipes, is_satisfied
+        return self._run_linear_program_search(max_weight_size, verbose)
 
 
 @torch.compile(dynamic=True)
@@ -1946,6 +1999,13 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 # Backward compatibility alias (defaults to gradient-based searcher)
 AutoQuantizeSearcher = AutoQuantizeGradientSearcher
 
+# Registry of auto_quantize sensitivity-scoring methods. Additional methods register
+# themselves here on import (see e.g. _auto_quantize_shapley).
+AUTO_QUANTIZE_SEARCHERS: dict[str, type[_AutoQuantizeBaseSearcher]] = {
+    AutoQuantizeGradientSearcher.method_name: AutoQuantizeGradientSearcher,
+    AutoQuantizeKLDivSearcher.method_name: AutoQuantizeKLDivSearcher,
+}
+
 
 def _as_list(value) -> list:
     if value is None:
@@ -2078,14 +2138,12 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     max_weight_size = total_weight_size * compression
     method = search_state["method"]
 
-    if method == "gradient":
-        searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
-    else:
+    if method not in AUTO_QUANTIZE_SEARCHERS:
         raise ValueError(
-            f"Unknown autoquant search method: {method!r}. Expected 'gradient' or 'kl_div'."
+            f"Unknown autoquant search method: {method!r}. "
+            f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
+    searcher = AUTO_QUANTIZE_SEARCHERS[method]()
 
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
@@ -2103,6 +2161,11 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
     }
+    # Method-specific state (e.g. the aumann_shapley damage model) participates in the
+    # re-solve; restore whatever the searcher declares beyond the fields set above.
+    for key in searcher.default_state_dict:
+        if key in search_state and not hasattr(searcher, key):
+            setattr(searcher, key, search_state[key])
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
 
     best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
