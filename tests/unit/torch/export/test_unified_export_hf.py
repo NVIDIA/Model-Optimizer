@@ -33,11 +33,13 @@ from modelopt.torch.export.unified_export_hf import _resolve_export_dtype
 from modelopt.torch.quantization.nn import TensorQuantizer
 
 
-def test_resolve_export_dtype_uses_explicit_dtype_without_configured_dtype(recwarn):
-    model = torch.nn.Module()
+@pytest.mark.parametrize("dtype", [None, torch.float16])
+def test_resolve_export_dtype_without_configured_dtype(dtype, recwarn):
+    model = torch.nn.Linear(1, 1)
     model.config = object()
 
-    assert _resolve_export_dtype(model, torch.float16) == torch.float16
+    expected_dtype = model.weight.dtype if dtype is None else dtype
+    assert _resolve_export_dtype(model, dtype) == expected_dtype
     assert not recwarn
 
 

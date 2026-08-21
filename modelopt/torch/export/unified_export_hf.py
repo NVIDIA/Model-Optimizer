@@ -826,9 +826,12 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
 
 def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
     """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
-    if dtype is None:
-        return model.config.torch_dtype
     configured_dtype = getattr(model.config, "torch_dtype", None)
+    if dtype is None:
+        if configured_dtype is not None:
+            return configured_dtype
+        first_parameter = next(model.parameters(), None)
+        return first_parameter.dtype if first_parameter is not None else torch.float16
     if configured_dtype is not None and dtype != configured_dtype:
         warnings.warn(
             f"Model's original dtype ({configured_dtype}) differs from target dtype "
