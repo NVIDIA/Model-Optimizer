@@ -22,8 +22,10 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from pathlib import Path
 
+import pytest
 import yaml
 
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
@@ -50,6 +52,28 @@ def test_lightweight_package_does_not_import_torch() -> None:
         capture_output=True,
         text=True,
         check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
+    environment = dict(os.environ)
+    # This subprocess checks cold importability, not subprocess coverage collection.
+    environment.pop("COVERAGE_PROCESS_START", None)
+    environment.pop("COVERAGE_FILE", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path; "
+            "assert callable(pipeline_config_from_path)",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
 
@@ -164,6 +188,7 @@ def test_load_experiment_config_composes_defaults_and_interpolation(
                 "puzzle_dir": "${oc.env:RUN_ROOT,unused}",
                 "pruning": {"automodel": {"parallel": {"pp": 2, "dp_shard": 4}}},
                 "teacher_dir": "${puzzle_dir}/ckpts/teacher",
+                "hook_class": "${get_object:package.module.Hook}",
             }
         )
     )
@@ -184,12 +209,78 @@ def test_load_experiment_config_composes_defaults_and_interpolation(
     assert config["puzzle_dir"] == str(tmp_path / "run")
     assert config["teacher_dir"] == str(tmp_path / "run" / "ckpts" / "teacher")
     assert config["copy"] == config["teacher_dir"]
+    assert config["hook_class"] == {"__type__": "package.module.Hook"}
     assert config["pruning"]["automodel"]["parallel"] == {
         "pp": 1,
         "dp_shard": 4,
         "ep": 2,
     }
     assert config["_runtime"]["config_path"] == str(experiment)
+
+
+def test_load_experiment_config_matches_hydra_scientific_number_semantics(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text(
+        """\
+defaults: [_self_]
+bypass:
+  best_val_loss: 1e+9
+  training:
+    learning_rate: 1e-4
+    min_lr_factor: 1e-5
+  schedule: [1e-4, 1e-5, \"1e-4\"]
+quoted: \"1e-4\"
+"""
+    )
+
+    config = load_experiment_config(experiment, overrides=["+threshold=1e-4"])
+
+    assert config["bypass"]["best_val_loss"] == 1e9
+    assert config["bypass"]["training"] == {
+        "learning_rate": 1e-4,
+        "min_lr_factor": 1e-5,
+    }
+    assert config["bypass"]["schedule"] == [1e-4, 1e-5, "1e-4"]
+    assert config["quoted"] == "1e-4"
+    assert config["threshold"] == 1e-4
+    assert all(
+        isinstance(value, float)
+        for value in (
+            config["bypass"]["best_val_loss"],
+            config["bypass"]["training"]["learning_rate"],
+            config["bypass"]["training"]["min_lr_factor"],
+            config["threshold"],
+        )
+    )
+
+
+def test_load_experiment_config_rejects_deletion_overrides(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    with pytest.raises(ValueError, match="^Deletion overrides are not supported"):
+        load_experiment_config(experiment, overrides=["~value"])
+
+
+def test_load_experiment_config_distinguishes_hydra_addition_modes(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("value: 1\n")
+
+    added = load_experiment_config(experiment, overrides=["+added.value=2"])
+    with pytest.raises(ValueError, match="^Addition override already exists"):
+        load_experiment_config(experiment, overrides=["+value=2"])
+    with pytest.raises(ValueError, match="^Override path does not exist"):
+        load_experiment_config(experiment, overrides=["missing.value=2"])
+    replaced = load_experiment_config(experiment, overrides=["++value=2"])
+
+    assert added["added"] == {"value": 2}
+    assert replaced["value"] == 2
 
 
 def test_convert_completeness_requires_runtime_subblock_library(
@@ -313,8 +404,6 @@ def test_depth_completeness_requires_matching_complete_trajectory(
 def test_build_library_requires_its_own_complete_outputs(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
     config = {"puzzle_dir": str(tmp_path)}
     write_terminal_manifest(tmp_path, "build_library", config=config)
     (tmp_path / "subblock_stats.json").write_text("{}")
@@ -324,6 +413,40 @@ def test_build_library_requires_its_own_complete_outputs(
     assert not stage_is_complete(config, "build_library")
     (tmp_path / "candidate_library.json").write_text("{}")
     assert stage_is_complete(config, "build_library")
+
+
+def test_build_library_completion_accepts_equivalent_loader_and_worker_configs(
+    tmp_path: Path, write_terminal_manifest
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text(
+        f"""\
+defaults: [_self_]
+puzzle_dir: {tmp_path}
+build_library:
+  enabled: true
+bypass:
+  best_val_loss: 1e+9
+  training:
+    learning_rate: 1e-4
+    min_lr_factor: 1e-5
+"""
+    )
+    controller_config = load_experiment_config(experiment)
+    worker_config = deepcopy(controller_config)
+    worker_config["library"] = {}
+
+    write_terminal_manifest(tmp_path, "build_library", config=worker_config)
+    for name in (
+        "replacement_library.json",
+        "candidate_library.json",
+        "subblock_stats.json",
+    ):
+        (tmp_path / name).write_text("{}")
+
+    assert stage_is_complete(controller_config, "build_library")
+    controller_config["bypass"]["best_val_loss"] = 2e9
+    assert not stage_is_complete(controller_config, "build_library")
 
 
 def test_embedding_build_library_requires_every_width_scenario(

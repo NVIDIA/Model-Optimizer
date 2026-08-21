@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Run or finalize one independently distributed width-diagnostic axis."""
 
 from __future__ import annotations
@@ -14,10 +29,11 @@ from modelopt.torch.puzzletron.diagnostics.campaign_progress_report import (
     generate_campaign_progress_report,
 )
 from modelopt.torch.puzzletron.diagnostics.width_sanity import aggregate_width_sanity
-from modelopt.torch.puzzletron.manifest import StageManifest, write_stage_manifest
+from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
 from modelopt.torch.puzzletron.pipeline_config import (
     load_runtime_hydra_config,
     pipeline_config_from_path,
+    rebase_authored_pipeline_config,
 )
 from modelopt.torch.puzzletron.stage_runner import run_stage
 from modelopt.torch.puzzletron.stages.diagnostics import _PRIMARY_METRICS
@@ -26,10 +42,9 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 
 def _axes(config: dict) -> list[str]:
     search_axes = (config.get("search_space") or {}).get("axes") or {}
-    non_sortable = set(
-        str(axis)
-        for axis in (config.get("width_sanity") or {}).get("non_sortable_axes", ())
-    )
+    non_sortable = {
+        str(axis) for axis in (config.get("width_sanity") or {}).get("non_sortable_axes", ())
+    }
     enabled = [
         str(axis)
         for axis, axis_cfg in search_axes.items()
@@ -118,7 +133,7 @@ def _worker_config(config: dict, axis: str, config_path: Path) -> dict:
     config["width_sanity"] = diagnostic
     runtime["overrides"] = runtime_overrides
     config["_runtime"] = runtime
-    return config
+    return rebase_authored_pipeline_config(config)
 
 
 def _validate_worker_topology(config: dict, axis: str) -> None:
@@ -138,13 +153,7 @@ def _validate_worker_topology(config: dict, axis: str) -> None:
             "axis diagnostic dp_shard must be divisible by ep because EP is overlaid "
             f"on FSDP shards: parallel={parallel}"
         )
-    expected = (
-        sizes["tp"]
-        * sizes["cp"]
-        * sizes["pp"]
-        * sizes["dp_shard"]
-        * sizes["dp_replicate"]
-    )
+    expected = sizes["tp"] * sizes["cp"] * sizes["pp"] * sizes["dp_shard"] * sizes["dp_replicate"]
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if expected != world_size:
         raise ValueError(
@@ -194,9 +203,7 @@ def _finalize(config_path: Path) -> None:
     worker_manifests = {}
     for axis in axes:
         safe = _safe_axis(axis)
-        manifest_path = (
-            puzzle_dir / ".axis_workers" / safe / "manifests" / "width_sanity.json"
-        )
+        manifest_path = puzzle_dir / ".axis_workers" / safe / "manifests" / "width_sanity.json"
         artifact_dir = puzzle_dir / "artifacts" / f"activation_diagnostic_axis_{safe}"
         summary_path = artifact_dir / "activation_diagnostic_summary.json"
         if manifest_path.is_file():
@@ -244,11 +251,7 @@ def _finalize(config_path: Path) -> None:
     parallel_execution = {
         "workers": len(axes),
         "gpus_per_worker": (
-            sizes["tp"]
-            * sizes["cp"]
-            * sizes["pp"]
-            * sizes["dp_shard"]
-            * sizes["dp_replicate"]
+            sizes["tp"] * sizes["cp"] * sizes["pp"] * sizes["dp_shard"] * sizes["dp_replicate"]
         ),
         **sizes,
     }
@@ -266,10 +269,10 @@ def _finalize(config_path: Path) -> None:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         summary_path = artifacts_dir / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-        manifest = StageManifest(
-            stage=stage,
-            inputs={"config": config, "worker_manifests": worker_manifests},
-            config=config,
+        manifest = stage_manifest_from_config(
+            stage,
+            config,
+            inputs={"worker_manifests": worker_manifests},
         )
         manifest.complete(
             outputs={

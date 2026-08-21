@@ -23,7 +23,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from pathlib import Path
 from queue import Queue
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..anymodel.registry import resolve_descriptor_from_pretrained
@@ -33,6 +33,7 @@ from ..distillation.global_automodel import (
     build_global_kd_config,
     run_global_kd,
 )
+from ..security_policy import require_boolean_policy
 from .common import complete_stage
 from .graph import StageSkipReason
 
@@ -197,11 +198,11 @@ def _select_evaluated_candidates(
 
 
 def _with_teacher_checkpoint(
-    teacher_dir: str | Path | None, candidates: list[tuple[str, str | Path]]
+    teacher_dir: str | Path | None, candidates: Sequence[tuple[str, str | Path]]
 ) -> list[tuple[str, str | Path]]:
     """Prepend the configured teacher while keeping downstream checkpoints unique."""
     if teacher_dir is None:
-        return candidates
+        return list(candidates)
     teacher_key = str(teacher_dir)
     return [("teacher", teacher_dir)] + [
         (name, checkpoint)
@@ -300,9 +301,23 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
             skip_reason=StageSkipReason.DISABLED,
             message="AIPerf is disabled.",
         )
+    model_cfg = dict(config.get("model") or {})
+    trust_remote_code = require_boolean_policy(
+        stage_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False)),
+        path="aiperf.trust_remote_code",
+        default=False,
+    )
+    allow_aiperf_v011_online_tokenizer_resolution = require_boolean_policy(
+        stage_cfg.get("allow_aiperf_v011_online_tokenizer_resolution", False),
+        path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+        default=False,
+    )
     from ..benchmarks import run_aiperf_sweep, write_aiperf_report
 
-    puzzle_dir = Path((config.get("experiment") or {}).get("dir"))
+    experiment_dir = (config.get("experiment") or {}).get("dir")
+    if experiment_dir is None:
+        raise ValueError("AIPerf requires experiment.dir")
+    puzzle_dir = Path(experiment_dir)
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
     checkpoint_root = Path(
         stage_cfg.get(
@@ -310,7 +325,7 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
             puzzle_dir / "mip" / "puzzle_solutions" / "depth_tournament" / "solutions--checkpoints",
         )
     )
-    checkpoints = []
+    checkpoints: list[tuple[str, str | Path]] = []
     if stage_cfg.get("checkpoint_source") == "global_kd":
         checkpoints.extend(_scenario_grid_global_kd_checkpoints(puzzle_dir))
     elif stage_cfg.get("checkpoint_source") == "scenario_grid":
@@ -414,6 +429,10 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
                 extra_inputs=dict(stage_cfg.get("extra_inputs") or {}),
                 use_server_token_count=bool(stage_cfg.get("use_server_token_count", True)),
                 seed=int(stage_cfg.get("seed", 42)),
+                trust_remote_code=trust_remote_code,
+                allow_aiperf_v011_online_tokenizer_resolution=(
+                    allow_aiperf_v011_online_tokenizer_resolution
+                ),
             )
         finally:
             pool.put(gpu_ids)
@@ -439,6 +458,9 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
             skip_reason=StageSkipReason.DISABLED,
             message="Zero-shot evaluation is disabled.",
         )
+    configured = stage_cfg.get("checkpoints")
+    if configured is not None and not isinstance(configured, (list, tuple)):
+        raise ValueError("zero_shot_evaluation.checkpoints must be a list or tuple")
     from omegaconf import OmegaConf
 
     import modelopt.torch.utils.distributed as dist
@@ -452,21 +474,21 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     from .pipeline import _distributed
 
     puzzle_dir = Path((config.get("experiment") or {})["dir"])
-    configured = stage_cfg.get("checkpoints")
+    raw_checkpoint_entries: list[tuple[str, str | Path]]
     if configured:
-        checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]
+        raw_checkpoint_entries = [(Path(path).name, Path(path)) for path in configured]
     elif stage_cfg.get("checkpoint_source") == "global_kd":
-        checkpoint_entries = _scenario_grid_global_kd_checkpoints(puzzle_dir)
+        raw_checkpoint_entries = _scenario_grid_global_kd_checkpoints(puzzle_dir)
     else:
-        checkpoint_entries = [
+        raw_checkpoint_entries = [
             (name, checkpoint)
             for name, checkpoint in _profile_solution_checkpoints(
                 puzzle_dir, stage_cfg.get("profile_id")
             )
             if name != "teacher"
         ]
-        if not checkpoint_entries:
-            checkpoint_entries = [
+        if not raw_checkpoint_entries:
+            raw_checkpoint_entries = [
                 (path.parent.name, path.parent)
                 for path in sorted(
                     (puzzle_dir / "scenarios").glob(
@@ -477,7 +499,7 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
     checkpoint_entries = [
         (name, Path(checkpoint))
-        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, checkpoint_entries)
+        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, raw_checkpoint_entries)
     ]
     if len(checkpoint_entries) == 1 and teacher_dir is None:
         raise FileNotFoundError("exact evaluation found no scenario checkpoints")

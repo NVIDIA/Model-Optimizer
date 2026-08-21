@@ -321,11 +321,16 @@ def _select_model_source(
     resolver: DefaultsResolver,
 ) -> Any:
     while True:
+        explicit_default = resolver.file_default("model.source")
         family = session.select(
             "model.source_family",
             "Model:",
             _model_family_choices(resolver),
-            default=_CUSTOM_MODEL_SOURCE,
+            default=(
+                _DEFAULT_MODEL_SOURCE
+                if explicit_default is not None and explicit_default.value
+                else _CUSTOM_MODEL_SOURCE
+            ),
         )
         if family is BACK:
             return BACK
@@ -4482,10 +4487,26 @@ def _fresh_state(
     defaults_path: Path | None,
     *,
     full: bool,
+    campaign_dir: Path | None = None,
+    setup_profile: str = "balanced",
 ) -> WizardState:
+    if campaign_dir is not None:
+        if full:
+            return WizardState.start(
+                Path(campaign_dir).expanduser(),
+                defaults_path=defaults_path,
+                setup_mode="full",
+            )
+        get_setup_preset(setup_profile)
+        return WizardState.start(
+            Path(campaign_dir).expanduser(),
+            defaults_path=defaults_path,
+            setup_mode="quick",
+            preset=setup_profile,
+        )
     if full:
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 continue
             if not str(value).strip():
@@ -4498,11 +4519,11 @@ def _fresh_state(
             )
 
     while True:
-        preset = _select_setup_preset(backend)
+        preset = _select_setup_preset(backend, default=setup_profile)
         if preset is BACK:
             continue
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 break
             if not str(value).strip():
@@ -4534,8 +4555,16 @@ def run_wizard_v2(
     defaults_path: Path | None,
     backend: PromptBackend | None = None,
     full: bool = False,
+    campaign_dir: Path | None = None,
+    setup_profile: str = "balanced",
 ) -> Path:
-    """Run setup v2, save every answer, validate bundles, and never launch jobs."""
+    """Resolve setup answers, validate both bundles, and never launch jobs.
+
+    ``campaign_dir`` and ``setup_profile`` let automation bypass only the new
+    campaign prompts while using the same wizard sections and bundle renderer.
+    """
+    if resume is not None and campaign_dir is not None:
+        raise SetupError("campaign_dir cannot be combined with resume")
     backend = backend or InteractiveBackend()
     print("Welcome to Puzzletron setup v2.")
     if resume is None:
@@ -4547,7 +4576,13 @@ def run_wizard_v2(
                 "defaults from a profile."
             )
             print("  Use --full only when you need every advanced control.")
-        state = _fresh_state(backend, defaults_path, full=full)
+        state = _fresh_state(
+            backend,
+            defaults_path,
+            full=full,
+            campaign_dir=campaign_dir,
+            setup_profile=setup_profile,
+        )
     else:
         state = WizardState.resume(resume)
         if full and state.setup_mode != "full":

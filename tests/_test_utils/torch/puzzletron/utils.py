@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Cross-model tiny-checkpoint helpers for tests."""
+
 import os
 
 import torch

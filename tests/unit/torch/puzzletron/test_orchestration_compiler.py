@@ -168,6 +168,47 @@ def test_compile_campaign_plan_preserves_drain_halt_policy(tmp_configs):
 
     assert plan.execution_defaults["halt_policy"] == "drain"
     assert controller._halt_policy is HaltPolicy.DRAIN
+    assert controller.artifact_settling_timeout_seconds == 300.0
+
+
+def test_compile_campaign_plan_configures_artifact_settling_timeout(tmp_configs):
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution = load_execution_config(execution_path)
+    execution["defaults"]["artifact_settling_timeout_seconds"] = 45
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=execution,
+    )
+
+    assert plan.execution_defaults["artifact_settling_timeout_seconds"] == 45
+    assert CampaignController(plan).artifact_settling_timeout_seconds == 45.0
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        (True, TypeError),
+        (0, ValueError),
+        (-1, ValueError),
+        (float("inf"), ValueError),
+        (float("nan"), ValueError),
+    ],
+)
+def test_compile_campaign_plan_rejects_invalid_artifact_settling_timeout(
+    tmp_configs, value, error_type
+):
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution = load_execution_config(execution_path)
+    execution["defaults"]["artifact_settling_timeout_seconds"] = value
+
+    with pytest.raises(error_type, match="artifact_settling_timeout_seconds"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+        )
 
 
 def test_compile_campaign_plan_uses_cpu_partition_without_gpus(tmp_configs):

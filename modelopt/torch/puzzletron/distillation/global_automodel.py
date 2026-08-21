@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
 
@@ -12,10 +27,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from ..dataset.config import DataLayout, Modality, PuzzletronDataSpec
 from ..identity import cache_key, canonicalize
+from ..security_policy import require_boolean_policy
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +75,7 @@ class GlobalKDConfig:
     teacher_model_kwargs: dict[str, Any] = field(default_factory=dict)
     student_model_kwargs: dict[str, Any] = field(default_factory=dict)
     domain: Literal["auto", "llm", "vlm"] = "auto"
-    trust_remote_code: bool = True
+    trust_remote_code: bool = False
     torch_dtype: str = "bf16"
     attn_implementation: str | None = None
     tp: int = 1
@@ -98,17 +114,17 @@ class GlobalKDConfig:
     resume: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
-    freeze_policy: Literal["vision_frozen", "projector_and_language", "train_all"] = (
-        "vision_frozen"
-    )
+    freeze_policy: Literal["vision_frozen", "projector_and_language", "train_all"] = "vision_frozen"
 
     def __post_init__(self):
+        require_boolean_policy(
+            self.trust_remote_code,
+            path="distillation.trust_remote_code",
+        )
         if self.domain not in ("auto", "llm", "vlm"):
             raise ValueError("distillation.domain must be auto, llm, or vlm")
         if self.pp_schedule not in ("1f1b", "interleaved1f1b"):
-            raise ValueError(
-                "distillation.pp_schedule must be 1f1b or interleaved1f1b"
-            )
+            raise ValueError("distillation.pp_schedule must be 1f1b or interleaved1f1b")
         if not self.resolved_student_descriptor or not self.resolved_teacher_descriptor:
             raise ValueError("Global KD requires descriptors for both student and teacher")
         weights = self.objective_weights
@@ -137,8 +153,7 @@ class GlobalKDConfig:
                 self.resolved_student_force_hf or self.resolved_teacher_force_hf
             ):
                 raise ValueError(
-                    "multimodal or packed global KD requires force_hf=False "
-                    "for student and teacher"
+                    "multimodal or packed global KD requires force_hf=False for student and teacher"
                 )
 
     @property
@@ -205,6 +220,56 @@ def _loss_term(node: dict[str, Any], *, legacy_temperature: float) -> KDLossTerm
     )
 
 
+def _descriptor_requires_trust_remote_code(*descriptor_names: str) -> bool:
+    """Return whether any selected model descriptor requires remote code."""
+
+    # Loading the descriptor catalog imports every supported HF model module.
+    # Keep that work on the config-building path that needs the policy check.
+    from ..anymodel.model_descriptor import ModelDescriptorFactory
+
+    for descriptor_name in dict.fromkeys(descriptor_names):
+        descriptor = ModelDescriptorFactory.get(descriptor_name)
+        requires_trust_remote_code = getattr(descriptor, "requires_trust_remote_code", None)
+        if not callable(requires_trust_remote_code):
+            raise ValueError(f"unknown Puzzletron model descriptor: {descriptor_name}")
+        if require_boolean_policy(
+            requires_trust_remote_code(),
+            path=f"descriptor {descriptor_name}.requires_trust_remote_code",
+        ):
+            return True
+    return False
+
+
+def _global_kd_trust_remote_code(
+    kd_config: dict[str, Any],
+    model_config: dict[str, Any],
+    *,
+    student_descriptor: str,
+    teacher_descriptor: str,
+) -> bool:
+    """Resolve explicit global-KD trust policy with a secure default."""
+
+    for config, path in (
+        (kd_config, "distillation.trust_remote_code"),
+        (model_config, "model.trust_remote_code"),
+    ):
+        if "trust_remote_code" in config:
+            return require_boolean_policy(config["trust_remote_code"], path=path)
+    if _descriptor_requires_trust_remote_code(student_descriptor, teacher_descriptor):
+        raise ValueError(
+            "Global KD descriptors require remote code; set "
+            "distillation.trust_remote_code=true or model.trust_remote_code=true "
+            "for trusted model sources"
+        )
+    return False
+
+
+def _require_matching_trust_policy(value: Any, *, path: str, expected: bool) -> None:
+    configured = require_boolean_policy(value, path=path)
+    if configured is not expected:
+        raise ValueError(f"{path} conflicts with the resolved global KD trust policy")
+
+
 def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     kd_cfg = dict(config.get("distillation") or {})
     student = dict(kd_cfg.get("student") or {})
@@ -254,6 +319,12 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
     )
     if not student_descriptor or not teacher_descriptor:
         raise ValueError("Global KD requires student and teacher Puzzletron descriptors")
+    trust_remote_code = _global_kd_trust_remote_code(
+        kd_cfg,
+        model_cfg,
+        student_descriptor=str(student_descriptor),
+        teacher_descriptor=str(teacher_descriptor),
+    )
 
     legacy_force_hf = bool(kd_cfg.get("force_hf", model_cfg.get("force_hf", True)))
     legacy_temperature = float(kd_cfg.get("temperature", 1.0))
@@ -273,8 +344,12 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         return float(default if value is None else value)
 
     return GlobalKDConfig(
-        teacher_dir=Path(teacher.get("dir") or kd_cfg.get("teacher_dir") or exp_dir / "ckpts" / "teacher"),
-        student_dir=Path(student.get("dir") or kd_cfg.get("student_dir") or exp_dir / "ckpts" / "solution"),
+        teacher_dir=Path(
+            teacher.get("dir") or kd_cfg.get("teacher_dir") or exp_dir / "ckpts" / "teacher"
+        ),
+        student_dir=Path(
+            student.get("dir") or kd_cfg.get("student_dir") or exp_dir / "ckpts" / "solution"
+        ),
         output_dir=Path(kd_cfg.get("output_dir") or exp_dir / "ckpts" / "distilled_solution"),
         descriptor=str(legacy_descriptor) if legacy_descriptor else None,
         student_descriptor=str(student_descriptor),
@@ -295,9 +370,10 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             **dict(teacher.get("model_kwargs") or {}),
         },
         domain=str(kd_cfg.get("domain", "auto")).lower(),
-        trust_remote_code=bool(kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", True))),
+        trust_remote_code=trust_remote_code,
         torch_dtype=str(kd_cfg.get("torch_dtype") or model_cfg.get("torch_dtype") or "bf16"),
-        attn_implementation=kd_cfg.get("attn_implementation") or model_cfg.get("attn_implementation"),
+        attn_implementation=kd_cfg.get("attn_implementation")
+        or model_cfg.get("attn_implementation"),
         tp=_int_value((parallel, "tp")),
         pp=_int_value((parallel, "pp")),
         ep=ep,
@@ -358,7 +434,10 @@ def _resolve_domain(kd_config: GlobalKDConfig) -> Literal["llm", "vlm"]:
         if "causallm" in architectures or model_type.endswith("_text"):
             return "llm"
         if (
-            any(token in architectures for token in ("conditionalgeneration", "imagetotext", "vision"))
+            any(
+                token in architectures
+                for token in ("conditionalgeneration", "imagetotext", "vision")
+            )
             or "vision_config" in checkpoint_config
         ):
             return "vlm"
@@ -394,7 +473,16 @@ def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> d
         "torch_dtype": kd_config.torch_dtype,
         "trust_remote_code": kd_config.trust_remote_code,
     }
-    model.update(kd_config.teacher_model_kwargs if teacher else kd_config.student_model_kwargs)
+    model_role = "teacher" if teacher else "student"
+    model_kwargs = kd_config.teacher_model_kwargs if teacher else kd_config.student_model_kwargs
+    if "trust_remote_code" in model_kwargs:
+        _require_matching_trust_policy(
+            model_kwargs["trust_remote_code"],
+            path=f"distillation.{model_role}_model_kwargs.trust_remote_code",
+            expected=kd_config.trust_remote_code,
+        )
+    model.update(model_kwargs)
+    model["trust_remote_code"] = kd_config.trust_remote_code
     if kd_config.mtp_ce_weight <= 0 and kd_config.mtp_kd_weight <= 0:
         model.setdefault("num_nextn_predict_layers", 0)
     if kd_config.attn_implementation:
@@ -543,7 +631,11 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     pp_microbatch_size = max(1, kd_config.local_batch_size // max(1, kd_config.pp))
     checkpoint_format = kd_config.checkpoint_format
     if checkpoint_format == "auto":
-        consolidated = str(kd_config.save_consolidated).strip().lower() not in {"false", "0", "none"}
+        consolidated = str(kd_config.save_consolidated).strip().lower() not in {
+            "false",
+            "0",
+            "none",
+        }
         # AutoModel's safetensors writer always constructs Hugging Face metadata.
         # Pipeline stages own disjoint FQNs, so use plain DCP for resumable PP
         # checkpoints unless an explicit consolidated export was requested.
@@ -554,9 +646,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     # requested number of optimizer updates by adding the internal sentinel.
     scheduler_max_steps = kd_config.max_steps + 1
     checkpoint_every_steps = kd_config.checkpoint_every_steps or scheduler_max_steps
-    data_spec = (
-        PuzzletronDataSpec.from_mapping(kd_config.data) if kd_config.data else None
-    )
+    data_spec = PuzzletronDataSpec.from_mapping(kd_config.data) if kd_config.data else None
     packed_sequence_size = int(kd_config.packed_sequence_size)
     if data_spec is not None and data_spec.layout is DataLayout.PACKED_VARLEN:
         canonical_pack_size = int(data_spec.packing.pack_size)
@@ -670,8 +760,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                     return dataset
                 dataset = {
                     "_target_": (
-                        "modelopt.torch.puzzletron.distillation.dataset."
-                        "make_puzzletron_llm_dataset"
+                        "modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_llm_dataset"
                     ),
                     "dataset_path": str(kd_config.data.get("path") or ""),
                     "split": split,
@@ -685,9 +774,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                     "seed": kd_config.seed,
                 }
                 if kd_config.data.get(cache_key):
-                    dataset["packed_token_cache_path"] = str(
-                        kd_config.data[cache_key]
-                    )
+                    dataset["packed_token_cache_path"] = str(kd_config.data[cache_key])
                 return dataset
 
             dataloader = {
@@ -737,18 +824,13 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
         else:
             recipe.update(
                 dataset={
-                    "_target_": (
-                        "nemo_automodel.components.datasets.llm.squad."
-                        "make_squad_dataset"
-                    ),
+                    "_target_": ("nemo_automodel.components.datasets.llm.squad.make_squad_dataset"),
                     "dataset_name": kd_config.dataset_name,
                     "split": kd_config.dataset_split,
                 },
                 dataloader={
                     "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
-                    "collate_fn": (
-                        "nemo_automodel.components.datasets.utils.default_collater"
-                    ),
+                    "collate_fn": ("nemo_automodel.components.datasets.utils.default_collater"),
                     "shuffle": False,
                 },
             )
@@ -756,19 +838,14 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 recipe.update(
                     validation_dataset={
                         "_target_": (
-                            "nemo_automodel.components.datasets.llm.squad."
-                            "make_squad_dataset"
+                            "nemo_automodel.components.datasets.llm.squad.make_squad_dataset"
                         ),
                         "dataset_name": kd_config.dataset_name,
                         "split": kd_config.validation_split,
                     },
                     validation_dataloader={
-                        "_target_": (
-                            "torchdata.stateful_dataloader.StatefulDataLoader"
-                        ),
-                        "collate_fn": (
-                            "nemo_automodel.components.datasets.utils.default_collater"
-                        ),
+                        "_target_": ("torchdata.stateful_dataloader.StatefulDataLoader"),
+                        "collate_fn": ("nemo_automodel.components.datasets.utils.default_collater"),
                     },
                 )
         metadata_keys = ["dataset", "dataloader"]
@@ -778,9 +855,18 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
             if key in domain_metadata:
                 recipe[key] = domain_metadata[key]
     else:
-        processor = dict(domain_metadata.get("processor") or kd_config.metadata.get("processor") or {})
+        processor = dict(
+            domain_metadata.get("processor") or kd_config.metadata.get("processor") or {}
+        )
+        if "trust_remote_code" in processor:
+            _require_matching_trust_policy(
+                processor["trust_remote_code"],
+                path="distillation.metadata.processor.trust_remote_code",
+                expected=kd_config.trust_remote_code,
+            )
         processor.setdefault("_target_", "transformers.AutoProcessor.from_pretrained")
         processor.setdefault("pretrained_model_name_or_path", str(kd_config.student_dir))
+        processor["trust_remote_code"] = kd_config.trust_remote_code
         recipe["processor"] = processor
         metadata_keys = ["dataset", "dataloader", "freeze_config"]
         if kd_config.validation_enabled:
@@ -796,8 +882,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
             calibration = dict(kd_config.data.get("calibration") or {})
             recipe["dataset"] = {
                 "_target_": (
-                    "modelopt.torch.puzzletron.dataset."
-                    "load_materialized_conversation_dataset"
+                    "modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset"
                 ),
                 "path_or_dataset": str(kd_config.data.get("path")),
                 "pretokenize": True,
@@ -883,14 +968,24 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
             # on the already-resolved student PipelineConfig so custom config
             # nodes cannot reintroduce unresolved string dtypes.
             recipe["teacher_pipeline"] = {
-                "module_fqns_per_model_part": teacher_pipeline.get(
-                    "module_fqns_per_model_part"
-                )
+                "module_fqns_per_model_part": teacher_pipeline.get("module_fqns_per_model_part")
             }
 
     overrides = kd_config.metadata.get("recipe_overrides")
     if overrides:
-        _deep_update(recipe, dict(overrides))
+        recipe_overrides = dict(overrides)
+        for model_key in ("model", "teacher_model", "processor"):
+            model_overrides = recipe_overrides.get(model_key)
+            if isinstance(model_overrides, Mapping) and "trust_remote_code" in model_overrides:
+                _require_matching_trust_policy(
+                    model_overrides["trust_remote_code"],
+                    path=(f"distillation.metadata.recipe_overrides.{model_key}.trust_remote_code"),
+                    expected=kd_config.trust_remote_code,
+                )
+        _deep_update(recipe, recipe_overrides)
+        processor = recipe.get("processor")
+        if isinstance(processor, dict):
+            processor["trust_remote_code"] = kd_config.trust_remote_code
 
     from ..plugins.automodel.config import inject_descriptor_model_kwargs
 
@@ -946,9 +1041,7 @@ def _quarantine_incomplete_global_kd_checkpoints(checkpoint_root: Path) -> None:
         if marker.is_file() and ".incomplete-" not in checkpoint_path.name:
             continue
         quarantine_root.mkdir(exist_ok=True)
-        quarantine = quarantine_root / (
-            f"{checkpoint_path.name}.incomplete-{time.time_ns()}"
-        )
+        quarantine = quarantine_root / (f"{checkpoint_path.name}.incomplete-{time.time_ns()}")
         checkpoint_path.replace(quarantine)
         logger.warning(
             "Quarantined interrupted Global KD checkpoint %s -> %s",
@@ -994,8 +1087,7 @@ def _reconcile_global_kd_training_log(checkpoint_root: Path) -> None:
             records_by_step[step] = record
 
     reconciled = "".join(
-        json.dumps(records_by_step[step], sort_keys=True) + "\n"
-        for step in sorted(records_by_step)
+        json.dumps(records_by_step[step], sort_keys=True) + "\n" for step in sorted(records_by_step)
     )
     temporary = training_log.with_name(f".{training_log.name}.{os.getpid()}.tmp")
     temporary.write_text(reconciled)
@@ -1045,9 +1137,7 @@ def _preserve_inactive_mtp_weights(source: Path, consolidated: Path) -> tuple[st
 
     preserved_name = "model-puzzletron-preserved-mtp.safetensors"
     preserved_path = consolidated / preserved_name
-    temporary_weights = preserved_path.with_name(
-        f".{preserved_path.name}.{os.getpid()}.tmp"
-    )
+    temporary_weights = preserved_path.with_name(f".{preserved_path.name}.{os.getpid()}.tmp")
     output_header = json.dumps(
         {"__metadata__": {"format": "pt"}, **tensor_headers},
         separators=(",", ":"),
@@ -1083,9 +1173,7 @@ def _preserve_global_kd_inactive_weights(kd_config: GlobalKDConfig) -> tuple[str
     for config_path in kd_config.output_dir.glob(
         "checkpoints/epoch_*_step_*/model/consolidated/config.json"
     ):
-        preserved.update(
-            _preserve_inactive_mtp_weights(kd_config.student_dir, config_path.parent)
-        )
+        preserved.update(_preserve_inactive_mtp_weights(kd_config.student_dir, config_path.parent))
     return tuple(sorted(preserved))
 
 
@@ -1119,9 +1207,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
         checkpoint_root = kd_config.output_dir / "checkpoints"
         _quarantine_incomplete_global_kd_checkpoints(checkpoint_root)
         _reconcile_global_kd_training_log(checkpoint_root)
-        temporary_path = recipe_path.with_name(
-            f".{recipe_path.name}.{os.getpid()}.tmp"
-        )
+        temporary_path = recipe_path.with_name(f".{recipe_path.name}.{os.getpid()}.tmp")
         temporary_path.write_text(recipe_payload)
         os.replace(temporary_path, recipe_path)
     deadline = time.monotonic() + 120
@@ -1159,9 +1245,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     if torch_dist.is_available() and torch_dist.is_initialized():
         torch_dist.barrier()
     observability = (
-        trainer.observability_metadata()
-        if hasattr(trainer, "observability_metadata")
-        else {}
+        trainer.observability_metadata() if hasattr(trainer, "observability_metadata") else {}
     )
     local_terms = {}
     for name, values in getattr(trainer, "_objective_buffers", {}).items():
@@ -1177,9 +1261,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     objective_metrics = {}
     for name in kd_config.objective_weights:
         values = [
-            value
-            for rank_terms in gathered_terms
-            for value in (rank_terms or {}).get(name, [])
+            value for rank_terms in gathered_terms for value in (rank_terms or {}).get(name, [])
         ]
         objective_metrics[name] = sum(values) / len(values) if values else None
     # The weighted recipe flushes its per-step buffers into training.jsonl so
@@ -1228,7 +1310,10 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
                 "global KD train_all produced no gradient for required groups: "
                 f"{missing_gradient_groups}; latest={latest_record}"
             )
-    if _resolve_domain(kd_config) == "vlm" and int(observability.get("vision_forward_count", 0)) <= 0:
+    if (
+        _resolve_domain(kd_config) == "vlm"
+        and int(observability.get("vision_forward_count", 0)) <= 0
+    ):
         raise RuntimeError(f"global KD observed no ViT forward: {observability}")
     return {
         "recipe_config": str(recipe_path),

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import transformers
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_qwen3_5_dir
 from transformers import LlamaForCausalLM
 
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
@@ -57,10 +58,6 @@ from modelopt.torch.puzzletron.stages import diagnostics as diagnostics_stage_mo
 from modelopt.torch.puzzletron.stages.diagnostics import width_slice_equivalence_stage
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 from modelopt.torch.puzzletron.utils.data import dataloaders as dataloader_module
-from tests._test_utils.torch.transformers_models import (
-    create_tiny_llama_dir,
-    create_tiny_qwen3_5_dir,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -514,18 +514,39 @@ def stage_spec(stage_id: str) -> StageSpec:
         raise ValueError(f"Unknown Puzzletron stage {stage_id!r}") from error
 
 
-def semantic_stage_config(config: Mapping[str, Any], stage_id: str) -> dict[str, Any]:
+def semantic_stage_config(
+    config: Mapping[str, Any], stage_id: str, *, use_authored: bool = True
+) -> dict[str, Any]:
     """Return configuration that can change the semantic result of one stage.
 
     Public stages declare their semantic sections alongside their other
     scheduler-neutral metadata. Dynamic stages that are not in the public
     registry retain the historical stage-ID section fallback.
+
+    Normalized worker configurations retain the independently loaded authored
+    configuration under ``_runtime.authored_config``. Semantic compatibility
+    uses that authored view by default, while execution records may explicitly
+    request the effective worker view.
+
+    For identity projection, an absent section, a ``None`` section, and an
+    empty mapping are equivalent because none contains an authored option.
+    Other falsey values remain in the projection because they can be semantic.
     """
+
+    runtime = config.get("_runtime")
+    authored = runtime.get("authored_config") if isinstance(runtime, Mapping) else None
+    selected = authored if use_authored and isinstance(authored, Mapping) else config
 
     spec = STAGE_REGISTRY.get(stage_id)
     stage_sections = (stage_id,) if spec is None else spec.semantic_config_sections
     sections = dict.fromkeys((*SHARED_SEMANTIC_CONFIG_SECTIONS, *stage_sections))
-    return {key: config[key] for key in sections if key in config}
+    return {
+        key: selected[key]
+        for key in sections
+        if key in selected
+        and selected[key] is not None
+        and not (isinstance(selected[key], Mapping) and not selected[key])
+    }
 
 
 def stage_display_name(stage_id: str, *, granularity: str | None = None) -> str:

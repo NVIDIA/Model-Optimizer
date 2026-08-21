@@ -58,11 +58,62 @@ PUZZLETRON_V2_CI_ENVIRONMENT_PATH = (
 with PUZZLETRON_V2_CI_ENVIRONMENT_PATH.open(encoding="utf-8") as environment_file:
     PUZZLETRON_V2_CI_ENVIRONMENT = json.load(environment_file)
 PUZZLETRON_V2_AUTOMODEL_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["nemo_automodel"]
+PUZZLETRON_V2_LMMS_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"]
 PUZZLETRON_V2_AUTOMODEL = (
     "nemo-automodel @ git+"
     f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['repository']}@"
     f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['commit']}"
 )
+
+
+def _verify_puzzletron_v2_environment(session):
+    """Fail before collection when the dedicated Puzzletron runtime drifts."""
+    expected_versions = {
+        "python": PUZZLETRON_V2_CI_ENVIRONMENT["python"],
+        "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
+        "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
+        "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE["base_version"],
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
+    }
+    expected_vcs = {
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE,
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE,
+    }
+    session.run(
+        "python",
+        "-c",
+        f"""
+import json
+import sys
+from importlib.metadata import distribution, version
+
+from packaging.version import Version
+
+from examples.puzzletron.ci_environment import verify_installed_vcs_source
+
+expected = {expected_versions!r}
+expected_vcs = {expected_vcs!r}
+actual = {{
+    "python": f"{{sys.version_info.major}}.{{sys.version_info.minor}}",
+    "torch": Version(version("torch")).base_version,
+    "torchvision": Version(version("torchvision")).base_version,
+    "transformers": Version(version("transformers")).base_version,
+    "lmms-eval": Version(version("lmms-eval")).base_version,
+    "nemo-automodel": Version(version("nemo-automodel")).base_version,
+}}
+mismatches = {{
+    name: (actual[name], expected_version)
+    for name, expected_version in expected.items()
+    if actual[name] != expected_version
+}}
+
+for name, source in expected_vcs.items():
+    verify_installed_vcs_source(name, source)
+
+assert not mismatches, f"Pinned Puzzletron CI environment mismatch: {{mismatches}}"
+""",
+    )
 
 
 def _cov_args():
@@ -109,36 +160,7 @@ def puzzletron_v2(session):
         PUZZLETRON_V2_AUTOMODEL,
     )
     session.run("uv", "pip", "check")
-    expected_versions = {
-        "python": PUZZLETRON_V2_CI_ENVIRONMENT["python"],
-        "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
-        "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
-        "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
-        "lmms-eval": PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"],
-        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
-    }
-    session.run(
-        "python",
-        "-c",
-        (
-            "import sys; "
-            "from importlib.metadata import version; "
-            "from packaging.version import Version; "
-            f"expected = {expected_versions!r}; "
-            "actual = {"
-            "'python': f'{sys.version_info.major}.{sys.version_info.minor}', "
-            "'torch': Version(version('torch')).base_version, "
-            "'torchvision': Version(version('torchvision')).base_version, "
-            "'transformers': Version(version('transformers')).base_version, "
-            "'lmms-eval': Version(version('lmms-eval')).base_version, "
-            "'nemo-automodel': Version(version('nemo-automodel')).base_version}; "
-            "mismatches = {name: (actual[name], expected_version) "
-            "for name, expected_version in expected.items() "
-            "if actual[name] != expected_version}; "
-            "assert not mismatches, "
-            "f'Pinned Puzzletron CI environment mismatch: {mismatches}'"
-        ),
-    )
+    _verify_puzzletron_v2_environment(session)
     session.run(
         "python",
         "-m",
@@ -171,6 +193,7 @@ def partial_unit(session, subset):
 
 
 # ─── GPU sessions (run inside containers — no new venv) ──────────────────────
+# The generic and Puzzletron sessions use their dedicated container environments directly.
 # `venv_backend="none"` skips creating a new venv so the session runs directly in the container's
 # existing Python environment (e.g. /opt/venv in NeMo) instead of an isolated one.
 # Use `python -m pip/pytest` to ensure the container's active venv Python is used,
@@ -200,7 +223,46 @@ def gpu(session):
         "git+https://github.com/state-spaces/mamba.git",
         "git+https://github.com/Dao-AILab/causal-conv1d.git",
     )
-    session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "tests/gpu",
+        "--ignore=tests/gpu/torch/puzzletron/test_puzzletron.py",
+        *_cov_args(),
+    )
+
+
+# Manual one-GPU runner for the focused Puzzletron lifecycle test.
+# Container: dedicated Puzzletron v2 GPU image with the pinned ci_environment.json runtime.
+@nox.session(venv_backend="none")
+def gpu_puzzletron(session):
+    """Verify the pinned runtime, then run the focused Puzzletron lifecycle GPU test."""
+    session.env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    _verify_puzzletron_v2_environment(session)
+    session.run(
+        "python",
+        "-c",
+        (
+            "import torch; "
+            "assert torch.cuda.is_available(), 'Puzzletron GPU CI requires CUDA'; "
+            "assert torch.cuda.device_count() == 1, "
+            "f'Puzzletron GPU CI requires exactly one visible GPU, got {torch.cuda.device_count()}'; "
+            "assert torch.version.cuda == '12.9', "
+            "f'Puzzletron GPU CI requires CUDA 12.9, got {torch.version.cuda}'"
+        ),
+    )
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        (
+            "tests/gpu/torch/puzzletron/test_puzzletron.py::"
+            "test_tiny_qwen_campaign_uses_current_public_route"
+        ),
+    )
 
 
 # Container: nvcr.io/nvidia/nemo:26.04 or later

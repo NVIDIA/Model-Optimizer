@@ -1,11 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Puzzletron's canonical global-distillation behavior."""
 
 import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from modelopt.torch.puzzletron.distillation.global_automodel import (
@@ -87,9 +102,7 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
     assert observed[0][0].to_dict() == {"subblock_configs": []}
 
 
-def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
-    monkeypatch, tmp_path
-):
+def test_distillation_overfit_stage_disables_mtp_objectives_by_default(monkeypatch, tmp_path):
     """Nano-like checkpoints without MTP must not enable MTP loss implicitly."""
     from modelopt.torch.puzzletron.manifest import StageManifest
     from modelopt.torch.puzzletron.stages import future
@@ -146,9 +159,7 @@ def test_distillation_overfit_stage_disables_mtp_objectives_by_default(
         },
     }
 
-    future.distillation_overfit_stage(
-        config, StageManifest(stage="global_distillation_sanity")
-    )
+    future.distillation_overfit_stage(config, StageManifest(stage="global_distillation_sanity"))
 
     assert captured["objective"] == {
         "main_ce": {"weight": 1.0},
@@ -171,19 +182,10 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
     training_log = output_dir / "checkpoints/training.jsonl"
     training_log.parent.mkdir(parents=True)
     training_log.write_text(
-        json.dumps({"step": 1, "loss": 2.0})
-        + "\n"
-        + json.dumps({"step": 2, "loss": 1.0})
-        + "\n"
+        json.dumps({"step": 1, "loss": 2.0}) + "\n" + json.dumps({"step": 2, "loss": 1.0}) + "\n"
     )
     for step in (1, 2):
-        checkpoint = (
-            output_dir
-            / "checkpoints"
-            / f"epoch_0_step_{step}"
-            / "model"
-            / "consolidated"
-        )
+        checkpoint = output_dir / "checkpoints" / f"epoch_0_step_{step}" / "model" / "consolidated"
         checkpoint.mkdir(parents=True)
         (checkpoint / "config.json").write_text("{}")
         (checkpoint.parents[1] / "saving_completed").touch()
@@ -209,9 +211,7 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
     assert payload["max_steps"] == 256
     assert payload["sequence_length"] == 16384
     assert payload["records"][-1] == {"step": 2, "loss": 1.0}
-    assert payload["post_kd_checkpoint"].endswith(
-        "checkpoints/epoch_0_step_2/model/consolidated"
-    )
+    assert payload["post_kd_checkpoint"].endswith("checkpoints/epoch_0_step_2/model/consolidated")
 
 
 def test_global_kd_metric_logger_flushes_every_optimizer_step():
@@ -227,9 +227,7 @@ def test_global_kd_metric_logger_flushes_every_optimizer_step():
     assert logger.flush is True
 
 
-def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(
-    tmp_path, monkeypatch
-):
+def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
         lambda *args, **kwargs: None,
@@ -262,10 +260,7 @@ def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(
     assert default_recipe["distributed"]["pipeline"]["pp_microbatch_size"] == 1
     assert default_recipe["distributed"]["pipeline"]["pp_batch_size"] == 8
     assert default_recipe["dataloader"]["batch_size"] == 8
-    assert (
-        override_recipe["distributed"]["pipeline"]["pp_schedule"]
-        == "interleaved1f1b"
-    )
+    assert override_recipe["distributed"]["pipeline"]["pp_schedule"] == "interleaved1f1b"
 
 
 def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch):
@@ -310,10 +305,7 @@ def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch
 
     assert recipe["recipe"] == "KnowledgeDistillationRecipeForNextTokenPrediction"
     assert recipe["dataset"] == {
-        "_target_": (
-            "modelopt.torch.puzzletron.distillation.dataset."
-            "make_puzzletron_llm_dataset"
-        ),
+        "_target_": ("modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_llm_dataset"),
         "dataset_path": str(tmp_path / "dataset"),
         "split": "train",
         "num_samples": 4096,
@@ -326,9 +318,7 @@ def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch
     )
 
 
-def test_global_kd_packed_text_uses_native_chat_data_and_canonical_pack_size(
-    tmp_path, monkeypatch
-):
+def test_global_kd_packed_text_uses_native_chat_data_and_canonical_pack_size(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
         lambda *args, **kwargs: None,
@@ -361,9 +351,7 @@ def test_global_kd_packed_text_uses_native_chat_data_and_canonical_pack_size(
 
     recipe = build_automodel_global_kd_recipe(config)
 
-    assert recipe["dataset"]["_target_"].endswith(
-        "make_puzzletron_chat_dataset"
-    )
+    assert recipe["dataset"]["_target_"].endswith("make_puzzletron_chat_dataset")
     assert recipe["dataloader"]["collate_fn"].endswith("default_collater")
     assert recipe["packed_sequence"] == {
         "packed_sequence_size": 256,
@@ -395,12 +383,16 @@ def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch
         "pp": 1,
     }
 
-    assert build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=True))[
-        "puzzletron_resume"
-    ] is True
-    assert build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=False))[
-        "puzzletron_resume"
-    ] is False
+    assert (
+        build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=True))["puzzletron_resume"]
+        is True
+    )
+    assert (
+        build_automodel_global_kd_recipe(GlobalKDConfig(**common, resume=False))[
+            "puzzletron_resume"
+        ]
+        is False
+    )
 
 
 def test_global_kd_config_preserves_per_model_dtype_overrides(tmp_path):
@@ -408,7 +400,11 @@ def test_global_kd_config_preserves_per_model_dtype_overrides(tmp_path):
 
     config = {
         "experiment": {"dir": str(tmp_path)},
-        "model": {"descriptor_override": "nemotron_h", "torch_dtype": "bfloat16"},
+        "model": {
+            "descriptor_override": "nemotron_h",
+            "torch_dtype": "bfloat16",
+            "trust_remote_code": True,
+        },
         "distillation": {
             "teacher_dir": str(tmp_path / "teacher"),
             "student_dir": str(tmp_path / "student"),
@@ -430,12 +426,166 @@ def test_global_kd_config_preserves_per_model_dtype_overrides(tmp_path):
 
     kd = build_global_kd_config(config)
 
-    assert global_automodel._model_recipe(kd, teacher=False, domain="llm")[
-        "torch_dtype"
-    ] == "float32"
-    assert global_automodel._model_recipe(kd, teacher=True, domain="llm")[
-        "torch_dtype"
-    ] == "bfloat16"
+    assert (
+        global_automodel._model_recipe(kd, teacher=False, domain="llm")["torch_dtype"] == "float32"
+    )
+    assert (
+        global_automodel._model_recipe(kd, teacher=True, domain="llm")["torch_dtype"] == "bfloat16"
+    )
+
+
+def test_global_kd_config_defaults_trust_policy_to_false(tmp_path):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "llama"},
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    kd = build_global_kd_config(config)
+
+    assert kd.trust_remote_code is False
+
+
+def test_global_kd_config_requires_explicit_remote_code_opt_in(tmp_path):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "nemotron_h"},
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="set distillation.trust_remote_code=true"):
+        build_global_kd_config(config)
+
+
+def test_global_kd_config_explicit_trust_policy_wins(tmp_path):
+    configured_trust = False
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {
+            "descriptor_override": "nemotron_h",
+            "trust_remote_code": not configured_trust,
+        },
+        "distillation": {
+            "trust_remote_code": configured_trust,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    assert build_global_kd_config(config).trust_remote_code is configured_trust
+
+
+def test_global_kd_config_rejects_non_boolean_trust_policy(tmp_path):
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {
+            "descriptor_override": "nemotron_h",
+            "trust_remote_code": "false",
+        },
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"model\.trust_remote_code must be a boolean"):
+        build_global_kd_config(config)
+
+
+def test_global_kd_model_kwargs_cannot_bypass_trust_policy(tmp_path):
+    # Keep the optional NeMo AutoModel runtime out of test collection.
+    from modelopt.torch.puzzletron.distillation import global_automodel
+
+    kd = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="llama",
+        trust_remote_code=False,
+    )
+    kd.teacher_model_kwargs["trust_remote_code"] = True
+
+    with pytest.raises(ValueError, match="conflicts with"):
+        global_automodel._model_recipe(kd, teacher=True, domain="llm")
+
+
+def test_global_kd_recipe_overrides_cannot_bypass_trust_policy(tmp_path):
+    kd = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="llama",
+        domain="llm",
+        validation_enabled=False,
+        metadata={"recipe_overrides": {"model": {"trust_remote_code": True}}},
+    )
+
+    with pytest.raises(ValueError, match="conflicts with"):
+        build_automodel_global_kd_recipe(kd)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"processor": {"trust_remote_code": True}, "dataset": {}, "dataloader": {}},
+        {
+            "recipe_overrides": {"processor": {"trust_remote_code": True}},
+            "dataset": {},
+            "dataloader": {},
+        },
+    ],
+)
+def test_global_kd_processor_cannot_bypass_trust_policy(tmp_path, metadata):
+    kd = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=tmp_path / "output",
+        descriptor="llama",
+        domain="vlm",
+        validation_enabled=False,
+        metadata=metadata,
+    )
+
+    with pytest.raises(ValueError, match="conflicts with"):
+        build_automodel_global_kd_recipe(kd)
 
 
 def test_global_kd_load_checkpoint_honors_resume_policy():
@@ -491,9 +641,7 @@ def test_global_distillation_stage_promotes_canonical_namespace(tmp_path):
     assert (kd_config.pp, kd_config.cp, kd_config.dp) == (2, 4, 8)
 
 
-def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(
-    tmp_path, monkeypatch
-):
+def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_pipeline_config",
         lambda *args, **kwargs: None,
@@ -508,7 +656,7 @@ def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(
     )
     config = {
         "experiment": {"dir": str(tmp_path)},
-        "model": {"descriptor_override": "nemotron_h"},
+        "model": {"descriptor_override": "nemotron_h", "trust_remote_code": True},
         "distillation": {
             "domain": "llm",
             "local_batch_size": 2,
@@ -563,18 +711,14 @@ def test_teacher_hidden_is_rewrapped_on_equivalent_lm_head_mesh(monkeypatch):
     source_mesh = Mesh()
     head_mesh = Mesh()
     hidden = FakeDTensor(torch.ones(2, 3), source_mesh)
-    base_layer = type(
-        "BaseLayer", (), {"weight": FakeDTensor(torch.ones(4, 3), head_mesh)}
-    )()
+    base_layer = type("BaseLayer", (), {"weight": FakeDTensor(torch.ones(4, 3), head_mesh)})()
     head = type("WrappedHead", (), {"base_layer": base_layer})()
 
     aligned = global_kd_recipe._align_dtensor_to_module_mesh(hidden, head)
 
     assert aligned.device_mesh is head_mesh
     assert aligned.placements == hidden.placements
-    assert FakeDTensor.calls == [
-        (hidden.local, head_mesh, hidden.placements, False)
-    ]
+    assert FakeDTensor.calls == [(hidden.local, head_mesh, hidden.placements, False)]
 
 
 def test_teacher_mtp_projection_uses_local_head_and_student_logit_mesh(monkeypatch):
@@ -603,15 +747,13 @@ def test_teacher_mtp_projection_uses_local_head_and_student_logit_mesh(monkeypat
     teacher_mesh = Mesh()
     student_mesh = Mesh()
     hidden = FakeDTensor(torch.tensor([[1.0, 2.0]]), teacher_mesh, ("replicate",))
-    weight = FakeDTensor(
-        torch.tensor([[1.0, 0.0], [0.0, 2.0]]), teacher_mesh, ("shard0",)
-    )
-    head = type("WrappedHead", (), {"base_layer": type("Base", (), {"weight": weight, "bias": None})()})()
+    weight = FakeDTensor(torch.tensor([[1.0, 0.0], [0.0, 2.0]]), teacher_mesh, ("shard0",))
+    head = type(
+        "WrappedHead", (), {"base_layer": type("Base", (), {"weight": weight, "bias": None})()}
+    )()
     reference = FakeDTensor(torch.empty(1, 2), student_mesh, ("shard_vocab",))
 
-    projected = global_kd_recipe._project_teacher_hidden_on_reference_mesh(
-        hidden, head, reference
-    )
+    projected = global_kd_recipe._project_teacher_hidden_on_reference_mesh(hidden, head, reference)
 
     assert projected.device_mesh is student_mesh
     assert projected.placements == reference.placements
@@ -740,10 +882,12 @@ def test_gradient_groups_are_observed_at_optimizer_step():
     assert all(value.item() > 0 for value in recipe._gradient_squared.values())
 
 
-def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
+def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
+    # Lazy import keeps the optional NeMo AutoModel runtime out of test collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     calls = []
+    refreshes = []
 
     class BaseRecipe:
         def save_checkpoint(
@@ -755,7 +899,12 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
             best_metric_key="default",
         ):
             calls.append((epoch, step, train_loss, val_loss, best_metric_key))
-            (tmp_path / f"epoch_{epoch}_step_{step}").mkdir()
+            checkpoint = tmp_path / f"epoch_{epoch}_step_{step}"
+            consolidated = checkpoint / "model/consolidated"
+            consolidated.mkdir(parents=True)
+            (consolidated / "config.json").write_text(
+                json.dumps({"text_config": {"block_configs": [{"subblock_configs": []}]}})
+            )
             return "saved"
 
     class Recipe(_WeightedObjectiveMixin, BaseRecipe):
@@ -768,6 +917,13 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
         {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
     )()
     recipe.dist_env = type("DistEnv", (), {"is_main": True})()
+    recipe.cfg = {"model": {"trust_remote_code": True}}
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda path, **kwargs: refreshes.append(
+            (path, kwargs, (tmp_path / "epoch_2_step_17/saving_completed").exists())
+        ),
+    )
 
     result = recipe.save_checkpoint(
         2,
@@ -779,7 +935,107 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path):
 
     assert result == "saved"
     assert calls == [(2, 17, 0.5, {"lm_loss": 0.25}, "lm_loss")]
+    assert refreshes == [
+        (
+            tmp_path / "epoch_2_step_17/model/consolidated",
+            {"trust_remote_code": True},
+            False,
+        )
+    ]
     assert (tmp_path / "epoch_2_step_17" / "saving_completed").is_file()
+
+
+def test_global_kd_checkpoint_trust_policy_requires_explicit_opt_in():
+    # Lazy imports keep the optional NeMo AutoModel runtime out of test collection.
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+        _checkpoint_trust_remote_code,
+    )
+
+    assert _checkpoint_trust_remote_code({"anymodel_descriptor": "llama"}) is False
+    with pytest.raises(ValueError, match="set model.trust_remote_code=true"):
+        _checkpoint_trust_remote_code({"anymodel_descriptor": "nemotron_h"})
+
+
+def test_global_kd_checkpoint_explicit_trust_policy_wins():
+    # Lazy imports keep the optional NeMo AutoModel runtime out of test collection.
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+        _checkpoint_trust_remote_code,
+    )
+
+    assert (
+        _checkpoint_trust_remote_code(
+            {
+                "anymodel_descriptor": "nemotron_h",
+                "trust_remote_code": False,
+            }
+        )
+        is False
+    )
+
+
+def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
+    # Import the dynamic mixin at test runtime to preserve lightweight module collection.
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
+
+    publication = {"error": None, "broadcasts": 0}
+
+    class BaseRecipe:
+        def save_checkpoint(
+            self,
+            epoch,
+            step,
+            train_loss,
+            val_loss,
+            best_metric_key="default",
+        ):
+            del train_loss, val_loss, best_metric_key
+            consolidated = tmp_path / f"epoch_{epoch}_step_{step}/model/consolidated"
+            consolidated.mkdir(parents=True, exist_ok=True)
+            (consolidated / "config.json").write_text(
+                json.dumps({"block_configs": [{"subblock_configs": []}]})
+            )
+            return "saved"
+
+    class Recipe(_WeightedObjectiveMixin, BaseRecipe):
+        pass
+
+    def broadcast_object_list(payload, *, src):
+        assert src == 0
+        publication["broadcasts"] += 1
+        if payload[0] is not None:
+            publication["error"] = payload[0]
+        else:
+            payload[0] = publication["error"]
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("refresh failed")),
+    )
+
+    def recipe(*, is_main):
+        instance = Recipe()
+        instance.checkpointer = type(
+            "Checkpointer",
+            (),
+            {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
+        )()
+        instance.dist_env = type("DistEnv", (), {"is_main": is_main})()
+        instance.cfg = {"model": {"trust_remote_code": False}}
+        return instance
+
+    with pytest.raises(ValueError, match="refresh failed"):
+        recipe(is_main=True).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
+    assert publication == {"error": "ValueError: refresh failed", "broadcasts": 1}
+    assert not (tmp_path / "epoch_2_step_19/saving_completed").exists()
+
+    with pytest.raises(
+        RuntimeError,
+        match="global KD checkpoint publication failed on rank 0: ValueError: refresh failed",
+    ):
+        recipe(is_main=False).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
+    assert publication["broadcasts"] == 2
 
 
 def test_global_kd_optimizer_save_uses_the_actual_pipeline_model_parts():
@@ -800,9 +1056,7 @@ def test_global_kd_optimizer_save_uses_the_actual_pipeline_model_parts():
         def save_optimizer(self, saved_optimizer, model, path, scheduler):
             del path, scheduler
             saved_models.append(model)
-            assert saved_optimizer.param_groups[0]["params"] == list(
-                original.parameters()
-            )
+            assert saved_optimizer.param_groups[0]["params"] == list(original.parameters())
 
     recipe = object.__new__(_WeightedObjectiveMixin)
     recipe.model_parts = [original]
@@ -854,9 +1108,7 @@ def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
     recipe._remove_text_inactive_optimizer_parameters()
 
     optimized = {
-        id(parameter)
-        for group in recipe.optimizer.param_groups
-        for parameter in group["params"]
+        id(parameter) for group in recipe.optimizer.param_groups for parameter in group["params"]
     }
     assert all(id(parameter) not in optimized for parameter in model.visual.parameters())
     assert all(id(parameter) not in optimized for parameter in model.mm_projector.parameters())
@@ -950,9 +1202,7 @@ def test_llm_pp_optimizer_step_publishes_every_weighted_objective(monkeypatch):
         lambda self, batches, max_grad_norm: log_data,
     )
 
-    recipe = object.__new__(
-        global_kd_recipe.KnowledgeDistillationRecipeForNextTokenPrediction
-    )
+    recipe = object.__new__(global_kd_recipe.KnowledgeDistillationRecipeForNextTokenPrediction)
     recipe.needs_teacher = True
     recipe.pp_enabled = True
     recipe.device_mesh = type(
@@ -973,8 +1223,7 @@ def test_llm_pp_optimizer_step_publishes_every_weighted_objective(monkeypatch):
     }
     recipe._objective_step_cursor = dict.fromkeys(recipe._objective_buffers, 0)
     recipe._gradient_squared = {
-        name: torch.tensor(0.0)
-        for name in ("vision", "projector", "language", "mtp")
+        name: torch.tensor(0.0) for name in ("vision", "projector", "language", "mtp")
     }
     recipe._dp_allreduce = lambda value, include_cp: value
 
@@ -1032,9 +1281,7 @@ def test_global_kd_uses_canonical_multimodal_packing_and_train_all(tmp_path, mon
     assert kd.freeze_policy == "train_all"
     assert kd.teacher_descriptor == "qwen3_5"
     assert kd.student_descriptor == "qwen3_5"
-    assert recipe["dataset"]["_target_"].endswith(
-        "load_materialized_conversation_dataset"
-    )
+    assert recipe["dataset"]["_target_"].endswith("load_materialized_conversation_dataset")
     assert recipe["dataset"]["path_or_dataset"] == str(tmp_path / "intersyn")
     assert recipe["packed_sequence"]["pack_size"] == 2048
     assert recipe["packed_sequence"]["max_packs"] == 128

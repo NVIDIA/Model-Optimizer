@@ -28,7 +28,7 @@ from .anymodel.registry import (
     resolve_descriptor_by_name,
     resolve_descriptor_from_pretrained,
 )
-from .manifest import StageManifest, write_stage_manifest
+from .manifest import StageManifest, stage_manifest_from_config, write_stage_manifest
 from .pipeline_config import canonical_stage_name, normalize_pipeline_config
 
 __all__ = ["STAGES", "StageResult", "normalize_config", "run_stage"]
@@ -210,7 +210,7 @@ def run_stage(
         return _skip_stage(
             cfg,
             stage,
-            StageManifest(stage=stage, inputs={"config": cfg}, config=cfg),
+            stage_manifest_from_config(stage, cfg),
             reason=StageSkipReason.DISABLED,
             message=f"Stage '{stage}' is disabled by configuration.",
         )
@@ -232,13 +232,12 @@ def run_stage(
             descriptor_confidence=resolution.confidence,
         )
         runtime_cfg["_runtime"] = runtime
-    manifest = StageManifest(
-        stage=stage,
+    manifest = stage_manifest_from_config(
+        stage,
+        cfg,
         inputs={
-            "config": cfg,
             "descriptor_resolution": resolution.to_dict() if resolution else None,
         },
-        config=cfg,
         effective_config=copy.deepcopy(runtime_cfg),
         capability_snapshot=resolution.capabilities.to_dict() if resolution else None,
     )

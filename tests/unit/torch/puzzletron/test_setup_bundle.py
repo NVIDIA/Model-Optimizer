@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
 import pytest
@@ -256,6 +253,13 @@ def test_custom_dataset_rendering_does_not_add_acquisition_fields() -> None:
     experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
 
     assert "acquisition" not in experiment["data"]
+
+
+def test_rendered_data_keeps_controller_and_worker_sequence_length_in_sync() -> None:
+    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
+
+    assert experiment["data"]["sequence_length"] == 2048
+    assert experiment["data"]["sequence_length"] == experiment["data"]["max_sample_length"]
 
 
 def test_packed_text_uses_native_automodel_data_instead_of_fixed_token_memmaps() -> None:

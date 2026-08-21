@@ -1,15 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Sharded stage adapter for independent worker instances."""
 
 from __future__ import annotations
 
-import subprocess
+# Reuse the standalone stage mergers without importing their runtime
+# dependencies into the controller. Commands pass configuration-derived values
+# as separate argv elements and never invoke a shell.
+import subprocess  # nosec B404
 import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..executors.slurm import SlurmExecutor
 from ..schema import (
@@ -29,6 +45,13 @@ from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns
+
+if TYPE_CHECKING:
+    from ...security_policy import require_boolean_policy
+elif __package__.startswith("puzzletron_orchestrator."):
+    from puzzletron_orchestrator.security_policy import require_boolean_policy
+else:
+    from ...security_policy import require_boolean_policy
 
 __all__ = ["ShardedStageAdapter"]
 
@@ -217,11 +240,11 @@ class ShardedStageAdapter(WorkAdapter):
         measurement_id = item.metadata.get("measurement_id")
         name_suffix = f"_{measurement_id}" if measurement_id else ""
         log_path = str(
-            log_dir
-            / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
+            log_dir / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
         )
         if node.stage_id == "aiperf":
             aiperf = plan.experiment_config.get("aiperf") or {}
+            model = plan.experiment_config.get("model") or {}
             argv = [
                 "python",
                 str(script_path),
@@ -236,6 +259,26 @@ class ShardedStageAdapter(WorkAdapter):
                 "--output-tokens",
                 str(aiperf.get("output_tokens", 1024)),
             ]
+            if "trust_remote_code" in aiperf:
+                trust_remote_code_path = "aiperf.trust_remote_code"
+                trust_remote_code_value = aiperf["trust_remote_code"]
+            else:
+                trust_remote_code_path = "model.trust_remote_code"
+                trust_remote_code_value = model.get("trust_remote_code", False)
+            trust_remote_code = require_boolean_policy(
+                trust_remote_code_value,
+                path=trust_remote_code_path,
+                default=False,
+            )
+            allow_online_tokenizer_resolution = require_boolean_policy(
+                aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False),
+                path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+                default=False,
+            )
+            if trust_remote_code:
+                argv.append("--trust-remote-code")
+            if allow_online_tokenizer_resolution:
+                argv.append("--allow-aiperf-v011-online-tokenizer-resolution")
         else:
             argv = ["python", str(script_path), "--config", plan.experiment_config_path]
             argv.extend(extra_args)
@@ -353,7 +396,8 @@ class ShardedStageAdapter(WorkAdapter):
                     command=command,
                 )
             else:
-                result = subprocess.run(
+                # The adapter selects the entry point and supplies an explicit argv tuple.
+                result = subprocess.run(  # nosec B603
                     command,
                     cwd=plan.runner.contract.repository,
                     capture_output=True,

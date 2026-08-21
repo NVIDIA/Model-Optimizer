@@ -31,8 +31,14 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkpoint
 from ..identity import canonicalize, stable_hash
+from ..security_policy import require_boolean_policy
 from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
 from .filters import apply_filter
+from .identity import (
+    expected_post_mip_execution_identity,
+    post_mip_execution_contract,
+    post_mip_execution_identity,
+)
 from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservation
 
 __all__ = [
@@ -123,62 +129,6 @@ def _execution_root(
     config: Mapping[str, Any], node: CompiledPostMIPNode, execution_identity: str
 ) -> Path:
     return _node_root(config, node) / "executions" / execution_identity
-
-
-def _execution_contract(
-    config: Mapping[str, Any],
-    node: CompiledPostMIPNode,
-    candidate_set: CandidateSet,
-    ledger: CandidateLedger,
-) -> dict[str, Any]:
-    dependency_owners = {
-        reference.partition(".")[0]
-        for reference in node.metric_references
-        if not reference.startswith("mip.")
-    }
-    if node.model_source not in {"latest", "origin"}:
-        dependency_owners.add(node.model_source)
-    dependency_executions = {}
-    for owner in sorted(dependency_owners):
-        current_path = (
-            _puzzle_dir(config) / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
-        )
-        dependency_executions[owner] = json.loads(current_path.read_text())["execution_identity"]
-    source_revisions = {
-        revision_id: ledger.source_revision(revision_id, node.model_source).revision_id
-        for revision_id in candidate_set.revision_ids
-    }
-    return {
-        "candidate_set": candidate_set.identity,
-        "node": node.config,
-        "dependency_executions": dependency_executions,
-        "source_revisions": source_revisions,
-    }
-
-
-def _execution_identity(
-    config: Mapping[str, Any],
-    node: CompiledPostMIPNode,
-    candidate_set: CandidateSet,
-    ledger: CandidateLedger,
-) -> str:
-    return stable_hash(
-        _execution_contract(config, node, candidate_set, ledger),
-        prefix="post_mip_execution",
-    )
-
-
-def expected_post_mip_execution_identity(config: Mapping[str, Any], stage_id: str) -> str:
-    """Return the identity a completed post-MIP stage must have right now."""
-
-    node = _compiled_node(config, stage_id)
-    ledger = _ledger(config)
-    active = json.loads((_puzzle_dir(config) / "mip" / "active_profiles.json").read_text())
-    if active.get("status") != "success" or ledger.active_mip_execution_identity != active.get(
-        "execution_identity"
-    ):
-        raise RuntimeError("post-MIP ledger does not reflect the active MIP execution")
-    return _execution_identity(config, node, _input_set(ledger, config, node), ledger)
 
 
 def _raw_solution(source) -> dict[str, Any]:
@@ -451,7 +401,9 @@ def _evaluate_checkpoint(
         stage=f"{node.stage_id}.{source.architecture_id}",
         inputs={"config": candidate},
         config=candidate,
-        semantic_config=semantic_stage_config(candidate, "zero_shot_evaluation"),
+        semantic_config=semantic_stage_config(
+            candidate, "zero_shot_evaluation", use_authored=False
+        ),
     )
     evaluation_stage(candidate, manifest)
     rows = json.loads((output / "evaluation_summary.json").read_text())
@@ -494,6 +446,19 @@ def _aiperf(
         for concurrency in concurrencies
     }
     topology = dict(settings.pop("topology", {}) or {})
+    trust_remote_code = require_boolean_policy(
+        settings.pop(
+            "trust_remote_code",
+            (config.get("model") or {}).get("trust_remote_code", False),
+        ),
+        path="post_mip.aiperf.config.trust_remote_code",
+        default=False,
+    )
+    allow_online_tokenizer_resolution = require_boolean_policy(
+        settings.pop("allow_aiperf_v011_online_tokenizer_resolution", False),
+        path="post_mip.aiperf.config.allow_aiperf_v011_online_tokenizer_resolution",
+        default=False,
+    )
     gpu_ids = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not gpu_ids:
         gpu_ids = ",".join(str(index) for index in range(int(topology.get("gpu_group_size", 1))))
@@ -510,6 +475,8 @@ def _aiperf(
         request_counts=request_counts,
         solution_id=source.architecture_id,
         profile_id=node.flow_id,
+        trust_remote_code=trust_remote_code,
+        allow_aiperf_v011_online_tokenizer_resolution=allow_online_tokenizer_resolution,
         **settings,
     )
     metrics = {}
@@ -648,7 +615,7 @@ def run_post_mip_node_shard(
     ledger = _ledger(config)
     ledger.ingest_mip(_puzzle_dir(config))
     candidate_set = _input_set(ledger, config, node)
-    execution_identity = _execution_identity(config, node, candidate_set, ledger)
+    execution_identity = post_mip_execution_identity(config, node, candidate_set, ledger)
     revision_ids = candidate_set.revision_ids[shard_index::shard_count]
     output_path = (
         _execution_root(config, node, execution_identity)
@@ -750,7 +717,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     ledger = _ledger(config)
     ledger.ingest_mip(_puzzle_dir(config))
     input_set = _input_set(ledger, config, node)
-    execution_identity = _execution_identity(config, node, input_set, ledger)
+    execution_identity = post_mip_execution_identity(config, node, input_set, ledger)
     timed_out_candidates = []
     if node.node_type == "filter":
         observations, output_set = _aggregate_filter(ledger, node, input_set, execution_identity)
@@ -871,7 +838,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
         "observations_path": str(observations_path),
         "candidate_set_path": str(candidate_set_path),
         "execution_identity": execution_identity,
-        "execution_contract": _execution_contract(config, node, input_set, ledger),
+        "execution_contract": post_mip_execution_contract(config, node, input_set, ledger),
         "checkpoints": sorted(
             {
                 str(ledger.revisions[revision_id].artifact["checkpoint"])

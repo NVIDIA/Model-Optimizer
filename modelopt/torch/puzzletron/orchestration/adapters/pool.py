@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Persistent pool adapter for coordinator/worker stages."""
 
@@ -7,6 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..identity import stable_hash
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -19,6 +32,7 @@ from ..schema import (
     WorkItem,
     WorkPlan,
 )
+from ..stages import semantic_stage_config
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns
@@ -51,6 +65,14 @@ def _replacement_puzzle_dir(plan: CampaignPlan, width: int | None) -> Path:
     if width is None:
         return plan.puzzle_dir
     return plan.puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
+
+
+def _replacement_work_id(stage_id: str, width: int | None, width_count: int) -> str:
+    if width_count == 1:
+        return f"{stage_id}:gang"
+    if width is None:
+        raise RuntimeError("multi-width replacement scoring requires concrete widths")
+    return f"{stage_id}:width-{width:04d}"
 
 
 def _replacement_environment(plan: CampaignPlan, puzzle_dir: Path) -> dict[str, str]:
@@ -130,6 +152,23 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
     return tuple(overrides)
 
 
+def _replacement_completion_identity(
+    plan: CampaignPlan,
+    root_overrides: list[str],
+) -> str:
+    return stable_hash(
+        {
+            "contract_hash": plan.contract_hash,
+            "semantic_config": semantic_stage_config(
+                plan.experiment_config,
+                "replacement_scoring",
+            ),
+            "root_overrides": root_overrides,
+        },
+        prefix="replacement_scoring_completion",
+    )
+
+
 class PersistentPoolAdapter(WorkAdapter):
     """Launch one coordinator plus resident worker pool."""
 
@@ -146,11 +185,7 @@ class PersistentPoolAdapter(WorkAdapter):
             workers_per_width, remainder = divmod(node.instances, len(widths))
             items = tuple(
                 WorkItem(
-                    work_id=(
-                        f"{node.stage_id}:gang"
-                        if len(widths) == 1
-                        else f"{node.stage_id}:width-{int(width):04d}"
-                    ),
+                    work_id=_replacement_work_id(node.stage_id, width, len(widths)),
                     stage_id=node.stage_id,
                     shard_index=index,
                     shard_count=len(widths),
@@ -233,17 +268,21 @@ class PersistentPoolAdapter(WorkAdapter):
             else plan.puzzle_dir
         )
         campaign_dir = replacement_puzzle_dir / "distributed_eval" / node.stage_id
-        effective_overrides = list(overrides or [])
+        root_overrides = list(overrides or [])
+        effective_overrides = list(root_overrides)
         if node.stage_id == "replacement_scoring":
             effective_overrides.extend(_replacement_overrides(plan, replacement_puzzle_dir))
         if role == "gang":
             worker_count = int(item.metadata.get("worker_count", node.instances))
+            allocation_nodes, allocation_gpus, topology = packed_allocation(
+                node, instances=worker_count
+            )
             env = {
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
                 "WORLD_SIZE": str(node.gpus_per_instance),
-                "NPROC_PER_NODE": str(node.gpus_per_instance),
+                "NPROC_PER_NODE": str(topology.gpus_per_task),
                 "WORKER_COUNT": str(worker_count),
             }
             if node.stage_id == "depth_importance":
@@ -254,6 +293,7 @@ class PersistentPoolAdapter(WorkAdapter):
                 script = repo / "examples/puzzletron/distributed_eval/run_depth_pool.sh"
             else:
                 env.update(_replacement_environment(plan, replacement_puzzle_dir))
+                env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
                 replacement_widths = _replacement_widths(plan)
                 if len(replacement_widths) > 1:
                     width = int(item.metadata["width"])
@@ -264,12 +304,10 @@ class PersistentPoolAdapter(WorkAdapter):
                                 / "artifacts"
                                 / "replacement_scoring"
                                 / ".pool_completion"
-                                / plan.contract_hash
+                                / _replacement_completion_identity(plan, root_overrides)
                             ),
                             "FINALIZE_COMPLETION_MARKER": f"width-{width}",
-                            "FINALIZE_EXPECTED_COMPLETIONS": str(
-                                len(replacement_widths)
-                            ),
+                            "FINALIZE_EXPECTED_COMPLETIONS": str(len(replacement_widths)),
                         }
                     )
                 script = repo / "examples/puzzletron/distributed_eval/run_replacement_pool.sh"
@@ -277,9 +315,6 @@ class PersistentPoolAdapter(WorkAdapter):
                 existing = env.get("DISTRIBUTED_EVAL_OVERRIDES", "")
                 env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
             log_path = str(log_dir / f"{node.stage_id}_gang_{attempt_id}.log")
-            allocation_nodes, allocation_gpus, topology = packed_allocation(
-                node, instances=worker_count
-            )
             return AttemptSpec(
                 attempt_id=attempt_id,
                 work_id=item.work_id,
@@ -326,6 +361,7 @@ class PersistentPoolAdapter(WorkAdapter):
             env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
         if node.stage_id == "replacement_scoring":
             env.update(_replacement_environment(plan, replacement_puzzle_dir))
+            env["FINALIZE_OVERRIDES"] = "\n".join(root_overrides)
         elif node.stage_id == "depth_importance":
             depth = plan.experiment_config.get("depth_importance") or {}
             env["OUTPUT_DIR"] = str(
@@ -334,13 +370,9 @@ class PersistentPoolAdapter(WorkAdapter):
         if role == "worker":
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in item.local_gpu_ids)
             env["NPROC_PER_NODE"] = str(node.gpus_per_instance)
-            env["NNODES"] = "1"
-            env["NODE_RANK"] = "0"
             worker_id = int(item.metadata.get("worker_id", 0))
             env["WORKER_GROUP_INDEX"] = str(worker_id)
             env["WORKER_PORT"] = str(5010 + worker_id)
-            env["RDZV_ENDPOINT"] = f"127.0.0.1:{29500 + worker_id}"
-            env["RDZV_ID"] = f"{node.stage_id}-{attempt_id}"
         argv = ("bash", str(script))
         # GPU partitions reject zero-GPU jobs; coordinators still need one GPU slot.
         allocation_gpus = 1 if role == "coordinator" else node.gpus_per_instance

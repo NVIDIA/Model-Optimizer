@@ -457,155 +457,25 @@ def _patterns_present(puzzle_dir: Path, patterns: tuple[str, ...]) -> bool:
     )
 
 
-def _prefixed_hash(prefix: str, payload: Mapping[str, Any]) -> str:
-    return f"{prefix}_{hash_payload(payload)[:16]}"
-
-
-def _post_input_candidate_set(
-    config: Mapping[str, Any], puzzle_dir: Path, stage_id: str
-) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    _prefix, flow_id, node_id = stage_id.split(".", 2)
-    flow = config["post_mip"]["flows"][flow_id]
-    node = flow["nodes"][node_id]
-    input_id = str(node.get("input", "source"))
-    registry = _read_mapping(puzzle_dir / "artifacts" / "post_mip" / "candidate_registry.json")
-    if registry is None:
-        raise RuntimeError("post-MIP candidate registry is unavailable")
-    if input_id != "source":
-        current = _read_mapping(
-            puzzle_dir / "artifacts" / "post_mip" / "nodes" / input_id / "current.json"
-        )
-        if current is None:
-            raise RuntimeError(f"post-MIP input node {input_id!r} has no current execution")
-        candidate_set = _read_mapping(
-            puzzle_dir
-            / "artifacts"
-            / "post_mip"
-            / "nodes"
-            / input_id
-            / "executions"
-            / str(current["execution_identity"])
-            / "candidate_set.json"
-        )
-        if candidate_set is None:
-            raise RuntimeError(f"post-MIP input node {input_id!r} has no candidate set")
-        identity_payload = {
-            key: candidate_set[key]
-            for key in (
-                "flow_id",
-                "node_id",
-                "revision_ids",
-                "producer_execution_identity",
-            )
-        }
-        if candidate_set.get("identity") != _prefixed_hash("candidate_set", identity_payload):
-            raise RuntimeError(f"post-MIP input node {input_id!r} has an invalid candidate set")
-        return candidate_set, registry
-
-    active = _read_mapping(puzzle_dir / "mip" / "active_profiles.json")
-    if active is None or active.get("status") != "success":
-        raise RuntimeError("active MIP profile manifest is unavailable")
-    active_execution = str(active["execution_identity"])
-    active_profiles = {str(value) for value in active.get("profile_ids") or ()}
-    if (
-        registry.get("active_mip_execution_identity") != active_execution
-        or set(registry.get("active_profile_ids") or ()) != active_profiles
-    ):
-        raise RuntimeError("post-MIP registry does not reflect the active MIP execution")
-    source = flow["source"]
-    variants = source.get("variants", "all")
-    objectives = source.get("objectives", "all")
-    if isinstance(variants, str) and variants != "all":
-        variants = [variants]
-    if isinstance(objectives, str) and objectives != "all":
-        objectives = [objectives]
-    revision_ids = []
-    for architecture in dict(registry.get("architectures") or {}).values():
-        origins = [
-            origin
-            for origin in architecture.get("origins") or ()
-            if origin.get("profile_id") in active_profiles
-            and origin.get("mip_execution_identity") == active_execution
-            and origin.get("run_id") == source["run"]
-            and (variants == "all" or origin.get("variant_id") in variants)
-            and (objectives == "all" or (origin.get("objective") or {}).get("metric") in objectives)
-        ]
-        if origins:
-            origins.sort(
-                key=lambda origin: (
-                    str(origin.get("profile_id")),
-                    str(origin.get("kind")),
-                    int(origin.get("rank", 0)),
-                )
-            )
-            revision_ids.append(str(origins[0]["revision_id"]))
-    revision_ids = sorted(dict.fromkeys(revision_ids))
-    payload = {
-        "flow_id": flow_id,
-        "node_id": "source",
-        "revision_ids": revision_ids,
-        "producer_execution_identity": active_execution,
-    }
-    return {
-        **payload,
-        "identity": _prefixed_hash("candidate_set", payload),
-    }, registry
-
-
 def post_mip_summary_is_current(
     config: Mapping[str, Any], puzzle_dir: Path, stage_id: str, summary: Mapping[str, Any]
 ) -> bool:
-    """Validate a node summary without importing the PyTorch-backed worker package."""
+    """Validate a node summary without importing torch."""
 
     try:
-        _prefix, flow_id, node_id = stage_id.split(".", 2)
-        node = dict(config["post_mip"]["flows"][flow_id]["nodes"][node_id])
-        candidate_set, registry = _post_input_candidate_set(config, puzzle_dir, stage_id)
-        owners = set()
-        if node.get("type") == "filter":
-            if node.get("mode") in {"top_k", "threshold"}:
-                references = [node["metric"]]
-            else:
-                references = [entry["metric"] for entry in node.get("metrics") or ()]
-            owners.update(
-                str(reference).partition(".")[0]
-                for reference in references
-                if not str(reference).startswith("mip.")
+        if __package__.startswith("puzzletron_orchestrator."):
+            from puzzletron_orchestrator.post_mip.identity import (
+                expected_post_mip_execution_identity,
             )
-        model_source = str(node.get("model_source", "latest"))
-        if model_source not in {"latest", "origin"}:
-            owners.add(model_source)
-        dependency_executions = {}
-        for owner in sorted(owners):
-            current = _read_mapping(
-                puzzle_dir / "artifacts" / "post_mip" / "nodes" / owner / "current.json"
-            )
-            if current is None:
-                return False
-            dependency_executions[owner] = current["execution_identity"]
-        revision_ids = [str(value) for value in candidate_set.get("revision_ids") or ()]
-        revisions = dict(registry.get("revisions") or {})
-        if model_source == "latest":
-            source_revisions = {value: value for value in revision_ids}
-        elif model_source == "origin":
-            source_revisions = {}
-            for value in revision_ids:
-                current = value
-                while revisions[current].get("parent_revision_id") is not None:
-                    current = str(revisions[current]["parent_revision_id"])
-                source_revisions[value] = current
         else:
-            recorded = (summary.get("execution_contract") or {}).get("source_revisions") or {}
-            if set(recorded) != set(revision_ids):
-                return False
-            source_revisions = dict(recorded)
-        contract = {
-            "candidate_set": candidate_set["identity"],
-            "node": node,
-            "dependency_executions": dependency_executions,
-            "source_revisions": source_revisions,
-        }
-        return summary.get("execution_identity") == _prefixed_hash("post_mip_execution", contract)
+            from ...post_mip.identity import expected_post_mip_execution_identity
+
+        effective_config = dict(config)
+        effective_config["puzzle_dir"] = str(puzzle_dir)
+        return summary.get("execution_identity") == expected_post_mip_execution_identity(
+            effective_config,
+            stage_id,
+        )
     except (KeyError, OSError, RuntimeError, TypeError, ValueError):
         return False
 

@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Long-lived AutoModel executor for distributed replace-block evaluation."""
 
 from __future__ import annotations
@@ -5,6 +20,7 @@ from __future__ import annotations
 import time
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
+from typing import Any
 
 from ..anymodel.model_descriptor import ModelDescriptorFactory
 from ..anymodel.registry import resolve_descriptor_from_pretrained
@@ -34,17 +50,19 @@ class AutoModelReplaceBlockExecutor:
 
     def __init__(self, hydra_cfg):
         self.cfg = hydra_cfg
-        self.recipe = None
-        self.cache = None
-        self.params = None
-        self.teacher_block_configs = None
-        self.num_q = None
-        self.head_dim = None
-        self.bypass_checkpoint_dir = None
+        self.recipe: Any | None = None
+        self.cache: Any | None = None
+        self.params: dict[str, Any] | None = None
+        self.teacher_block_configs: Any | None = None
+        self.num_q: int | None = None
+        self.head_dim: int | None = None
+        self.bypass_checkpoint_dir: Path | None = None
         self.is_output_writer = False
-        self.source_hidden_width = None
-        self.sliced_teacher_baseline = None
-        self.latest_observability = None
+        self.source_hidden_width: int | None = None
+        self.sliced_teacher_baseline: dict[str, Any] | None = None
+        self.latest_observability: dict[str, Any] | None = None
+        self.latest_score_device_type: str | None = None
+        self.visible_cuda_device_count: int | None = None
         self._setup_complete = False
 
     def capabilities(self) -> dict:
@@ -74,7 +92,8 @@ class AutoModelReplaceBlockExecutor:
         from ..tools.checkpoint_utils import load_model_config
 
         scoring = self.cfg.scoring
-        self.params = solution_scoring_params(self.cfg)
+        params = solution_scoring_params(self.cfg)
+        self.params = params
         apply_patch()
         teacher_dir = Path(
             scoring.get("teacher_dir", None) or f"{self.cfg.puzzle_dir}/ckpts/teacher"
@@ -115,18 +134,19 @@ class AutoModelReplaceBlockExecutor:
         recipe_dict = build_solution_recipe_config(self.cfg, target_dir)
         distributed = recipe_dict.get("distributed", {})
         validate_force_hf_ep(
-            self.params["force_hf"],
+            params["force_hf"],
             int(distributed.get("ep_size", 1) or 1),
         )
         target_recipe = _run_recipe(
             recipe_dict,
             scoring,
-            self.params["eval_iters"],
-            self.params["use_puzzletron_dataloader"],
-            self.params["data_cfg"],
+            params["eval_iters"],
+            params["use_puzzletron_dataloader"],
+            params["data_cfg"],
         )
-        self.cache = TeacherTargetCache(device=self.params["teacher_cache_device"])
-        _extract_teacher_targets(target_recipe, self.cache, self.params)
+        cache = TeacherTargetCache(device=params["teacher_cache_device"])
+        self.cache = cache
+        _extract_teacher_targets(target_recipe, cache, params)
         dist.barrier()
 
         if source_dir.resolve() == target_dir.resolve():
@@ -137,9 +157,9 @@ class AutoModelReplaceBlockExecutor:
             self.recipe = _run_recipe(
                 build_solution_recipe_config(self.cfg, source_dir),
                 scoring,
-                self.params["eval_iters"],
-                self.params["use_puzzletron_dataloader"],
-                self.params["data_cfg"],
+                params["eval_iters"],
+                params["use_puzzletron_dataloader"],
+                params["data_cfg"],
             )
         # AutoModel PP containers can retain a final norm/LM head on a rank
         # where the pipeline stage does not actually execute them.  Elect from
@@ -149,12 +169,15 @@ class AutoModelReplaceBlockExecutor:
         import torch.distributed as torch_dist
 
         rank = torch_dist.get_rank() if torch_dist.is_initialized() else 0
-        observed = bool(len(self.cache))
-        observed_by_rank = [(rank, observed)]
+        observed = bool(len(cache))
+        observed_by_rank: list[tuple[int, bool] | None] = [(rank, observed)]
         if torch_dist.is_initialized():
             observed_by_rank = [None] * torch_dist.get_world_size()
             torch_dist.all_gather_object(observed_by_rank, (rank, observed))
-        output_ranks = [item_rank for item_rank, has_capture in observed_by_rank if has_capture]
+        observations = [item for item in observed_by_rank if item is not None]
+        if len(observations) != len(observed_by_rank):
+            raise RuntimeError("Missing AutoModel output-rank observation from a distributed rank")
+        output_ranks = [item_rank for item_rank, has_capture in observations if has_capture]
         if not output_ranks:
             raise RuntimeError("No AutoModel rank captured teacher final hidden states")
         self.is_output_writer = observed and rank == min(output_ranks)
@@ -172,6 +195,9 @@ class AutoModelReplaceBlockExecutor:
             raise NotImplementedError(f"Unsupported evaluation handler {request.handler!r}")
         if not self._setup_complete:
             raise RuntimeError("AutoModelReplaceBlockExecutor.setup() was not called")
+        params = self.params
+        if params is None:
+            raise RuntimeError("AutoModelReplaceBlockExecutor setup state is incomplete")
         from ..plugins.automodel.solution_launch import _solution_prune_target
         from ..replacement_library.replacement_utils import parse_layer_replacement
 
@@ -243,14 +269,18 @@ class AutoModelReplaceBlockExecutor:
             provenance={
                 "handler": request.handler,
                 "evaluator_revision": request.evaluator_revision,
-                "micro_batch_size": self.params.get("micro_batch_size"),
+                "micro_batch_size": params.get("micro_batch_size"),
                 "hidden_width": self.source_hidden_width,
                 "sliced_teacher_baseline": self.sliced_teacher_baseline,
                 "observability": self.latest_observability,
+                "score_device_type": getattr(self, "latest_score_device_type", None),
+                "visible_cuda_device_count": getattr(self, "visible_cuda_device_count", None),
             },
         )
 
     def _score(self, prune_target: dict | list[dict] | None) -> dict | None:
+        # Keep framework imports lazy so this executor remains dependency-light until setup.
+        import torch
         import torch.distributed as torch_dist
 
         import modelopt.torch.utils.distributed as dist
@@ -264,10 +294,17 @@ class AutoModelReplaceBlockExecutor:
         recipe = self.recipe
         cache = self.cache
         params = self.params
+        if recipe is None or cache is None or params is None:
+            raise RuntimeError("AutoModelReplaceBlockExecutor setup state is incomplete")
+        self.visible_cuda_device_count = torch.cuda.device_count()
         per_batch = []
         tp_group = recipe.tensor_parallel_group()
         candidate_lm_head = recipe.lm_head_weight() if recipe.has_outputs else None
-        raw_targets = prune_target if isinstance(prune_target, list) else [prune_target]
+        raw_targets: list[dict | None] = []
+        if isinstance(prune_target, list):
+            raw_targets.extend(prune_target)
+        else:
+            raw_targets.append(prune_target)
         prune_targets = [dict(target) for target in raw_targets if target is not None]
         layer_indices = [int(target["layer_idx"]) for target in prune_targets]
         owned_layers = [
@@ -279,9 +316,7 @@ class AutoModelReplaceBlockExecutor:
         with ExitStack() as stack:
             for target in prune_targets:
                 layer_idx = int(target["layer_idx"])
-                bypass_dir = target.pop(
-                    "bypass_checkpoint_dir", self.bypass_checkpoint_dir
-                )
+                bypass_dir = target.pop("bypass_checkpoint_dir", self.bypass_checkpoint_dir)
                 stack.enter_context(
                     recipe.block_checkpoint_overlay_context(bypass_dir, layer_idx)
                     if bypass_dir is not None
@@ -298,6 +333,13 @@ class AutoModelReplaceBlockExecutor:
             for batch_idx, (hidden, targets) in enumerate(recipe.iterate_captures()):
                 if hidden is None:
                     continue
+                device_type = hidden.device.type
+                if self.latest_score_device_type not in (None, device_type):
+                    raise RuntimeError(
+                        "AutoModel scoring tensors changed device type within one executor: "
+                        f"{self.latest_score_device_type!r} -> {device_type!r}"
+                    )
+                self.latest_score_device_type = device_type
                 teacher_hidden = cache.hidden(
                     batch_idx,
                     device=hidden.device,

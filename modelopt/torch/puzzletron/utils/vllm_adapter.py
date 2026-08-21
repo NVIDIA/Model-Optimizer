@@ -218,14 +218,21 @@ def configure_anymodel_metadata(hf_config: Any, descriptor: Any) -> bool:
     return True
 
 
-def refresh_realized_checkpoint_config(checkpoint_dir: str | Path) -> Path:
-    """Rebuild the vLLM interchange fields of an already-realized checkpoint."""
+def refresh_realized_checkpoint_config(
+    checkpoint_dir: str | Path,
+    *,
+    trust_remote_code: bool = False,
+) -> Path:
+    """Rebuild vLLM interchange fields without trusting checkpoint code by default."""
     from transformers import AutoConfig
 
     from ..anymodel.registry import resolve_descriptor
 
     checkpoint_dir = Path(checkpoint_dir)
-    config = AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(
+        checkpoint_dir,
+        trust_remote_code=trust_remote_code,
+    )
     descriptor = resolve_descriptor(config).descriptor
     text_config = _get_text_config(config)
 
@@ -338,22 +345,16 @@ def _convert_block_entry(
             is_full = _get(attn, "sliding_window_size") == "full"
             head_dim_field = "global_head_dim" if (is_full or k_eq_v) else "head_dim"
             current_head_dim = (
-                global_global_head_dim
-                if head_dim_field == "global_head_dim"
-                else global_head_dim
+                global_global_head_dim if head_dim_field == "global_head_dim" else global_head_dim
             )
             if qk_head_dim != current_head_dim:
                 entry[head_dim_field] = qk_head_dim
 
         window = _get(attn, "sliding_window_size")
         if window is not None:
-            desired_type = (
-                "full_attention" if window == "full" else "sliding_attention"
-            )
+            desired_type = "full_attention" if window == "full" else "sliding_attention"
             current_type = (
-                global_layer_types[layer_idx]
-                if layer_idx < len(global_layer_types)
-                else None
+                global_layer_types[layer_idx] if layer_idx < len(global_layer_types) else None
             )
             if global_layer_types and current_type != desired_type:
                 layer_types = list(global_layer_types)
@@ -462,7 +463,9 @@ def _derive_per_layer_config(
     global_moe_latent_size = (
         _get(text_config, moe_latent_field) if moe_latent_field is not None else None
     )
-    global_mamba_values = {hf_field: _get(text_config, hf_field) for hf_field in mamba_fields.values()}
+    global_mamba_values = {
+        hf_field: _get(text_config, hf_field) for hf_field in mamba_fields.values()
+    }
     global_q_lora_rank = _get(text_config, "q_lora_rank")
     global_kv_lora_rank = _get(text_config, "kv_lora_rank")
     global_layer_types = list(_get(text_config, "layer_types") or ())
