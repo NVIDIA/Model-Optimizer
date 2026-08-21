@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 import torch.distributed as dist
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
@@ -43,5 +44,6 @@ def _test_data_parallel_helper(rank, size):
     dist.destroy_process_group()
 
 
+@pytest.mark.timeout(120)
 def test_data_parallel(skip_on_windows):
     spawn_multiprocess_job(2, _test_data_parallel_helper, backend="gloo")
