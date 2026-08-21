@@ -69,11 +69,8 @@ def _is_quantized_module(module: nn.Module) -> bool:
 def _fuse_unrouted_experts(layer_module: nn.Module, fused_linears: dict[str, list[str]]) -> None:
     """Fuse the sibling experts the probe never routed a token to.
 
-    The probe runs one real batch, so on a 256-expert layer it activates a handful and the
-    rest would keep unmerged gate/up scales -- ``sync_moe_gate_up_amax`` covers
-    ``weight_quantizer.amax`` but not the static quantizer's ``global_amax``. Mirrors the
-    replay ``requantize_resmooth_fused_llm_layers`` does for the same reason, scoped to
-    this layer because experts never span one.
+    ``sync_moe_gate_up_amax`` covers ``weight_quantizer.amax`` but not a static
+    quantizer's ``global_amax``, so unrouted pairs would keep unmerged scales.
     """
     from .quant_utils import preprocess_linear_fusion
 
@@ -139,25 +136,32 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
     return sorted(tied)
 
 
+def assert_formats_supported(module: nn.Module, scope: str) -> None:
+    """Raise unless every format in ``module`` can be reproduced per layer.
+
+    Called twice, because AWQ and SVDQuant only become visible once the calibrator has
+    registered ``_pre_quant_scale`` / ``svdquant_lora_a``: before calibration to fail
+    early, and on each exported layer, which is the authority.
+    """
+    unsupported = sorted(str(f) for f in _module_formats(module) - SUPPORTED_FORMATS)
+    if unsupported:
+        raise NotImplementedError(
+            f"layerwise export does not support quantization format(s) {unsupported} "
+            f"({scope}): they need requantize_resmooth_fused_llm_layers' pre-quant-scale "
+            "steps, which are still whole-model. Supported today: "
+            f"{sorted(str(f) for f in SUPPORTED_FORMATS if f)}."
+        )
+
+
 def assert_layerwise_export_supported(model: nn.Module) -> None:
-    """Raise ``NotImplementedError`` unless per-layer export is valid for this model.
+    """Raise unless per-layer export is valid for this model.
 
-    Each case would otherwise differ from a whole-model export without failing. The format
-    gate is the central one: this path never runs ``requantize_resmooth_fused_llm_layers``,
-    so it is limited to formats whose scales it can reproduce per layer.
-
-    Supporting AWQ and SVDQuant needs that pass's pre-quant-scale steps made per-layer.
+    Structural cases only; each would otherwise differ from a whole-model export without
+    failing. Formats are settled by :func:`assert_formats_supported`.
     """
     from modelopt.torch.utils import distributed as dist
 
-    unsupported = sorted(str(f) for f in _module_formats(model) - SUPPORTED_FORMATS)
-    if unsupported:
-        raise NotImplementedError(
-            f"layerwise export does not support quantization format(s) {unsupported}: they "
-            "need requantize_resmooth_fused_llm_layers' pre-quant-scale steps, which are "
-            "still whole-model. Supported today: "
-            f"{sorted(str(f) for f in SUPPORTED_FORMATS if f)}."
-        )
+    assert_formats_supported(model, "before calibration")
 
     tied = _tied_quantized_modules(model)
     if tied:
@@ -334,7 +338,7 @@ class LayerwiseExporter:
                 "export disagree on decoder layer order."
             )
 
-        self._assert_calibrated_format_supported(layer_module)
+        assert_formats_supported(layer_module, "once calibrated")
 
         layer_name = self._layer_names[layer_idx]
         tensors: dict[str, torch.Tensor] = {}
@@ -357,32 +361,24 @@ class LayerwiseExporter:
             _copy_storage_aliases(tensors), str(self._export_dir / layer_shard_name(layer_idx))
         )
 
-    def _assert_calibrated_format_supported(self, layer_module: nn.Module) -> None:
-        """Re-run the format gate once real calibration state exists.
-
-        AWQ and SVDQuant are only distinguishable after calibration -- their discriminators
-        (``_pre_quant_scale``, ``svdquant_lora_a``) are registered by the calibrator -- so
-        the constructor's gate sees plain NVFP4 and passes. Every layer, not just the
-        first: a recipe may apply such a format to a subset, and a resumed run starts
-        part-way through. One walk per layer is one whole-model walk in total.
-        """
-        unsupported = sorted(str(f) for f in _module_formats(layer_module) - SUPPORTED_FORMATS)
-        if unsupported:
-            raise NotImplementedError(
-                f"layerwise export does not support quantization format(s) {unsupported}: "
-                "they need requantize_resmooth_fused_llm_layers' pre-quant-scale steps, "
-                "which are still whole-model. Only visible now that the first layer is "
-                "calibrated. Supported today: "
-                f"{sorted(str(f) for f in SUPPORTED_FORMATS if f)}."
-            )
-
     def _fuse_shared_inputs(
         self, layer_module: nn.Module, probe_forward: Callable[[nn.Module], None] | None
     ) -> None:
         """Unify scales across the modules of this layer that share an input.
 
-        Equivalent to the whole-model pass because the groups never cross a layer boundary,
-        and it uses real activations rather than a synthetic probe.
+        Parity with ``requantize_resmooth_fused_llm_layers``, whose steps are all
+        intra-layer, so a per-layer pass can reproduce them:
+
+        ==============================  ==========================================
+        Whole-model step                Here
+        ==============================  ==========================================
+        ``fuse_prequant_to_linear``     refused (AWQ/SVDQuant)
+        layernorm pre_quant_scale fold  refused (AWQ/SVDQuant)
+        MoE expert resmooth             refused (AWQ/SVDQuant)
+        shared-input group fusion       this method, on real activations
+        sibling-expert replay           :func:`_fuse_unrouted_experts`
+        gate/up amax sync               ``sync_moe_gate_up_amax`` in export_layer
+        ==============================  ==========================================
         """
         from .quant_utils import get_quantization_format
         from .unified_export_hf import _fuse_shared_input_modules, collect_shared_input_modules
@@ -434,9 +430,8 @@ class LayerwiseExporter:
         model = self._ctx.model
         quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         _add_mtp_exclusions(model, quant_config)
-        # No _warn_on_unsynced_moe_gate_up: export_layer syncs each layer inside
-        # transient_module_state, so the shards are synced but the live model is not --
-        # the check would fire on every MoE run and report a miss that did not happen.
+        # No _warn_on_unsynced_moe_gate_up: export_layer syncs inside
+        # transient_module_state, so the shards are synced and the live model is not.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
         # Config module names must match the tensors', or a loader treats an excluded

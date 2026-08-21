@@ -15,6 +15,7 @@
 
 """Per-layer export must match whole-model export, and refuse what it cannot match."""
 
+import contextlib
 import copy
 import json
 from unittest.mock import patch
@@ -163,6 +164,21 @@ def baseline_checkpoint(tmp_path_factory):
     return _load_checkpoint(export_dir)
 
 
+@contextlib.contextmanager
+def _dies_at_layer(layer_idx: int):
+    """Lose the session mid-model, the way a GPU timeout would."""
+    real = LayerwiseExporter.export_layer
+
+    def die(self, idx, *args, **kwargs):
+        if idx == layer_idx:
+            raise RuntimeError("interrupted")
+        return real(self, idx, *args, **kwargs)
+
+    with patch.object(LayerwiseExporter, "export_layer", die):
+        yield
+
+
+@pytest.mark.parametrize("interrupt_at", [None, 2], ids=["fresh", "resumed"])
 @pytest.mark.parametrize(
     ("make_cfg", "layerwise_extra", "expected_key_suffix"),
     [
@@ -185,9 +201,13 @@ def baseline_checkpoint(tmp_path_factory):
     ],
 )
 def test_export_matches_whole_model_export(
-    tmp_path, make_cfg, layerwise_extra, expected_key_suffix
+    tmp_path, make_cfg, layerwise_extra, expected_key_suffix, interrupt_at
 ):
-    """Exporting per layer during calibration must yield the same checkpoint."""
+    """Exporting per layer during calibration must yield the same checkpoint.
+
+    ``interrupt_at`` crosses every config with a lost-session resume, since the two
+    interact: a resumed run re-enters the export path part-way through the model.
+    """
     baseline_dir = tmp_path / "baseline"
     base = make_cfg()
     base["algorithm"] = {"method": "max", "layerwise": {"enable": True, **layerwise_extra}}
@@ -196,6 +216,9 @@ def test_export_matches_whole_model_export(
     export_dir = tmp_path / "fused"
     cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt", base=make_cfg())
     cfg["algorithm"]["layerwise"].update(layerwise_extra)
+    if interrupt_at is not None:
+        with _dies_at_layer(interrupt_at), pytest.raises(RuntimeError, match="interrupted"):
+            mtq.quantize(_build_model(), cfg, _calib)
     mtq.quantize(_build_model(), cfg, _calib)
 
     exported = _load_checkpoint(export_dir)
@@ -231,17 +254,7 @@ def test_resume_skips_exported_layers(tmp_path, baseline_checkpoint):
     checkpoint_dir = tmp_path / "ckpt"
     # Die partway, the way a lost GPU session would: only the committed boundary is
     # resumable, so rewinding a *finished* run's manifest would not reproduce this state.
-    real_export_layer = LayerwiseExporter.export_layer
-
-    def die_at_layer_2(self, layer_idx, *args, **kwargs):
-        if layer_idx == 2:
-            raise RuntimeError("simulated interruption")
-        return real_export_layer(self, layer_idx, *args, **kwargs)
-
-    with (
-        patch.object(LayerwiseExporter, "export_layer", die_at_layer_2),
-        pytest.raises(RuntimeError, match="simulated interruption"),
-    ):
+    with _dies_at_layer(2), pytest.raises(RuntimeError, match="interrupted"):
         mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
 
     assert (export_dir / layer_shard_name(1)).is_file(), "layer 1 was never committed"

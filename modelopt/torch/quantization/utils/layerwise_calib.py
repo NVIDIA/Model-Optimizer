@@ -812,10 +812,9 @@ class _CheckpointState:
             calib_mutates_weights=self.calib_mutates_weights,
             save_layer_state=self.save_layer_state,
         )
-        # Per-layer export only, whose resume dir is auto-derived and so was never opted
-        # into: without this it keeps one activation set per layer, which dwarfs the
-        # checkpoint it sits beside. After the manifest commits the boundary, so a crash
-        # mid-write still leaves the previous one resumable.
+        # Per-layer export only: its resume dir is auto-derived, so an activation set per
+        # layer would dwarf a checkpoint the user never opted into. After the manifest, so
+        # a crash mid-write still resumes from the previous boundary.
         if not self.save_layer_state:
             self._prune_stale_next_inputs(keep=layer_idx)
         window_start = self._last_saved_layer + 1
