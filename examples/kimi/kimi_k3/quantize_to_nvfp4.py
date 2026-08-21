@@ -249,9 +249,12 @@ def _build_w13_kmax_overrides(f, expert_bases: list[str], device: str) -> dict[s
             groups[prefix][proj] = base
 
     overrides: dict[str, int] = {}
-    for paths in groups.values():
+    for prefix, paths in groups.items():
         if "w1" not in paths or "w3" not in paths:
-            continue
+            raise RuntimeError(
+                "w1/w3 of one expert are split across shards, so they cannot share "
+                f"scale_2 for the fused GEMM1: {prefix}"
+            )
         k1 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w1"] + ".weight_scale"), device)
         k3 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w3"] + ".weight_scale"), device)
         shared = max(k1, k3)
@@ -630,6 +633,8 @@ def _module_name_aliases(name: str) -> list[str]:
             suffix = n[len("language_model.model.") :]
             runtime_names.add("model." + suffix)
             runtime_names.add(suffix)
+        elif n.startswith("language_model."):
+            runtime_names.add(n[len("language_model.") :])
     names.update(runtime_names)
     return sorted(names)
 
@@ -800,6 +805,22 @@ def _wait_for(
         time.sleep(poll_s)
 
 
+def _rank0_ready(ready_path: Path, run_id: str, world_size: int, rank: int) -> bool:
+    """Check that rank 0 published matching rendezvous settings."""
+    if not ready_path.exists():
+        return False
+    ready = json.loads(ready_path.read_text())
+    if ready.get("run_id") != run_id:
+        return False
+    published_world_size = ready.get("world_size")
+    if published_world_size != world_size:
+        raise ValueError(
+            f"rank {rank} has --world_size {world_size}, but rank 0 published "
+            f"{published_world_size} for run {run_id}"
+        )
+    return True
+
+
 def _merge_rank_reports(
     rank_reports: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, int], set[str], set[str]]:
@@ -891,8 +912,8 @@ def main():
     p.add_argument(
         "--input_scale",
         type=float,
-        default=1.0,
-        help="fixed activation input_scale for every quantized module (no calibration)",
+        default=None,
+        help="fixed activation input_scale for every quantized module (default: 1.0)",
     )
     p.add_argument("--device", default="cpu", help="'cpu' (default) or 'cuda'")
     p.add_argument("--jobs", type=int, default=8, help="shards converted in parallel per rank")
@@ -927,17 +948,27 @@ def main():
     args = p.parse_args()
 
     if args.recipe:
-        if args.cast_mxfp4_to_nvfp4 or args.attn_fp8 or args.attn_mxfp8 or args.attn_fp8_pb:
-            p.error("--recipe cannot be combined with the low-level format flags")
+        if (
+            args.cast_mxfp4_to_nvfp4
+            or args.attn_fp8
+            or args.attn_mxfp8
+            or args.attn_fp8_pb
+            or args.input_scale is not None
+        ):
+            p.error("--recipe cannot be combined with the low-level format flags or --input_scale")
         try:
             settings = _conversion_settings_from_recipe(args.recipe)
         except (OSError, ValueError) as exc:
             p.error(f"invalid Kimi-K3 recipe: {exc}")
         for name, value in settings.items():
             setattr(args, name, value)
+    if args.input_scale is None:
+        args.input_scale = 1.0
 
-    if not math.isfinite(args.input_scale) or args.input_scale <= 0:
+    input_scale = float(args.input_scale)
+    if not math.isfinite(input_scale) or input_scale <= 0:
         p.error("--input_scale must be finite and > 0")
+    args.input_scale = input_scale
     if args.jobs <= 0:
         p.error("--jobs must be > 0")
     if args.threads_per_job <= 0:
@@ -971,9 +1002,11 @@ def main():
         _write_json_atomic(ready_path, {"run_id": args.run_id, "world_size": args.world_size})
     else:
         _wait_for(
-            lambda: (
-                ready_path.exists()
-                and json.loads(ready_path.read_text()).get("run_id") == args.run_id
+            lambda: _rank0_ready(
+                ready_path,
+                args.run_id,
+                args.world_size,
+                args.rank,
             ),
             f"rank-0 rendezvous for run {args.run_id}",
             args.sync_timeout,

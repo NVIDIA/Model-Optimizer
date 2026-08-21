@@ -29,7 +29,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 22 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 24 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -55,6 +55,8 @@ supported combinations.
 | `nvfp4_weight_only-kv_fp16` | NVFP4 W4A16, weights only | none (BF16/FP16) | max |
 | `nvfp4_weight_only-kv_fp8_cast` | NVFP4 W4A16, weights only | FP8 (constant amax) | max |
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
+| `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
+| `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 
 </details>
 
@@ -128,6 +130,11 @@ activations and tensor-core math are what deliver the throughput.
 - **`int4_blockwise_weight_only`** — INT4 weights, block size 128, BF16
   activations. Classic W4A16 weight compression; works without NVFP4-class
   hardware.
+- **`nvfp4_mlp_weight_only`** — NVFP4 (block size 32) weights on MLP/MoE layers
+  only, BF16 activations.
+- **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
+  activations. Needs no calibration forward pass; the QAT starting point for the
+  GPT-OSS family (see `examples/gpt-oss`).
 
 ---
 

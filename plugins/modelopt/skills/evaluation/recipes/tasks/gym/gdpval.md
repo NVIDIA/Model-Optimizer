@@ -21,6 +21,11 @@ launcher can fail before client startup when the config forwards
 `NEL_INVOCATION_ID`. The shared reference explains the failure signature, dry-run
 check, and procedure for validating and adopting a newer launcher.
 
+**Part of the AA suite** — generate it for every AA request, as its own config
+alongside the `aa/` multi-task one. It shares `recipes/tasks/gym/` with MRCR,
+which is *not* AA: the directory groups tasks by **harness** (NeMo Gym), not by
+suite membership, so read that per-task, not from the path.
+
 ## What makes GDPVal different (not a normal `aa/` task)
 
 - **Standalone** — one gym eval per config. Never add GDPVal to a multi-task
@@ -47,7 +52,7 @@ Start from the self-contained example and edit it — **do not** copy a fragment
 another config:
 
 ```text
-recipes/examples/gym_gdpval/example_gym_gdpval.yaml   # SLURM + single-node vLLM,
+recipes/examples/gym/example_gdpval.yaml   # SLURM + single-node vLLM,
                                                     # rubric mode, self-contained
 ```
 

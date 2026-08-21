@@ -17,8 +17,10 @@
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
+import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -44,6 +46,46 @@ def test_published_recipe_resolves_to_streaming_conversion_settings():
         "attn_fp8_pb": True,
         "input_scale": 1.0,
     }
+
+
+def test_recipe_rejects_explicit_input_scale(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(_SCRIPT),
+            "--source_ckpt",
+            str(tmp_path / "source"),
+            "--output_ckpt",
+            str(tmp_path / "output"),
+            "--recipe",
+            k3_cast._PUBLISHED_RECIPE,
+            "--input_scale",
+            "1.0",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        k3_cast.main()
+
+    assert "--recipe cannot be combined" in capsys.readouterr().err
+
+
+def test_rank0_rendezvous_rejects_mismatched_world_size(tmp_path):
+    ready_path = tmp_path / "ready.json"
+    ready_path.write_text(json.dumps({"run_id": "run-1", "world_size": 4}))
+
+    assert not k3_cast._rank0_ready(ready_path, "other-run", world_size=4, rank=1)
+    assert k3_cast._rank0_ready(ready_path, "run-1", world_size=4, rank=1)
+    with pytest.raises(ValueError, match="rank 1 has --world_size 2"):
+        k3_cast._rank0_ready(ready_path, "run-1", world_size=2, rank=1)
+
+
+def test_module_name_aliases_strip_language_model_prefix():
+    assert k3_cast._module_name_aliases("language_model.lm_head") == [
+        "language_model.lm_head",
+        "lm_head",
+    ]
 
 
 def _mxfp4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -102,6 +144,17 @@ def _write_source_checkpoint(tmp_path: Path) -> tuple[Path, str, dict[str, torch
     )
     (source / "tokenizer_config.json").write_text("{}")
     return source, shard_name, state
+
+
+def test_split_w1_w3_pair_fails_instead_of_using_independent_scales(tmp_path):
+    source, shard_name, _ = _write_source_checkpoint(tmp_path)
+    base = "language_model.model.layers.1.block_sparse_moe.experts.0.w1"
+
+    with (
+        safe_open(source / shard_name, framework="pt", device="cpu") as f,
+        pytest.raises(RuntimeError, match="split across shards"),
+    ):
+        k3_cast._build_w13_kmax_overrides(f, [base], "cpu")
 
 
 def test_convert_shard_casts_experts_and_quantizes_attention(tmp_path):

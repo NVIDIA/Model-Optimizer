@@ -35,6 +35,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.recipe.loader import load_recipe
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry, TensorQuantizer
 from modelopt.torch.quantization.plugins.huggingface import (
+    _QuantHFParallelLinear,
     _TransposedExpertsCalibMixin,
     get_homogeneous_hf_decoder_layers,
     is_homogeneous_hf_model,
@@ -75,6 +76,32 @@ class PytorchModel(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+def test_hf_parallel_weight_access_restores_dtensor_after_exception(monkeypatch):
+    class FakeDTensor:
+        placements = ("shard",)
+
+        @staticmethod
+        def to_local():
+            return torch.ones(2, 2)
+
+    class ParallelLinear:
+        weight = FakeDTensor()
+        shard = FakeDTensor.placements
+
+    monkeypatch.setattr(torch.distributed.tensor, "DTensor", FakeDTensor)
+    linear = ParallelLinear()
+    original_weight = linear.weight
+
+    with (
+        pytest.raises(RuntimeError, match="test error"),
+        _QuantHFParallelLinear.enable_weight_access_and_writeback(linear),
+    ):
+        assert isinstance(linear.weight, nn.Parameter)
+        raise RuntimeError("test error")
+
+    assert linear.weight is original_weight
 
 
 def test_convert_conv1d():

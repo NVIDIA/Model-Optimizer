@@ -13,12 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Base cost-excluded layer patterns for AutoQuantize, spliced into a recipe's cost_excluded_layers
-# via ``$import``. These are VL patterns; including them unconditionally is safe: on a non-VL model
-# nothing matches, so cost_weight 0 is a no-op, while on a VL model it keeps the vision tower / MTP
-# out of the bit-budget denominator.
+# PTQ recipe wrapping the shipped mxfp4_mlp_weight_only preset (the config behind
+# mtq.MXFP4_MLP_WEIGHT_ONLY_CFG), so the two cannot drift apart.
 
-# modelopt-schema: modelopt.recipe.config.LayerPatternList
-  - "*visual*"
-  - "*mtp*"
-  - "*vision_tower*"
+imports:
+  preset: configs/ptq/presets/model/mxfp4_mlp_weight_only
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Applies dynamic MXFP4 to MLP/MoE weight quantizers only (weight-only, activations untouched);
+    no calibration forward pass is required.
+quantize:
+  $import: preset

@@ -524,8 +524,10 @@ class _QuantHFParallelLinear(_ParallelLinear):
             weight = self.weight
             # TODO: To support TP + FSDP, we need to redistribute the tensor with replicate instead of shard
             self.weight = nn.Parameter(weight.to_local())
-            yield
-            self.weight = weight
+            try:
+                yield
+            finally:
+                self.weight = weight
         else:  # transformers>=5.0: weights are already plain Parameters
             yield
 
