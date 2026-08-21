@@ -232,6 +232,25 @@ def test_export_matches_whole_model_export(
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
 
 
+def test_index_resolves_every_key_to_the_shard_holding_it(tmp_path):
+    """A loader resolves keys through the index; tensor equality never exercises that.
+
+    A weight_map entry naming the wrong shard compares equal to a whole-model export and
+    still fails in vLLM or transformers.
+    """
+    export_dir = tmp_path / "fused"
+    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    on_disk = {}
+    for shard in sorted(set(weight_map.values())):
+        assert (export_dir / shard).is_file(), f"index names a missing shard {shard}"
+        on_disk.update(dict.fromkeys(load_file(export_dir / shard), shard))
+
+    assert set(weight_map) == set(on_disk), "index and shards disagree on which keys exist"
+    assert all(on_disk[k] == v for k, v in weight_map.items()), "key routed to the wrong shard"
+
+
 def test_layerwise_export_replaces_resume_artifacts(tmp_path):
     """The shards are the resume artifact, so per-layer weight copies are not written."""
     checkpoint_dir = tmp_path / "ckpt"
