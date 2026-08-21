@@ -17,6 +17,10 @@ Changelog
 - Add per-expert weight quantization for Transformer Engine ``TEGroupedMLP`` (fused MoE experts): each expert now has its own ``weight_quantizer`` (a ``GroupedQuantizer`` holding one ``TensorQuantizer`` per expert) with an independent ``amax``, instead of a single shared ``amax`` across all experts. Applies to ``mtq.quantize`` calibration, HF / Megatron export, and QAD.
 - Add opt-in ``torch.compile`` execution for Transformer Engine grouped-linear per-expert weight quantizers while preserving their native checkpoint amax shapes. Set ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP=1`` before quantized-module conversion; the default path remains eager.
 
+*Speculative Decoding*
+
+- Add the DFlash2 draft variant, selected with ``dflash_architecture_config.projector_type="dflash2"``. It keeps DFlash's one-pass parallel backbone and adds a grouped dynamic convolution around every attention/MLP sublayer (sized by ``conv_kernel_size`` / ``conv_group_size``) plus a low-rank candidate selector (``selector_rank`` / ``selector_top_k``) that scores transitions between adjacent block positions' top-k candidates. The selector's training term is weighted by ``dflash_selector_loss_alpha`` (default 1.0). Exported checkpoints declare ``DFlash2DraftModel`` and match the SGLang/vLLM DFlash2 loaders.
+
 *Misc*
 
 - Add ``modelopt.torch.utils.mlflow.MlflowRunLogger`` for recording a script run on an MLflow tracking server: the invocation, the ModelOpt version, the run log (captured by teeing ``stdout``/``stderr``) and any caller-supplied artifacts, with configuration as searchable params. ``mlflow`` is an optional dependency, imported only when tracking is enabled.

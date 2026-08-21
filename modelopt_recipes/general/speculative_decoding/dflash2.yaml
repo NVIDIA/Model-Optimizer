@@ -1,0 +1,98 @@
+# DFlash2 speculative-decoding training recipe.
+#
+# DFlash2 (https://inco.ai/blog/dflash2/) reuses the DFlash mode/pipeline and adds
+# two components, selected via dflash_architecture_config.projector_type=dflash2:
+#   - a grouped dynamic depthwise convolution around every attention/MLP sublayer,
+#     giving each block position a view of its predecessors inside the block;
+#   - a low-rank candidate selector that scores transitions between adjacent block
+#     positions' top-k candidates, so serving walks one coherent path.
+# The selector is trained by an extra cross-entropy term weighted by
+# dflash_selector_loss_alpha. Online training is the default path (data.mode=online).
+# Override fields via an OmegaConf dotlist.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: DFlash2 training recipe (DFlash backbone + sublayer conv + candidate selector).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  mode: online
+  data_path:
+  offline_data_path:
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  chat_template:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  output_dir:
+  num_train_epochs: 6
+  per_device_train_batch_size: 1
+  learning_rate: 6.0e-4
+  warmup_ratio: 0.04
+  training_seq_len: 3072
+  logging_steps: 50
+  save_steps: 2000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Keep off: eval runs the DFlash backbone only (Markov head not applied yet),
+  # so AR would reflect the backbone alone, not the trained model. Compare via
+  # export + the offline acceptance-length harness instead.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  # --- rarely modified ---
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  # Safe default: the selector params are unused when
+  # dflash_selector_loss_alpha == 0, which would otherwise trip DDP.
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 256
+  dflash_use_torch_compile: false
+  dflash_self_logit_distillation: false
+  # gamma for exponential loss decay (block_size=16 -> 7).
+  dflash_loss_decay_factor: 7.0
+  # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
+  dflash_mask_token_id: 151669
+  # Weight of the candidate-selector cross-entropy term (0 disables it and trains
+  # the backbone + convolutions only).
+  dflash_selector_loss_alpha: 1.0
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    # Draft attention/MLP dims — set explicitly (the draft is an independent
+    # Qwen3 model and does NOT inherit these from the base). GQA: 8 KV heads.
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: dflash2
+    # Grouped dynamic depthwise convolution. conv_kernel_size is the number of taps
+    # (2 = each position also sees its predecessor); it must not exceed the block
+    # size. conv_group_size must divide hidden_size.
+    conv_kernel_size: 2
+    conv_group_size: 16
+    # Candidate selector: rank of the transition codebooks, and how many of the
+    # backbone top-k candidates per position it re-ranks.
+    selector_rank: 256
+    selector_top_k: 16

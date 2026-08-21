@@ -228,6 +228,17 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_selector_loss_alpha: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        description=(
+            "DFlash2 only: weight of the candidate-selector cross-entropy term, added to "
+            "the backbone loss. The selector re-ranks the backbone's top-k candidates per "
+            "block position; 0 trains the backbone and convolutions only. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dflash2'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha
