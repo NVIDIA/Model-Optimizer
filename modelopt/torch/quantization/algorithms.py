@@ -595,6 +595,7 @@ class QuantRecipeHparam(Hparam):
 
 _LINEAR_ATTN_QKVZ_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_qkv|in_proj_z)$")
 _LINEAR_ATTN_BA_RE = re.compile(r"^(.*?\.linear_attn)\.(?:in_proj_a|in_proj_b)$")
+_ATTN_QKV_RULE = r"^(.*?)\.(q_proj|k_proj|v_proj)$"
 
 
 def _linear_attn_qkvz_group_key(_model, name: str) -> str | None:
@@ -638,7 +639,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     method_name: str | None = None
 
     quant_grouping_rules = [
-        r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
+        _ATTN_QKV_RULE,  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
@@ -1473,6 +1474,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     method_name = "gradient"
 
     score_module_rules = [
+        _ATTN_QKV_RULE,
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
@@ -1553,12 +1555,12 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     @torch.enable_grad()
     def _estimate_auto_quantize_scores(self, is_param_grad_enabled):
         # TODO: remove the no-quant recipe
-        def auto_quantize_score_estimate_forward(module, input, *args, **kwargs):
+        def auto_quantize_score_estimate_forward(module, *args, **kwargs):
             for hparam in module._hparams_for_scoring:
                 if hparam.is_configurable:
                     hparam.active = QuantRecipe(quant_cfg=None)
 
-            output = module._forward_original(input, *args, **kwargs)
+            output = module._forward_original(*args, **kwargs)
 
             # If gradient checkpointing is enabled, gradient will not be enabled in the global forward pass.
             # With gradient checkpointing, gradients are computed in the local forward pass during backward pass
@@ -1576,7 +1578,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
                         if recipe == QuantRecipe(quant_cfg=None):
                             continue
                         hparam.active = recipe
-                        output_diff = module._forward_original(input, *args, **kwargs)
+                        output_diff = module._forward_original(*args, **kwargs)
 
                         if isinstance(output_diff, tuple):
                             output_diff = output_diff[0] - output[0]
