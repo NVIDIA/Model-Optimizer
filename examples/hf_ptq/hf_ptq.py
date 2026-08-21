@@ -77,6 +77,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import EXPORT_PARENT_ATTR
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -119,6 +120,17 @@ def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
 
 
 mto.enable_huggingface_checkpointing()
+
+
+def _link_export_parent(language_model, full_model) -> None:
+    """Point per-layer export at the model the checkpoint must describe.
+
+    Straight into ``__dict__``: ``nn.Module.__setattr__`` would register the parent as a
+    submodule of its own child, and that cycle makes ``named_modules()`` recurse forever.
+    Plain attribute lookup still finds it.
+    """
+    if language_model is not full_model:
+        language_model.__dict__[EXPORT_PARENT_ATTR] = full_model
 
 
 def extract_and_prepare_language_model_from_vl(full_model):
@@ -630,6 +642,8 @@ def load_model(args: argparse.Namespace):
         if extracted_lm is not None:
             language_model = extracted_lm
             model_type = extracted_model_type
+            if args.layerwise_export:
+                _link_export_parent(language_model, full_model)
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -656,6 +670,8 @@ def load_model(args: argparse.Namespace):
                 if extracted_lm is not None:
                     language_model = extracted_lm
                     model_type = extracted_model_type
+                    if args.layerwise_export:
+                        _link_export_parent(language_model, full_model)
 
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
@@ -778,12 +794,20 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
     calibration begins, the user has already paid for the whole run.
     """
     if is_multimodal_model(full_model):
-        raise NotImplementedError(
-            "layerwise.export_dir does not support multimodal models: calibration runs on the "
-            "extracted language model, so the shards and config.json would describe that "
-            "submodel rather than the full VLM, and the VLM export path would then "
-            "overwrite config.json with the unquantized source config."
-        )
+        # Calibration runs on the extracted language model, so the exporter is told which
+        # model the checkpoint describes; it then prefixes tensor keys, writes the full VLM
+        # config and picks up the untouched towers. That needs the submodel to be reachable
+        # from the full model -- otherwise the prefix is undefined and the shards would
+        # silently describe the submodel alone.
+        lineage = get_language_model_from_vl(full_model)
+        language_model = lineage[-1] if lineage else None
+        if language_model is None or all(m is not language_model for m in full_model.modules()):
+            raise NotImplementedError(
+                "layerwise.export_dir does not support this multimodal model: its language "
+                "model could not be located inside the full model, so exported tensor names "
+                "cannot be resolved against the VLM namespace. Export without "
+                "layerwise.export_dir."
+            )
 
     if mtp_layer_prefixes:
         raise NotImplementedError(
@@ -857,7 +881,10 @@ def export_quantized(
         # Check if the model is a multimodal/VLM model
         is_vlm = is_multimodal_model(full_model)
 
-        if is_vlm:
+        # Skipped under per-layer export: calibration already wrote a config carrying the
+        # quantization_config, and the source config is unquantized, so writing it over the
+        # top would strip that metadata off a finished checkpoint.
+        if is_vlm and not args.layerwise_export:
             # Save original model config and the processor config to the export path for VLMs.
             print(f"Saving original model config to {export_path}")
 

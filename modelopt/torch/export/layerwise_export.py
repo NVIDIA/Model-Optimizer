@@ -18,6 +18,7 @@
 import contextlib
 import hashlib
 import json
+import re
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -63,6 +64,81 @@ def _is_quantized_module(module: nn.Module) -> bool:
     return any(
         isinstance(child, (TensorQuantizer, SequentialQuantizer)) for child in module.children()
     )
+
+
+#: Set by the caller on the calibrated submodel to name the model the checkpoint should
+#: describe. Multimodal pipelines calibrate the extracted language model, but the exported
+#: checkpoint has to describe the whole VLM or its config and tensor names disagree.
+EXPORT_PARENT_ATTR = "_layerwise_export_parent"
+
+
+def resolve_export_parent(model: nn.Module) -> tuple[nn.Module, str]:
+    """Return ``(model the checkpoint describes, key prefix for its tensors)``.
+
+    Without :data:`EXPORT_PARENT_ATTR` this is ``(model, "")``. With it, the prefix is the
+    dotted path from parent down to the calibrated submodel, found by identity so a module
+    that merely looks like the language model cannot be mistaken for it.
+    """
+    parent = getattr(model, EXPORT_PARENT_ATTR, None)
+    if parent is None or parent is model:
+        return model, ""
+    for name, module in parent.named_modules():
+        if module is model:
+            return parent, f"{name}." if name else ""
+    raise ValueError(
+        f"{EXPORT_PARENT_ATTR} was set to a {type(parent).__name__} that does not contain "
+        "the calibrated model, so exported tensor names cannot be resolved against it."
+    )
+
+
+def build_legacy_name_mapper(model: nn.Module):
+    """Hub-name mapper for transformers < 5, or None if the model declares no mapping.
+
+    ``save_pretrained`` is what reverses ``_checkpoint_conversion_mapping`` on 4.x. Per-layer
+    export writes shards with ``save_file`` and never passes through it, so without this it
+    would publish in-memory names where the whole-model path publishes hub names.
+    """
+    mapping = getattr(model, "_checkpoint_conversion_mapping", None)
+    if not mapping:
+        return None
+    # Stored hub-pattern -> in-memory-prefix, so invert. Longest in-memory prefix first, or
+    # a shorter one shadows a longer one (``lm_head`` inside ``model.language_model...``).
+    rules = sorted(
+        ((re.compile("^" + re.escape(mem)), hub.lstrip("^")) for hub, mem in mapping.items()),
+        key=lambda r: -len(r[0].pattern),
+    )
+
+    def _map(name: str) -> str:
+        for pattern, replacement in rules:
+            new, n = pattern.subn(replacement, name, count=1)
+            if n:
+                return new
+        return name
+
+    return _map
+
+
+def _prefix_quant_config_names(quant_config: dict, prefix: str, siblings: list[str]) -> None:
+    """Move a quant config into the parent's namespace, in place.
+
+    Module references gain ``prefix`` so they name the tensors the shards were written
+    under. Every subtree outside the calibrated submodel is then added to
+    ``exclude_modules``: calibration never saw them, so a loader that does not find them
+    excluded would read plain BF16 weights as quantized.
+    """
+    if not prefix:
+        return
+    quantization = quant_config.get("quantization")
+    if not isinstance(quantization, dict):
+        return
+    excluded = quantization.get("exclude_modules")
+    if isinstance(excluded, list):
+        quantization["exclude_modules"] = sorted(
+            [prefix + m for m in excluded] + [f"{s}*" for s in siblings]
+        )
+    quantized = quantization.get("quantized_layers")
+    if isinstance(quantized, dict):
+        quantization["quantized_layers"] = {prefix + k: v for k, v in quantized.items()}
 
 
 def _module_formats(model: nn.Module) -> set:
@@ -259,18 +335,38 @@ class LayerwiseExporter:
         self._kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
         self._finalized = False
 
+        # These differ for a multimodal pipeline: calibration runs on the extracted language
+        # model, but the checkpoint must describe the whole VLM. Everything that walks
+        # modules stays on `model`; only tensor keys and the config artifacts move up.
+        self._export_model, self._key_prefix = resolve_export_parent(model)
+        self._sibling_prefixes = (
+            [
+                name
+                for name, _ in self._export_model.named_children()
+                if name != self._key_prefix.split(".", 1)[0]
+            ]
+            if self._key_prefix
+            else []
+        )
+
         self._name_mapper = None
         try:
-            self._name_mapper = build_reverse_name_mapper(model)
+            # From the export model: the mapper reverses transformers' internal layout into
+            # hub names across the whole checkpoint, and the two namespaces differ. Gemma3-VL
+            # stores the decoder at model.language_model.layers but publishes it as
+            # language_model.model.layers, which a submodel-scoped mapper cannot produce.
+            self._name_mapper = build_reverse_name_mapper(self._export_model)
         except Exception as exc:
-            warnings.warn(
-                f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
-                "match the original HF hub checkpoint."
-            )
+            self._name_mapper = build_legacy_name_mapper(self._export_model)
+            if self._name_mapper is None:
+                warnings.warn(
+                    f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
+                    "match the original HF hub checkpoint."
+                )
         # By name, not data_ptr: layers and tail are separate passes.
         raw_tied_keys: set[str] = (
-            set(getattr(model, "_tied_weights_keys", None) or [])
-            if getattr(model.config, "tie_word_embeddings", False)
+            set(getattr(self._export_model, "_tied_weights_keys", None) or [])
+            if getattr(self._export_model.config, "tie_word_embeddings", False)
             else set()
         )
         self._tied_alias_keys: set[str] = (
@@ -456,10 +552,17 @@ class LayerwiseExporter:
             mapped = self._name_mapper(name) if self._name_mapper is not None else name
             tail.setdefault(mapped, tensor.detach().contiguous().cpu())
 
+        # Subtrees of the parent outside the calibrated submodel -- a VLM's vision tower and
+        # projector. Calibration never saw them and every pass above walks `model`, so
+        # without this they are simply absent. Unquantized, so no export handler is needed.
+        self._collect_sibling_subtrees(tail)
+
         save_file(_copy_storage_aliases(tail), str(self._export_dir / _TAIL_SHARD))
         self._write_index()
-        save_non_weight_artifacts(model, self._export_dir)
-        _write_hf_export_config(model, quant_config, self._export_dir)
+        _prefix_quant_config_names(quant_config, self._key_prefix, self._sibling_prefixes)
+        # The parent's config: the checkpoint has to describe the whole model, towers included.
+        save_non_weight_artifacts(self._export_model, self._export_dir)
+        _write_hf_export_config(self._export_model, quant_config, self._export_dir)
         return quant_config
 
     def _bind_identity(self, quant_config: dict) -> None:
@@ -549,6 +652,51 @@ class LayerwiseExporter:
                 "export directories are from different runs; delete one and restart."
             )
 
+    def _collect_sibling_subtrees(self, tail: dict[str, torch.Tensor]) -> None:
+        """Add the parent's tensors that live outside the calibrated submodel.
+
+        No-op unless :func:`resolve_export_parent` found a parent. These keys are already in
+        the parent's namespace, so the prefix must not be applied again -- only the hub-name
+        reversal, which spans the whole checkpoint.
+        """
+        if not self._key_prefix:
+            return
+        from modelopt.torch.quantization.utils.core_utils import (
+            enable_weight_access_and_writeback,
+            requires_weight_materialization,
+        )
+
+        parent = self._export_model
+        parent_modules = dict(parent.named_modules())
+        inner_ids = {id(m) for m in self._ctx.model.modules()}
+
+        def _store(key: str, tensor: torch.Tensor) -> None:
+            mapped = self._name_mapper(key) if self._name_mapper is not None else key
+            if tensor is not None and not tensor.is_meta and mapped not in self._tied_alias_keys:
+                tail.setdefault(mapped, tensor.detach().contiguous().cpu())
+
+        for name, module in parent.named_modules():
+            if not name or id(module) in inner_ids or name.startswith(self._key_prefix):
+                continue
+            if not requires_weight_materialization(module, parent, parent_modules):
+                continue
+            with enable_weight_access_and_writeback(
+                module, parent, parent_modules, writeback=False
+            ):
+                for key, tensor in module.state_dict().items():
+                    _store(f"{name}.{key}", tensor)
+
+        for key, tensor in parent.state_dict().items():
+            if key.startswith(self._key_prefix):
+                continue
+            if tensor is not None and tensor.is_meta:
+                raise RuntimeError(
+                    f"{key!r} is on meta and its module was offered no materialization "
+                    "window, so it cannot be exported. Export without export_dir and use "
+                    "export_hf_checkpoint() for this model."
+                )
+            _store(key, tensor)
+
     def _collect(self, out: dict[str, torch.Tensor], full_key: str, tensor: torch.Tensor) -> None:
         """Apply per-tensor export postprocessing and hub-name reversal, or drop the tensor."""
         from .quant_utils import _postprocess_single_tensor
@@ -556,7 +704,11 @@ class LayerwiseExporter:
         if tensor is None or tensor.is_meta:
             return
         new_key, new_value = _postprocess_single_tensor(
-            full_key, tensor, 448, self._kv_cache_format, self._ctx.is_modelopt_qlora
+            self._key_prefix + full_key,
+            tensor,
+            448,
+            self._kv_cache_format,
+            self._ctx.is_modelopt_qlora,
         )
         if new_key is None or new_value is None:
             return

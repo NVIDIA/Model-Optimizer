@@ -22,11 +22,20 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
+from _test_utils.torch.transformers_models import (
+    get_tiny_gemma3vl,
+    get_tiny_llama,
+    get_tiny_qwen3_moe,
+)
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
+from modelopt.torch.export.layerwise_export import (
+    EXPORT_PARENT_ATTR,
+    LayerwiseExporter,
+    layer_shard_name,
+)
+from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -413,6 +422,63 @@ def test_moe_export_matches(tmp_path):
     )
 
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
+
+
+def _build_vlm():
+    """A tiny VLM -- the shape per-layer export used to refuse outright."""
+    torch.manual_seed(0)
+    model = get_tiny_gemma3vl().cuda().eval()
+    # is_multimodal_model reads this, and the tiny fixtures leave it unset.
+    model.config.architectures = ["Gemma3ForConditionalGeneration"]
+    return model
+
+
+def _vlm_language_model(vlm):
+    lineage = get_language_model_from_vl(vlm)
+    assert lineage, "fixture is expected to expose a language model lineage"
+    return lineage[-1]
+
+
+def _calib_vlm(language_model):
+    # use_cache=False: this calls the text model directly rather than the CausalLM wrapper,
+    # so a KV cache would carry across batches and the second batch would build a mask for
+    # more positions than there are keys.
+    for batch in CALIB_BATCHES:
+        language_model(batch.cuda(), use_cache=False)
+
+
+def _vlm_cfg():
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    return cfg
+
+
+def test_vlm_export_matches_whole_model_export(tmp_path):
+    """Calibrating the submodel must still export a checkpoint describing the whole VLM.
+
+    Without the parent link the shards and config would describe the language model alone:
+    tensor keys missing their prefix, the vision tower absent, the config the text model's.
+    """
+    baseline_vlm = _build_vlm()
+    mtq.quantize(_vlm_language_model(baseline_vlm), _vlm_cfg(), _calib_vlm)
+    baseline_dir = tmp_path / "baseline"
+    export_hf_checkpoint(baseline_vlm, export_dir=baseline_dir)
+
+    export_dir = tmp_path / "fused"
+    vlm = _build_vlm()
+    language_model = _vlm_language_model(vlm)
+    language_model.__dict__[EXPORT_PARENT_ATTR] = vlm
+    cfg = _vlm_cfg()
+    cfg["algorithm"]["layerwise"] |= {
+        "export_dir": str(export_dir),
+        "checkpoint_dir": str(tmp_path / "ckpt"),
+        "calib_mutates_weights": False,
+    }
+    mtq.quantize(language_model, cfg, _calib_vlm)
+
+    exported = _load_checkpoint(export_dir)
+    assert any("vision" in k for k in exported), "vision tower missing from the checkpoint"
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
 
 
 def test_export_does_not_mutate_the_model(tmp_path):
