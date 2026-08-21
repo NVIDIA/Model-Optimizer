@@ -61,6 +61,7 @@ def test_resolve_export_dtype(configured_dtype, dtype, expected_dtype, warning_c
 
 
 def test_resolve_export_dtype_with_empty_diffusers_config():
+    # Import locally so Diffusers stays optional during torch-only test collection.
     frozen_dict = pytest.importorskip("diffusers.configuration_utils").FrozenDict()
     model = torch.nn.Linear(1, 1)
     model.config = frozen_dict
