@@ -1237,7 +1237,10 @@ def quantize_main(
                 "layerwise.export_dir is not supported with an AutoQuantize recipe; "
                 "use a PTQ recipe, or drop export_dir and export afterwards."
             )
-        # A resumed run leaves skipped layers without amax; only the checkpoint is whole.
+        # finalize() converts the non-decoder modules in place without rolling them back, so
+        # the model is never valid for inference; a resumed run also skips layers' amax.
+        if not args.skip_generate:
+            print("Layerwise export: forcing --skip_generate, the model is left in export form.")
         args.skip_generate = True
 
     if args.batch_size == 0:
