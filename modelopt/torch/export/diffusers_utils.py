@@ -32,15 +32,22 @@ DiffusionPipeline: type[Any] | None
 ModelMixin: type[Any] | None
 try:  # diffusers is optional for LTX-2 export paths
     from diffusers import DiffusionPipeline as _DiffusionPipeline
-    from diffusers import ModelMixin as _ModelMixin
 
     DiffusionPipeline = _DiffusionPipeline
-    ModelMixin = _ModelMixin
-    _HAS_DIFFUSERS = True
 except Exception:  # pragma: no cover
     DiffusionPipeline = None
+
+try:
+    try:
+        from diffusers import ModelMixin as _ModelMixin
+    except ImportError:  # older diffusers releases do not export ModelMixin at package level
+        from diffusers.models.modeling_utils import ModelMixin as _ModelMixin
+
+    ModelMixin = _ModelMixin
+except Exception:  # pragma: no cover
     ModelMixin = None
-    _HAS_DIFFUSERS = False
+
+_HAS_DIFFUSERS = DiffusionPipeline is not None or ModelMixin is not None
 
 TI2VidTwoStagesPipeline: type[Any] | None
 try:  # optional for LTX-2 export paths
