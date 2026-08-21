@@ -52,7 +52,7 @@ with import_plugin("megatron"):
 
 
 class _MambaConv1dCompat(torch.nn.Module):
-    """Expose direct Mamba conv params through the legacy Conv1d state_dict keys."""
+    """Expose the mixer's raw ``conv1d_weight`` / ``conv1d_bias`` as legacy Conv1d state_dict keys."""
 
     def __init__(self, mixer):
         super().__init__()
@@ -61,13 +61,16 @@ class _MambaConv1dCompat(torch.nn.Module):
 
 
 def _get_mamba_conv1d(mixer):
+    """Return the mixer's conv as a module.
+
+    nemo:26.06 and earlier keep a ``conv1d`` module; Megatron-LM PR #4899 replaced it with raw
+    ``conv1d_weight`` / ``conv1d_bias`` parameters, which are wrapped to keep the same keys.
+    """
     conv1d = getattr(mixer, "conv1d", None)
     if conv1d is not None:
         return conv1d
 
     if hasattr(mixer, "conv1d_weight") and hasattr(mixer, "conv1d_bias"):
-        # Megatron-LM PR #4899 / commit 35992ba changed MambaMixer fields from
-        # `conv1d` to direct `conv1d_weight` and `conv1d_bias` parameters.
         return _MambaConv1dCompat(mixer)
 
     raise AttributeError(
@@ -860,6 +863,8 @@ class GPTModelImporter:
                         )
 
                     layer_id += 1
+
+                self.rules["mtp.final_layernorm"](mtp.final_layernorm, layer_id - 1)
             else:  # non-repeated MTP
                 # MTP is the last layer in DeepSeek V3/R1
                 layer_id += 1
