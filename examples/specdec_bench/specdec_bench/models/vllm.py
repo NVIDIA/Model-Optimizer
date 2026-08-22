@@ -109,10 +109,11 @@ class VLLMModel(Model):
                 # (handled in speculative.py:562-573).
                 specdec["model"] = draft_model_dir
         elif kwargs.get("speculative_algorithm") == "DFLASH":
+            # DFlash block size includes one anchor, so block 8 maps to 7 speculative tokens in vLLM.
             specdec = {
                 "method": "dflash",
                 "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 8),
+                "num_speculative_tokens": (kwargs.get("speculative_num_draft_tokens") or 8) - 1,
             }
         elif kwargs.get("speculative_algorithm") == "DSPARK":
             specdec = {
@@ -122,6 +123,9 @@ class VLLMModel(Model):
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+
+        if specdec is not None and kwargs.get("draft_sample_method") is not None:
+            specdec["draft_sample_method"] = kwargs["draft_sample_method"]
 
         if specdec is None:
             num_speculative_tokens = 1

@@ -407,9 +407,8 @@ class HFDFlashModel(DFlashModel):
             "rms_norm_eps",
         ]
         for attr in _setdefault_attrs:
-            if not hasattr(self.dflash_config, attr) or getattr(self.dflash_config, attr) is None:
-                if hasattr(base_config, attr):
-                    setattr(self.dflash_config, attr, getattr(base_config, attr))
+            if attr not in config.dflash_architecture_config and hasattr(base_config, attr):
+                setattr(self.dflash_config, attr, getattr(base_config, attr))
 
         # RoPE base settings are ENFORCED to match the base model (not setdefault): the
         # DFlash draft injects the target's KV into every layer, so its RoPE base must
@@ -420,10 +419,18 @@ class HFDFlashModel(DFlashModel):
         # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
         # added only at export via dflash_export_rope_scaling.)
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if not hasattr(base_config, attr):
+            base_val = getattr(base_config, attr, None)
+            if base_val is None and attr == "rope_theta":
+                rope_parameters = getattr(base_config, "rope_parameters", None)
+                if isinstance(rope_parameters, dict):
+                    base_val = rope_parameters.get(attr)
+            if base_val is None:
                 continue
-            base_val = getattr(base_config, attr)
-            user_val = getattr(self.dflash_config, attr, None)
+            draft_rope_parameters = getattr(self.dflash_config, "rope_parameters", None)
+            if attr == "rope_theta" and isinstance(draft_rope_parameters, dict):
+                user_val = draft_rope_parameters.get(attr)
+            else:
+                user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
                 logger.warning(
                     "DFlash: ignoring dflash_architecture_config.%s=%r and enforcing the "
@@ -433,7 +440,10 @@ class HFDFlashModel(DFlashModel):
                     user_val,
                     base_val,
                 )
-            setattr(self.dflash_config, attr, base_val)
+            if attr == "rope_theta" and isinstance(draft_rope_parameters, dict):
+                draft_rope_parameters[attr] = base_val
+            else:
+                setattr(self.dflash_config, attr, base_val)
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,

@@ -1,0 +1,306 @@
+job_name: dspark.qwen3.5-9b-speed-bench-v3
+
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3.5-9B
+
+  # Draft semantics: DSpark7 drafts 7 speculative tokens; DFlash8 drafts 7 speculative tokens (includes 1 anchor).
+
+  # Prepare SPEED-Bench data
+  task_0:
+    inline: >-
+      python3 -m pip install -r modules/Model-Optimizer/examples/specdec_bench/requirements.txt && (test -f /hf-local/nvidia/SPEED-Bench/speed/qualitative/test.parquet || python3 modules/Model-Optimizer/examples/specdec_bench/prepare_data.py --dataset speed --config qualitative --output_dir /hf-local/nvidia/SPEED-Bench)
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # Base T1 C32
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm NONE
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/base/qualitative-t1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # Base T0 C32
+  task_2:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm NONE
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":0.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/base/qualitative-t0-greedy
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # DSpark T1 C32
+  task_3:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DSPARK
+      - --draft_model_dir /cicd/export-v3
+      - --draft_length 7
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --max_seq_len 16384
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5},\"engine_args\":{\"draft_sample_method\":\"probabilistic\"}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/dspark/qualitative-t1-prob
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # DSpark T0 C32
+  task_4:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DSPARK
+      - --draft_model_dir /cicd/export-v3
+      - --draft_length 7
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --max_seq_len 16384
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":0.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/dspark/qualitative-t0-greedy
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # MTP3 T1 C32
+  task_5:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 3
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/mtp3/qualitative-t1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # MTP3 T0 C32
+  task_6:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 3
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":0.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/mtp3/qualitative-t0-greedy
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # MTP7 T1 C32
+  task_7:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 7
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/mtp7/qualitative-t1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # MTP7 T0 C32
+  task_8:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm MTP
+      - --draft_length 7
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":0.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/mtp7/qualitative-t0-greedy
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # DFlash8 T1 C32
+  task_9:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir z-lab/Qwen3.5-9B-DFlash
+      - --block_size 8
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --max_seq_len 16384
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5},\"engine_args\":{\"draft_sample_method\":\"probabilistic\"}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/dflash8/qualitative-t1-prob
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh
+
+  # DFlash8 T0 C32
+  task_10:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench/speed/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir z-lab/Qwen3.5-9B-DFlash
+      - --block_size 8
+      - --tp_size 1
+      - --ep_size 1
+      - --concurrency 32
+      - --output_length 4096
+      - --max_seq_len 16384
+      - "--runtime_params '{\"sampling_kwargs\":{\"temperature\":0.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}}'"
+      - --aa_timing
+      - --show_progress
+      - --save_dir /cicd/benchmark-v3/results/dflash8/qualitative-t0-greedy
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: slurm_factory
+      partition: batch
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: null
+      time: 02:00:00
+      container: <project_path>/dspark-training/.cache/containers/vllm-openai-nightly.sqsh

@@ -433,7 +433,7 @@ class TestRunJobsExtended:
             inline = mock_script.call_args[1]["inline"]
 
         # `<` and `>` are shlex-quoted so the shell treats them literally.
-        assert "python -m pip install 'transformers<5' fire" in inline
+        assert "python3 -m pip install 'transformers<5' fire" in inline
         # Local rank 0 installs; other ranks wait on a per-job/step/node marker.
         assert '[ "${SLURM_LOCALID:-0}" -eq 0 ]' in inline
         marker = (
@@ -481,7 +481,7 @@ class TestRunJobsExtended:
             call_kwargs = mock_script.call_args[1]
 
         inline = call_kwargs["inline"]
-        assert "python -m pip install fire" in inline
+        assert "python3 -m pip install fire" in inline
         # "--flag value" keeps the shell-word-split convention (expands to two args).
         assert inline.rstrip().endswith("bash run.sh --flag value")
         # Wrapped inline: no separate script/args kwargs.

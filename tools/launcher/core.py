@@ -91,6 +91,12 @@ def set_slurm_config_type(cls):
         SandboxTask2,
         SandboxTask3,
         SandboxTask4,
+        SandboxTask5,
+        SandboxTask6,
+        SandboxTask7,
+        SandboxTask8,
+        SandboxTask9,
+        SandboxTask10,
     ):
         task_cls.__dataclass_fields__["slurm_config"].type = cls
         task_cls.__annotations__["slurm_config"] = cls
@@ -154,6 +160,36 @@ class SandboxTask3(SandboxTask):
 @dataclass
 class SandboxTask4(SandboxTask):
     """Task slot 4 in a pipeline."""
+
+
+@dataclass
+class SandboxTask5(SandboxTask):
+    """Task slot 5 in a pipeline."""
+
+
+@dataclass
+class SandboxTask6(SandboxTask):
+    """Task slot 6 in a pipeline."""
+
+
+@dataclass
+class SandboxTask7(SandboxTask):
+    """Task slot 7 in a pipeline."""
+
+
+@dataclass
+class SandboxTask8(SandboxTask):
+    """Task slot 8 in a pipeline."""
+
+
+@dataclass
+class SandboxTask9(SandboxTask):
+    """Task slot 9 in a pipeline."""
+
+
+@dataclass
+class SandboxTask10(SandboxTask):
+    """Task slot 10 in a pipeline."""
 
 
 def create_task_from_yaml(yaml_file, factory_lookup):
@@ -241,6 +277,12 @@ class SandboxPipeline:
     task_2: SandboxTask2 = None
     task_3: SandboxTask3 = None
     task_4: SandboxTask4 = None
+    task_5: SandboxTask5 = None
+    task_6: SandboxTask6 = None
+    task_7: SandboxTask7 = None
+    task_8: SandboxTask8 = None
+    task_9: SandboxTask9 = None
+    task_10: SandboxTask10 = None
     tasks: list[SandboxTask] = None
 
     assets: list[str] = None  # HF repo paths (relative to hf_local) to verify before submission
@@ -259,7 +301,7 @@ class SandboxPipeline:
         """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
         if self.tasks is None:
             self.tasks = []
-            for i in range(5):
+            for i in range(11):
                 task = getattr(self, f"task_{i}", None)
                 if task is not None:
                     self.tasks += [task]
@@ -842,7 +884,7 @@ def run_jobs(
                 if task.reqs or task.reqs_file:
                     pkgs = ["-r", shlex.quote(task.reqs_file)] if task.reqs_file else []
                     pkgs += [shlex.quote(tok) for tok in shlex.split(task.reqs or "")]
-                    install = "python -m pip install " + " ".join(pkgs)
+                    install = "python3 -m pip install " + " ".join(pkgs)
                     # On Slurm, srun runs this inline on every rank (ntasks_per_node), so install
                     # once per node on local rank 0 behind a filesystem barrier — concurrent pip on
                     # one node corrupts the env. The marker lives in the working dir (/nemo_run/code,

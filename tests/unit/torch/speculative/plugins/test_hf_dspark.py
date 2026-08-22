@@ -30,6 +30,7 @@ import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from safetensors.torch import load_file
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
@@ -66,7 +67,6 @@ def _get_dspark_config(
         "markov_rank": MARKOV_RANK,
         "markov_head_type": head_type,
         "use_confidence_head": use_confidence_head,
-        "pure_draft_prefix_len": 1,
         "shift_label": True,
     }
     return config
@@ -335,3 +335,30 @@ class TestDSparkExporter:
         assert cfg["num_anchors"] == 512
         assert cfg["mask_token_id"] == cfg["dflash_config"]["mask_token_id"]
         assert cfg["target_layer_ids"] == cfg["dflash_config"]["target_layer_ids"]
+
+    def test_export_config_matches_training_config(self):
+        """Export preserves every training draft config field after canonicalization."""
+        model = get_tiny_llama(num_hidden_layers=4)
+        model.config.rope_theta = None
+        model.config.rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": 10_000_000,
+        }
+        mtsp.convert(model, [("dflash", _get_dspark_config())])
+
+        training_config = model.dflash_config.to_dict()
+        exported_config = model.get_exporter()._export_config()
+        runtime_config = Qwen3Config(
+            **{**exported_config, **exported_config["dflash_config"]}
+        ).to_dict()
+        metadata = {"architectures", "dtype", "transformers_version"}
+
+        mismatches = {
+            field: (
+                training_config[field],
+                runtime_config[field] if field in runtime_config else "<missing>",
+            )
+            for field in training_config.keys() - metadata
+            if field not in runtime_config or training_config[field] != runtime_config[field]
+        }
+        assert not mismatches, json.dumps(mismatches, indent=2)
