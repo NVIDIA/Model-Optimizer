@@ -33,6 +33,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from .layer_utils import sync_moe_gate_up_amax
 from .quant_aware_conversion import build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
@@ -44,7 +45,6 @@ from .unified_export_hf import (
     _resolve_export_dtype,
     _sanitize_generation_config_for_save,
     _unpatch_revert_weight_conversion,
-    _warn_on_unsynced_moe_gate_up,
     requantize_resmooth_fused_llm_layers,
 )
 
@@ -249,7 +249,8 @@ def _export_transformers_checkpoint_streaming(
 
     _add_mtp_exclusions(model, quant_config)
 
-    _warn_on_unsynced_moe_gate_up(model)
+    # As in unified_export_hf: gives each expert's gate/up pair one weight amax.
+    sync_moe_gate_up_amax(model)
 
     # --- Per-tensor constants ---
     kv_cache_max_bound = 448

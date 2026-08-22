@@ -875,22 +875,6 @@ def _add_mtp_exclusions(model: nn.Module, quant_config: dict) -> None:
                 print(f"Adding MTP layer to quantization_config ignore: {pattern}")
 
 
-def _warn_on_unsynced_moe_gate_up(model: nn.Module) -> None:
-    """Safety net for gate/up weight quantizer amaxes that resmoothing did not reach.
-
-    ``requantize_resmooth_fused_llm_layers`` can miss experts that the dummy forward
-    never activated, or that use non-standard expert naming.
-    """
-    synced = sync_moe_gate_up_amax(model)
-    if synced:
-        warnings.warn(
-            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
-            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
-            f"This typically means the dummy forward did not activate these experts. "
-            f"Taking element-wise max of amaxes for serving-engine fusion."
-        )
-
-
 def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
@@ -981,7 +965,10 @@ def _export_transformers_checkpoint(
 
     _add_mtp_exclusions(model, quant_config)
 
-    _warn_on_unsynced_moe_gate_up(model)
+    # Serving engines fuse gate_up_proj and need one weight_scale_2. Calibration unifies
+    # the group's global_amax (SHARED_PATTERNS), which settles static quantizers; a dynamic
+    # one derives weight_scale_2 from _amax, which this unifies. Mutates the model.
+    sync_moe_gate_up_amax(model)
 
     # Merge per-side input_quantizer amaxes BEFORE export, so the retained tied weight's single
     # input_scale covers every side's activation range (else the dropped side clips at inference).

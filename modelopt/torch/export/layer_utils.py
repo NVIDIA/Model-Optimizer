@@ -1192,7 +1192,7 @@ _GATE_UP_PAIRS = [("gate_proj", "up_proj"), ("w1", "w3")]
 
 
 def sync_moe_gate_up_amax(model: nn.Module) -> int:
-    """Take element-wise max of gate and up weight quantizer amaxes per expert.
+    """Take element-wise max of gate and up weight quantizer amaxes per expert, in place.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
     require a single weight_scale_2. Since weight_scale_2 = amax / (6 * m_fp8)
@@ -1211,6 +1211,9 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     for _, sub_module in model.named_modules():
         if not (is_moe(sub_module) and hasattr(sub_module, "experts")):
             continue
+        # Not iterable when the experts are stacked into one tensor (Llama4, GptOss, and
+        # every built-in MoE on transformers 5.x): gate and up already share an amax.
+        # Megatron needs nothing here either -- its linear_fc1 *is* the fused gate+up.
         if not hasattr(sub_module.experts, "__iter__"):
             continue
         for expert in sub_module.experts:
