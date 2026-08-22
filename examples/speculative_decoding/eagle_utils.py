@@ -59,12 +59,16 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
+    final_aux_is_base_hidden=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
     Args:
         shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
             If False, labels are unshifted for diffusion-style training (DFlash).
+        final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
+            base's final layer, so the last captured plane is both the final aux feature and
+            the base (KD-target) hidden instead of an extra dedicated plane.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -115,6 +119,7 @@ def make_speculative_data_module(
             model=data_args.streaming_model_name,
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
+            final_aux_is_base_hidden=final_aux_is_base_hidden,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,

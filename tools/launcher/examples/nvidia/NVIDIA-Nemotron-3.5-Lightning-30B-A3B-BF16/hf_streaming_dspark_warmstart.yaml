@@ -1,0 +1,118 @@
+# Warm-start fine-tune of the RELEASED Nemotron-3.5-Lightning DSpark drafter (streaming).
+#
+# Continues `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark` from its published
+# weights against `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` served by vLLM, via
+# the shared streaming pipeline (common/eagle3/train_eagle_streaming.sh).
+#
+# Unlike the other streaming examples, the drafter architecture is NOT overridden here: it
+# all lives in the recipe this points at,
+#   modelopt_recipes/huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/
+#     speculative_decoding/dspark_warmstart.yaml
+# because every one of those fields is transcribed from the released checkpoint's own
+# config.json and must match it exactly. Keep drafter shape/behaviour changes in the recipe
+# and cluster/serve knobs here.
+#
+# Nemotron-3.5-Lightning specifics this yaml encodes (each was a silent failure mode):
+#   * The base is hybrid Mamba2 + attention + MoE (`nemotron_h`: 52 layers = 23 mamba /
+#     23 moe / 6 attention), NOT a plain transformer.
+#   * The served copy of the base config.json needs its layer-type vocabulary rewritten for
+#     the transformers-5 path the nightly resolves `nemotron_h` through: `mamba` ->
+#     `linear_attention`, `attention` -> `full_attention` (also `mtp_layers_block_type`),
+#     plus a consistent `hybrid_override_pattern`
+#     `MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME` (tf5 gives the pattern PRIORITY
+#     over layers_block_type). Verify after load: linear_attn=23 moe=23 full_attn=6 mlp=0 —
+#     a wrong MoE count means the default pattern was applied and weights are misplaced.
+#     This conversion is NOT done by the pipeline; patch the checkpoint before launching.
+#   * SERVE_READY_TIMEOUT=1200: startup is dominated by Mamba2 SSD Triton kernel warmup,
+#     not weight load — weights land in ~60s but /health only answers at ~390s, and
+#     enforce_eager does NOT skip it. The 900s default is uncomfortably close.
+#   * EAGLE_CAPTURE_IDS=[2,6,20,30,42,52] = the released drafter's own
+#     `eagle_aux_hidden_state_layer_ids` (= recipe target_layer_ids [1,5,19,29,41,51] + 1,
+#     post-layer 1-based), with 52 = the true final layer. These are NOT the uniform default
+#     for a 52-layer base; mismatched ids silently skew train vs inference.
+#   * The stock Nemotron chat template has no {% generation %} tags, so answer_only_loss
+#     would train on an all-zero assistant mask. Point data.chat_template at a tagged copy.
+#   * Do NOT bind-mount /tmp into the serve container: TP8 then hangs forever in
+#     ncclCommInitRank, which looks like slow weight loading rather than a hang.
+#
+# Run ON the cluster login node (paramiko can't reach it through the login proxy):
+#   export SLURM_HOST=localhost SLURM_ACCOUNT=<your_account> \
+#          SLURM_PARTITION=<multi_node_partition> \
+#          SLURM_HF_LOCAL=<hf_models_dir> \
+#          SLURM_JOB_DIR=<experiments_dir> \
+#          NEMORUN_HOME=$PWD
+#   uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/hf_streaming_dspark_warmstart.yaml \
+#          identity=$HOME/.ssh/id_ecdsa detach=True --yes
+#
+# The export lands in /scratchspace/export.
+
+job_name: Nemotron-3.5-Lightning_DSpark_warmstart_streaming
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    # config.json layer-type vocabulary already patched for tf5 (see header).
+    hf_model: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+    # The published drafter the warm start continues from.
+    drafter: /hf-local/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark
+
+  # Build /scratchspace/data/train.jsonl. Point data.data_path at the full
+  # Spec-Decoding-Dataset-v2 corpus to reproduce; eagle_utils also accepts a
+  # directory of *.jsonl shards directly.
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  task_1:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      # Drafter architecture, warm-start source, block size, mask token, SWA window,
+      # causal attention and attention sink all come from this recipe — see header.
+      - --config modules/Model-Optimizer/modelopt_recipes/huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/speculative_decoding/dspark_warmstart.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - dflash.dflash_init_checkpoint=<<global_vars.drafter>>
+      - data.data_path=/scratchspace/data/train.jsonl
+      # The stock Nemotron template has no {% generation %} tags; without a tagged copy
+      # answer_only_loss trains on an all-zero mask (see header).
+      - data.chat_template=<path to nemotron chat template with {% generation %} tags>
+      - training.output_dir=/scratchspace/dspark
+      # The vLLM serve container has no tensorboard -> trainer init crash.
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # The released drafter's own capture ids (see header) — not the uniform default.
+      - EAGLE_CAPTURE_IDS: "[2,6,20,30,42,52]"
+      - SERVE_NODES: "2"
+      - SERVE_TP: "8"
+      - STREAMING_NUM_WORKERS: "4"
+      - SERVE_MAX_MODEL_LEN: "4096"
+      - SERVE_MAX_NUM_SEQS: "32"
+      - SERVE_GPU_MEM_UTIL: "0.85"
+      # Mamba2 Triton warmup pushes /health to ~390s; do not lower (see header).
+      - SERVE_READY_TIMEOUT: "1200"
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # RDMA transport is UCX (InfiniBand) by default. On AWS EFA, uncomment —
+      # and note UCX SEGFAULTS at agent init on EFA nodes (it detects the EFA
+      # devices), so LIBFABRIC is required there even for single-node runs:
+      # - NIXL_BACKENDS: "LIBFABRIC"
+      # - FI_PROVIDER: "efa"
+      # - NCCL_IB_DISABLE: "1"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 3
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # vLLM x86_64 build whose `nemotron_h` implements SupportsEagle3 with post-layer
+      # (idx+1) aux capture. Do NOT bind-mount /tmp (see header).
+      container: <vllm-image-with-nemotron_h-eagle3>
