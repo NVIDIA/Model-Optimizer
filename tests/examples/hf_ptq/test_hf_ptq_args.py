@@ -203,6 +203,69 @@ def test_restore_quantized_state_skips_calibration_and_exports(monkeypatch):
     assert export_calls == [full_model]
 
 
+def test_save_quantized_state_happens_after_mxfp4_to_nvfp4_cast(monkeypatch):
+    """--cast_mxfp4_to_nvfp4 overwrites each weight quantizer's global_amax after calibration.
+    Saving before that cast would capture a pre-cast snapshot, so a later
+    --restore_quantized_state retry would export a model that never got the cast applied.
+    Save must run after the cast."""
+    state_path = "/tmp/out.pt"
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--kv_cache_qformat",
+        "none",
+        "--batch_size",
+        "1",
+        "--cast_mxfp4_to_nvfp4",
+        "--save_quantized_state",
+        state_path,
+    )
+    args.verbose = False
+
+    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
+    monkeypatch.setattr(
+        hf_ptq, "make_calib_dataloader", lambda *a, **k: (object(), None)
+    )
+    monkeypatch.setattr(hf_ptq, "pre_quantize", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(hf_ptq, "_resolve_model_path", lambda *a, **k: "dummy")
+
+    call_order = []
+    monkeypatch.setattr(
+        hf_ptq, "mono_quantize", lambda *a, **k: call_order.append("mono_quantize")
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "apply_cast_mxfp4_to_nvfp4",
+        lambda *a, **k: call_order.append("apply_cast_mxfp4_to_nvfp4"),
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "_save_quantized_state_if_requested",
+        lambda *a, **k: call_order.append("_save_quantized_state_if_requested"),
+    )
+    monkeypatch.setattr(hf_ptq, "post_quantize", lambda *a, **k: None)
+
+    hf_ptq.quantize_main(
+        args,
+        object(),  # full_model
+        object(),  # language_model
+        "llama",
+        False,  # calibration_only
+        None,  # processor
+        None,  # tokenizer
+        "left",  # default_padding_side
+        None,  # default_pad_token
+        "cuda",  # device
+    )
+
+    assert call_order == [
+        "mono_quantize",
+        "apply_cast_mxfp4_to_nvfp4",
+        "_save_quantized_state_if_requested",
+    ]
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(

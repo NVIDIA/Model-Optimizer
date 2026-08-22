@@ -1331,6 +1331,7 @@ def quantize_main(
             quant_cfg = copy.deepcopy(quant_cfg)
             force_weight_quantizers_static(quant_cfg["quant_cfg"])
 
+        quantized_this_run = bool(quant_cfg)
         if quant_cfg:
             mono_quantize(
                 args,
@@ -1342,7 +1343,6 @@ def quantize_main(
                 calib_dataloader,
                 is_nemotron_vl_model,
             )
-            _save_quantized_state_if_requested(args, full_model)
         else:
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
@@ -1359,6 +1359,10 @@ def quantize_main(
         # ``from_pretrained`` already populated so the cast works with the documented command.
         source_ckpt_dir = _resolve_model_path(args.pyt_ckpt_path, args.trust_remote_code)
         apply_cast_mxfp4_to_nvfp4(language_model, source_ckpt_dir)
+
+    # Save after the cast (if any) so a restore later reflects what actually gets exported.
+    if quantized_this_run:
+        _save_quantized_state_if_requested(args, full_model)
 
     post_quantize(
         args,
