@@ -98,6 +98,47 @@ class _AutoQuantMoeModel(torch.nn.Module):
         return torch.randn(1, 4, 32)
 
 
+class _ScoredMoeExpert(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(8, 8)
+        self.up_proj = torch.nn.Linear(8, 8)
+        self.down_proj = torch.nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.down_proj(self.gate_proj(x) + self.up_proj(x))
+
+
+class _ScoredMoeMlp(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = torch.nn.ModuleList([_ScoredMoeExpert(), _ScoredMoeExpert()])
+
+    def forward(self, x):
+        output = torch.zeros_like(x)
+        for expert in self.experts:
+            output = output + expert(x)
+        return output
+
+
+class _ScoredMoeLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = _ScoredMoeMlp()
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class _ScoredMoeModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_ScoredMoeLayer()])
+
+    def forward(self, x):
+        return self.layers[0](x)
+
+
 @pytest.mark.parametrize(
     ("quant_cfg", "other_quant_cfg", "is_less_than"),
     [
@@ -903,6 +944,113 @@ def _test_data_parallel_auto_quantize(rank, size):
 def test_data_parallel_auto_quantize(skip_on_windows):
     # 2 ranks fully exercise the cross-rank sync the test asserts; more just adds spawn overhead.
     spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
+
+
+def _test_data_parallel_moe_score_module(rank, size):
+    torch.manual_seed(1234)
+    model = _ScoredMoeModel()
+    data_loader = [torch.randn(2, 3, 8) for _ in range(2)]
+    model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 12.0},
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
+        data_loader=data_loader,
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.square().mean(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    hparam = model.layers[0].mlp.experts[0].gate_proj.get_hparam("quant_recipe")
+    assert hparam.score_modules == [model.layers[0].mlp]
+    assert isinstance(model.layers[0].mlp._hparams_for_scoring, list)
+
+    recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    local_score = sum(
+        hparam._importance_dict[recipe][score_module].item()
+        for score_module in hparam.score_modules
+    )
+    candidate = next(
+        candidate
+        for candidate in search_history["candidate_stats"].values()
+        if "layers.0.mlp.experts.0.gate_proj" in candidate["module_names"]
+    )
+    recipe_idx = candidate["formats"].index(recipe)
+    assert candidate["scores"][recipe_idx] == pytest.approx(local_score * size)
+
+    scores = {
+        name: candidate["scores"] for name, candidate in search_history["candidate_stats"].items()
+    }
+    rank_zero_scores = DistributedProcessGroup.get_dist_syncd_obj(
+        scores if rank == 0 else None,
+        DistributedProcessGroup(None),
+        lambda values: values[0],
+    )
+    assert scores == rank_zero_scores
+
+
+def test_data_parallel_moe_score_module(skip_on_windows):
+    spawn_multiprocess_job(2, _test_data_parallel_moe_score_module, backend="gloo")
+
+
+def test_score_hparam_registration_preserves_order():
+    quant_modules = [
+        mtq.quantize(torch.nn.Linear(4, 4), mtq.INT8_DEFAULT_CFG),
+        mtq.quantize(torch.nn.Linear(4, 4), mtq.INT8_DEFAULT_CFG),
+    ]
+    score_module = torch.nn.Identity()
+    recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+
+    first = QuantRecipeHparam(
+        [recipe],
+        quant_modules=[quant_modules[0], quant_modules[1], quant_modules[0]],
+        score_modules=[score_module, score_module],
+    )
+    second = QuantRecipeHparam(
+        [recipe],
+        quant_modules=[quant_modules[1]],
+        score_modules=[score_module],
+    )
+
+    assert first.quant_modules == quant_modules
+    assert first.score_modules == [score_module]
+    assert score_module._hparams_for_scoring == [first, second]
+
+
+def test_gradient_scoring_restores_model_after_failure():
+    model = SimpleLinear()
+    patched_modules = []
+
+    def fail_during_scoring(model, data):
+        model(data)
+        patched_modules.extend(
+            module
+            for module in model.modules()
+            if getattr(module.forward, "__name__", None) == "patched_forward"
+        )
+        raise RuntimeError("stop after scoring forward")
+
+    with pytest.raises(RuntimeError, match="stop after scoring forward"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            forward_backward_step=fail_during_scoring,
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert patched_modules
+    assert all(
+        getattr(module.forward, "__name__", None) != "patched_forward" for module in patched_modules
+    )
+    assert all(not module._backward_hooks for module in patched_modules)
+    assert all(param.requires_grad for param in model.parameters())
+    for module in model.modules():
+        for hparam in getattr(module, "_hparams_for_scoring", []):
+            assert hparam.active == hparam.original
 
 
 def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
