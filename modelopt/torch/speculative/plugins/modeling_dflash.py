@@ -60,6 +60,59 @@ from .modeling_final_norm import _maybe_apply_base_final_norm
 __all__ = ["DFlashBaseModelOutput", "DFlashModule", "build_target_layer_ids"]
 
 
+def _sink_attention_impl(q, k, v, attention_mask, sink_bias, scaling, dropout_p, training):
+    """Eager attention with a learnable per-head sink logit.
+
+    Free function rather than a method so ``torch.compile`` traces one graph shared by every
+    draft layer, instead of one per module instance.
+
+    Mirrors ``transformers``' GPT-OSS ``eager_attention_forward``, minus its explicit
+    max-subtraction: ``F.softmax`` already subtracts the row max internally, so the extra
+    step is a mathematical no-op, and under ``torch.compile`` its backward returns NaN
+    sink gradients for a bf16 mask built from ``finfo.min`` (the forward stays finite, so
+    this surfaces only as a dead sink parameter).
+    """
+    attn_weights = torch.matmul(q, k.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        # [B, 1, Q, KV] additive mask, already sliced to the kv length by the caller.
+        attn_weights = attn_weights + attention_mask[..., : k.shape[-2]]
+
+    sinks = sink_bias.view(1, -1, 1, 1).expand(
+        attn_weights.shape[0], -1, attn_weights.shape[-2], -1
+    )
+    combined = torch.cat([attn_weights, sinks.to(attn_weights.dtype)], dim=-1)
+    probs = F.softmax(combined, dim=-1, dtype=torch.float32).to(q.dtype)
+    attn_weights = probs[..., :-1]  # drop the sink column
+    attn_weights = F.dropout(attn_weights, p=dropout_p, training=training)
+    return torch.matmul(attn_weights, v).transpose(1, 2).contiguous()
+
+
+# Compiled lazily and cached, shared by every draft layer. The sink's extra softmax column
+# cannot be expressed by a fused SDPA/flash kernel, so this path materializes the
+# [B, H, Q, KV] logits; Inductor fuses the mask add, concat and softmax into one kernel,
+# which on the released Nemotron-3.5 draft shape (B=4, H=32, Q=512, KV=2560, bf16, fwd+bwd)
+# cuts a draft layer from 15.5 ms / 2.87 GiB to 8.4 ms / 1.13 GiB. Training shapes are static
+# (the collator pads every sample to ``train_len``), so this compiles once rather than per
+# batch. Compilation is deferred to first use so importing this module — and CPU-only unit
+# tests, which never reach a sink layer — pay nothing.
+_compiled_sink_attention = None
+
+
+def _get_sink_attention_fn():
+    """Return the sink attention implementation, compiling it on first use.
+
+    Falls back to the uncompiled function if ``torch.compile`` is unavailable in this
+    environment; the two are numerically interchangeable, so this only costs speed.
+    """
+    global _compiled_sink_attention
+    if _compiled_sink_attention is None:
+        try:
+            _compiled_sink_attention = torch.compile(_sink_attention_impl)
+        except Exception:
+            _compiled_sink_attention = _sink_attention_impl
+    return _compiled_sink_attention
+
+
 @dataclass
 class DFlashBaseModelOutput:
     """Output container for base model forward pass in DFlash training."""
@@ -246,40 +299,29 @@ class DFlashAttention(nn.Module):
         return self.o_proj(attn_output)
 
     def _sink_attention(self, q, k, v, attention_mask):
-        """Eager attention with a learnable per-head sink logit.
+        """Attention with a learnable per-head sink logit.
 
         The sink is an extra column appended to the attention logits before the softmax and
         dropped immediately after, so it consumes probability mass without contributing to
-        the output. Fused SDPA/flash kernels cannot express that extra column, so this path
-        is eager; it runs only when ``dflash_attention_sink`` is enabled.
-
-        Mirrors ``transformers``' GPT-OSS ``eager_attention_forward``, including the
-        max-subtraction before the softmax that keeps bf16 training from overflowing.
+        the output. Fused SDPA/flash kernels cannot express that extra column, so the logits
+        are materialized and the kernel fusion is left to ``torch.compile``. Runs only when
+        ``dflash_attention_sink`` is enabled.
 
         Returns ``[B, q_len, num_heads, head_dim]`` to match the HF attention interface.
         """
         sink_bias = self.attention_sink_bias
         assert sink_bias is not None, "_sink_attention requires dflash_attention_sink=True"
 
-        k = repeat_kv(k, self.num_key_value_groups)
-        v = repeat_kv(v, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scaling
-        if attention_mask is not None:
-            # [B, 1, Q, KV] additive mask, already sliced to the kv length by the caller.
-            attn_weights = attn_weights + attention_mask[..., : k.shape[-2]]
-
-        sinks = sink_bias.view(1, -1, 1, 1).expand(
-            attn_weights.shape[0], -1, attn_weights.shape[-2], -1
+        return _get_sink_attention_fn()(
+            q,
+            repeat_kv(k, self.num_key_value_groups),
+            repeat_kv(v, self.num_key_value_groups),
+            attention_mask,
+            sink_bias,
+            self.scaling,
+            self.attention_dropout if self.training else 0.0,
+            self.training,
         )
-        combined = torch.cat([attn_weights, sinks.to(attn_weights.dtype)], dim=-1)
-        combined = combined - combined.amax(dim=-1, keepdim=True)
-        probs = F.softmax(combined, dim=-1, dtype=torch.float32).to(q.dtype)
-        attn_weights = probs[..., :-1]  # drop the sink column
-        attn_weights = F.dropout(
-            attn_weights, p=self.attention_dropout if self.training else 0.0, training=self.training
-        )
-        return torch.matmul(attn_weights, v).transpose(1, 2).contiguous()
 
 
 class DFlashDecoderLayer(nn.Module):
