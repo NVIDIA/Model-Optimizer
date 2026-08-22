@@ -442,17 +442,10 @@ class HFDFlashModel(DFlashModel):
             self.dflash_config.hidden_size // self.dflash_config.num_attention_heads,
         )
         self.dflash_config.block_size = self.dflash_block_size
-        # Attention-shape knobs the draft module needs at build time. Carried on the draft
-        # config (not read from DFlashConfig) so _build_draft_module stays a pure function
-        # of dflash_config and restored checkpoints rebuild an identical module.
+        # On the draft config so _build_draft_module stays a pure function of it.
         self.dflash_config.attention_sink_bias = self.dflash_attention_sink
 
-        # Target layer IDs: which base layers feed the draft's feature-fusion `fc`.
-        # An explicit dflash_architecture_config.target_layer_ids wins — a published draft
-        # is trained against specific capture points (e.g. the Nemotron-3.5 DSpark draft's
-        # [1,5,19,29,41,51]), and recomputing the uniform default would both mis-shape `fc`
-        # and feed the draft features from layers it never saw. Otherwise derive the
-        # uniform default.
+        # Which base layers feed the draft's `fc`: explicit ids win, else the uniform default.
         num_target_layers = (
             base_config.num_orig_hidden_layers
             if self.dflash_offline
@@ -472,20 +465,13 @@ class HFDFlashModel(DFlashModel):
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
                     f"references a layer beyond the base model's {num_target_layers} layers."
                 )
-            # Duplicates pass both checks above -- the count is right, so `fc` gets the
-            # expected input width and training proceeds -- while feeding one layer's
-            # features twice and dropping a capture point entirely. Streaming makes it
-            # worse: the producer captures each base layer at most once, so a duplicated id
-            # also yields fewer planes than `fc` expects.
             if len(set(user_target_layer_ids)) != len(user_target_layer_ids):
                 raise ValueError(
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "
                     "contains duplicates; each draft layer needs a distinct capture layer "
                     "(the streaming producer captures each base layer at most once)."
                 )
-            # Reject negatives explicitly: forward() indexes hidden_states[lid + 1], where a
-            # negative id silently wraps to a valid layer instead of raising, and the draft
-            # then trains on features from a layer it was never meant to see.
+            # forward() indexes hidden_states[lid + 1], where a negative id silently wraps.
             if min(user_target_layer_ids) < 0:
                 raise ValueError(
                     f"dflash_architecture_config.target_layer_ids {user_target_layer_ids} "

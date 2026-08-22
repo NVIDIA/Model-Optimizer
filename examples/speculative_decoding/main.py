@@ -285,42 +285,13 @@ def train():
 
     print_rank_0("Loading dataset...")
     is_dflash = isinstance(recipe, ModelOptDFlashRecipe)
-    # A draft whose top aux layer already is the base's last layer (e.g. the released
-    # Nemotron-3.5 DSpark draft: aux ids [1,5,19,29,41,51], zero-based, on a 52-layer base)
-    # cannot get a distinct extra capture plane for the base hidden — vLLM captures each
-    # layer once — so the streaming dataset must reuse the final plane for both roles.
-    # Derived from the model rather than configured by hand: it is a property of the
-    # draft, and a wrong manual value fails as a confusing matmul shape error deep in
-    # the draft's `fc`.
-    # Read the base depth the same way HFDFlashModel.modify does: offline/streaming loads
-    # the base with num_hidden_layers=0 (or a fake base) and stashes the real count in
-    # num_orig_hidden_layers, so num_hidden_layers alone would compare against 0 here.
-    _base_cfg = (
-        getattr(model.config, "text_config", None)
-        or getattr(model.config, "llm_config", None)
-        or model.config
-    )
-    _base_depth = getattr(_base_cfg, "num_orig_hidden_layers", None) or getattr(
-        _base_cfg, "num_hidden_layers", 0
-    )
-    final_aux_is_base_hidden = bool(
-        is_dflash
-        and getattr(model, "target_layer_ids", None)
-        and _base_depth
-        and max(model.target_layer_ids) + 1 >= _base_depth
-    )
-    print_rank_0(
-        f"Streaming plane layout: base_depth={_base_depth}, "
-        f"draft target_layer_ids={getattr(model, 'target_layer_ids', None)}, "
-        f"final_aux_is_base_hidden={final_aux_is_base_hidden}"
-    )
     data_module = make_speculative_data_module(
         tokenizer,
         recipe.data,
         train_len=training_args.training_seq_len,
         answer_only_loss=training_args.answer_only_loss,
         shift_labels=not is_dflash,
-        final_aux_is_base_hidden=final_aux_is_base_hidden,
+        final_aux_is_base_hidden=recipe.data.final_aux_is_base_hidden,
     )
 
     callbacks = [EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)]

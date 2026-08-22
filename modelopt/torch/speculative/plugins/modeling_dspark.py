@@ -72,6 +72,7 @@ import torch
 from torch import nn
 
 from .modeling_dflash import DFlashModule
+from .modeling_draft_checkpoint_compat import remap_dspark_nested_head_keys
 
 __all__ = ["DSparkModule"]
 
@@ -124,40 +125,8 @@ class DSparkModule(DFlashModule):
         # existed, so initialize the new layers explicitly.
         self._init_head_weights(config)
 
-        self._register_load_state_dict_pre_hook(self._remap_nested_head_keys, with_module=False)
-
-    # Head submodules that some published checkpoints nest under a `markov_head.` parent.
-    _NESTED_HEAD_PREFIX = "markov_head."
-
-    @classmethod
-    def _remap_nested_head_keys(cls, state_dict, prefix, *args, **kwargs):
-        """Accept head weights nested under ``markov_head.`` as well as flat.
-
-        ModelOpt keeps the head tensors flat on this module (``markov_w1`` /
-        ``markov_w2`` / ...), matching the upstream DeepSpec layout, and exports them that
-        way. Some released drafters — e.g.
-        ``nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark`` — instead nest them
-        under a ``markov_head.`` parent module. Rewriting those keys in place here lets
-        either layout load without changing the export format (which would break drafters
-        already trained and deployed with the flat names).
-        """
-        nested = prefix + cls._NESTED_HEAD_PREFIX
-        for key in [k for k in state_dict if k.startswith(nested)]:
-            flat = prefix + key[len(nested) :]
-            nested_value = state_dict.pop(key)
-            # A flat key already present wins: never clobber an explicit match. That case
-            # means a partially-converted checkpoint carrying both layouts; the Markov
-            # tables are ~14% of the draft's parameters and loading the wrong one is
-            # invisible at runtime, so say which copy was dropped rather than picking
-            # silently.
-            if flat in state_dict:
-                logger.warning(
-                    "DSpark: ignoring nested %s because %s is also present in the checkpoint.",
-                    key,
-                    flat,
-                )
-            else:
-                state_dict[flat] = nested_value
+        # Released-checkpoint key layouts live in modeling_draft_checkpoint_compat.
+        self._register_load_state_dict_pre_hook(remap_dspark_nested_head_keys, with_module=False)
 
     def _init_head_weights(self, config):
         """Initialize the head Linear/Embedding layers (matching HF _init_weights std)."""

@@ -36,6 +36,9 @@ data:
   # The stock Nemotron template has no {% generation %} tags, so answer_only_loss would get
   # an all-zero assistant mask. Point this at a tagged copy.
   chat_template: <path to nemotron chat template with {% generation %} tags>
+  # This draft's top aux id (51, zero-based) already is the base's last layer, so vLLM emits
+  # no separate base-hidden plane and the final aux plane serves both roles.
+  final_aux_is_base_hidden: true
 
 training:
   output_dir: <output dir>
