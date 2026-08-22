@@ -117,6 +117,16 @@ def test_restore_quantized_state_with_deprecated_auto_quantize_cli_is_rejected(m
         )
 
 
+def test_auto_quantize_bits_alone_is_rejected(monkeypatch):
+    """--auto_quantize_bits isn't read anywhere in the quantization path anymore -- only an
+    AutoQuantize --recipe enables AutoQuantize. A legacy command passing this flag on its own
+    (no save/restore involved) must fail at parse_args() instead of silently running plain PTQ."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "dummy", "--auto_quantize_bits", "5.4"
+        )
+
+
 def test_save_quantized_state_round_trips_through_real_mto(monkeypatch, tmp_path):
     """The mocked test above pins the call *shape*; this exercises the real ModelOpt
     persistence path end to end: quantize a small local model, save its state through

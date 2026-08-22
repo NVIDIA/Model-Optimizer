@@ -1591,15 +1591,16 @@ def parse_args() -> argparse.Namespace:
             "before proceeding straight to export."
         ),
     )
-    # Deprecated AutoQuantize CLI flags: kept as a backward-compat shim that converts them into an
-    # AutoQuantizeConfig on the fly (see _auto_quantize_config_from_cli). Prefer --recipe. The old
-    # CLI also lives on the 0.45 branch.
+    # Deprecated AutoQuantize CLI flags: no longer wired to anything -- AutoQuantize is now
+    # configured exclusively via an AutoQuantize --recipe. Kept only so old invocations fail
+    # loudly at parse_args() instead of silently running plain PTQ. The old CLI still lives on
+    # the 0.45 branch for anyone who needs it.
     parser.add_argument(
         "--auto_quantize_bits",
         type=float,
         default=None,
-        help="[Deprecated: use an AutoQuantize --recipe] Effective-bits target; also enables the "
-        "AutoQuantize CLI path. Candidate formats are taken from --qformat (comma-separated).",
+        help="[Removed: use an AutoQuantize --recipe instead] Effective-bits target. Setting "
+        "this now fails parsing rather than silently running plain PTQ.",
     )
     parser.add_argument(
         "--auto_quantize_method",
@@ -1713,14 +1714,20 @@ def parse_args() -> argparse.Namespace:
             "--low_memory_mode does not support --recipe; the low-memory loader initializes "
             "quantizers from --qformat/--kv_cache_qformat."
         )
+    if args.auto_quantize_bits is not None:
+        parser.error(
+            "--auto_quantize_bits no longer enables AutoQuantize; it is not read anywhere in "
+            "the quantization path and a command relying on it would now silently run plain "
+            "PTQ instead. Use an AutoQuantize --recipe instead."
+        )
     if args.save_quantized_state is not None and args.restore_quantized_state is not None:
         parser.error(
             "--save_quantized_state and --restore_quantized_state are mutually exclusive: "
             "restoring a saved state skips calibration, so there is nothing new to save."
         )
-    if (args.save_quantized_state is not None or args.restore_quantized_state is not None) and (
-        args.auto_quantize_bits is not None or _recipe_is_auto_quantize(args.recipe)
-    ):
+    if (
+        args.save_quantized_state is not None or args.restore_quantized_state is not None
+    ) and _recipe_is_auto_quantize(args.recipe):
         parser.error(
             "--save_quantized_state/--restore_quantized_state are only supported for the plain "
             "(non-AutoQuantize) recipe/qformat path; AutoQuantize's search state is not a single "
