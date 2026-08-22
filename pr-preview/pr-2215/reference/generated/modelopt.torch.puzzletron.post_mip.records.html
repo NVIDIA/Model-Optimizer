@@ -1,0 +1,721 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>records &mdash; Model Optimizer 0.0.1.dev1+g76ad102b3</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="reporting" href="modelopt.torch.puzzletron.post_mip.reporting.html" />
+    <link rel="prev" title="identity" href="modelopt.torch.puzzletron.post_mip.identity.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+      <li class="breadcrumb-item active">records</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.post_mip.records.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="records">
+<h1>records<a class="headerlink" href="#records" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.puzzletron.post_mip.records">Durable candidate lineage and observations for configurable post-MIP flows.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate" title="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ArchitectureCandidate</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind" title="modelopt.torch.puzzletron.post_mip.records.ArtifactKind"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ArtifactKind</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger" title="modelopt.torch.puzzletron.post_mip.records.CandidateLedger"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CandidateLedger</span></code></a></p></td>
+<td><p>Single-writer transactional registry backed by immutable node result files.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision" title="modelopt.torch.puzzletron.post_mip.records.CandidateRevision"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CandidateRevision</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="modelopt.torch.puzzletron.post_mip.records.CandidateSet"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CandidateSet</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation" title="modelopt.torch.puzzletron.post_mip.records.NodeObservation"><code class="xref py py-obj docutils literal notranslate"><span class="pre">NodeObservation</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ArchitectureCandidate</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">architecture_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_configs</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mip_metrics=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">origins=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">origin_revision_id=''</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>architecture_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>block_configs</strong> (<em>list</em><em>[</em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>mip_metrics</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>float</em><em>]</em>)</p></li>
+<li><p><strong>origins</strong> (<em>list</em><em>[</em><em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em><em>]</em>)</p></li>
+<li><p><strong>origin_revision_id</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.architecture_id">
+<span class="sig-name descname"><span class="pre">architecture_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.architecture_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.block_configs">
+<span class="sig-name descname"><span class="pre">block_configs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.block_configs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.mip_metrics">
+<span class="sig-name descname"><span class="pre">mip_metrics</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.mip_metrics" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.origin_revision_id">
+<span class="sig-name descname"><span class="pre">origin_revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.origin_revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.origins">
+<span class="sig-name descname"><span class="pre">origins</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArchitectureCandidate.origins" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArtifactKind">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ArtifactKind</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArtifactKind.CHECKPOINT">
+<span class="sig-name descname"><span class="pre">CHECKPOINT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'checkpoint'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind.CHECKPOINT" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArtifactKind.CONFIG">
+<span class="sig-name descname"><span class="pre">CONFIG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'config'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind.CONFIG" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.ArtifactKind.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CandidateLedger</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Single-writer transactional registry backed by immutable node result files.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.VERSION">
+<span class="sig-name descname"><span class="pre">VERSION</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.VERSION" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">root</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>root</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.add_revision">
+<span class="sig-name descname"><span class="pre">add_revision</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">architecture_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">artifact_kind</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">artifact</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">producer_node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.add_revision" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>architecture_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>artifact_kind</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind" title="modelopt.torch.puzzletron.post_mip.records.ArtifactKind"><em>ArtifactKind</em></a>)</p></li>
+<li><p><strong>artifact</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>parent_revision_id</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>producer_node</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision" title="modelopt.torch.puzzletron.post_mip.records.CandidateRevision"><em>CandidateRevision</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.candidate_metadata">
+<span class="sig-name descname"><span class="pre">candidate_metadata</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">revision_id</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.candidate_metadata" title="Link to this definition"></a></dt>
+<dd><p>Return architecture, revision lineage, and accumulated observations.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>revision_id</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.ingest_mip">
+<span class="sig-name descname"><span class="pre">ingest_mip</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">puzzle_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.ingest_mip" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>puzzle_dir</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.load_candidate_set">
+<span class="sig-name descname"><span class="pre">load_candidate_set</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_id</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">execution_identity</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.load_candidate_set" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>execution_identity</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="modelopt.torch.puzzletron.post_mip.records.CandidateSet"><em>CandidateSet</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.load_execution_observations">
+<span class="sig-name descname"><span class="pre">load_execution_observations</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">execution_identities</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.load_execution_observations" title="Link to this definition"></a></dt>
+<dd><p>Load node observations from exact immutable executions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>execution_identities</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>str</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.publish">
+<span class="sig-name descname"><span class="pre">publish</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.publish" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>Path</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.publish_node">
+<span class="sig-name descname"><span class="pre">publish_node</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">observations</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">candidate_set</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">execution_identity</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.publish_node" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>observations</strong> (<em>Iterable</em><em>[</em><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation" title="modelopt.torch.puzzletron.post_mip.records.NodeObservation"><em>NodeObservation</em></a><em>]</em>)</p></li>
+<li><p><strong>candidate_set</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="modelopt.torch.puzzletron.post_mip.records.CandidateSet"><em>CandidateSet</em></a>)</p></li>
+<li><p><strong>execution_identity</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Path</em>, <em>Path</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.resolve_concurrency_metrics">
+<span class="sig-name descname"><span class="pre">resolve_concurrency_metrics</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reference</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.resolve_concurrency_metrics" title="Link to this definition"></a></dt>
+<dd><p>Resolve finite <code class="docutils literal notranslate"><span class="pre">concurrency_&lt;N&gt;.&lt;metric&gt;</span></code> values from one node observation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>reference</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>int</em>, <em>float</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.resolve_metric">
+<span class="sig-name descname"><span class="pre">resolve_metric</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reference</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.resolve_metric" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>reference</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>float</em> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.root_set">
+<span class="sig-name descname"><span class="pre">root_set</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flow_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.root_set" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>flow_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>source</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="modelopt.torch.puzzletron.post_mip.records.CandidateSet"><em>CandidateSet</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateLedger.source_revision">
+<span class="sig-name descname"><span class="pre">source_revision</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input_revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateLedger.source_revision" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>input_revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>source</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision" title="modelopt.torch.puzzletron.post_mip.records.CandidateRevision"><em>CandidateRevision</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CandidateRevision</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">architecture_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">artifact_kind</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">artifact</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parent_revision_id</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">producer_node</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mip'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>architecture_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>artifact_kind</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind" title="modelopt.torch.puzzletron.post_mip.records.ArtifactKind"><em>ArtifactKind</em></a>)</p></li>
+<li><p><strong>artifact</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>parent_revision_id</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>producer_node</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.architecture_id">
+<span class="sig-name descname"><span class="pre">architecture_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.architecture_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.artifact">
+<span class="sig-name descname"><span class="pre">artifact</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.artifact" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.artifact_kind">
+<span class="sig-name descname"><span class="pre">artifact_kind</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.ArtifactKind" title="modelopt.torch.puzzletron.post_mip.records.ArtifactKind"><span class="pre">ArtifactKind</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.artifact_kind" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.parent_revision_id">
+<span class="sig-name descname"><span class="pre">parent_revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.parent_revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.producer_node">
+<span class="sig-name descname"><span class="pre">producer_node</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mip'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.producer_node" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateRevision.revision_id">
+<span class="sig-name descname"><span class="pre">revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateRevision.revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CandidateSet</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flow_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision_ids</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">identity</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">producer_execution_identity</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>flow_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>node_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>revision_ids</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>identity</strong> (<em>str</em>)</p></li>
+<li><p><strong>producer_execution_identity</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.create">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">create</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flow_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision_ids</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">producer_execution_identity</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.create" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>flow_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>node_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>revision_ids</strong> (<em>Iterable</em><em>[</em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>producer_execution_identity</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet" title="modelopt.torch.puzzletron.post_mip.records.CandidateSet"><em>CandidateSet</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.flow_id">
+<span class="sig-name descname"><span class="pre">flow_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.flow_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.identity">
+<span class="sig-name descname"><span class="pre">identity</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.identity" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.node_id">
+<span class="sig-name descname"><span class="pre">node_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.node_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.producer_execution_identity">
+<span class="sig-name descname"><span class="pre">producer_execution_identity</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.producer_execution_identity" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.CandidateSet.revision_ids">
+<span class="sig-name descname"><span class="pre">revision_ids</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.CandidateSet.revision_ids" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">NodeObservation</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">node_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">source_revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_revision_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">status</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">metrics=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">artifacts=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">warnings=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error=None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>node_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>input_revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>source_revision_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>output_revision_id</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>status</strong> (<em>str</em>)</p></li>
+<li><p><strong>metrics</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>float</em><em>]</em>)</p></li>
+<li><p><strong>artifacts</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>warnings</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>error</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.artifacts">
+<span class="sig-name descname"><span class="pre">artifacts</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.artifacts" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.error">
+<span class="sig-name descname"><span class="pre">error</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.error" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.input_revision_id">
+<span class="sig-name descname"><span class="pre">input_revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.input_revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.metrics">
+<span class="sig-name descname"><span class="pre">metrics</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">float</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.metrics" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.node_id">
+<span class="sig-name descname"><span class="pre">node_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.node_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.output_revision_id">
+<span class="sig-name descname"><span class="pre">output_revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.output_revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.source_revision_id">
+<span class="sig-name descname"><span class="pre">source_revision_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.source_revision_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.status">
+<span class="sig-name descname"><span class="pre">status</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.status" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.post_mip.records.NodeObservation.warnings">
+<span class="sig-name descname"><span class="pre">warnings</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">list</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.post_mip.records.NodeObservation.warnings" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.post_mip.identity.html" class="btn btn-neutral float-left" title="identity" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.post_mip.reporting.html" class="btn btn-neutral float-right" title="reporting" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

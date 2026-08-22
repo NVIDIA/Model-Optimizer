@@ -1,0 +1,542 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>manifest &mdash; Model Optimizer 0.0.1.dev1+g76ad102b3</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="mip" href="modelopt.torch.puzzletron.mip.html" />
+    <link rel="prev" title="identity" href="modelopt.torch.puzzletron.identity.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+      <li class="breadcrumb-item active">manifest</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.manifest.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="manifest">
+<h1>manifest<a class="headerlink" href="#manifest" title="Link to this heading"></a></h1>
+<span class="target" id="module-modelopt.torch.puzzletron.manifest"></span><p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.StageManifest" title="modelopt.torch.puzzletron.manifest.StageManifest"><code class="xref py py-obj docutils literal notranslate"><span class="pre">StageManifest</span></code></a></p></td>
+<td><p>Durable metadata and semantic identity for one Puzzletron stage execution.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.read_stage_manifest" title="modelopt.torch.puzzletron.manifest.read_stage_manifest"><code class="xref py py-obj docutils literal notranslate"><span class="pre">read_stage_manifest</span></code></a></p></td>
+<td><p>Read a stage manifest while preserving compatibility with older schemas.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.semantic_stage_config" title="modelopt.torch.puzzletron.manifest.semantic_stage_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">semantic_stage_config</span></code></a></p></td>
+<td><p>Return configuration that can change the semantic result of one stage.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.stage_manifest_from_config" title="modelopt.torch.puzzletron.manifest.stage_manifest_from_config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">stage_manifest_from_config</span></code></a></p></td>
+<td><p>Build a worker manifest with separate authored and effective config views.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.validate_stage_execution_record" title="modelopt.torch.puzzletron.manifest.validate_stage_execution_record"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_stage_execution_record</span></code></a></p></td>
+<td><p>Validate the canonical pointer and every immutable record it references.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.write_stage_execution_record" title="modelopt.torch.puzzletron.manifest.write_stage_execution_record"><code class="xref py py-obj docutils literal notranslate"><span class="pre">write_stage_execution_record</span></code></a></p></td>
+<td><p>Persist immutable resolved config and artifact metadata for one execution.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.write_stage_manifest" title="modelopt.torch.puzzletron.manifest.write_stage_manifest"><code class="xref py py-obj docutils literal notranslate"><span class="pre">write_stage_manifest</span></code></a></p></td>
+<td><p>Atomically write a stage manifest from rank zero.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">StageManifest</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Durable metadata and semantic identity for one Puzzletron stage execution.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version='1'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">status='pending'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inputs=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">outputs=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">capability_snapshot=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">semantic_config=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">implementation_provenance=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">skip_reason=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">effective_config=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">execution_record=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stale_reason=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">started_at=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ended_at=None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage</strong> (<em>str</em>)</p></li>
+<li><p><strong>version</strong> (<em>str</em>)</p></li>
+<li><p><strong>status</strong> (<em>str</em>)</p></li>
+<li><p><strong>inputs</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>outputs</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>capability_snapshot</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>semantic_config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>implementation_provenance</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>skip_reason</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>effective_config</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>execution_record</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>stale_reason</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>started_at</strong> (<em>str</em>)</p></li>
+<li><p><strong>ended_at</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.capability_snapshot">
+<span class="sig-name descname"><span class="pre">capability_snapshot</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.capability_snapshot" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.complete">
+<span class="sig-name descname"><span class="pre">complete</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">outputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">status</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'success'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">skip_reason</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.complete" title="Link to this definition"></a></dt>
+<dd><p>Mark the stage complete with its validated outputs and final status.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>outputs</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>status</strong> (<em>str</em><em> | </em><a class="reference internal" href="modelopt.torch.puzzletron.stages.html#modelopt.torch.puzzletron.stages.StageStatus" title="modelopt.torch.puzzletron.stages.StageStatus"><em>StageStatus</em></a>)</p></li>
+<li><p><strong>skip_reason</strong> (<em>str</em><em> | </em><a class="reference internal" href="modelopt.torch.puzzletron.stages.html#modelopt.torch.puzzletron.stages.StageSkipReason" title="modelopt.torch.puzzletron.stages.StageSkipReason"><em>StageSkipReason</em></a><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.config">
+<span class="sig-name descname"><span class="pre">config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.config_identity">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">config_identity</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.config_identity" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.effective_config">
+<span class="sig-name descname"><span class="pre">effective_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.effective_config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.ended_at">
+<span class="sig-name descname"><span class="pre">ended_at</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.ended_at" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.execution_record">
+<span class="sig-name descname"><span class="pre">execution_record</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.execution_record" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.implementation_provenance">
+<span class="sig-name descname"><span class="pre">implementation_provenance</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.implementation_provenance" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.inputs">
+<span class="sig-name descname"><span class="pre">inputs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.inputs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.outputs">
+<span class="sig-name descname"><span class="pre">outputs</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.outputs" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.semantic_config">
+<span class="sig-name descname"><span class="pre">semantic_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.semantic_config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.semantic_config_identity">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">semantic_config_identity</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.semantic_config_identity" title="Link to this definition"></a></dt>
+<dd><p>Return the identity of configuration relevant to this stage’s result.</p>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.semantic_identity">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">semantic_identity</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.semantic_identity" title="Link to this definition"></a></dt>
+<dd><p>Return the compatibility identity consumed by downstream resume checks.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.skip_reason">
+<span class="sig-name descname"><span class="pre">skip_reason</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.skip_reason" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.stage">
+<span class="sig-name descname"><span class="pre">stage</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.stage" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.stale_reason">
+<span class="sig-name descname"><span class="pre">stale_reason</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.stale_reason" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.started_at">
+<span class="sig-name descname"><span class="pre">started_at</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.started_at" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.status">
+<span class="sig-name descname"><span class="pre">status</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'pending'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.status" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.to_dict" title="Link to this definition"></a></dt>
+<dd><p>Return the backward-compatible serialized manifest payload.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.StageManifest.version">
+<span class="sig-name descname"><span class="pre">version</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'1'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.StageManifest.version" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.read_stage_manifest">
+<span class="sig-name descname"><span class="pre">read_stage_manifest</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.read_stage_manifest" title="Link to this definition"></a></dt>
+<dd><p>Read a stage manifest while preserving compatibility with older schemas.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>path</strong> (<em>str</em><em> | </em><em>Path</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.semantic_stage_config">
+<span class="sig-name descname"><span class="pre">semantic_stage_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_id</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_authored</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.semantic_stage_config" title="Link to this definition"></a></dt>
+<dd><p>Return configuration that can change the semantic result of one stage.</p>
+<p>Public stages declare their semantic sections alongside their other
+scheduler-neutral metadata. Dynamic stages that are not in the public
+registry retain the historical stage-ID section fallback.</p>
+<p>Normalized worker configurations retain the independently loaded authored
+configuration under <code class="docutils literal notranslate"><span class="pre">_runtime.authored_config</span></code>. Semantic compatibility
+uses that authored view by default, while execution records may explicitly
+request the effective worker view.</p>
+<p>For identity projection, an absent section, a <code class="docutils literal notranslate"><span class="pre">None</span></code> section, and an
+empty mapping are equivalent because none contains an authored option.
+Other falsey values remain in the projection because they can be semantic.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>stage_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>use_authored</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.stage_manifest_from_config">
+<span class="sig-name descname"><span class="pre">stage_manifest_from_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">effective_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">manifest_fields</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.stage_manifest_from_config" title="Link to this definition"></a></dt>
+<dd><p>Build a worker manifest with separate authored and effective config views.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage</strong> (<em>str</em>)</p></li>
+<li><p><strong>config</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>inputs</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>effective_config</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>manifest_fields</strong> (<em>Any</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.manifest.StageManifest" title="modelopt.torch.puzzletron.manifest.StageManifest"><em>StageManifest</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.validate_stage_execution_record">
+<span class="sig-name descname"><span class="pre">validate_stage_execution_record</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">manifest_path</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expected_stage</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.validate_stage_execution_record" title="Link to this definition"></a></dt>
+<dd><p>Validate the canonical pointer and every immutable record it references.</p>
+<p>Historical stage manifests without <code class="docutils literal notranslate"><span class="pre">execution_record</span></code> remain readable. Any
+manifest that opts into the execution-record schema is checked fail closed.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>manifest_path</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>expected_stage</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>str</em>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.write_stage_execution_record">
+<span class="sig-name descname"><span class="pre">write_stage_execution_record</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">manifest_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">manifest_payload</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.write_stage_execution_record" title="Link to this definition"></a></dt>
+<dd><p>Persist immutable resolved config and artifact metadata for one execution.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>manifest_path</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>manifest_payload</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.manifest.write_stage_manifest">
+<span class="sig-name descname"><span class="pre">write_stage_manifest</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">manifest</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.manifest.write_stage_manifest" title="Link to this definition"></a></dt>
+<dd><p>Atomically write a stage manifest from rank zero.</p>
+<p>Rank zero publishes the immutable execution record and assigns its reference
+to <code class="docutils literal notranslate"><span class="pre">manifest.execution_record</span></code> before writing the manifest. Other ranks
+return without writing and leave <code class="docutils literal notranslate"><span class="pre">manifest.execution_record</span></code> unchanged.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>manifest</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.manifest.StageManifest" title="modelopt.torch.puzzletron.manifest.StageManifest"><em>StageManifest</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.identity.html" class="btn btn-neutral float-left" title="identity" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.mip.html" class="btn btn-neutral float-right" title="mip" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

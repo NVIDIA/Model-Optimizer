@@ -1,0 +1,474 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>layerwise_export &mdash; Model Optimizer 0.0.1.dev1+g7ba99036d</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=93ef59b3" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="mcore_config_map" href="modelopt.torch.export.mcore_config_map.html" />
+    <link rel="prev" title="layer_utils" href="modelopt.torch.export.layer_utils.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.export.html">export</a></li>
+      <li class="breadcrumb-item active">layerwise_export</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.export.layerwise_export.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="layerwise-export">
+<h1>layerwise_export<a class="headerlink" href="#layerwise-export" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.export.layerwise_export">Write each decoder layer’s quantized checkpoint shard as soon as it is calibrated.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter" title="modelopt.torch.export.layerwise_export.LayerwiseExporter"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LayerwiseExporter</span></code></a></p></td>
+<td><p>Writes one decoder layer's quantized shard per call, then the tail and index.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.assert_formats_supported" title="modelopt.torch.export.layerwise_export.assert_formats_supported"><code class="xref py py-obj docutils literal notranslate"><span class="pre">assert_formats_supported</span></code></a></p></td>
+<td><p>Raise unless every format in <code class="docutils literal notranslate"><span class="pre">module</span></code> can be reproduced per layer.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.assert_layerwise_export_supported" title="modelopt.torch.export.layerwise_export.assert_layerwise_export_supported"><code class="xref py py-obj docutils literal notranslate"><span class="pre">assert_layerwise_export_supported</span></code></a></p></td>
+<td><p>Raise unless per-layer export is valid for this model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.build_legacy_name_mapper" title="modelopt.torch.export.layerwise_export.build_legacy_name_mapper"><code class="xref py py-obj docutils literal notranslate"><span class="pre">build_legacy_name_mapper</span></code></a></p></td>
+<td><p>Hub-name mapper for transformers &lt; 5, or None if the model declares no mapping.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.layer_shard_name" title="modelopt.torch.export.layerwise_export.layer_shard_name"><code class="xref py py-obj docutils literal notranslate"><span class="pre">layer_shard_name</span></code></a></p></td>
+<td><p>Shard filename for one decoder layer.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.resolve_export_parent" title="modelopt.torch.export.layerwise_export.resolve_export_parent"><code class="xref py py-obj docutils literal notranslate"><span class="pre">resolve_export_parent</span></code></a></p></td>
+<td><p>Return <code class="docutils literal notranslate"><span class="pre">(model</span> <span class="pre">the</span> <span class="pre">checkpoint</span> <span class="pre">describes,</span> <span class="pre">key</span> <span class="pre">prefix</span> <span class="pre">for</span> <span class="pre">its</span> <span class="pre">tensors)</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.export.layerwise_export.transient_module_state" title="modelopt.torch.export.layerwise_export.transient_module_state"><code class="xref py py-obj docutils literal notranslate"><span class="pre">transient_module_state</span></code></a></p></td>
+<td><p>Undo the parameter, buffer and child-module changes export makes to <code class="docutils literal notranslate"><span class="pre">module</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py data">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.EXPORT_PARENT_ATTR">
+<span class="sig-name descname"><span class="pre">EXPORT_PARENT_ATTR</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'_layerwise_export_parent'</span></span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.EXPORT_PARENT_ATTR" title="Link to this definition"></a></dt>
+<dd><p>Set by the caller on the calibrated submodel to name the model the checkpoint should
+describe. Multimodal pipelines calibrate the extracted language model, but the exported
+checkpoint has to describe the whole VLM or its config and tensor names disagree.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">LayerwiseExporter</span></span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Writes one decoder layer’s quantized shard per call, then the tail and index.</p>
+<p>Built before calibration, driven per layer from inside the window calibration opens,
+finalized after the last. <code class="docutils literal notranslate"><span class="pre">finalize</span></code> indexes the shards on disk, so layers an earlier
+run exported are picked up without being re-exported.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_modelopt_qlora</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.__init__" title="Link to this definition"></a></dt>
+<dd><p>Validate support and capture model-level state, before calibration runs.</p>
+<p>Only quantizer <em>configuration</em> is read here; anything amax-dependent belongs in
+<a class="reference internal" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize" title="modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">finalize()</span></code></a>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>)</p></li>
+<li><p><strong>export_dir</strong> (<em>Path</em><em> | </em><em>str</em>)</p></li>
+<li><p><strong>dtype</strong> (<em>dtype</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>is_modelopt_qlora</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_no_orphan_shards">
+<span class="sig-name descname"><span class="pre">assert_no_orphan_shards</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">manifest_present</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_no_orphan_shards" title="Link to this definition"></a></dt>
+<dd><p>Refuse to silently redo work when shards exist but the resume record does not.</p>
+<p>The resume point comes from the manifest – the shards cannot supply it. Without
+one <code class="docutils literal notranslate"><span class="pre">start_layer</span></code> is 0, <a class="reference internal" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_shards_present" title="modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_shards_present"><code class="xref py py-meth docutils literal notranslate"><span class="pre">assert_shards_present()</span></code></a> checks an empty range, and
+calibration overwrites every finished layer without a word.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>manifest_present</strong> (<em>bool</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_shards_present">
+<span class="sig-name descname"><span class="pre">assert_shards_present</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">upto</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.assert_shards_present" title="Link to this definition"></a></dt>
+<dd><p>Require shards for layers <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">upto)</span></code>, which a resume intends to skip.</p>
+<p>The checkpoint directory knows nothing about what was exported, so a mismatched
+pair would only surface at <a class="reference internal" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize" title="modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize"><code class="xref py py-meth docutils literal notranslate"><span class="pre">finalize()</span></code></a> – after a full calibration.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>upto</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.completed_layers">
+<span class="sig-name descname"><span class="pre">completed_layers</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.completed_layers" title="Link to this definition"></a></dt>
+<dd><p>How many leading layers already have a shard on disk.</p>
+<p>A <em>contiguous</em> run from layer 0: a gap means the layers after it were never
+finished, and resuming past one would leave the checkpoint missing them.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.export_layer">
+<span class="sig-name descname"><span class="pre">export_layer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">probe_forward</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.export_layer" title="Link to this definition"></a></dt>
+<dd><p>Pack one calibrated layer into its shard, leaving that layer untouched.</p>
+<p><code class="docutils literal notranslate"><span class="pre">probe_forward</span></code> runs the layer on real activations so a fusing format can
+rediscover which modules share an input; only omit it when nothing fuses.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+<li><p><strong>layer_module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>probe_forward</strong> (<em>Callable</em><em>[</em><em>[</em><em>Module</em><em>]</em><em>, </em><em>None</em><em>] </em><em>| </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize">
+<span class="sig-name descname"><span class="pre">finalize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">extra_state_dict</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.LayerwiseExporter.finalize" title="Link to this definition"></a></dt>
+<dd><p>Export the tail, write the config artifacts, and index all shards.</p>
+<p>Leaves <code class="docutils literal notranslate"><span class="pre">export_dir</span></code> a complete checkpoint; no <code class="docutils literal notranslate"><span class="pre">export_hf_checkpoint()</span></code> needed.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>extra_state_dict</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><em>Tensor</em><em>] </em><em>| </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.assert_formats_supported">
+<span class="sig-name descname"><span class="pre">assert_formats_supported</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scope</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.assert_formats_supported" title="Link to this definition"></a></dt>
+<dd><p>Raise unless every format in <code class="docutils literal notranslate"><span class="pre">module</span></code> can be reproduced per layer.</p>
+<p>Called twice, because AWQ and SVDQuant only become visible once the calibrator has
+registered <code class="docutils literal notranslate"><span class="pre">_pre_quant_scale</span></code> / <code class="docutils literal notranslate"><span class="pre">svdquant_lora_a</span></code>: before calibration to fail
+early, and on each exported layer, which is the authority.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module</strong> (<em>Module</em>)</p></li>
+<li><p><strong>scope</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.assert_layerwise_export_supported">
+<span class="sig-name descname"><span class="pre">assert_layerwise_export_supported</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.assert_layerwise_export_supported" title="Link to this definition"></a></dt>
+<dd><p>Raise unless per-layer export is valid for this model.</p>
+<p>Structural cases only; each would otherwise differ from a whole-model export without
+failing. Formats are settled by <a class="reference internal" href="#modelopt.torch.export.layerwise_export.assert_formats_supported" title="modelopt.torch.export.layerwise_export.assert_formats_supported"><code class="xref py py-func docutils literal notranslate"><span class="pre">assert_formats_supported()</span></code></a>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.build_legacy_name_mapper">
+<span class="sig-name descname"><span class="pre">build_legacy_name_mapper</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.build_legacy_name_mapper" title="Link to this definition"></a></dt>
+<dd><p>Hub-name mapper for transformers &lt; 5, or None if the model declares no mapping.</p>
+<p><code class="docutils literal notranslate"><span class="pre">save_pretrained</span></code> is what reverses <code class="docutils literal notranslate"><span class="pre">_checkpoint_conversion_mapping</span></code> on 4.x. Per-layer
+export writes shards with <code class="docutils literal notranslate"><span class="pre">save_file</span></code> and never passes through it, so without this it
+would publish in-memory names where the whole-model path publishes hub names.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.layer_shard_name">
+<span class="sig-name descname"><span class="pre">layer_shard_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.layer_shard_name" title="Link to this definition"></a></dt>
+<dd><p>Shard filename for one decoder layer.</p>
+<p>Keyed by index, not a counter, so re-exporting overwrites rather than leaving a stale
+shard for the index to find.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>layer_idx</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.resolve_export_parent">
+<span class="sig-name descname"><span class="pre">resolve_export_parent</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.resolve_export_parent" title="Link to this definition"></a></dt>
+<dd><p>Return <code class="docutils literal notranslate"><span class="pre">(model</span> <span class="pre">the</span> <span class="pre">checkpoint</span> <span class="pre">describes,</span> <span class="pre">key</span> <span class="pre">prefix</span> <span class="pre">for</span> <span class="pre">its</span> <span class="pre">tensors)</span></code>.</p>
+<p>Without <a class="reference internal" href="#modelopt.torch.export.layerwise_export.EXPORT_PARENT_ATTR" title="modelopt.torch.export.layerwise_export.EXPORT_PARENT_ATTR"><code class="xref py py-data docutils literal notranslate"><span class="pre">EXPORT_PARENT_ATTR</span></code></a> this is <code class="docutils literal notranslate"><span class="pre">(model,</span> <span class="pre">&quot;&quot;)</span></code>. With it, the prefix is the
+dotted path from parent down to the calibrated submodel, found by identity so a module
+that merely looks like the language model cannot be mistaken for it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>Module</em>, <em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.export.layerwise_export.transient_module_state">
+<span class="sig-name descname"><span class="pre">transient_module_state</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.export.layerwise_export.transient_module_state" title="Link to this definition"></a></dt>
+<dd><p>Undo the parameter, buffer and child-module changes export makes to <code class="docutils literal notranslate"><span class="pre">module</span></code>.</p>
+<p>A resident model has no materialization window to discard what export leaves behind.
+Restoring the dicts covers rebinding; buffers are additionally clone-restored because
+scale fusion writes amax in place. Parameters are not – that would copy the layer.
+Attributes outside those three dicts are not restored (e.g. the layer-relative <code class="docutils literal notranslate"><span class="pre">name</span></code>
+that <code class="docutils literal notranslate"><span class="pre">collect_shared_input_modules</span></code> sets), so handlers must keep their state there.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>module</strong> (<em>Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.export.layer_utils.html" class="btn btn-neutral float-left" title="layer_utils" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.export.mcore_config_map.html" class="btn btn-neutral float-right" title="mcore_config_map" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

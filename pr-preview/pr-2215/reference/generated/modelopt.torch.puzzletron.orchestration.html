@@ -1,0 +1,1429 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>orchestration &mdash; Model Optimizer 0.0.1.dev1+g76ad102b3</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="pipeline_config" href="modelopt.torch.puzzletron.pipeline_config.html" />
+    <link rel="prev" title="utils" href="modelopt.torch.puzzletron.mip.utils.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4 current"><a class="current reference internal" href="#">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+      <li class="breadcrumb-item active">orchestration</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.orchestration.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="orchestration">
+<h1>orchestration<a class="headerlink" href="#orchestration" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.puzzletron.orchestration">Scheduler-neutral Puzzletron campaign orchestration.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec" title="modelopt.torch.puzzletron.orchestration.AttemptSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AttemptSpec</span></code></a></p></td>
+<td><p>One submitted attempt for one work item or coordinated stage.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CampaignController" title="modelopt.torch.puzzletron.orchestration.CampaignController"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CampaignController</span></code></a></p></td>
+<td><p>Scheduler-neutral durable controller for one campaign plan.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan" title="modelopt.torch.puzzletron.orchestration.CampaignPlan"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CampaignPlan</span></code></a></p></td>
+<td><p>Compiled campaign plan bound to one experiment and runner.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CommandSpec" title="modelopt.torch.puzzletron.orchestration.CommandSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CommandSpec</span></code></a></p></td>
+<td><p>Shell command and environment for one attempt.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="modelopt.torch.puzzletron.orchestration.ExecutionStrategy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ExecutionStrategy</span></code></a></p></td>
+<td><p>How one stage maps work items onto model instances.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.FailureClass" title="modelopt.torch.puzzletron.orchestration.FailureClass"><code class="xref py py-obj docutils literal notranslate"><span class="pre">FailureClass</span></code></a></p></td>
+<td><p>Semantic failure classification for policy decisions.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy" title="modelopt.torch.puzzletron.orchestration.FailurePolicy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">FailurePolicy</span></code></a></p></td>
+<td><p>Named retry/resume policy for campaign attempts.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.HaltPolicy" title="modelopt.torch.puzzletron.orchestration.HaltPolicy"><code class="xref py py-obj docutils literal notranslate"><span class="pre">HaltPolicy</span></code></a></p></td>
+<td><p>When to stop the campaign after a stage attempt fails.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.JobHandle" title="modelopt.torch.puzzletron.orchestration.JobHandle"><code class="xref py py-obj docutils literal notranslate"><span class="pre">JobHandle</span></code></a></p></td>
+<td><p>Opaque executor handle persisted for recovery.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.JobStatus" title="modelopt.torch.puzzletron.orchestration.JobStatus"><code class="xref py py-obj docutils literal notranslate"><span class="pre">JobStatus</span></code></a></p></td>
+<td><p>Normalized executor status.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh" title="modelopt.torch.puzzletron.orchestration.ParallelMesh"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ParallelMesh</span></code></a></p></td>
+<td><p>AutoModel-compatible parallel mesh for one model instance.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride" title="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ParallelMeshOverride</span></code></a></p></td>
+<td><p>Optional per-stage mesh override from execution config.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment" title="modelopt.torch.puzzletron.orchestration.RunnerEnvironment"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RunnerEnvironment</span></code></a></p></td>
+<td><p>One scheduler-neutral runner environment bound to a campaign.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec" title="modelopt.torch.puzzletron.orchestration.StageExecutionSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">StageExecutionSpec</span></code></a></p></td>
+<td><p>Execution semantics for one stage node.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher" title="modelopt.torch.puzzletron.orchestration.TaskLauncher"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TaskLauncher</span></code></a></p></td>
+<td><p>How an executor starts processes inside one scheduler task.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskTopology" title="modelopt.torch.puzzletron.orchestration.TaskTopology"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TaskTopology</span></code></a></p></td>
+<td><p>Scheduler-neutral task and distributed-group layout for one attempt.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction" title="modelopt.torch.puzzletron.orchestration.ShutdownAction"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ShutdownAction</span></code></a></p></td>
+<td><p>User decision after requesting interactive controller shutdown.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TerminalControls" title="modelopt.torch.puzzletron.orchestration.TerminalControls"><code class="xref py py-obj docutils literal notranslate"><span class="pre">TerminalControls</span></code></a></p></td>
+<td><p>Read single-key controller commands without adding a terminal dependency.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.WorkItem" title="modelopt.torch.puzzletron.orchestration.WorkItem"><code class="xref py py-obj docutils literal notranslate"><span class="pre">WorkItem</span></code></a></p></td>
+<td><p>One unit of work inside a stage plan.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.WorkPlan" title="modelopt.torch.puzzletron.orchestration.WorkPlan"><code class="xref py py-obj docutils literal notranslate"><span class="pre">WorkPlan</span></code></a></p></td>
+<td><p>Deterministic work plan for one stage attempt.</p></td>
+</tr>
+</tbody>
+</table>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.compile_campaign_plan" title="modelopt.torch.puzzletron.orchestration.compile_campaign_plan"><code class="xref py py-obj docutils literal notranslate"><span class="pre">compile_campaign_plan</span></code></a></p></td>
+<td><p>Compile one campaign plan from experiment + runner + execution configs.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.normalize_vllm_topology" title="modelopt.torch.puzzletron.orchestration.normalize_vllm_topology"><code class="xref py py-obj docutils literal notranslate"><span class="pre">normalize_vllm_topology</span></code></a></p></td>
+<td><p>Normalize vLLM topology, including its boolean expert-parallel mode.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.pack_gpu_allocation" title="modelopt.torch.puzzletron.orchestration.pack_gpu_allocation"><code class="xref py py-obj docutils literal notranslate"><span class="pre">pack_gpu_allocation</span></code></a></p></td>
+<td><p>Pack independent instances onto nodes with cluster-safe exclusivity rules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.plan_to_dict" title="modelopt.torch.puzzletron.orchestration.plan_to_dict"><code class="xref py py-obj docutils literal notranslate"><span class="pre">plan_to_dict</span></code></a></p></td>
+<td><p>Serialize a campaign plan for durable storage.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">AttemptSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>One submitted attempt for one work item or coordinated stage.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">attempt_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">work_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">command</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allocation_nodes=1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">allocation_gpus=1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exclusive=False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contract_hash=''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">metadata=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">task_topology=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>attempt_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>work_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>stage_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>command</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CommandSpec" title="modelopt.torch.puzzletron.orchestration.schema.CommandSpec"><em>CommandSpec</em></a>)</p></li>
+<li><p><strong>allocation_nodes</strong> (<em>int</em>)</p></li>
+<li><p><strong>allocation_gpus</strong> (<em>int</em>)</p></li>
+<li><p><strong>exclusive</strong> (<em>bool</em>)</p></li>
+<li><p><strong>contract_hash</strong> (<em>str</em>)</p></li>
+<li><p><strong>metadata</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>task_topology</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskTopology" title="modelopt.torch.puzzletron.orchestration.schema.TaskTopology"><em>TaskTopology</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.allocation_gpus">
+<span class="sig-name descname"><span class="pre">allocation_gpus</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.allocation_gpus" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.allocation_nodes">
+<span class="sig-name descname"><span class="pre">allocation_nodes</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.allocation_nodes" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.attempt_id">
+<span class="sig-name descname"><span class="pre">attempt_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.attempt_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.command">
+<span class="sig-name descname"><span class="pre">command</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CommandSpec" title="modelopt.torch.puzzletron.orchestration.schema.CommandSpec"><span class="pre">CommandSpec</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.command" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.contract_hash">
+<span class="sig-name descname"><span class="pre">contract_hash</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.contract_hash" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.exclusive">
+<span class="sig-name descname"><span class="pre">exclusive</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.exclusive" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.metadata" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.stage_id">
+<span class="sig-name descname"><span class="pre">stage_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.stage_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.task_topology">
+<span class="sig-name descname"><span class="pre">task_topology</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskTopology" title="modelopt.torch.puzzletron.orchestration.schema.TaskTopology"><span class="pre">TaskTopology</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.task_topology" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.AttemptSpec.work_id">
+<span class="sig-name descname"><span class="pre">work_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.AttemptSpec.work_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignController">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CampaignController</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignController" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Scheduler-neutral durable controller for one campaign plan.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignController.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">plan</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">executor</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">poll_interval_seconds</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">5.0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">logger</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">terminal_controls</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignController.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>plan</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan" title="modelopt.torch.puzzletron.orchestration.schema.CampaignPlan"><em>CampaignPlan</em></a>)</p></li>
+<li><p><strong>executor</strong> (<em>Executor</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>poll_interval_seconds</strong> (<em>float</em>)</p></li>
+<li><p><strong>local</strong> (<em>bool</em>)</p></li>
+<li><p><strong>logger</strong> (<em>OrchestratorLogger</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>terminal_controls</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TerminalControls" title="modelopt.torch.puzzletron.orchestration.terminal.TerminalControls"><em>TerminalControls</em></a><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignController.run">
+<span class="sig-name descname"><span class="pre">run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overrides</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">once</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_iterations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignController.run" title="Link to this definition"></a></dt>
+<dd><p>Run the controller until all stages complete or a fatal failure occurs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>overrides</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>once</strong> (<em>bool</em>)</p></li>
+<li><p><strong>max_iterations</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignController.shutdown">
+<span class="sig-name descname"><span class="pre">shutdown</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reason</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'keyboard</span> <span class="pre">interrupt'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignController.shutdown" title="Link to this definition"></a></dt>
+<dd><p>Cancel every live executor handle and mark attempts cancelled.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>reason</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CampaignPlan</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Compiled campaign plan bound to one experiment and runner.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experiment_config_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">puzzle_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">experiment_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runner</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">execution_defaults</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contract_hash</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overrides</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>experiment_config_path</strong> (<em>str</em>)</p></li>
+<li><p><strong>puzzle_dir</strong> (<em>Path</em>)</p></li>
+<li><p><strong>experiment_config</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>runner</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment" title="modelopt.torch.puzzletron.orchestration.RunnerEnvironment"><em>RunnerEnvironment</em></a>)</p></li>
+<li><p><strong>execution_defaults</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>stages</strong> (<em>tuple</em><em>[</em><em>StagePlanNode</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>contract_hash</strong> (<em>str</em>)</p></li>
+<li><p><strong>overrides</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.contract_hash">
+<span class="sig-name descname"><span class="pre">contract_hash</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.contract_hash" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.execution_defaults">
+<span class="sig-name descname"><span class="pre">execution_defaults</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.execution_defaults" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.experiment_config">
+<span class="sig-name descname"><span class="pre">experiment_config</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.experiment_config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.experiment_config_path">
+<span class="sig-name descname"><span class="pre">experiment_config_path</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.experiment_config_path" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.overrides">
+<span class="sig-name descname"><span class="pre">overrides</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.overrides" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.puzzle_dir">
+<span class="sig-name descname"><span class="pre">puzzle_dir</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Path</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.puzzle_dir" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.runner">
+<span class="sig-name descname"><span class="pre">runner</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment" title="modelopt.torch.puzzletron.orchestration.RunnerEnvironment"><span class="pre">RunnerEnvironment</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.runner" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CampaignPlan.stages">
+<span class="sig-name descname"><span class="pre">stages</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">StagePlanNode</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan.stages" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">CommandSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Shell command and environment for one attempt.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">argv</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">env=&lt;factory&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cwd=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_path=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shell=False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>argv</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>env</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>str</em><em>]</em>)</p></li>
+<li><p><strong>cwd</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>log_path</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>shell</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.argv">
+<span class="sig-name descname"><span class="pre">argv</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.argv" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.cwd">
+<span class="sig-name descname"><span class="pre">cwd</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.cwd" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.env">
+<span class="sig-name descname"><span class="pre">env</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.env" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.log_path">
+<span class="sig-name descname"><span class="pre">log_path</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.log_path" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.CommandSpec.shell">
+<span class="sig-name descname"><span class="pre">shell</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.CommandSpec.shell" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ExecutionStrategy">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ExecutionStrategy</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>How one stage maps work items onto model instances.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ExecutionStrategy.PERSISTENT_POOL">
+<span class="sig-name descname"><span class="pre">PERSISTENT_POOL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'persistent_pool'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy.PERSISTENT_POOL" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ExecutionStrategy.SHARDED">
+<span class="sig-name descname"><span class="pre">SHARDED</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'sharded'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy.SHARDED" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ExecutionStrategy.SINGLE">
+<span class="sig-name descname"><span class="pre">SINGLE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'single'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy.SINGLE" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ExecutionStrategy.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">FailureClass</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>Semantic failure classification for policy decisions.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.APPLICATION">
+<span class="sig-name descname"><span class="pre">APPLICATION</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'application'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.APPLICATION" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.CANCELLED">
+<span class="sig-name descname"><span class="pre">CANCELLED</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'cancelled'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.CANCELLED" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.CONFIG">
+<span class="sig-name descname"><span class="pre">CONFIG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'config'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.CONFIG" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.OOM">
+<span class="sig-name descname"><span class="pre">OOM</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'oom'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.OOM" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.SUCCESS">
+<span class="sig-name descname"><span class="pre">SUCCESS</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'success'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.SUCCESS" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.TIMEOUT_FATAL">
+<span class="sig-name descname"><span class="pre">TIMEOUT_FATAL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'timeout_fatal'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.TIMEOUT_FATAL" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.TIMEOUT_RESUMABLE">
+<span class="sig-name descname"><span class="pre">TIMEOUT_RESUMABLE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'timeout_resumable'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.TIMEOUT_RESUMABLE" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.TRANSIENT">
+<span class="sig-name descname"><span class="pre">TRANSIENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'transient'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.TRANSIENT" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.UNKNOWN">
+<span class="sig-name descname"><span class="pre">UNKNOWN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'unknown'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.UNKNOWN" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailureClass.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailureClass.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailurePolicy">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">FailurePolicy</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>Named retry/resume policy for campaign attempts.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailurePolicy.RESUME">
+<span class="sig-name descname"><span class="pre">RESUME</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'resume'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy.RESUME" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailurePolicy.STRICT">
+<span class="sig-name descname"><span class="pre">STRICT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'strict'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy.STRICT" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.FailurePolicy.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.HaltPolicy">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">HaltPolicy</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.HaltPolicy" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>When to stop the campaign after a stage attempt fails.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.HaltPolicy.DRAIN">
+<span class="sig-name descname"><span class="pre">DRAIN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'drain'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.HaltPolicy.DRAIN" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.HaltPolicy.FAIL_FAST">
+<span class="sig-name descname"><span class="pre">FAIL_FAST</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'fail_fast'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.HaltPolicy.FAIL_FAST" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.HaltPolicy.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.HaltPolicy.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">JobHandle</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Opaque executor handle persisted for recovery.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">backend</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">handle_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attempt_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">metadata=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>backend</strong> (<em>str</em>)</p></li>
+<li><p><strong>handle_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>attempt_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>metadata</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle.attempt_id">
+<span class="sig-name descname"><span class="pre">attempt_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle.attempt_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle.backend">
+<span class="sig-name descname"><span class="pre">backend</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle.backend" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle.handle_id">
+<span class="sig-name descname"><span class="pre">handle_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle.handle_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobHandle.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobHandle.metadata" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">JobStatus</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Normalized executor status.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">handle</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exit_code</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">reason</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">log_paths</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>handle</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.JobHandle" title="modelopt.torch.puzzletron.orchestration.schema.JobHandle"><em>JobHandle</em></a>)</p></li>
+<li><p><strong>state</strong> (<em>JobState</em>)</p></li>
+<li><p><strong>exit_code</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>reason</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>log_paths</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.exit_code">
+<span class="sig-name descname"><span class="pre">exit_code</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.exit_code" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.handle">
+<span class="sig-name descname"><span class="pre">handle</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.JobHandle" title="modelopt.torch.puzzletron.orchestration.schema.JobHandle"><span class="pre">JobHandle</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.handle" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.log_paths">
+<span class="sig-name descname"><span class="pre">log_paths</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.log_paths" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.reason">
+<span class="sig-name descname"><span class="pre">reason</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.reason" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.JobStatus.state">
+<span class="sig-name descname"><span class="pre">state</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">JobState</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.JobStatus.state" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ParallelMesh</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>AutoModel-compatible parallel mesh for one model instance.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ep</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_shard</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_replicate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tp</strong> (<em>int</em>)</p></li>
+<li><p><strong>cp</strong> (<em>int</em>)</p></li>
+<li><p><strong>pp</strong> (<em>int</em>)</p></li>
+<li><p><strong>ep</strong> (<em>int</em>)</p></li>
+<li><p><strong>dp_shard</strong> (<em>int</em>)</p></li>
+<li><p><strong>dp_replicate</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.as_dict">
+<span class="sig-name descname"><span class="pre">as_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.as_dict" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.cp">
+<span class="sig-name descname"><span class="pre">cp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.cp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.dp_replicate">
+<span class="sig-name descname"><span class="pre">dp_replicate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.dp_replicate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.dp_shard">
+<span class="sig-name descname"><span class="pre">dp_shard</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.dp_shard" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.ep">
+<span class="sig-name descname"><span class="pre">ep</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.ep" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.from_mapping">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">from_mapping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mapping</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.from_mapping" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>mapping</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh" title="modelopt.torch.puzzletron.orchestration.mesh.ParallelMesh"><em>ParallelMesh</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.pp">
+<span class="sig-name descname"><span class="pre">pp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.pp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMesh.tp">
+<span class="sig-name descname"><span class="pre">tp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh.tp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ParallelMeshOverride</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Optional per-stage mesh override from execution config.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ep</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_shard</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dp_replicate</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tp</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>cp</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>pp</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>ep</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dp_shard</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dp_replicate</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.cp">
+<span class="sig-name descname"><span class="pre">cp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.cp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.dp_replicate">
+<span class="sig-name descname"><span class="pre">dp_replicate</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.dp_replicate" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.dp_shard">
+<span class="sig-name descname"><span class="pre">dp_shard</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.dp_shard" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.ep">
+<span class="sig-name descname"><span class="pre">ep</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.ep" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.pp">
+<span class="sig-name descname"><span class="pre">pp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.pp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.tp">
+<span class="sig-name descname"><span class="pre">tp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride.tp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RunnerEnvironment</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>One scheduler-neutral runner environment bound to a campaign.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">kind</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">contract</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">slurm=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">baremetal=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">defaults=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>kind</strong> (<em>str</em>)</p></li>
+<li><p><strong>contract</strong> (<em>ExecutionContract</em>)</p></li>
+<li><p><strong>slurm</strong> (<em>SlurmRunnerConfig</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>baremetal</strong> (<em>BareMetalRunnerConfig</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>defaults</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.baremetal">
+<span class="sig-name descname"><span class="pre">baremetal</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">BareMetalRunnerConfig</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.baremetal" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.contract">
+<span class="sig-name descname"><span class="pre">contract</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">ExecutionContract</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.contract" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.defaults">
+<span class="sig-name descname"><span class="pre">defaults</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.defaults" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.kind">
+<span class="sig-name descname"><span class="pre">kind</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.kind" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.RunnerEnvironment.slurm">
+<span class="sig-name descname"><span class="pre">slurm</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">SlurmRunnerConfig</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment.slurm" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ShutdownAction">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ShutdownAction</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>User decision after requesting interactive controller shutdown.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ShutdownAction.CANCEL">
+<span class="sig-name descname"><span class="pre">CANCEL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'cancel'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction.CANCEL" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ShutdownAction.CONTINUE">
+<span class="sig-name descname"><span class="pre">CONTINUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'continue'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction.CONTINUE" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ShutdownAction.DETACH">
+<span class="sig-name descname"><span class="pre">DETACH</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'detach'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction.DETACH" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.ShutdownAction.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">StageExecutionSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Execution semantics for one stage node.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strategy</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">instances</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">failure_policy</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">FailurePolicy.STRICT</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mesh_override</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gpus_per_node</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">partition</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">resource</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'gpu'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>strategy</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="modelopt.torch.puzzletron.orchestration.schema.ExecutionStrategy"><em>ExecutionStrategy</em></a>)</p></li>
+<li><p><strong>instances</strong> (<em>int</em>)</p></li>
+<li><p><strong>failure_policy</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy" title="modelopt.torch.puzzletron.orchestration.schema.FailurePolicy"><em>FailurePolicy</em></a>)</p></li>
+<li><p><strong>mesh_override</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride" title="modelopt.torch.puzzletron.orchestration.schema.ParallelMeshOverride"><em>ParallelMeshOverride</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>gpus_per_node</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>partition</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>resource</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.failure_policy">
+<span class="sig-name descname"><span class="pre">failure_policy</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.FailurePolicy" title="modelopt.torch.puzzletron.orchestration.schema.FailurePolicy"><span class="pre">FailurePolicy</span></a></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'strict'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.failure_policy" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.gpus_per_node">
+<span class="sig-name descname"><span class="pre">gpus_per_node</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.gpus_per_node" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.instances">
+<span class="sig-name descname"><span class="pre">instances</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.instances" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.mesh_override">
+<span class="sig-name descname"><span class="pre">mesh_override</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMeshOverride" title="modelopt.torch.puzzletron.orchestration.schema.ParallelMeshOverride"><span class="pre">ParallelMeshOverride</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.mesh_override" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.partition">
+<span class="sig-name descname"><span class="pre">partition</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.partition" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.resource">
+<span class="sig-name descname"><span class="pre">resource</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'gpu'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.resource" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.stage_id">
+<span class="sig-name descname"><span class="pre">stage_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.stage_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.StageExecutionSpec.strategy">
+<span class="sig-name descname"><span class="pre">strategy</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="modelopt.torch.puzzletron.orchestration.schema.ExecutionStrategy"><span class="pre">ExecutionStrategy</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.StageExecutionSpec.strategy" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskLauncher">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TaskLauncher</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">str</span></code>, <code class="xref py py-class docutils literal notranslate"><span class="pre">Enum</span></code></p>
+<p>How an executor starts processes inside one scheduler task.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskLauncher.DIRECT">
+<span class="sig-name descname"><span class="pre">DIRECT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'direct'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher.DIRECT" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskLauncher.TORCHRUN">
+<span class="sig-name descname"><span class="pre">TORCHRUN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'torchrun'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher.TORCHRUN" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskLauncher.__new__">
+<span class="sig-name descname"><span class="pre">__new__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher.__new__" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TaskTopology</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Scheduler-neutral task and distributed-group layout for one attempt.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">task_count</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gpus_per_task</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tasks_per_group</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">launcher</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">TaskLauncher.DIRECT</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">placement</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'block'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>task_count</strong> (<em>int</em>)</p></li>
+<li><p><strong>gpus_per_task</strong> (<em>int</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>tasks_per_group</strong> (<em>int</em>)</p></li>
+<li><p><strong>launcher</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher" title="modelopt.torch.puzzletron.orchestration.schema.TaskLauncher"><em>TaskLauncher</em></a>)</p></li>
+<li><p><strong>placement</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.gpus_per_task">
+<span class="sig-name descname"><span class="pre">gpus_per_task</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.gpus_per_task" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.launcher">
+<span class="sig-name descname"><span class="pre">launcher</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.TaskLauncher" title="modelopt.torch.puzzletron.orchestration.schema.TaskLauncher"><span class="pre">TaskLauncher</span></a></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'direct'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.launcher" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.placement">
+<span class="sig-name descname"><span class="pre">placement</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'block'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.placement" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.task_count">
+<span class="sig-name descname"><span class="pre">task_count</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.task_count" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TaskTopology.tasks_per_group">
+<span class="sig-name descname"><span class="pre">tasks_per_group</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TaskTopology.tasks_per_group" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">TerminalControls</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Read single-key controller commands without adding a terminal dependency.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_stream</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_stream</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>input_stream</strong> (<em>TextIO</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>output_stream</strong> (<em>TextIO</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.action_for_choice">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">action_for_choice</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">choice</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.action_for_choice" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>choice</strong> (<em>str</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction" title="modelopt.torch.puzzletron.orchestration.terminal.ShutdownAction"><em>ShutdownAction</em></a> | <em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.choose_revisions">
+<span class="sig-name descname"><span class="pre">choose_revisions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">prompt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">revision_ids</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.choose_revisions" title="Link to this definition"></a></dt>
+<dd><p>Select revision IDs in cooked mode using numbers or exact IDs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>prompt</strong> (<em>str</em>)</p></li>
+<li><p><strong>revision_ids</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>str</em>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.choose_shutdown">
+<span class="sig-name descname"><span class="pre">choose_shutdown</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.choose_shutdown" title="Link to this definition"></a></dt>
+<dd><p>Prompt in cooked mode and return one explicit shutdown decision.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ShutdownAction" title="modelopt.torch.puzzletron.orchestration.terminal.ShutdownAction"><em>ShutdownAction</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.poll_quit">
+<span class="sig-name descname"><span class="pre">poll_quit</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.poll_quit" title="Link to this definition"></a></dt>
+<dd><p>Return whether an available keypress requests the quit menu.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>bool</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.start">
+<span class="sig-name descname"><span class="pre">start</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.start" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.TerminalControls.stop">
+<span class="sig-name descname"><span class="pre">stop</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.TerminalControls.stop" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">WorkItem</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>One unit of work inside a stage plan.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">work_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shard_index</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shard_count</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gpus_per_instance</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_gpu_ids=()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">metadata=&lt;factory&gt;</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>work_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>stage_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>shard_index</strong> (<em>int</em>)</p></li>
+<li><p><strong>shard_count</strong> (<em>int</em>)</p></li>
+<li><p><strong>gpus_per_instance</strong> (<em>int</em>)</p></li>
+<li><p><strong>local_gpu_ids</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>metadata</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.gpus_per_instance">
+<span class="sig-name descname"><span class="pre">gpus_per_instance</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.gpus_per_instance" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.local_gpu_ids">
+<span class="sig-name descname"><span class="pre">local_gpu_ids</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">int</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.local_gpu_ids" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.metadata">
+<span class="sig-name descname"><span class="pre">metadata</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Mapping</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.metadata" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.shard_count">
+<span class="sig-name descname"><span class="pre">shard_count</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.shard_count" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.shard_index">
+<span class="sig-name descname"><span class="pre">shard_index</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.shard_index" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.stage_id">
+<span class="sig-name descname"><span class="pre">stage_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.stage_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkItem.work_id">
+<span class="sig-name descname"><span class="pre">work_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkItem.work_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">WorkPlan</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Deterministic work plan for one stage attempt.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stage_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strategy</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">items</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aggregate_required</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>stage_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>strategy</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="modelopt.torch.puzzletron.orchestration.schema.ExecutionStrategy"><em>ExecutionStrategy</em></a>)</p></li>
+<li><p><strong>items</strong> (<em>tuple</em><em>[</em><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.WorkItem" title="modelopt.torch.puzzletron.orchestration.schema.WorkItem"><em>WorkItem</em></a><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>aggregate_required</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan.aggregate_required">
+<span class="sig-name descname"><span class="pre">aggregate_required</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan.aggregate_required" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan.items">
+<span class="sig-name descname"><span class="pre">items</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.WorkItem" title="modelopt.torch.puzzletron.orchestration.schema.WorkItem"><span class="pre">WorkItem</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan.items" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan.stage_id">
+<span class="sig-name descname"><span class="pre">stage_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan.stage_id" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.WorkPlan.strategy">
+<span class="sig-name descname"><span class="pre">strategy</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ExecutionStrategy" title="modelopt.torch.puzzletron.orchestration.schema.ExecutionStrategy"><span class="pre">ExecutionStrategy</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.WorkPlan.strategy" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.compile_campaign_plan">
+<span class="sig-name descname"><span class="pre">compile_campaign_plan</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">experiment_config_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runner</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">execution</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overrides</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stage_filter</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.compile_campaign_plan" title="Link to this definition"></a></dt>
+<dd><p>Compile one campaign plan from experiment + runner + execution configs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>experiment_config_path</strong> (<em>str</em><em> | </em><em>Path</em>)</p></li>
+<li><p><strong>runner</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.RunnerEnvironment" title="modelopt.torch.puzzletron.orchestration.schema.RunnerEnvironment"><em>RunnerEnvironment</em></a>)</p></li>
+<li><p><strong>execution</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p></li>
+<li><p><strong>overrides</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>)</p></li>
+<li><p><strong>stage_filter</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan" title="modelopt.torch.puzzletron.orchestration.schema.CampaignPlan"><em>CampaignPlan</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.normalize_vllm_topology">
+<span class="sig-name descname"><span class="pre">normalize_vllm_topology</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">topology</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.normalize_vllm_topology" title="Link to this definition"></a></dt>
+<dd><p>Normalize vLLM topology, including its boolean expert-parallel mode.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>topology</strong> (<em>Mapping</em><em>[</em><em>str</em><em>, </em><em>Any</em><em>]</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.pack_gpu_allocation">
+<span class="sig-name descname"><span class="pre">pack_gpu_allocation</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mesh</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">instances</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gpus_per_node</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.pack_gpu_allocation" title="Link to this definition"></a></dt>
+<dd><p>Pack independent instances onto nodes with cluster-safe exclusivity rules.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>mesh</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.ParallelMesh" title="modelopt.torch.puzzletron.orchestration.mesh.ParallelMesh"><em>ParallelMesh</em></a>)</p></li>
+<li><p><strong>instances</strong> (<em>int</em>)</p></li>
+<li><p><strong>gpus_per_node</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>GpuAllocation</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.orchestration.plan_to_dict">
+<span class="sig-name descname"><span class="pre">plan_to_dict</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">plan</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.orchestration.plan_to_dict" title="Link to this definition"></a></dt>
+<dd><p>Serialize a campaign plan for durable storage.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>plan</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.orchestration.CampaignPlan" title="modelopt.torch.puzzletron.orchestration.schema.CampaignPlan"><em>CampaignPlan</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.mip.utils.html" class="btn btn-neutral float-left" title="utils" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.pipeline_config.html" class="btn btn-neutral float-right" title="pipeline_config" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,1244 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>generic_decoder &mdash; Model Optimizer 0.0.1.dev1+g76ad102b3</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="gpt_oss" href="modelopt.torch.puzzletron.anymodel.models.gpt_oss.html" />
+    <link rel="prev" title="models" href="modelopt.torch.puzzletron.anymodel.models.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.bypass_distillation.html">bypass_distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.html">puzzletron</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.puzzletron.anymodel.models.html">models</a></li>
+      <li class="breadcrumb-item active">generic_decoder</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.puzzletron.anymodel.models.generic_decoder.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="generic-decoder">
+<h1>generic_decoder<a class="headerlink" href="#generic-decoder" title="Link to this heading"></a></h1>
+<p id="module-modelopt.torch.puzzletron.anymodel.models.generic_decoder">Composable contracts for structurally standard decoder families.</p>
+<p class="rubric">Classes</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DecoderLayout</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GatedDenseFFNContract</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GenericDecoderContract</span></code></a></p></td>
+<td><p>A model-name-independent contract assembled from decoder components.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">GenericContractModelDescriptor</span></code></a></p></td>
+<td><p>ModelDescriptor adapter whose behavior is derived from a structural contract.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">LatentAttentionContract</span></code></a></p></td>
+<td><p>Descriptor-owned MLA rank fields shared by conversion and runtime export.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MTPContract</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PLEContract</span></code></a></p></td>
+<td><p>Per-layer embedding channel geometry shared by Gemma-style decoders.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RoutedMoEContract</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">StandardGQAAttentionContract</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract"><code class="xref py py-obj docutils literal notranslate"><span class="pre">VisionLanguageContract</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">DecoderLayout</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">language_config_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">language_prefix</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_template</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">input_embedding</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_embedding</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">final_norm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_norm_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_size_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'hidden_size'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>language_config_path</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>language_prefix</strong> (<em>str</em>)</p></li>
+<li><p><strong>layer_template</strong> (<em>str</em>)</p></li>
+<li><p><strong>input_embedding</strong> (<em>str</em>)</p></li>
+<li><p><strong>output_embedding</strong> (<em>str</em>)</p></li>
+<li><p><strong>final_norm</strong> (<em>str</em>)</p></li>
+<li><p><strong>layer_norm_names</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>hidden_size_field</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.final_norm">
+<span class="sig-name descname"><span class="pre">final_norm</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.final_norm" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.hidden_size_field">
+<span class="sig-name descname"><span class="pre">hidden_size_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'hidden_size'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.hidden_size_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.input_embedding">
+<span class="sig-name descname"><span class="pre">input_embedding</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.input_embedding" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_config">
+<span class="sig-name descname"><span class="pre">language_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_config" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config</strong> (<em>Any</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Any</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_config_path">
+<span class="sig-name descname"><span class="pre">language_config_path</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_config_path" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_prefix">
+<span class="sig-name descname"><span class="pre">language_prefix</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.language_prefix" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_norm_names">
+<span class="sig-name descname"><span class="pre">layer_norm_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_norm_names" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_path">
+<span class="sig-name descname"><span class="pre">layer_path</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_path" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>layer_idx</strong> (<em>int</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_pattern">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_pattern</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_pattern" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_template">
+<span class="sig-name descname"><span class="pre">layer_template</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.layer_template" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.output_embedding">
+<span class="sig-name descname"><span class="pre">output_embedding</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout.output_embedding" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GatedDenseFFNContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gate_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'gate_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">up_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'up_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">down_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'down_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'intermediate_size'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">double_wide_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shared_kv_layers_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>gate_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>up_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>down_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>intermediate_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>double_wide_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>shared_kv_layers_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.constructor_intermediate_size">
+<span class="sig-name descname"><span class="pre">constructor_intermediate_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">actual_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.constructor_intermediate_size" title="Link to this definition"></a></dt>
+<dd><p>Invert constructor-only expansion for a requested runtime width.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+<li><p><strong>actual_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.double_wide_field">
+<span class="sig-name descname"><span class="pre">double_wide_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.double_wide_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.down_proj_name">
+<span class="sig-name descname"><span class="pre">down_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'down_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.down_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.gate_proj_name">
+<span class="sig-name descname"><span class="pre">gate_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'gate_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.gate_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.intermediate_field">
+<span class="sig-name descname"><span class="pre">intermediate_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'intermediate_size'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.intermediate_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.layer_intermediate_size">
+<span class="sig-name descname"><span class="pre">layer_intermediate_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.layer_intermediate_size" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>int</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.module_name">
+<span class="sig-name descname"><span class="pre">module_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.module_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.shared_kv_layers_field">
+<span class="sig-name descname"><span class="pre">shared_kv_layers_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.shared_kv_layers_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.up_proj_name">
+<span class="sig-name descname"><span class="pre">up_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'up_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract.up_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GenericContractModelDescriptor</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference internal" href="modelopt.torch.puzzletron.anymodel.model_descriptor.base.html#modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor" title="modelopt.torch.puzzletron.anymodel.model_descriptor.base.ModelDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">ModelDescriptor</span></code></a></p>
+<p>ModelDescriptor adapter whose behavior is derived from a structural contract.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.DECODER_LAYER_CLS">
+<span class="sig-name descname"><span class="pre">DECODER_LAYER_CLS</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">type</span><span class="p"><span class="pre">[</span></span><span class="pre">nn.Module</span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">type</span><span class="p"><span class="pre">[</span></span><span class="pre">nn.Module</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.DECODER_LAYER_CLS" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.attn_no_op_post_init">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attn_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.attn_no_op_post_init" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>decoder_layer</strong> (<em>nn.Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.block_config_to_layer_overrides">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">block_config_to_layer_overrides</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.block_config_to_layer_overrides" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.decoder_layer_cls">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">decoder_layer_cls</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.decoder_layer_cls" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.embedding_pruning_spec">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">embedding_pruning_spec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">widths</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alignment</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.embedding_pruning_spec" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>alignment</strong> (<em>int</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.final_norm_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">final_norm_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.final_norm_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.generic_decoder_contract">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">generic_decoder_contract</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.generic_decoder_contract" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.GenericDecoderContract"><em>GenericDecoderContract</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.get_language_model_config">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_language_model_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.get_language_model_config" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.init_rotary_embedding">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init_rotary_embedding</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.init_rotary_embedding" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.input_embedding_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">input_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.input_embedding_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.layer_block_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_block_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">index</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.layer_block_name" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>index</strong> (<em>int</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.layer_name_predicates">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">layer_name_predicates</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">num_layers</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.layer_name_predicates" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>num_layers</strong> (<em>int</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.local_kd_subblock_module_paths">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">local_kd_subblock_module_paths</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.local_kd_subblock_module_paths" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p></li>
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>tuple</em>[<em>str</em>, <em>str</em>], <em>str</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.mlp_no_op_post_init">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">mlp_no_op_post_init</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">decoder_layer</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.mlp_no_op_post_init" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>decoder_layer</strong> (<em>nn.Module</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.output_embedding_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">output_embedding_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.output_embedding_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.passthrough_weight_name_predicates">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">passthrough_weight_name_predicates</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.passthrough_weight_name_predicates" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.patch_layer_config">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">patch_layer_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">layer_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">block_config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.patch_layer_config" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>layer_config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>block_config</strong> (<a class="reference internal" href="modelopt.torch.puzzletron.block_config.html#modelopt.torch.puzzletron.block_config.BlockConfig" title="modelopt.torch.puzzletron.block_config.BlockConfig"><em>BlockConfig</em></a>)</p></li>
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.ple_pruning_spec">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">ple_pruning_spec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.ple_pruning_spec" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.puzzletron_capabilities">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">puzzletron_capabilities</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.puzzletron_capabilities" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.vision_module_names">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">vision_module_names</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericContractModelDescriptor.vision_module_names" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>str</em>, …]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">GenericDecoderContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>A model-name-independent contract assembled from decoder components.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">descriptor_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_family</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layout</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">attention</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">latent_attention</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dense_ffn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">routed_moe</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vision</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mtp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ple</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">additional_tensor_rules</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">additional_exempt_patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">checkpoint_key_rewrites</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">native_automodel_supported</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ep_supported</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sequence_parallel_supported</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hidden_permutation_group_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">explicit_full_attention_window</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>descriptor_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_family</strong> (<em>str</em>)</p></li>
+<li><p><strong>layout</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.DecoderLayout"><em>DecoderLayout</em></a>)</p></li>
+<li><p><strong>attention</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.StandardGQAAttentionContract"><em>StandardGQAAttentionContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>latent_attention</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.LatentAttentionContract"><em>LatentAttentionContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>dense_ffn</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.GatedDenseFFNContract"><em>GatedDenseFFNContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>routed_moe</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.RoutedMoEContract"><em>RoutedMoEContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>vision</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.VisionLanguageContract"><em>VisionLanguageContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>mtp</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.MTPContract"><em>MTPContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>ple</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.PLEContract"><em>PLEContract</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>additional_tensor_rules</strong> (<em>tuple</em><em>[</em><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><em>TensorAxisRule</em></a><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>additional_exempt_patterns</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>checkpoint_key_rewrites</strong> (<em>tuple</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>str</em><em>]</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>native_automodel_supported</strong> (<em>bool</em>)</p></li>
+<li><p><strong>ep_supported</strong> (<em>bool</em>)</p></li>
+<li><p><strong>sequence_parallel_supported</strong> (<em>bool</em>)</p></li>
+<li><p><strong>hidden_permutation_group_size</strong> (<em>int</em>)</p></li>
+<li><p><strong>explicit_full_attention_window</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.additional_exempt_patterns">
+<span class="sig-name descname"><span class="pre">additional_exempt_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.additional_exempt_patterns" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.additional_tensor_rules">
+<span class="sig-name descname"><span class="pre">additional_tensor_rules</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><span class="pre">TensorAxisRule</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.additional_tensor_rules" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.attention">
+<span class="sig-name descname"><span class="pre">attention</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.StandardGQAAttentionContract"><span class="pre">StandardGQAAttentionContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.attention" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.capabilities">
+<span class="sig-name descname"><span class="pre">capabilities</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.capabilities" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config</strong> (<em>Any</em><em> | </em><em>None</em>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.checkpoint_key_rewrites">
+<span class="sig-name descname"><span class="pre">checkpoint_key_rewrites</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">str</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.checkpoint_key_rewrites" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.dense_ffn">
+<span class="sig-name descname"><span class="pre">dense_ffn</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GatedDenseFFNContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.GatedDenseFFNContract"><span class="pre">GatedDenseFFNContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.dense_ffn" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.descriptor_name">
+<span class="sig-name descname"><span class="pre">descriptor_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.descriptor_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.discover_prunable_modules">
+<span class="sig-name descname"><span class="pre">discover_prunable_modules</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.discover_prunable_modules" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>model</strong> (<em>nn.Module</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, nn.Module]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.embedding_pruning_spec">
+<span class="sig-name descname"><span class="pre">embedding_pruning_spec</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">widths</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alignment</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.embedding_pruning_spec" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>widths</strong> (<em>tuple</em><em>[</em><em>int</em><em>, </em><em>...</em><em>] </em><em>| </em><em>list</em><em>[</em><em>int</em><em>]</em>)</p></li>
+<li><p><strong>alignment</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.EmbeddingPruningSpec" title="modelopt.torch.puzzletron.pruning.embedding_pruning.EmbeddingPruningSpec"><em>EmbeddingPruningSpec</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.ep_supported">
+<span class="sig-name descname"><span class="pre">ep_supported</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.ep_supported" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.explicit_full_attention_window">
+<span class="sig-name descname"><span class="pre">explicit_full_attention_window</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.explicit_full_attention_window" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.hidden_permutation_group_size">
+<span class="sig-name descname"><span class="pre">hidden_permutation_group_size</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.hidden_permutation_group_size" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.language_config">
+<span class="sig-name descname"><span class="pre">language_config</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.language_config" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config</strong> (<em>Any</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>Any</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.latent_attention">
+<span class="sig-name descname"><span class="pre">latent_attention</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.LatentAttentionContract"><span class="pre">LatentAttentionContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.latent_attention" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.layout">
+<span class="sig-name descname"><span class="pre">layout</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.DecoderLayout" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.DecoderLayout"><span class="pre">DecoderLayout</span></a></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.layout" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.model_family">
+<span class="sig-name descname"><span class="pre">model_family</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.model_family" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.mtp">
+<span class="sig-name descname"><span class="pre">mtp</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.MTPContract"><span class="pre">MTPContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.mtp" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.native_automodel_supported">
+<span class="sig-name descname"><span class="pre">native_automodel_supported</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.native_automodel_supported" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.ple">
+<span class="sig-name descname"><span class="pre">ple</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.PLEContract"><span class="pre">PLEContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.ple" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.reduced_axis_values">
+<span class="sig-name descname"><span class="pre">reduced_axis_values</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alignment</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.reduced_axis_values" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>alignment</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.routed_moe">
+<span class="sig-name descname"><span class="pre">routed_moe</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.RoutedMoEContract"><span class="pre">RoutedMoEContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.routed_moe" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.sequence_parallel_supported">
+<span class="sig-name descname"><span class="pre">sequence_parallel_supported</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.sequence_parallel_supported" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.vision">
+<span class="sig-name descname"><span class="pre">vision</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract" title="modelopt.torch.puzzletron.anymodel.models.generic_decoder.generic_decoder_model_descriptor.VisionLanguageContract"><span class="pre">VisionLanguageContract</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.GenericDecoderContract.vision" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">LatentAttentionContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Descriptor-owned MLA rank fields shared by conversion and runtime export.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">q_lora_rank_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'q_lora_rank'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kv_lora_rank_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'kv_lora_rank'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>q_lora_rank_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>kv_lora_rank_field</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.kv_lora_rank_field">
+<span class="sig-name descname"><span class="pre">kv_lora_rank_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'kv_lora_rank'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.kv_lora_rank_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.module_name">
+<span class="sig-name descname"><span class="pre">module_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.module_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.q_lora_rank_field">
+<span class="sig-name descname"><span class="pre">q_lora_rank_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'q_lora_rank'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.LatentAttentionContract.q_lora_rank_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">MTPContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tensor_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exempt_patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tensor_rules</strong> (<em>tuple</em><em>[</em><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><em>TensorAxisRule</em></a><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>exempt_patterns</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.exempt_patterns">
+<span class="sig-name descname"><span class="pre">exempt_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.exempt_patterns" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.tensor_rules">
+<span class="sig-name descname"><span class="pre">tensor_rules</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><span class="pre">TensorAxisRule</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.MTPContract.tensor_rules" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">PLEContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Per-layer embedding channel geometry shared by Gemma-style decoders.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">width_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'hidden_size_per_layer_input'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_gate_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'per_layer_input_gate'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_projection_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'per_layer_projection'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_embedding_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'embed_tokens_per_layer'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_projection_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'per_layer_model_projection'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_norm_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'per_layer_projection_norm'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>width_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>layer_gate_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>layer_projection_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_embedding_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_projection_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_norm_name</strong> (<em>str</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.layer_gate_name">
+<span class="sig-name descname"><span class="pre">layer_gate_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'per_layer_input_gate'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.layer_gate_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.layer_projection_name">
+<span class="sig-name descname"><span class="pre">layer_projection_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'per_layer_projection'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.layer_projection_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_embedding_name">
+<span class="sig-name descname"><span class="pre">model_embedding_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'embed_tokens_per_layer'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_embedding_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_norm_name">
+<span class="sig-name descname"><span class="pre">model_norm_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'per_layer_projection_norm'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_norm_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_projection_name">
+<span class="sig-name descname"><span class="pre">model_projection_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'per_layer_model_projection'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.model_projection_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.width_field">
+<span class="sig-name descname"><span class="pre">width_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'hidden_size_per_layer_input'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.PLEContract.width_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">RoutedMoEContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'mlp'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">experts_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'experts'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">router_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'gate'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shared_expert_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'shared_expert'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gate_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'gate_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">up_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'up_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">down_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'down_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">num_experts_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'num_experts'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'moe_intermediate_size'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shared_intermediate_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'shared_expert_intermediate_size'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">top_k_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'num_experts_per_tok'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">replaces_dense_ffn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>experts_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>router_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>shared_expert_name</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>gate_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>up_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>down_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>num_experts_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>intermediate_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>shared_intermediate_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>top_k_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>replaces_dense_ffn</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.down_proj_name">
+<span class="sig-name descname"><span class="pre">down_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'down_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.down_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.experts_name">
+<span class="sig-name descname"><span class="pre">experts_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'experts'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.experts_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.gate_proj_name">
+<span class="sig-name descname"><span class="pre">gate_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'gate_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.gate_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.intermediate_field">
+<span class="sig-name descname"><span class="pre">intermediate_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'moe_intermediate_size'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.intermediate_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.module_name">
+<span class="sig-name descname"><span class="pre">module_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'mlp'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.module_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.num_experts_field">
+<span class="sig-name descname"><span class="pre">num_experts_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'num_experts'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.num_experts_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.replaces_dense_ffn">
+<span class="sig-name descname"><span class="pre">replaces_dense_ffn</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.replaces_dense_ffn" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.router_name">
+<span class="sig-name descname"><span class="pre">router_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'gate'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.router_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.shared_expert_name">
+<span class="sig-name descname"><span class="pre">shared_expert_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'shared_expert'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.shared_expert_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.shared_intermediate_field">
+<span class="sig-name descname"><span class="pre">shared_intermediate_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'shared_expert_intermediate_size'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.shared_intermediate_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.top_k_field">
+<span class="sig-name descname"><span class="pre">top_k_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'num_experts_per_tok'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.top_k_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.up_proj_name">
+<span class="sig-name descname"><span class="pre">up_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'up_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.RoutedMoEContract.up_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">StandardGQAAttentionContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'self_attn'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">q_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'q_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'k_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'v_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">o_proj_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'o_proj'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">query_heads_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'num_attention_heads'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">kv_heads_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'num_key_value_heads'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">head_dim_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'head_dim'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_head_dim_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_kv_heads_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k_eq_v_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">shared_kv_layers_field</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>q_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>k_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>v_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>o_proj_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>query_heads_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>kv_heads_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>head_dim_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>global_head_dim_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>global_kv_heads_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>k_eq_v_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>shared_kv_layers_field</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.global_head_dim_field">
+<span class="sig-name descname"><span class="pre">global_head_dim_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.global_head_dim_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.global_kv_heads_field">
+<span class="sig-name descname"><span class="pre">global_kv_heads_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.global_kv_heads_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.head_dim_field">
+<span class="sig-name descname"><span class="pre">head_dim_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'head_dim'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.head_dim_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.k_eq_v_field">
+<span class="sig-name descname"><span class="pre">k_eq_v_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.k_eq_v_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.k_proj_name">
+<span class="sig-name descname"><span class="pre">k_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'k_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.k_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.kv_heads_field">
+<span class="sig-name descname"><span class="pre">kv_heads_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'num_key_value_heads'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.kv_heads_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.layer_geometry">
+<span class="sig-name descname"><span class="pre">layer_geometry</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_idx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">layer_types</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.layer_geometry" title="Link to this definition"></a></dt>
+<dd><p>Resolve one layer’s true Q/K/V geometry and KV owner.</p>
+<p>Standard models simply return their global GQA fields. Families with
+full/sliding heterogeneity can declare alternate full-attention fields,
+K=V coupling, and trailing KV-sharing layers without forking conversion.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>config</strong> (<em>Any</em>)</p></li>
+<li><p><strong>layer_idx</strong> (<em>int</em>)</p></li>
+<li><p><strong>layer_types</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>int</em>, <em>int</em>, <em>int</em>, <em>bool</em>, <em>int</em> | <em>None</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.layer_override_fields">
+<span class="sig-name descname"><span class="pre">layer_override_fields</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">attention</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.layer_override_fields" title="Link to this definition"></a></dt>
+<dd><p>Map one typed attention config to constructor fields.</p>
+<p>Families with heterogeneous local/global geometry describe the alternate
+fields above.  The generic descriptor can therefore target the correct
+constructor fields without naming the family or duplicating its rules.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>attention</strong> (<em>Any</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>dict</em>[<em>str</em>, <em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.module_name">
+<span class="sig-name descname"><span class="pre">module_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'self_attn'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.module_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.o_proj_name">
+<span class="sig-name descname"><span class="pre">o_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'o_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.o_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.q_proj_name">
+<span class="sig-name descname"><span class="pre">q_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'q_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.q_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.query_heads_field">
+<span class="sig-name descname"><span class="pre">query_heads_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'num_attention_heads'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.query_heads_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.shared_kv_layers_field">
+<span class="sig-name descname"><span class="pre">shared_kv_layers_field</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.shared_kv_layers_field" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.v_proj_name">
+<span class="sig-name descname"><span class="pre">v_proj_name</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'v_proj'</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.v_proj_name" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.validate">
+<span class="sig-name descname"><span class="pre">validate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.StandardGQAAttentionContract.validate" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>config</strong> (<em>Any</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>tuple</em>[<em>int</em>, <em>int</em>, <em>int</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">VisionLanguageContract</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract" title="Link to this definition"></a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">module_names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">projector_rules</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">projector_output_config_paths</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exempt_patterns</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.__init__" title="Link to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>module_names</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>projector_rules</strong> (<em>tuple</em><em>[</em><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><em>TensorAxisRule</em></a><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>projector_output_config_paths</strong> (<em>tuple</em><em>[</em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>exempt_patterns</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.exempt_patterns">
+<span class="sig-name descname"><span class="pre">exempt_patterns</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.exempt_patterns" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.module_names">
+<span class="sig-name descname"><span class="pre">module_names</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.module_names" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.projector_output_config_paths">
+<span class="sig-name descname"><span class="pre">projector_output_config_paths</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.projector_output_config_paths" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.projector_rules">
+<span class="sig-name descname"><span class="pre">projector_rules</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><a class="reference internal" href="modelopt.torch.puzzletron.pruning.embedding_pruning.html#modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule" title="modelopt.torch.puzzletron.pruning.embedding_pruning.TensorAxisRule"><span class="pre">TensorAxisRule</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></em><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.models.generic_decoder.VisionLanguageContract.projector_rules" title="Link to this definition"></a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.puzzletron.anymodel.models.html" class="btn btn-neutral float-left" title="models" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.puzzletron.anymodel.models.gpt_oss.html" class="btn btn-neutral float-right" title="gpt_oss" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,122 @@
+models
+======
+
+.. List the submodules
+
+
+
+.. rubric:: Modules
+
+.. autosummary::
+   :toctree:
+   :recursive:
+
+
+
+   modelopt.torch.models.arctic
+
+
+
+   modelopt.torch.models.dbrx
+
+
+
+   modelopt.torch.models.deepseek
+
+
+
+   modelopt.torch.models.gemma
+
+
+
+   modelopt.torch.models.gemma2
+
+
+
+   modelopt.torch.models.gemma3
+
+
+
+   modelopt.torch.models.gemma4
+
+
+
+   modelopt.torch.models.gemma4_text
+
+
+
+   modelopt.torch.models.gpt_oss
+
+
+
+   modelopt.torch.models.llama
+
+
+
+   modelopt.torch.models.mixtral
+
+
+
+   modelopt.torch.models.nemotron
+
+
+
+   modelopt.torch.models.nemotron_h
+
+
+
+   modelopt.torch.models.qwen2_moe
+
+
+
+   modelopt.torch.models.qwen3
+
+
+
+   modelopt.torch.models.qwen3_5_moe
+
+
+
+   modelopt.torch.models.qwen3_moe
+
+
+
+   modelopt.torch.models.qwen3_next
+
+
+
+   modelopt.torch.models.registry
+
+
+
+   modelopt.torch.models.specs
+
+
+
+
+.. Autodoc anything defined in the module itself
+
+   TODO: WE DON'T USE THIS OPTION RIGHT NOW BUT WE CAN REACTIVATE IF WANTED
+   We use :ignore-module-all: so sphinx does not document the same module twice, even if it is reimported
+   For reimports that should be documented somewhere other than where they are defined, the re-imports
+   __module__ should be manually overridden -- i.e. in the ``__init__.py`` which contains ``from xxx import YYY``,
+   add in ``YYY.__module__ = __name__``.
+
+.. automodule:: modelopt.torch.models
+   :members:
+   :undoc-members:
+
+   .. Also show members without docstrings. Only members from __all__ are considered as per conf.py
+   .. Ideally we should add docstrings for these members.
+
+
+   .. Overview table of available classes in the module
+   
+   
+   
+
+
+   .. Overview table of available functions in the module
+   
+   
+   

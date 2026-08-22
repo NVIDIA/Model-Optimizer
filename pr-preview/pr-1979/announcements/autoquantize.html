@@ -1,0 +1,327 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoQuantize: A Fast Automatic Mixed-Precision Assignment &mdash; Model Optimizer 0.0.1.dev1+g7a7abf432</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=7a224f4b" />
+      <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=93ef59b3" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script defer="defer" src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/announcements/autoquantize.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="autoquantize-a-fast-automatic-mixed-precision-assignment">
+<h1>AutoQuantize: A Fast Automatic Mixed-Precision Assignment<a class="headerlink" href="#autoquantize-a-fast-automatic-mixed-precision-assignment" title="Link to this heading"></a></h1>
+<dl class="field-list simple">
+<dt class="field-odd">Authors<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin, Shengliang Xu</p>
+</dd>
+<dt class="field-even">Date<span class="colon">:</span></dt>
+<dd class="field-even"><p>July 15, 2026</p>
+</dd>
+<dt class="field-odd">Tags<span class="colon">:</span></dt>
+<dd class="field-odd"><p>autoquantize, quantization, mixed-precision, modelopt</p>
+</dd>
+</dl>
+<section id="why-do-we-need-autoquantize">
+<h2>Why do we need AutoQuantize?<a class="headerlink" href="#why-do-we-need-autoquantize" title="Link to this heading"></a></h2>
+<p>LLMs carry a lot of redundancy, but not uniformly: a few layers — attention projections, the final layers of the network — are disproportionately sensitive to quantization, while most others (like MoE experts) are quite forgiving. Keeping just those few sensitive layers at higher precision (FP8 or BF16) while quantizing the rest to FP4 preserves accuracy with nearly all of FP4’s memory savings and speedups. The hard part is finding <em>which</em> layers to keep — traditionally a slow pile of per-model ablation experiments.</p>
+<p><strong>AutoQuantize</strong>, part of NVIDIA’s <a class="reference external" href="https://github.com/NVIDIA/TensorRT-Model-Optimizer" rel="noopener noreferrer" target="_blank">Model Optimizer</a> library, automates this search: given a cost budget, it scores every layer’s quantization sensitivity with a fast gradient-based heuristic and finds the lowest-scoring mixed-precision assignment under that budget — no per-model ablation studies required.</p>
+</section>
+<section id="how-autoquantize-works">
+<h2>How AutoQuantize works<a class="headerlink" href="#how-autoquantize-works" title="Link to this heading"></a></h2>
+<p>AutoQuantize is a neural architecture search (NAS) inspired method that works in three steps: score how sensitive each operation is to quantization, model the performance cost of each available format, and solve for the best layer-wise assignment under the cost budget with a knapsack-style optimization. The sensitivity score uses a second-order Taylor approximation in the spirit of Optimal Brain Surgeon <a class="footnote-reference brackets" href="#id6" id="id1" role="doc-noteref"><span class="fn-bracket">[</span>1<span class="fn-bracket">]</span></a> and the output-side diagonal-Fisher reconstruction used by BRECQ <a class="footnote-reference brackets" href="#id7" id="id2" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>; the mixed-precision allocation is inspired by LLM-MQ <a class="footnote-reference brackets" href="#id8" id="id3" role="doc-noteref"><span class="fn-bracket">[</span>3<span class="fn-bracket">]</span></a>.</p>
+<p>Where LLM-MQ handles only weight quantization, AutoQuantize works at the operator level — including joint weight-and-activation quantization for GEMMs — and respects real deployment constraints such as operator fusion.</p>
+<section id="autoquantize-gradient-a-fast-yet-accurate-sensitivity-scoring">
+<h3>AutoQuantize gradient: A fast, yet accurate sensitivity scoring<a class="headerlink" href="#autoquantize-gradient-a-fast-yet-accurate-sensitivity-scoring" title="Link to this heading"></a></h3>
+<p>The sensitivity score we want is simple to state: how much the model loss changes when a layer is quantized in isolation. Measuring that directly — quantize one layer at a time, re-evaluate the whole model — requires a full model evaluation per layer per candidate format, as we’ll quantify later (Table 1). We need a cheaper estimate.</p>
+<p>Two observations give us a shortcut. First, for a trained model, a Taylor expansion of the loss around a layer’s output shows the loss change from a quantization perturbation is governed by the Hessian — the local curvature. Second, following BRECQ <a class="footnote-reference brackets" href="#id7" id="id4" role="doc-noteref"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></a>, we approximate that Hessian with the diagonal Fisher, whose entries are squared gradients. This drops the off-diagonal terms, treating cross-coordinate contributions from the output error as negligible. Together these observations turn sensitivity into a gradient-squared-weighted output error, no explicit Hessian required.</p>
+<p>Concretely, let <span class="math notranslate nohighlight">\(Y_i\)</span> be the BF16 output of operator <span class="math notranslate nohighlight">\(i\)</span>, <span class="math notranslate nohighlight">\(Y_i^{Q_{i,f}}\)</span> its output under quantization format <span class="math notranslate nohighlight">\(f\)</span>, <span class="math notranslate nohighlight">\(g_i = \nabla_{Y_i}\mathcal{L}\)</span> the gradient at that output, and <span class="math notranslate nohighlight">\(H_i\)</span> the local Hessian:</p>
+<div class="math notranslate nohighlight">
+\[\mathcal{L}\!\left(Y_i^{Q_{i,f}}\right) = \mathcal{L}\!\left(Y_i\right) - g_i^{\top}\!\left(Y_i - Y_i^{Q_{i,f}}\right) + \tfrac{1}{2}\left(Y_i - Y_i^{Q_{i,f}}\right)^{\!\top} H_i \left(Y_i - Y_i^{Q_{i,f}}\right)\]</div>
+<p>The first-order term vanishes in expectation for a trained model, leaving:</p>
+<div class="math notranslate nohighlight">
+\[\Delta\mathcal{L}\!\left(Y_i^{Q_{i,f}}\right) = \mathcal{L}\!\left(Y_i^{Q_{i,f}}\right) - \mathcal{L}\!\left(Y_i\right) \approx \tfrac{1}{2}\left(Y_i - Y_i^{Q_{i,f}}\right)^{\!\top} H_i \left(Y_i - Y_i^{Q_{i,f}}\right)\]</div>
+<p>Keeping only the Hessian diagonal and estimating it with the diagonal Fisher (squared gradients) gives the sensitivity score:</p>
+<div class="math notranslate nohighlight">
+\[S(\mathrm{Op}_i, Q_{i,f}) = \Delta\mathcal{L}\!\left(Y_i^{Q_{i,f}}\right) \propto \sum_{k=1}^{d} \left(g_{i,k}\right)^2 \left(Y_{i,k} - Y_{i,k}^{Q_{i,f}}\right)^2\]</div>
+<p>where <span class="math notranslate nohighlight">\(d\)</span> is the feature dimension of the layer output.</p>
+<p>The intuition: quantization perturbs the model, and the loss impact of that perturbation is the output error weighted by squared gradients. The error can be measured at the operation’s immediate output or further downstream (e.g. the block output); for linear layers we use the linear-layer output. This output-side formulation is also what separates AutoQuantize from LLM-MQ, which measures error at each weight and therefore can’t handle joint weight-and-activation quantization or the coupled decisions deployment-aware search needs.</p>
+<p>Both ingredients are cheap: the output error <span class="math notranslate nohighlight">\(Y_{i,k} - Y_{i,k}^{Q_{i,f}}\)</span> comes from replaying the operator’s captured input through simulated quantization for each candidate format, and the gradient <span class="math notranslate nohighlight">\(g_{i,k}\)</span> from one backward pass per scoring batch.</p>
+</section>
+<section id="performance-cost">
+<h3>Performance cost<a class="headerlink" href="#performance-cost" title="Link to this heading"></a></h3>
+<p>ModelOpt uses <em>effective bits</em> to model the average bit cost over AutoQuantize-eligible quantizable weights. The model includes format-provided overhead when an explicit effective-bits value is available; otherwise it estimates the cost from the format’s <code class="docutils literal notranslate"><span class="pre">num_bits</span></code>. Embeddings, norms, and other parameters outside the search are not included. Sweeping the target provides a consistent budget axis for comparing assignments.</p>
+</section>
+<section id="putting-it-together">
+<h3>Putting it together<a class="headerlink" href="#putting-it-together" title="Link to this heading"></a></h3>
+<p>Following the effective-bits objective above, AutoQuantize solves the constrained optimization</p>
+<div class="math notranslate nohighlight">
+\[\min_{\{f\}} \sum_i S(\mathrm{Op}_i, Q_{i,f}) \quad \text{s.t.} \quad \sum_i N_{\mathrm{params}}(\mathrm{Op}_i) \times \mathrm{bits}(Q_{i,f}) \leq N_{\mathrm{total}} \times \bar{b},\]</div>
+<p>where <span class="math notranslate nohighlight">\(Q_{i,f}\)</span> is the chosen format for operator <span class="math notranslate nohighlight">\(i\)</span>, <span class="math notranslate nohighlight">\(\mathrm{bits}(Q_{i,f})\)</span> the modeled bit cost per eligible weight of format <span class="math notranslate nohighlight">\(f\)</span>, <span class="math notranslate nohighlight">\(N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)\)</span> the eligible quantizable-weight count, and <span class="math notranslate nohighlight">\(\bar{b}\)</span> the user-specified average effective-bits target (e.g. <span class="math notranslate nohighlight">\(\bar{b} = 4.8\)</span>). A format-provided effective-bits value includes its declared overhead; formats without one use the <code class="docutils literal notranslate"><span class="pre">num_bits</span></code> estimate described above. Sweeping <span class="math notranslate nohighlight">\(\bar{b}\)</span> produces a budget sweep of proxy-optimal assignments.</p>
+</section>
+</section>
+<section id="deployment-restriction-aware-search">
+<h2>Deployment-restriction-aware search<a class="headerlink" href="#deployment-restriction-aware-search" title="Link to this heading"></a></h2>
+<p>A mixed-precision assignment must respect the coupling constraints of its target runtime. AutoQuantize folds selected constraints directly into the search: any restriction of the form “this group of operators takes one joint format decision” becomes a merged knapsack item with aggregated sensitivity and cost. This narrows the assignment to formats that coupled operators can share; runtime support still depends on the model, quantization formats, and documented export and deployment workflow.</p>
+<section id="joint-quantization-for-fused-linear-layers">
+<h3>Joint quantization for fused linear layers<a class="headerlink" href="#joint-quantization-for-fused-linear-layers" title="Link to this heading"></a></h3>
+<p>Inference runtimes commonly fuse each layer’s Q, K, and V projections, so AutoQuantize constrains the three projections to share one format. Sensitivity remains measured at each projection’s individual module output, and the three scores are aggregated for the shared-format decision:</p>
+<div class="math notranslate nohighlight">
+\[S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) = \sum_{p \in \{\mathrm{q},\mathrm{k},\mathrm{v}\}} S(\mathrm{Op}_p, Q_{p,f}).\]</div>
+<p>The corresponding costs are aggregated in the same way. Grouping therefore changes the assignment constraint, not where QKV sensitivity is measured.</p>
+</section>
+<section id="moe-layer-constraints">
+<h3>MoE layer constraints<a class="headerlink" href="#moe-layer-constraints" title="Link to this heading"></a></h3>
+<p>The quantized MoE APIs in vLLM and TensorRT-LLM require all sparse experts within a layer to share one format. AutoQuantize therefore treats each layer’s sparse-expert projections — every expert’s <code class="docutils literal notranslate"><span class="pre">up_proj</span></code> and <code class="docutils literal notranslate"><span class="pre">down_proj</span></code> — as a single decision. For this MoE grouping, sensitivity is measured downstream at the MoE block output:</p>
+<div class="math notranslate nohighlight">
+\[S(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{moe},k}\right)^2 \left(Y_{\mathrm{moe},k} - Y_{\mathrm{moe},k}^{Q_{\mathrm{moe},f}}\right)^2.\]</div>
+<p>The other linear layers in the MoE block — latent projections and shared experts — are not subject to this restriction, so each is searched independently.</p>
+</section>
+</section>
+<section id="results">
+<h2>Results<a class="headerlink" href="#results" title="Link to this heading"></a></h2>
+<a class="reference internal image-reference" href="../_images/autoquantize-qwen3-mmlu-effective-bits.png"><img alt="MMLU accuracy versus effective bits under AutoQuantize for Qwen3 1.7B, 4B, 8B, and 14B" src="../_images/autoquantize-qwen3-mmlu-effective-bits.png" style="width: 100%;" />
+</a>
+<p><strong>MMLU accuracy vs. effective bits under AutoQuantize, Qwen3 1.7B/4B/8B/14B.</strong></p>
+<p>The figure shows an AutoQuantize budget sweep on Qwen3 models: sweep the modeled bit budget, solve the additive sensitivity proxy at each point, and evaluate the resulting assignment on MMLU. Accuracy has an overall upward trend as the budget increases, with some non-monotonic points.</p>
+<p>Adding FP8 to the format menu helps across the reported sweep: at every budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn’t need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.</p>
+<section id="autoquantize-gradient-is-fast">
+<h3>AutoQuantize gradient is fast!<a class="headerlink" href="#autoquantize-gradient-is-fast" title="Link to this heading"></a></h3>
+<p>Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method instead visits every scored module, locally replays every candidate format, and performs one backward pass. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~51× difference (Table 1).</p>
+<p><strong>Table 1. Scoring cost: gradient vs. KL divergence (lower is better).</strong></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Scoring method</p></th>
+<th class="head"><p>Scoring complexity</p></th>
+<th class="head"><p>Time taken for sensitivity estimation</p></th>
+<th class="head"><p>Peak GPU memory</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Gradient</p></td>
+<td><p><span class="math notranslate nohighlight">\(O(N_{\mathrm{layers}}) \times O(N_{\mathrm{formats}})\)</span></p></td>
+<td><p>~16 minutes</p></td>
+<td><p>29 GB</p></td>
+</tr>
+<tr class="row-odd"><td><p>KL divergence</p></td>
+<td><p><span class="math notranslate nohighlight">\(O(N_{\mathrm{layers}}^2) \times O(N_{\mathrm{formats}})\)</span></p></td>
+<td><p>~14 hours</p></td>
+<td><p>23 GB</p></td>
+</tr>
+</tbody>
+</table>
+<p><em>ModelOpt AutoQuantize supports both sensitivity scoring methods — gradient (the default) and KL divergence. Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.</em></p>
+<p><strong>Memory.</strong> A backward pass is not inherently memory-heavy. With activation checkpointing, activations are recomputed on demand instead of retained for backward, trading additional compute for a smaller footprint. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, peak memory remains close to forward-only execution: 29 GB versus 23 GB for KL-divergence in Table 1.</p>
+</section>
+</section>
+<section id="how-to-use-modelopt-autoquantize">
+<h2>How to use ModelOpt AutoQuantize<a class="headerlink" href="#how-to-use-modelopt-autoquantize" title="Link to this heading"></a></h2>
+<p>AutoQuantize is a one-call API in Model Optimizer — pass the model, a bit budget, the format menu to search over, and a calibration data loader:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.quantization</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtq</span>
+
+<span class="n">model</span><span class="p">,</span> <span class="n">search_state</span> <span class="o">=</span> <span class="n">mtq</span><span class="o">.</span><span class="n">auto_quantize</span><span class="p">(</span>
+    <span class="n">model</span><span class="p">,</span>
+    <span class="n">constraints</span><span class="o">=</span><span class="p">{</span><span class="s2">"effective_bits"</span><span class="p">:</span> <span class="mf">4.8</span><span class="p">},</span>
+    <span class="n">quantization_formats</span><span class="o">=</span><span class="p">[</span><span class="n">mtq</span><span class="o">.</span><span class="n">NVFP4_DEFAULT_CFG</span><span class="p">,</span> <span class="n">mtq</span><span class="o">.</span><span class="n">FP8_DEFAULT_CFG</span><span class="p">],</span>
+    <span class="n">data_loader</span><span class="o">=</span><span class="n">calib_loader</span><span class="p">,</span>
+    <span class="n">forward_step</span><span class="o">=</span><span class="k">lambda</span> <span class="n">model</span><span class="p">,</span> <span class="n">batch</span><span class="p">:</span> <span class="n">model</span><span class="p">(</span><span class="o">**</span><span class="n">batch</span><span class="p">),</span>
+    <span class="n">loss_func</span><span class="o">=</span><span class="k">lambda</span> <span class="n">output</span><span class="p">,</span> <span class="n">batch</span><span class="p">:</span> <span class="n">output</span><span class="o">.</span><span class="n">loss</span><span class="p">,</span>
+    <span class="n">num_calib_steps</span><span class="o">=</span><span class="mi">512</span><span class="p">,</span>
+    <span class="n">num_score_steps</span><span class="o">=</span><span class="mi">128</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>The returned model carries the searched per-layer format assignment and is ready for export. For an end-to-end example on Hugging Face models — including the supported export workflow — see the <a class="reference external" href="https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/hf_ptq#autoquantize" rel="noopener noreferrer" target="_blank">AutoQuantize section of the ModelOpt hf_ptq README</a>. AutoQuantize also works on Megatron Core models — see the <a class="reference external" href="https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-auto-quantize-mixed-precision-search" rel="noopener noreferrer" target="_blank">AutoQuantize mixed-precision search example in Megatron-LM</a>.</p>
+</section>
+<section id="next-steps">
+<h2>Next steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
+<p>We are working on improving AutoQuantize in the following ways:</p>
+<ol class="arabic simple">
+<li><p><strong>Hardware-aware cost.</strong> Effective bits is a fast proxy for deployment cost. Relying instead on hardware-measured costs — such as per-operator latency on the target GPU and inference runtime — would let the solver optimize for what actually matters: end-to-end inference speed.</p></li>
+<li><p><strong>Combinatorial effects of quantization.</strong> AutoQuantize currently scores each layer quantized in isolation, but quantization errors interact — the loss impact of quantizing two layers together is not always the sum of their individual scores. Capturing these combinatorial effects in the sensitivity estimate is the next step toward tighter accuracy at the same budget.</p></li>
+</ol>
+</section>
+<section id="conclusion">
+<h2>Conclusion<a class="headerlink" href="#conclusion" title="Link to this heading"></a></h2>
+<p>AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, a knapsack solve under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model’s accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.</p>
+</section>
+<section id="references">
+<span id="id5"></span><h2>References<a class="headerlink" href="#references" title="Link to this heading"></a></h2>
+<aside class="footnote-list brackets">
+<aside class="footnote brackets" id="id6" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id1">1</a><span class="fn-bracket">]</span></span>
+<ol class="upperalpha simple" start="2">
+<li><p>Hassibi and D. G. Stork. <a class="reference external" href="https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html" rel="noopener noreferrer" target="_blank">Second Order Derivatives for Network Pruning: Optimal Brain Surgeon</a>. <em>NeurIPS</em>, 1992.</p></li>
+</ol>
+</aside>
+<aside class="footnote brackets" id="id7" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span>2<span class="fn-bracket">]</span></span>
+<span class="backrefs">(<a role="doc-backlink" href="#id2">1</a>,<a role="doc-backlink" href="#id4">2</a>)</span>
+<ol class="upperalpha simple" start="25">
+<li><p>Li, R. Gong, X. Tan, Y. Yang, P. Hu, Q. Zhang, F. Yu, W. Wang, and S. Gu. <a class="reference external" href="https://openreview.net/forum?id=POWv6hDd9XH" rel="noopener noreferrer" target="_blank">BRECQ: Pushing the Limit of Post-Training Quantization by Block Reconstruction</a>. <em>ICLR</em>, 2021.</p></li>
+</ol>
+</aside>
+<aside class="footnote brackets" id="id8" role="doc-footnote">
+<span class="label"><span class="fn-bracket">[</span><a role="doc-backlink" href="#id3">3</a><span class="fn-bracket">]</span></span>
+<ol class="upperalpha simple" start="19">
+<li><p>Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. <a class="reference external" href="https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf" rel="noopener noreferrer" target="_blank">LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment</a>. <em>NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)</em>, 2023.</p></li>
+</ol>
+</aside>
+</aside>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

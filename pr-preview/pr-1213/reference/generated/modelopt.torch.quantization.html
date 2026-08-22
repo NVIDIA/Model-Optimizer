@@ -1,0 +1,263 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>quantization &mdash; Model Optimizer 0.0.1.dev1+ga38e667b1</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="algorithms" href="modelopt.torch.quantization.algorithms.html" />
+    <link rel="prev" title="pruning" href="modelopt.torch.prune.pruning.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">NVIDIA Model Optimizer Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.triton.html">triton</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.torch.html">torch</a></li>
+      <li class="breadcrumb-item active">quantization</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.torch.quantization.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="quantization">
+<h1>quantization<a class="headerlink" href="#quantization" title="Link to this heading"></a></h1>
+<p class="rubric">Modules</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.algorithms.html#module-modelopt.torch.quantization.algorithms" title="modelopt.torch.quantization.algorithms"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.algorithms</span></code></a></p></td>
+<td><p>Module for advanced quantization algorithms.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.backends.html#module-modelopt.torch.quantization.backends" title="modelopt.torch.quantization.backends"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.backends</span></code></a></p></td>
+<td><p>Quantization backends.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.calib.html#module-modelopt.torch.quantization.calib" title="modelopt.torch.quantization.calib"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.calib</span></code></a></p></td>
+<td><p>Calibrator classes.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.compress.html#modelopt.torch.quantization.compress" title="modelopt.torch.quantization.compress"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.compress</span></code></a>(model)</p></td>
+<td><p>Compress model weights of quantized model.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.config.html#module-modelopt.torch.quantization.config" title="modelopt.torch.quantization.config"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.config</span></code></a></p></td>
+<td><p>This document lists the quantization formats supported by Model Optimizer and example quantization configs.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.conversion.html#module-modelopt.torch.quantization.conversion" title="modelopt.torch.quantization.conversion"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.conversion</span></code></a></p></td>
+<td><p>Quantization conversion/restore utilities.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html#module-modelopt.torch.quantization.export_onnx" title="modelopt.torch.quantization.export_onnx"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.export_onnx</span></code></a></p></td>
+<td><p>Utility to export a quantized torch model to quantized ONNX.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.extensions.html#module-modelopt.torch.quantization.extensions" title="modelopt.torch.quantization.extensions"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.extensions</span></code></a></p></td>
+<td><p>Module to load C++ / CUDA extensions.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.mode.html#module-modelopt.torch.quantization.mode" title="modelopt.torch.quantization.mode"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.mode</span></code></a></p></td>
+<td><p>This module contains the mode descriptor for the quantization mode.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.model_calib.html#module-modelopt.torch.quantization.model_calib" title="modelopt.torch.quantization.model_calib"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.model_calib</span></code></a></p></td>
+<td><p>Calibration utilities.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.model_quant.html#module-modelopt.torch.quantization.model_quant" title="modelopt.torch.quantization.model_quant"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.model_quant</span></code></a></p></td>
+<td><p>User-facing quantization API.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.nn.html#module-modelopt.torch.quantization.nn" title="modelopt.torch.quantization.nn"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.nn</span></code></a></p></td>
+<td><p>Modules with quantization support.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.plugins.html#module-modelopt.torch.quantization.plugins" title="modelopt.torch.quantization.plugins"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.plugins</span></code></a></p></td>
+<td><p>Handles quantization plugins to correctly quantize third-party modules.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.qtensor.html#module-modelopt.torch.quantization.qtensor" title="modelopt.torch.quantization.qtensor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.qtensor</span></code></a></p></td>
+<td><p>Tensor Class for Real Quantization.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html#module-modelopt.torch.quantization.tensor_quant" title="modelopt.torch.quantization.tensor_quant"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.tensor_quant</span></code></a></p></td>
+<td><p>Basic tensor quantization functions.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="modelopt.torch.quantization.triton.html#module-modelopt.torch.quantization.triton" title="modelopt.torch.quantization.triton"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.triton</span></code></a></p></td>
+<td><p>Triton quantization kernels.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="modelopt.torch.quantization.utils.html#module-modelopt.torch.quantization.utils" title="modelopt.torch.quantization.utils"><code class="xref py py-obj docutils literal notranslate"><span class="pre">modelopt.torch.quantization.utils</span></code></a></p></td>
+<td><p>Quantization utilities.</p></td>
+</tr>
+</tbody>
+</table>
+<p id="module-modelopt.torch.quantization">Quantization package.</p>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.torch.prune.pruning.html" class="btn btn-neutral float-left" title="pruning" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.torch.quantization.algorithms.html" class="btn btn-neutral float-right" title="algorithms" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
