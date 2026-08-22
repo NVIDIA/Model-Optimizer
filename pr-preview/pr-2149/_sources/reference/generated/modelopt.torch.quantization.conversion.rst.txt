@@ -37,6 +37,7 @@ conversion
    .. autosummary::
       :nosignatures:
    
+      preserve_quantizer_attributes_context
       register
       replace_quant_module
       set_quantizer_attribute

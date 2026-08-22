@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>quant_module &mdash; Model Optimizer 0.0.1.dev1+g8e572ca4f</title>
+  <title>quant_module &mdash; Model Optimizer 0.0.1.dev1+g4e90c9b82</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
@@ -287,10 +287,12 @@ the parallel state of the module.</p>
 <dt class="sig sig-object py" id="modelopt.torch.quantization.nn.modules.quant_module.QuantModule.fold_weight">
 <span class="sig-name descname"><span class="pre">fold_weight</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">keep_attrs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.nn.modules.quant_module.QuantModule.fold_weight" title="Link to this definition"></a></dt>
 <dd><p>Bake each fake-quant weight quantizer into its weight for faster eval.</p>
-<p>Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
-transform is baked into the stored weight and then disabled, so subsequent forwards use
-the stored weight directly. Calibration buffers (<code class="docutils literal notranslate"><span class="pre">_pre_quant_scale</span></code>, <code class="docutils literal notranslate"><span class="pre">_amax</span></code>) are
-dropped unless <code class="docutils literal notranslate"><span class="pre">keep_attrs</span></code>.</p>
+<p>Every fake-quant weight quantizer is folded, including disabled quantizers whose pre-quant
+scale or rotation remains active. The folded transform is baked into the stored weight and
+then disabled, so subsequent forwards use the stored weight directly. Calibration buffers
+(<code class="docutils literal notranslate"><span class="pre">_pre_quant_scale</span></code>, <code class="docutils literal notranslate"><span class="pre">_amax</span></code>) are dropped unless <code class="docutils literal notranslate"><span class="pre">keep_attrs</span></code>. A retained pre-quant
+scale remains stored but is made inactive because it has already been applied to the folded
+weight.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><p><strong>keep_attrs</strong> (<em>bool</em>)</p>

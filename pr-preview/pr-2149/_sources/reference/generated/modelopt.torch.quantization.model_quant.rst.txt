@@ -47,5 +47,6 @@ model\_quant
       postprocess_amax
       print_quant_summary
       quantize
+      temporarily_fold_weights
    
    

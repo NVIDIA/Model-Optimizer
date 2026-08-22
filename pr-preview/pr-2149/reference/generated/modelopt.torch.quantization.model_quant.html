@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>model_quant &mdash; Model Optimizer 0.0.1.dev1+g8e572ca4f</title>
+  <title>model_quant &mdash; Model Optimizer 0.0.1.dev1+g4e90c9b82</title>
       <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
       <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
@@ -212,6 +212,9 @@
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.quantization.model_quant.quantize" title="modelopt.torch.quantization.model_quant.quantize"><code class="xref py py-obj docutils literal notranslate"><span class="pre">quantize</span></code></a></p></td>
 <td><p>Quantizes and calibrates the model in-place.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.quantization.model_quant.temporarily_fold_weights" title="modelopt.torch.quantization.model_quant.temporarily_fold_weights"><code class="xref py py-obj docutils literal notranslate"><span class="pre">temporarily_fold_weights</span></code></a></p></td>
+<td><p>Temporarily fold fake-quant weights for a frozen inference region.</p></td>
 </tr>
 </tbody>
 </table>
@@ -683,6 +686,36 @@ Please subsample the dataset or reduce the number of batches if needed.</p>
 </dd>
 </dl>
 <p>Returns: A pytorch model which has been quantized and calibrated.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.quantization.model_quant.temporarily_fold_weights">
+<span class="sig-name descname"><span class="pre">temporarily_fold_weights</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">snapshot_device</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.quantization.model_quant.temporarily_fold_weights" title="Link to this definition"></a></dt>
+<dd><p>Temporarily fold fake-quant weights for a frozen inference region.</p>
+<p>Each <code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code> performs its normal module-specific <code class="docutils literal notranslate"><span class="pre">fold_weight</span></code> operation.
+Fake-quant weights affected by quantization, pre-quant scaling, or rotation and all fake-quant
+runtime states are restored on exit, including after an exception. Weights are restored in
+place so optimizer and distributed references remain valid.</p>
+<p>This context is intended for repeated no-gradient forwards with no optimizer step, such as
+log-probability recomputation over several microbatches. It retains calibration attributes
+while folded; a retained weight <code class="docutils literal notranslate"><span class="pre">pre_quant_scale</span></code> is inactive inside the context because its
+value is already baked into the temporary weight. Sharing a weight or weight quantizer across
+multiple <code class="xref py py-class docutils literal notranslate"><span class="pre">QuantModule</span></code> instances and using <code class="xref py py-class docutils literal notranslate"><span class="pre">SequentialQuantizer</span></code> are not
+supported.</p>
+<p>Example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="k">with</span> <span class="n">mtq</span><span class="o">.</span><span class="n">temporarily_fold_weights</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">snapshot_device</span><span class="o">=</span><span class="s2">"cpu"</span><span class="p">):</span>
+    <span class="n">outputs</span> <span class="o">=</span> <span class="n">model</span><span class="p">(</span><span class="n">inputs</span><span class="p">)</span>
+</pre></div>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>Module</em>) – Quantized model whose weights will be temporarily folded.</p></li>
+<li><p><strong>snapshot_device</strong> (<em>device</em><em> | </em><em>str</em><em> | </em><em>None</em>) – Device used to store parameter snapshots. <code class="docutils literal notranslate"><span class="pre">None</span></code> keeps each snapshot
+on the parameter’s device; <code class="docutils literal notranslate"><span class="pre">&quot;cpu&quot;</span></code> avoids the additional accelerator memory.</p></li>
+</ul>
+</dd>
+</dl>
 </dd></dl>
 
 </section>
