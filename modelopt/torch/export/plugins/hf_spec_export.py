@@ -413,11 +413,11 @@ class DFlashExporter(SpeculativeDecodingExporter):
             config["layer_types"] = ["full_attention"] * draft_config.num_hidden_layers
 
         # Sliding-window attention: all draft layers use non-causal SWA (MiMo-style). vLLM's
-        # _resolve_layer_attention reads dflash_config.use_swa + swa_window_size; with
-        # layer_types left all "full_attention" it applies a non-causal sliding window to
-        # every draft layer (window from swa_window_size / top-level sliding_window).
+        # _resolve_layer_attention reads both layer_types and dflash_config.use_swa; retain
+        # the nested fields for compatibility while making layer_types explicit.
         swa_window = getattr(self.model, "dflash_swa_window_size", None)
         if swa_window is not None:
+            config["layer_types"] = ["sliding_attention"] * draft_config.num_hidden_layers
             config["sliding_window"] = swa_window
             config["dflash_config"].update(
                 {

@@ -36,6 +36,7 @@ _HIDDEN_SIZE = 16
         ("llama", "rmsnorm"),
         ("qwen3", "rmsnorm"),
         ("qwen3_5_text", "gemma_rmsnorm"),
+        ("qwen3_5_moe_text", "gemma_rmsnorm"),
         ("deepseek_v3", "rmsnorm"),
         ("kimi_k2", "rmsnorm"),
         ("kimi_k25", "rmsnorm"),

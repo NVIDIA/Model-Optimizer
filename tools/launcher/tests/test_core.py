@@ -236,6 +236,16 @@ class TestGetDefaultEnv:
         assert slurm_env["HF_HOME"] == "/modelopt/hf-cache"
         assert local_env["HF_HOME"] == "/modelopt/hf-cache"
 
+    def test_serve_nodes_forwarded_to_slurm(self, monkeypatch):
+        monkeypatch.setenv("SERVE_NODES", "8")
+        slurm_env, _ = get_default_env()
+        assert slurm_env["SERVE_NODES"] == "8"
+
+    def test_serve_nodes_omitted_when_unset(self, monkeypatch):
+        monkeypatch.delenv("SERVE_NODES", raising=False)
+        slurm_env, _ = get_default_env()
+        assert "SERVE_NODES" not in slurm_env
+
 
 class TestReportVersions:
     """Tests for report_versions git info utility."""

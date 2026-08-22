@@ -62,6 +62,9 @@ def get_default_env(experiment_title=None):
         "LAUNCH_SCRIPT": "python",
         **specdec_s3,
     }
+    # Forward the launcher-shell topology override into the Slurm job.
+    if serve_nodes := os.getenv("SERVE_NODES"):
+        slurm_env["SERVE_NODES"] = serve_nodes
     local_env = {
         "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR", f"/{title}/triton-cache"),
         "HF_HOME": os.getenv("HF_HOME", f"/{title}/hf-cache"),

@@ -164,6 +164,12 @@ parser.add_argument(
     default="soft-switch",
     help="Disable thinking with /no_think or the server's chat_template_kwargs API.",
 )
+parser.add_argument(
+    "--response-mode",
+    choices=["mixed", "thinking", "non-thinking"],
+    default="mixed",
+    help="Response mode for synthesized shards; mixed disables thinking on even shards.",
+)
 args = parser.parse_args()
 
 if args.temperature is not None and any(
@@ -329,7 +335,9 @@ for shard_id in shard_ids:
     print(len(shard), file_path)
 
     num_proc = min(args.num_proc, len(shard))
-    if shard_id % 2 == 0:
+    if args.response_mode == "non-thinking" or (
+        args.response_mode == "mixed" and shard_id % 2 == 0
+    ):
         shard = shard.map(disable_thinking_column, num_proc=num_proc)
     # Reuse completed map-worker caches and omit rows without a generated response.
     cache_dir = os.path.join(args.save, ".cache")

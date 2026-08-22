@@ -88,6 +88,7 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     "qwen3": "rmsnorm",
     "qwen3_moe": "rmsnorm",
     "qwen3_5_text": "gemma_rmsnorm",  # Qwen3.5 scales by (1 + weight).
+    "qwen3_5_moe_text": "gemma_rmsnorm",
     "deepseek_v3": "rmsnorm",
     "kimi_k2": "rmsnorm",  # Kimi-K2 / K2-Thinking (DeepSeek-V3 arch) report model_type "kimi_k2"
     "kimi_k25": "rmsnorm",  # Kimi-K2.5 / K2.6 / K2.7 all report model_type "kimi_k25"

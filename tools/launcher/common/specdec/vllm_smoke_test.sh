@@ -26,6 +26,8 @@
 #   NUM_SPEC_TOKENS — number of speculative tokens (default: 15)
 #   TP_SIZE         — tensor parallel size (default: 1)
 #   VLLM_PORT       — server port (default: 8000)
+#   MAX_MODEL_LEN    — optional maximum context length
+#   ENFORCE_EAGER    — set to "1" to disable compile and CUDA graphs
 #   REASONING_PARSER — reasoning parser (e.g., "qwen3" for Qwen3.5)
 #   DISABLE_PREFIX_CACHING — set to "1" to disable prefix caching
 #   SMOKE_PROFILE — profile label printed in results (default: "greedy")
@@ -83,6 +85,12 @@ if [ -n "${REASONING_PARSER:-}" ]; then
 fi
 if [ "${DISABLE_PREFIX_CACHING:-}" = "1" ]; then
     OPTIONAL_ARGS="${OPTIONAL_ARGS} --no-enable-prefix-caching"
+fi
+if [ -n "${MAX_MODEL_LEN:-}" ]; then
+    OPTIONAL_ARGS="${OPTIONAL_ARGS} --max-model-len ${MAX_MODEL_LEN}"
+fi
+if [ "${ENFORCE_EAGER:-}" = "1" ]; then
+    OPTIONAL_ARGS="${OPTIONAL_ARGS} --enforce-eager"
 fi
 
 # Start vLLM server (capture output for regression check parsing)
