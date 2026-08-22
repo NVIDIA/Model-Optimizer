@@ -2228,6 +2228,8 @@ def test_convert_to_f16_excludes_named_rmsnorm_nodes_without_changing_qdq():
     initializers = [
         numpy_helper.from_array(np.full(4, 0.25, dtype=np.float32), name="q_scale"),
         numpy_helper.from_array(np.zeros(4, dtype=np.uint8), name="q_zero_point"),
+        numpy_helper.from_array(np.full(4, 0.25, dtype=np.float32), name="dq_scale"),
+        numpy_helper.from_array(np.zeros(4, dtype=np.uint8), name="dq_zero_point"),
         numpy_helper.from_array(np.array(2.0, dtype=np.float32), name="pow_exponent"),
         numpy_helper.from_array(np.array([1], dtype=np.int64), name="reduce_axes"),
         numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name="epsilon"),
@@ -2243,14 +2245,12 @@ def test_convert_to_f16_excludes_named_rmsnorm_nodes_without_changing_qdq():
         ),
         helper.make_node(
             "DequantizeLinear",
-            ["X_quantized", "q_scale", "q_zero_point"],
+            ["X_quantized", "dq_scale", "dq_zero_point"],
             ["X_dequantized"],
             name="input/DequantizeLinear",
             axis=1,
         ),
-        helper.make_node(
-            "Pow", ["X_dequantized", "pow_exponent"], ["pow_out"], name="/rms/Pow"
-        ),
+        helper.make_node("Pow", ["X_dequantized", "pow_exponent"], ["pow_out"], name="/rms/Pow"),
         helper.make_node(
             "ReduceMean",
             ["pow_out", "reduce_axes"],
@@ -2260,9 +2260,7 @@ def test_convert_to_f16_excludes_named_rmsnorm_nodes_without_changing_qdq():
         ),
         helper.make_node("Add", ["mean_out", "epsilon"], ["add_out"], name="/rms/Add"),
         helper.make_node("Sqrt", ["add_out"], ["sqrt_out"], name="/rms/Sqrt"),
-        helper.make_node(
-            "Div", ["X_dequantized", "sqrt_out"], ["div_out"], name="/rms/Div"
-        ),
+        helper.make_node("Div", ["X_dequantized", "sqrt_out"], ["div_out"], name="/rms/Div"),
         helper.make_node("Mul", ["div_out", "gamma"], ["Y"], name="/rms/Mul"),
     ]
     model = helper.make_model(
@@ -2286,7 +2284,7 @@ def test_convert_to_f16_excludes_named_rmsnorm_nodes_without_changing_qdq():
     qdq_initializers_before = {
         initializer.name: initializer.SerializeToString()
         for initializer in model.graph.initializer
-        if initializer.name in {"q_scale", "q_zero_point"}
+        if initializer.name in {"q_scale", "q_zero_point", "dq_scale", "dq_zero_point"}
     }
     opsets_before = [(opset.domain, opset.version) for opset in model.opset_import]
 
