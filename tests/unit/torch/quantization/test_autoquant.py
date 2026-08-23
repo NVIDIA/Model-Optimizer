@@ -779,7 +779,7 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
 )
 @pytest.mark.parametrize(
     "method",
-    ["gradient", "kl_div"],
+    ["gradient", "kl_div", "aumann_shapley"],
 )
 def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method):
     model = model_cls()
@@ -1362,7 +1362,7 @@ def test_estimate_quant_compression_per_entry_effective_bits():
         )
 
 
-@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("method", ["gradient", "kl_div", "aumann_shapley"])
 def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     """Test that checkpoint can be used to resume an interrupted search."""
     model = SimpleLinear()
