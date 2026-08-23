@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import getpass
 import importlib
 import sys
@@ -22,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import yaml
+from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
@@ -99,6 +101,58 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
         4.5,
     ]
     assert "kv_cache_quant_cfg" not in inputs
+
+
+def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
+    """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
+        candidate_formats=[
+            QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+        score_size=1,
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        kv_cache_qformat="none",
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+
+    hf_ptq.auto_quantize(args, model, data, aq, full_model=model)
+
+    attention = model.model.layers[0].self_attn
+    assert attention.k_bmm_quantizer.num_bits == (4, 3)
+    assert attention.v_bmm_quantizer.num_bits == (4, 3)
+
+
+def test_kv_autoquant_names_asymmetric_export_format(monkeypatch):
+    """The supported FP8-K/NVFP4-V candidate has a stable semantic name."""
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    mixed_config = copy.deepcopy(hf_ptq.KV_QUANT_CFG_CHOICES["nvfp4"])
+    fp8_k_quantizer = copy.deepcopy(hf_ptq.KV_QUANT_CFG_CHOICES["fp8"]["quant_cfg"][0])
+    fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
+    mixed_config["quant_cfg"].append(fp8_k_quantizer)
+    mixed_config["effective_bits"] = 6.25
+
+    candidates = hf_ptq._mtq_kv_candidate_formats([QuantizeConfig(**mixed_config)])
+
+    assert candidates[0][1] == "fp8_k_nvfp4_v"
 
 
 def test_kv_autoquant_kl_excludes_padding_positions(monkeypatch):

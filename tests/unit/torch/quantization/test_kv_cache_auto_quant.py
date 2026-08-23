@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.transformers_models import get_tiny_llama
+from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3, get_tiny_qwen3vl
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
@@ -24,6 +26,7 @@ from modelopt.torch.quantization import model_quant, tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
     _candidate_quantizers,
+    _eligible_layers,
     _kv_scalar_weight,
     _solve_additive_recipe,
     _validate_kv_only_config,
@@ -192,6 +195,29 @@ class _ToyKVModel(nn.Module):
 
     def forward(self, x):
         return self.lm_head(self.attn1(self.attn0(x)))
+
+
+def test_kv_eligible_layers_supports_hybrid_attention_mixers_only():
+    """Hybrid decoders include attention mixers but exclude nonattention mixers."""
+    model = nn.Module()
+    model.layers = nn.ModuleList([nn.Module(), nn.Module()])
+    model.layers[0].mixer = nn.Linear(8, 8, bias=False)
+    model.layers[1].mixer = _ToyKVAttention(8, gain=1.0)
+
+    layers = _eligible_layers(model, disabled_layers=None)
+
+    assert [(name, width) for name, _, width in layers] == [("layers.1.mixer", 16)]
+
+
+def test_kv_eligible_layers_rejects_aliased_attention_boundary():
+    """An attention object registered at multiple paths must not be selected by traversal order."""
+    model = nn.Module()
+    attention = _ToyKVAttention(8, gain=1.0)
+    model.attention = attention
+    model.attention_alias = attention
+
+    with pytest.raises(ValueError, match="registered through aliases"):
+        _eligible_layers(model, disabled_layers=None)
 
 
 def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fake_quant_stub):
@@ -467,6 +493,45 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_
         for layer in restored_model.model.layers
         if layer.self_attn.k_bmm_quantizer.num_bits == (4, 3)
     )
+
+
+@pytest.mark.parametrize(
+    ("model_factory", "expected_layer", "disabled_layers"),
+    [
+        (get_tiny_qwen3, "model.layers.0.self_attn", None),
+        (get_tiny_qwen3vl, "model.language_model.layers.0.self_attn", "*visual*"),
+    ],
+)
+def test_public_kv_autoquant_selects_qwen_causal_attention_only(
+    model_factory, expected_layer, disabled_layers
+):
+    """Plain and conditional Qwen models expose only causal attention to the KV search."""
+    model = model_factory(num_hidden_layers=1)
+    text_config = getattr(model.config, "text_config", model.config)
+    data = [{"input_ids": torch.randint(0, text_config.vocab_size, (1, 8))}]
+    candidate = (
+        _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump(),
+        "fp8",
+    )
+
+    model, state = mtq.auto_quantize_kv_cache(
+        model,
+        {"kv_effective_bits": 8.0},
+        [candidate],
+        data,
+        lambda search_model, batch: search_model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+        disabled_layers=disabled_layers,
+    )
+
+    assert set(state["layers"]) == {expected_layer}
+    assert json.loads(json.dumps(state))["layers"][expected_layer]["selected"] == "fp8"
+    exported = get_quant_config(model)["quantization"]
+    if "kv_cache_quantized_layers" in exported:
+        assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
+    else:
+        assert exported["kv_cache_quant_algo"] == "FP8"
 
 
 def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():

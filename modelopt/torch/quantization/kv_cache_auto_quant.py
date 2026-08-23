@@ -248,10 +248,21 @@ def _eligible_layers(
     model: nn.Module, disabled_layers: list[str] | str | None
 ) -> list[tuple[str, nn.Module, int]]:
     patterns = [disabled_layers] if isinstance(disabled_layers, str) else disabled_layers or []
-    layers = []
-    for name, module in model.named_modules():
+    boundaries = []
+    names_by_identity: dict[int, list[str]] = {}
+    for name, module in model.named_modules(remove_duplicate=False):
         if not all(hasattr(module, attr) for attr in _KV_QUANTIZER_ATTRS):
             continue
+        boundaries.append((name, module))
+        names_by_identity.setdefault(id(module), []).append(name)
+    aliases = [names for names in names_by_identity.values() if len(names) > 1]
+    if aliases:
+        raise ValueError(
+            f"KV-cache attention boundaries are registered through aliases: {aliases}."
+        )
+
+    layers = []
+    for name, module in boundaries:
         if any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
             continue
         layers.append((name, module, _kv_scalar_weight(module, name)))

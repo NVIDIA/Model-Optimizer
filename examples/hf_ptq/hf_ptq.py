@@ -362,6 +362,18 @@ def _mtq_kv_candidate_formats(formats) -> list[tuple[dict, str]]:
         quant_cfg = fmt.model_dump(exclude_none=True)
         candidate_quantizers = quant_cfg.get("quant_cfg", [])
         name = None
+        nvfp4_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["nvfp4"]).model_dump(exclude_none=True)[
+            "quant_cfg"
+        ]
+        fp8_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["fp8"]).model_dump(exclude_none=True)[
+            "quant_cfg"
+        ]
+        if len(fp8_quantizers) != 1:
+            raise RuntimeError("The FP8 KV preset must contain exactly one quantizer entry.")
+        fp8_k_quantizer = copy.deepcopy(fp8_quantizers[0])
+        fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
+        if candidate_quantizers == [*nvfp4_quantizers, fp8_k_quantizer]:
+            name = "fp8_k_nvfp4_v"
         for preset_name, preset in KV_QUANT_CFG_CHOICES.items():
             normalized_preset_quantizers = (
                 type(fmt)(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
