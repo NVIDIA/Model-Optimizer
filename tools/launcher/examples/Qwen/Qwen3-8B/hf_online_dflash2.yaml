@@ -1,0 +1,107 @@
+# DFlash2 online speculative decoding training for Qwen3-8B.
+#
+# DFlash2 = the DFlash draft backbone plus two additions:
+#   * a grouped dynamic depthwise convolution wrapped around every attention and
+#     MLP sublayer (taps clipped at block boundaries, identity-initialized so a
+#     fresh DFlash2 draft computes exactly what its DFlash backbone would), and
+#   * a low-rank candidate selector that scores transitions between adjacent
+#     block positions' top-k candidates, so serving walks one coherent path.
+# See the dflash2.yaml recipe and
+# modelopt/torch/speculative/plugins/{modeling,hf}_dflash2.py.
+#
+# 2-step pipeline:
+#   task_0: Build training conversations (Daring-Anteater multi-turn SFT, 50K)
+#   task_1: Online DFlash2 training + export of the drafter checkpoint
+#
+# As configured this is a short convergence check (max_steps=2000), matching the
+# other Qwen3-8B online examples so it finishes on one node. To reproduce the
+# published Qwen3-8B DFlash2 curve instead, see "Full run" below.
+#
+# Reference: inco.ai/blog/dflash2 | vLLM PR #52816 (serving support)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash2.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash2.yaml --yes
+#
+# Full run (the strict A/B against DFlash / DSpark / Domino, 3 epochs = ~92K
+# steps on the 1.96M-conversation Spec-Decoding-Dataset-v1, 8 nodes x 8 H100):
+#   - point data.data_path at that corpus instead of task_0's output
+#   - training.num_train_epochs=3 and drop training.max_steps
+#   - training.save_steps=4000
+#   - slurm_config.nodes=8 (global batch stays 64 = nodes x gpus x bs x accum)
+#   Every other knob below is already the A/B setting.
+
+job_name: Qwen3-8B_DFlash2_online
+pipeline:
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+
+  # Step 1: Build input conversations. example_data_config.yaml enables only the
+  # daring-anteater source (train: 50000) — multi-turn SFT with real assistant
+  # completions. --full-conversations keeps those completions so answer_only_loss
+  # has assistant spans to mask. make_dataset.sh writes /scratchspace/data/train.jsonl.
+  task_0:
+    script: common/eagle3/make_dataset.sh
+    args:
+      - -f modules/Model-Optimizer/examples/dataset/example_data_config.yaml
+      - --full-conversations
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc10
+
+  # Step 2: Online DFlash2 training (the script exports the drafter at the end).
+  # Consumes the conversations built in task_0 (shared via /scratchspace).
+  task_1:
+    script: common/specdec/dflash_online_training.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash2.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - data.data_path=/scratchspace/data/train.jsonl
+      - data.chat_template=examples/Qwen/Qwen3-8B/chat_template_train.jinja
+      - training.output_dir=/scratchspace/dflash2_bs16
+      - training.per_device_train_batch_size=1
+      - training.num_train_epochs=1
+      - training.max_steps=2000
+      - training.training_seq_len=4096
+      - training.learning_rate=6.0e-4
+      - training.warmup_ratio=0.04
+      - training.warmup_steps=0
+      - training.lr_scheduler_type=linear
+      - training.save_steps=5000
+      - training.logging_steps=100
+      - training.disable_tqdm=true
+      - training.answer_only_loss=true
+      # Draft backbone — identical to the DFlash / DSpark / Domino arms so the
+      # only difference between them is the correction head.
+      - dflash.dflash_block_size=16
+      - dflash.dflash_num_anchors=512
+      - dflash.dflash_loss_decay_factor=7
+      - dflash.dflash_mask_token_id=151669
+      - dflash.dflash_self_logit_distillation=false
+      - dflash.dflash_architecture_config.num_hidden_layers=5
+      - dflash.dflash_architecture_config.num_attention_heads=32
+      - dflash.dflash_architecture_config.num_key_value_heads=8
+      - dflash.dflash_architecture_config.head_dim=128
+      - dflash.dflash_architecture_config.intermediate_size=12288
+      # DFlash2 knobs (also set in the recipe; repeated here for visibility).
+      # A draft dim NOT set explicitly falls back to the Qwen3Config default, not
+      # to the base model's — hence the five dims above are always spelled out.
+      - dflash.dflash_architecture_config.projector_type=dflash2
+      - dflash.dflash_architecture_config.conv_kernel_size=2
+      - dflash.dflash_architecture_config.conv_group_size=16
+      - dflash.dflash_architecture_config.selector_rank=256
+      - dflash.dflash_architecture_config.selector_top_k=16
+      - dflash.dflash_selector_loss_alpha=1.0
+      # Sliding-window draft attention, matching the published DFlash2 drafters.
+      - dflash.dflash_swa_window_size=2048
+    environment:
+      - MAX_FINAL_LOSS: "5.0"
+      - MIN_FINAL_ACC: "0.15"
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
