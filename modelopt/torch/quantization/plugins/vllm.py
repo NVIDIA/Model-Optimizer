@@ -883,9 +883,16 @@ if VllmMLAAttention is not None:
             if not getattr(self, "_query_quant_in_kernel", False):
                 query = self.q_bmm_quantizer(query)
             # Write-once latent-cache QDQ: the single representation both
-            # decode BMMs consume from the paged cache.
-            kv_c = self.kv_c_bmm_quantizer(kv_c)
-            k_pe = self.k_pe_bmm_quantizer(k_pe)
+            # decode BMMs consume from the paged cache. When the fused MLA impl
+            # owns this at cache-write time (``_kv_quant_in_cache_write``), skip
+            # it here so the *bf16* latent reaches vLLM's prefill ``kv_b_proj``
+            # projection — the projected K/V are then quantized exactly once in
+            # the prefill kernel, avoiding a double quant. Otherwise (fakequant /
+            # calibration path, where the fused impl is not installed) quantize
+            # module-side as before.
+            if not getattr(self, "_kv_quant_in_cache_write", False):
+                kv_c = self.kv_c_bmm_quantizer(kv_c)
+                k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
 
         def modelopt_post_restore(self, prefix: str = "") -> None:

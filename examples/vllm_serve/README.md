@@ -235,8 +235,9 @@ python vllm_serve_sparse_attn.py <MODEL_PATH> -tp 8 \
 The MLA operand mapping differs from regular attention because the latent cache is shared by both BMMs:
 
 - `q_format`: prefill quantizes the projected 192-d query in-kernel; decode quantizes the absorbed `kv_lora_rank + rope`-d query (FP32 QDQ carrier). With `q_format=fp8` the module-level quantizer QDQs the pre-projection query instead.
-- `k_format`: governs the write-once latent-cache QDQ (`kv_c`, `k_pe` before the cache write) and the prefill projected K (in-kernel).
+- `k_format`: governs the write-once latent-cache QDQ (`kv_c`, `k_pe`, applied at cache-write time by the impl) and the prefill projected K (in-kernel).
 - `v_format`: governs the prefill projected V (in-kernel) only. Decode BMM2 consumes the write-once quantized latent cache as-is — a single stored representation with no on-read re-quantization.
+- The latent QDQ is applied at the cache-write hook (not the module forward), so the **new-tokens** prefill projection reads the bf16 latent and its K/V operands are quantized exactly once. Note one residual: cached-**context** prefill chunks gather from the already-quantized paged cache and re-quantize the projected operands, so those chunks are double-quantized — inherent to reading a stored quantized latent, and absent for short prompts that fit a single chunk.
 - `p_format`: fused into both the prefill and decode kernels; the softmax denominator stays unquantized and P amax defaults to 1.0.
 
 MLA decode uses a fixed 32-split, 32-key-tile schedule with tile boundaries at absolute token positions, so quantized decode results are stable as the sequence grows and reproducible across batch shapes and devices. Optional checkpoint N:M sparsity applies to prefill new-token attention only (cached-context chunks run dense); skip-softmax is rejected on MLA layers. Sparse-only installation ignores MLA layers. DeepSeek V3.2-style sparse-indexer MLA and FP8 latent caches are unsupported.

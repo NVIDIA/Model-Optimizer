@@ -196,6 +196,30 @@ class ModelOptMLAImpl(TritonMLAImpl):
     quant_kw: _MLAQuantKw
     sparse_kw: dict[str, Any]
 
+    def do_kv_cache_update(self, kv_c_normed, k_pe, *args, **kwargs):
+        """Write-once latent QDQ, applied here (cache write) not in the module.
+
+        vLLM calls this before ``forward_impl`` and passes ``forward_impl`` the
+        same latent tensors. Quantizing here — **out of place**, so the caller's
+        tensors stay bf16 — writes a quantized cache (read by decode) while the
+        prefill ``kv_b_proj`` projection still consumes bf16 latent. That makes
+        the prefill K/V operands single-quant (quantized once in the prefill
+        kernel) instead of double-quant. Quantizer refs are stashed by the
+        installer; absent/disabled quantizers pass through unchanged.
+
+        Note: cached-context prefill chunks gather from this quantized cache and
+        re-quantize the projected operands, so they remain double-quant — that
+        is inherent to reading a stored quantized latent and is not addressed
+        here.
+        """
+        kv_q = getattr(self, "_kv_c_quantizer", None)
+        kpe_q = getattr(self, "_k_pe_quantizer", None)
+        if kv_q is not None and getattr(kv_q, "is_enabled", False):
+            kv_c_normed = kv_q(kv_c_normed)
+        if kpe_q is not None and getattr(kpe_q, "is_enabled", False):
+            k_pe = kpe_q(k_pe)
+        return super().do_kv_cache_update(kv_c_normed, k_pe, *args, **kwargs)
+
     def _get_prefill_backend(self, prefill_metadata) -> _ModelOptMLAPrefillBackend:
         backend = self.__dict__.get("_modelopt_prefill_backend")
         if backend is None:

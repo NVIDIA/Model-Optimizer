@@ -112,6 +112,12 @@ class TestMLAInstall:
             assert float(amax) == 6.0 * 448.0
         assert attention._query_quant_in_kernel is True
         assert not hasattr(attention, "_value_quant_in_kernel")
+        # Latent QDQ is moved to the impl's cache-write hook (single-quant
+        # prefill): the module flag skips the module-side kv_c/k_pe quant, and
+        # the impl carries the quantizer refs its override applies.
+        assert attention._kv_quant_in_cache_write is True
+        assert attention.impl._kv_c_quantizer is attention.kv_c_bmm_quantizer
+        assert attention.impl._k_pe_quantizer is attention.k_pe_bmm_quantizer
         assert attention.impl.quant_kw.prefill == {
             "q_quant": "nvfp4",
             "q_amax": None,
@@ -339,3 +345,56 @@ class TestMLAImplDispatch:
         impl.forward_mha(None, None, None, None, metadata, None, None, None)
 
         assert seen["backend_during_call"] is base_backend  # untouched
+
+
+class _RecorderQuantizer:
+    """Stand-in TensorQuantizer that records calls and returns a marked tensor."""
+
+    def __init__(self, *, is_enabled=True):
+        self.is_enabled = is_enabled
+        self.calls = []
+
+    def __call__(self, x):
+        self.calls.append(x)
+        return f"quant({x})"  # distinct object => out-of-place
+
+
+class TestMLACacheWriteQuant:
+    def test_do_kv_cache_update_quantizes_latent_out_of_place(self, monkeypatch):
+        impl = _bare_mla_impl()
+        impl._kv_c_quantizer = _RecorderQuantizer()
+        impl._k_pe_quantizer = _RecorderQuantizer()
+        seen = {}
+
+        def _fake_super(self, kv_c_normed, k_pe, *args, **kwargs):
+            seen["kv_c"] = kv_c_normed
+            seen["k_pe"] = k_pe
+
+        monkeypatch.setattr(TritonMLAImpl, "do_kv_cache_update", _fake_super)
+
+        impl.do_kv_cache_update("kvc", "kpe", "cache", "slot", "auto", "scale")
+
+        # The latent QDQ is applied here (cache write), not skipped.
+        assert impl._kv_c_quantizer.calls == ["kvc"]
+        assert impl._k_pe_quantizer.calls == ["kpe"]
+        # The quantized (new) tensors are what gets written to cache.
+        assert seen["kv_c"] == "quant(kvc)"
+        assert seen["k_pe"] == "quant(kpe)"
+
+    def test_do_kv_cache_update_skips_disabled_quantizers(self, monkeypatch):
+        impl = _bare_mla_impl()
+        impl._kv_c_quantizer = _RecorderQuantizer(is_enabled=False)
+        impl._k_pe_quantizer = None
+        seen = {}
+
+        def _fake_super(self, kv_c_normed, k_pe, *args, **kwargs):
+            seen["kv_c"] = kv_c_normed
+            seen["k_pe"] = k_pe
+
+        monkeypatch.setattr(TritonMLAImpl, "do_kv_cache_update", _fake_super)
+
+        impl.do_kv_cache_update("kvc", "kpe", "cache", "slot", "auto", "scale")
+
+        assert impl._kv_c_quantizer.calls == []  # disabled => passthrough
+        assert seen["kv_c"] == "kvc"
+        assert seen["k_pe"] == "kpe"
