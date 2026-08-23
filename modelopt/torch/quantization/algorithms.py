@@ -17,6 +17,7 @@
 
 import copy
 import fnmatch
+import functools
 import gc
 import types
 import warnings
@@ -268,6 +269,12 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
+@functools.cache
+def _no_quant_signature() -> str:
+    """Return the canonical signature used to identify the no-quant recipe."""
+    return QuantRecipe(quant_cfg=None).checkpoint_signature
+
+
 class QuantRecipe(CustomHPType):
     """A subclass of QuantizeConfig enabling auto_quantize specific configurations.
 
@@ -308,6 +315,11 @@ class QuantRecipe(CustomHPType):
         """Return the canonical identity used for ordering and checkpoint validation."""
         return getattr(self, "_config_signature", self.config.model_dump_json())
 
+    @property
+    def is_no_quant(self) -> bool:
+        """Whether this recipe leaves the module unquantized."""
+        return self.checkpoint_signature == _no_quant_signature()
+
     @staticmethod
     def get_auto_name_for_config(quant_cfg: str | dict[str, Any] | None) -> str | None:
         """Get a name for the quantization configuration."""
@@ -332,8 +344,10 @@ class QuantRecipe(CustomHPType):
         return self._str_repr
 
     def __lt__(self, other: "QuantRecipe"):
-        return (self.compression, self.checkpoint_signature) < (
+        # Callers treat the last choice as the unquantized end of the format ladder.
+        return (self.compression, self.is_no_quant, self.checkpoint_signature) < (
             other.compression,
+            other.is_no_quant,
             other.checkpoint_signature,
         )
 
@@ -659,10 +673,11 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     # certain modules to share the same format. Sensitivity scores are computed from perturbations
     # at score modules. See AutoQuantizeGradientSearcher for detailed documentation.
 
-    candidate_stats: dict[str, dict[str, list[float]]]
+    candidate_stats: dict[str, dict[str, Any]]
     best: dict[str, Any]
     quantizer_states: dict
     method_name: str | None = None
+    method_options_keys: frozenset[str] = frozenset()
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -735,6 +750,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "`forward_step` must be provided for `auto_quantize`."
         )
         return config
+
+    def validate_search_input(self, constraints, config) -> None:
+        """Validate method-specific inputs before quantizing the model."""
 
     def load_search_checkpoint(self) -> bool:
         return super().load_search_checkpoint(strict=False)
@@ -1083,7 +1101,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             if not isinstance(hparam, QuantRecipeHparam):
                 continue
 
-            formats, scores, costs = [], [], []
+            formats, raw_scores, scores, costs = [], [], [], []
             prev_score = float("inf")
             for recipe in hparam.solver_choices:
                 formats.append(recipe)
@@ -1091,6 +1109,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                 score = hparam.get_score(recipe)
                 cost = hparam.get_cost(recipe)
 
+                raw_scores.append(score)
                 score = min(score, prev_score)  # TODO: Should we get rid of this?
                 scores.append(score)
                 costs.append(cost)
@@ -1098,6 +1117,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
+            self.candidate_stats[name]["raw_scores"] = raw_scores
             self.candidate_stats[name]["costs"] = costs
             self.candidate_stats[name]["module_names"] = hparam.quant_module_names
             self.candidate_stats[name]["quantizer_attrs"] = hparam.quant_module_replay_attrs
@@ -1385,6 +1405,46 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             return [0.99, 0.90, None]
         return [None, 0.99, 0.90]
 
+    def _run_linear_program_search(self, max_weight_size, verbose=False):
+        """Select recipes with the standard AutoQuantize linear program."""
+        for lower_bound in self._get_search_lower_bounds():
+            constraints, constraint_name = self._get_constraints_for_search(
+                max_weight_size, lower_bound
+            )
+            lps = LPS(
+                name="AutoQuantize",
+                constraints=constraints,
+                constraints_to_candidate_costs={
+                    constraint_name: [
+                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
+                    ]
+                },
+                candidate_scores=[
+                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
+                ],
+                objective_type="minimize",
+                verbose=verbose,
+            )
+            selections, self.status = lps()
+            if self.status == "Optimal":
+                break
+
+        is_satisfied = self.status == "Optimal"
+        if not is_satisfied:
+            warnings.warn(
+                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
+            )
+
+        best_recipes = {}
+        for name, selected_idx in zip(self.candidate_stats, selections, strict=True):
+            best_recipes[name] = {
+                "format": self.candidate_stats[name]["formats"][selected_idx],
+                "costs": self.candidate_stats[name]["costs"][selected_idx],
+                "scores": self.candidate_stats[name]["scores"][selected_idx],
+            }
+
+        return best_recipes, is_satisfied
+
     @abstractmethod
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Run the search with stats to get the best recipe and whether the constraints are satisfied."""
@@ -1459,10 +1519,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 def _get_auto_quantize_score(grad_output, output_diff):
     x = grad_output.float() * output_diff.float()
     return x.clamp(-1e10, 1e10).square().sum()
-
-
-def _add_auto_quantize_score(grad_output, output_diff, score_tensor):
-    score_tensor += _get_auto_quantize_score(grad_output, output_diff)
 
 
 class _AutoQuantizeBackwardScoringSession(ABC):
@@ -1563,56 +1619,90 @@ class _AutoQuantizeBackwardScoringSession(ABC):
         """Run a score module forward pass and collect method-specific state."""
 
 
-class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
-    """Collect gradient-based scores while candidate recipes are replayed."""
+class _AutoQuantizeCandidateReplayScoringSession(_AutoQuantizeBackwardScoringSession):
+    """Share baseline execution, candidate replay, and score accumulation."""
 
-    def forward(self, module: nn.Module, *args, **kwargs):
-        """Run the reference forward and cache each recipe's output perturbation."""
-        no_quant_recipe = QuantRecipe(quant_cfg=None)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.no_quant = QuantRecipe(quant_cfg=None)
+
+    def _run_unquantized(self, module: nn.Module, *args, **kwargs):
+        """Run a score module with each configurable group unquantized."""
         for hparam in module._hparams_for_scoring:
             if hparam.is_configurable:
-                hparam.active = no_quant_recipe
-
+                hparam.active = self.no_quant
         output = self.original_forward(module)(*args, **kwargs)
+        base = output[0] if isinstance(output, tuple) else output
+        return output, base
 
-        # Checkpointed modules recompute with gradients enabled during backward.
-        base_output = output[0] if isinstance(output, tuple) else output
-        if not torch.is_grad_enabled() or not base_output.requires_grad:
-            return output
-
-        output_diffs = {hparam: {} for hparam in module._hparams_for_scoring}
+    def _replay_candidates(self, module: nn.Module, base, candidate_recipes, *args, **kwargs):
+        """Measure output differences for the requested candidates."""
+        output_diffs = {}
         with torch.no_grad():
             for hparam in module._hparams_for_scoring:
                 if not hparam.is_configurable:
                     continue
-                for recipe in hparam.choices:
-                    if recipe == no_quant_recipe:
+                recipe_diffs = {}
+                for recipe in candidate_recipes(hparam):
+                    if recipe == self.no_quant:
                         continue
                     hparam.active = recipe
-                    replay = self.original_forward(module)(*args, **kwargs)
-                    output_diff = (
-                        replay[0] - output[0] if isinstance(replay, tuple) else replay - output
-                    )
-                    output_diffs[hparam][recipe] = output_diff.detach()
-                hparam.active = no_quant_recipe
+                    try:
+                        replay = self.original_forward(module)(*args, **kwargs)
+                    finally:
+                        hparam.active = self.no_quant
+                    replay = replay[0] if isinstance(replay, tuple) else replay
+                    recipe_diffs[recipe] = (replay - base).detach()
+                if recipe_diffs:
+                    output_diffs[hparam] = recipe_diffs
+        return output_diffs
 
+    def _accumulate_candidate_scores(self, module, output_diffs, grad_output) -> None:
+        """Apply the method's score functional to replayed output differences."""
+        if grad_output is None:
+            return
+        with torch.no_grad():
+            for hparam, recipe_diffs in output_diffs.items():
+                for recipe, output_diff in recipe_diffs.items():
+                    contribution = self._score_contribution(grad_output, output_diff)
+                    current = hparam._importance_dict[recipe][module]
+                    hparam._importance_dict[recipe][module] = (
+                        contribution if current is None else current + contribution
+                    )
+
+    def _register_candidate_score_hook(self, module, output, output_diffs) -> None:
+        """Bind replayed candidate differences to one output invocation."""
         self._register_output_grad_hook(
-            base_output,
-            lambda grad_output: self._accumulate_scores(module, output_diffs, grad_output),
+            output,
+            lambda grad_output: self._accumulate_candidate_scores(
+                module, output_diffs, grad_output
+            ),
         )
+
+    @abstractmethod
+    def _score_contribution(self, grad_output, output_diff):
+        """Return this method's score contribution for one replayed candidate."""
+
+
+class _AutoQuantizeGradientScoringSession(_AutoQuantizeCandidateReplayScoringSession):
+    """Collect gradient-based scores while candidate recipes are replayed."""
+
+    def forward(self, module: nn.Module, *args, **kwargs):
+        """Run the reference forward and cache each recipe's output perturbation."""
+        output, base = self._run_unquantized(module, *args, **kwargs)
+
+        # Checkpointed modules recompute with gradients enabled during backward.
+        if not torch.is_grad_enabled() or not base.requires_grad:
+            return output
+
+        output_diffs = self._replay_candidates(
+            module, base, lambda hparam: hparam.choices, *args, **kwargs
+        )
+        self._register_candidate_score_hook(module, base, output_diffs)
         return output
 
-    def _accumulate_scores(self, module, invocation_diffs, grad_output) -> None:
-        """Accumulate scores for the invocation that produced ``grad_output``."""
-        for hparam, output_diffs in invocation_diffs.items():
-            for recipe, output_diff in output_diffs.items():
-                importance = hparam._importance_dict[recipe][module]
-                if importance is None:
-                    hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
-                        grad_output, output_diff
-                    )
-                else:
-                    _add_auto_quantize_score(grad_output, output_diff, importance)
+    def _score_contribution(self, grad_output, output_diff):
+        return _get_auto_quantize_score(grad_output, output_diff)
 
 
 class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
@@ -1794,52 +1884,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
         AutoQuantize uses Linear Programming Solver to find the optimal quantization configuration which
         minimizes the sum of per-layer auto_quantize scores while meeting the specified constraint.
         """
-        # TODO: Do this only for rank 0 in the respective pipeline group
-
-        for lower_bound in self._get_search_lower_bounds():
-            # The LP solver for auto_quantize sometimes fails to find a solution if a lower bound is not
-            # specified. I dont know why this happens.
-            # As a workaround, lets specify a lower bound for the weight compression if previous
-            # search without lower bound fails.
-            constraints, constraint_name = self._get_constraints_for_search(
-                max_weight_size, lower_bound
-            )
-
-            lps = LPS(
-                name="AutoQuantize",
-                constraints=constraints,
-                constraints_to_candidate_costs={
-                    constraint_name: [
-                        candidate_stat["costs"] for candidate_stat in self.candidate_stats.values()
-                    ]
-                },
-                candidate_scores=[
-                    candidate_stat["scores"] for candidate_stat in self.candidate_stats.values()
-                ],
-                objective_type="minimize",
-                verbose=verbose,
-            )
-            selections, self.status = lps()
-            if self.status == "Optimal":
-                break
-
-        if self.status != "Optimal":
-            warnings.warn(
-                "AutoQuantize FAILED to find a solution! The searched model might not meet all constraints. "
-            )
-            is_satisfied = False
-        else:
-            is_satisfied = True
-
-        best_recipes = {}
-        for name, selected_idx in zip(self.candidate_stats.keys(), selections):
-            best_recipes[name] = {
-                "format": self.candidate_stats[name]["formats"][selected_idx],
-                "costs": self.candidate_stats[name]["costs"][selected_idx],
-                "scores": self.candidate_stats[name]["scores"][selected_idx],
-            }
-
-        return best_recipes, is_satisfied
+        return self._run_linear_program_search(max_weight_size, verbose)
 
 
 @torch.compile(dynamic=True)
@@ -2045,6 +2090,12 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 # Backward compatibility alias (defaults to gradient-based searcher)
 AutoQuantizeSearcher = AutoQuantizeGradientSearcher
 
+# Registry of AutoQuantize scoring methods. Optional methods register on import.
+AUTO_QUANTIZE_SEARCHERS: dict[str, type[_AutoQuantizeBaseSearcher]] = {
+    AutoQuantizeGradientSearcher.method_name: AutoQuantizeGradientSearcher,
+    AutoQuantizeKLDivSearcher.method_name: AutoQuantizeKLDivSearcher,
+}
+
 
 def _as_list(value) -> list:
     if value is None:
@@ -2177,15 +2228,12 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
     max_weight_size = total_weight_size * compression
     method = search_state["method"]
 
-    if method == "gradient":
-        searcher = AutoQuantizeGradientSearcher()
-    elif method == "kl_div":
-        searcher = AutoQuantizeKLDivSearcher()
-    else:
+    if method not in AUTO_QUANTIZE_SEARCHERS:
         raise ValueError(
-            f"Unknown autoquant search method: {method!r}. Expected 'gradient' or 'kl_div'."
+            f"Unknown autoquant search method: {method!r}. "
+            f"Expected one of {sorted(AUTO_QUANTIZE_SEARCHERS)}."
         )
-
+    searcher = AUTO_QUANTIZE_SEARCHERS[method]()
     searcher.candidate_stats = candidate_stats
     searcher.cost_model = search_state.get("cost_model", COST_MODEL_WEIGHT)
     searcher.cost = search_state.get("cost", {})
@@ -2202,8 +2250,10 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
         "cost": searcher.cost,
         "active_moe_expert_ratio": searcher.active_moe_expert_ratio,
     }
+    for key in searcher.default_state_dict:
+        if key in search_state and not hasattr(searcher, key):
+            setattr(searcher, key, search_state[key])
     best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
-
     best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
     if verbose:
         total_cost = sum(info["costs"] for info in best_recipe_info.values())
