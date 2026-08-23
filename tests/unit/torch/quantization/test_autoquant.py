@@ -36,6 +36,7 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipe,
     QuantRecipeHparam,
     _AutoQuantizeBaseSearcher,
+    _AutoQuantizeGradientScoringSession,
     _module_search_space_signature,
     estimate_quant_compression,
 )
@@ -1046,11 +1047,39 @@ def test_gradient_scoring_restores_model_after_failure():
     assert all(
         getattr(module.forward, "__name__", None) != "patched_forward" for module in patched_modules
     )
+    assert all("forward" not in module.__dict__ for module in patched_modules)
     assert all(not module._backward_hooks for module in patched_modules)
     assert all(param.requires_grad for param in model.parameters())
     for module in model.modules():
         for hparam in getattr(module, "_hparams_for_scoring", []):
             assert hparam.active == hparam.original
+
+
+@pytest.mark.parametrize("instance_override", [False, True])
+def test_gradient_scoring_restores_forward_attribute_layout(instance_override):
+    module = torch.nn.Identity()
+    module._hparams_for_scoring = []
+
+    def original_forward(x):
+        return x + 1
+
+    original_override = original_forward
+    if instance_override:
+        module.forward = original_override
+
+    session = _AutoQuantizeGradientScoringSession(
+        module,
+        [module],
+        lambda _name, _model: False,
+    )
+    with pytest.raises(RuntimeError, match="stop during scoring"), session:
+        assert module.__dict__["forward"] is not original_override
+        raise RuntimeError("stop during scoring")
+
+    if instance_override:
+        assert module.__dict__["forward"] is original_override
+    else:
+        assert "forward" not in module.__dict__
 
 
 def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):

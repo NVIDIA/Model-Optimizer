@@ -1485,8 +1485,13 @@ class _AutoQuantizeBackwardScoringSession(ABC):
             for module in self.score_modules:
                 original_forward = module.forward
                 self._original_forwards[module] = original_forward
+                had_instance_forward = "forward" in module.__dict__
+                instance_forward = module.__dict__.get("forward")
                 module.forward = types.MethodType(patched_forward, module)
-                self._stack.callback(setattr, module, "forward", original_forward)
+                if had_instance_forward:
+                    self._stack.callback(setattr, module, "forward", instance_forward)
+                else:
+                    self._stack.callback(module.__dict__.pop, "forward", None)
                 hook = module.register_full_backward_hook(self.backward_hook)
                 self._stack.callback(hook.remove)
 
