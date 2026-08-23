@@ -116,6 +116,8 @@ repos:
               modelopt/torch/speculative/plugins/modeling_domino.py|
               modelopt/torch/speculative/plugins/hf_dflash.py|
               modelopt/torch/speculative/plugins/modeling_dflash.py|
+              modelopt/torch/speculative/plugins/hf_dflash2.py|
+              modelopt/torch/speculative/plugins/modeling_dflash2.py|
               modelopt/torch/speculative/plugins/hf_dspark.py|
               modelopt/torch/speculative/plugins/modeling_dspark.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|
