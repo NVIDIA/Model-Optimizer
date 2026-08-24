@@ -12,7 +12,7 @@ Why do we need AutoQuantize?
 
 LLMs carry a lot of redundancy, but not uniformly: a few layers — attention projections, the final layers of the network — are disproportionately sensitive to quantization, while most others (like MoE experts) are quite forgiving. Keeping just those few sensitive layers at higher precision (FP8 or BF16) while quantizing the rest to FP4 preserves accuracy with nearly all of FP4's memory savings and speedups. The hard part is finding *which* layers to keep — traditionally a slow pile of per-model ablation experiments.
 
-**AutoQuantize**, part of NVIDIA's `Model Optimizer <https://github.com/NVIDIA/TensorRT-Model-Optimizer>`_ library, automates this search: given a cost budget, it scores every layer's quantization sensitivity with a fast gradient-based heuristic and finds the lowest-scoring mixed-precision assignment under that budget — no per-model ablation studies required.
+**AutoQuantize**, part of NVIDIA's `Model Optimizer <https://github.com/NVIDIA/Model-Optimizer>`_ library, automates this search: given a cost budget, it scores every layer's quantization sensitivity with a fast gradient-based heuristic and finds the lowest-scoring mixed-precision assignment under that budget — no per-model ablation studies required.
 
 How AutoQuantize works
 **********************
@@ -73,27 +73,26 @@ Deployment-restriction-aware search
 
 A mixed-precision assignment must respect the coupling constraints of its target runtime. AutoQuantize folds selected constraints directly into the search: any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item with aggregated sensitivity and cost. This narrows the assignment to formats that coupled operators can share; runtime support still depends on the model, quantization formats, and documented export and deployment workflow.
 
-Joint quantization for fused linear layers
-===========================================
+Grouped decisions for coupled operators
+=======================================
 
-Inference runtimes commonly fuse each layer's Q, K, and V projections, so AutoQuantize constrains the three projections to share one format. Sensitivity remains measured at each projection's individual module output, and the three scores are aggregated for the shared-format decision:
+Inference runtimes commonly fuse each layer's Q, K, and V projections into one GEMM, so AutoQuantize constrains the three projections to share a format. Each projection is still scored at its own output, and the three scores are summed into the shared decision:
+
+The same grouping mechanism covers other supported fused layouts, including gate/up MLP projections and expert-weight layouts.
 
 .. math::
 
    S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) = \sum_{p \in \{\mathrm{q},\mathrm{k},\mathrm{v}\}} S(\mathrm{Op}_p, Q_{p,f}).
 
-The corresponding costs are aggregated in the same way. Grouping therefore changes the assignment constraint, not where QKV sensitivity is measured.
+Adding the three scores isn't a shortcut — it follows from the approximation we already made. Dropping the off-diagonal Hessian terms means the errors from Q, K, and V don't interact, so their sensitivities simply add. Measuring them jointly after the attention block instead would capture that interaction; we leave that as a future investigation.
 
-MoE layer constraints
-=====================
-
-The quantized MoE APIs in vLLM and TensorRT-LLM require all sparse experts within a layer to share one format. AutoQuantize therefore treats each layer's sparse-expert projections — every expert's ``up_proj`` and ``down_proj`` — as a single decision. For this MoE grouping, sensitivity is measured downstream at the MoE block output:
+Costs are summed the same way. The quantized MoE APIs in TensorRT-LLM, vLLM, and SGLang impose the same kind of restriction, so each layer's sparse routed experts are merged into a single decision in exactly this manner. For the Qwen3 models benchmarked here, that decision includes every expert's ``gate_proj``, ``up_proj``, and ``down_proj``. Unlike the QKV case, sensitivity is measured once downstream at the MoE block output rather than at each expert projection:
 
 .. math::
 
    S(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{moe},k}\right)^2 \left(Y_{\mathrm{moe},k} - Y_{\mathrm{moe},k}^{Q_{\mathrm{moe},f}}\right)^2.
 
-The other linear layers in the MoE block — latent projections and shared experts — are not subject to this restriction, so each is searched independently.
+Latent projections and shared experts are outside this all-sparse-experts restriction, but other applicable fusion constraints still apply. For example, a shared expert's ``gate_proj`` and ``up_proj`` share a format while its ``down_proj`` is searched separately.
 
 Results
 *******
@@ -111,7 +110,7 @@ Adding FP8 to the format menu helps across the reported sweep: at every budget, 
 AutoQuantize gradient is fast!
 ==============================
 
-Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method instead visits every scored module, locally replays every candidate format, and performs one backward pass. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~51× difference (Table 1).
+Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method instead visits every scored module, locally replays every candidate format, and performs one backward pass. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~52× difference (Table 1).
 
 **Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
@@ -155,7 +154,7 @@ AutoQuantize is a one-call API in Model Optimizer — pass the model, a bit budg
        num_score_steps=128,
    )
 
-The returned model carries the searched per-layer format assignment and is ready for export. For an end-to-end example on Hugging Face models — including the supported export workflow — see the `AutoQuantize section of the ModelOpt hf_ptq README <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/hf_ptq#autoquantize>`_. AutoQuantize also works on Megatron Core models — see the `AutoQuantize mixed-precision search example in Megatron-LM <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-auto-quantize-mixed-precision-search>`_.
+The returned model carries the searched per-layer format assignment and is ready for export. For an end-to-end example on Hugging Face models — including the supported export workflow — see the `AutoQuantize section of the ModelOpt hf_ptq README <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq#autoquantize>`_. AutoQuantize also works on Megatron Core models — see the `AutoQuantize mixed-precision search example in Megatron-LM <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-auto-quantize-mixed-precision-search>`_.
 
 Next steps
 **********

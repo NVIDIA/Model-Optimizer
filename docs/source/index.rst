@@ -34,7 +34,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
        <div class="announcement-card-meta">July 15, 2026 &middot; Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin, Shengliang Xu</div>
        <h2><a href="announcements/autoquantize.html">AutoQuantize: A Fast Automatic Mixed-Precision Assignment</a></h2>
        <p>AutoQuantize finds low-sensitivity mixed-precision assignments with gradient-based scoring under a modeled effective-bits budget.</p>
-       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span></div>
+       <div class="announcement-card-tags"><span>autoquantize</span><span>quantization</span><span>mixed-precision</span><span>modelopt</span></div>
      </article>
      <article class="announcement-card" data-date="2026-07-13" data-title="DSpark vs Domino: Same DFlash Backbone, Different Correction Heads" data-summary="DSpark and Domino both build on block-parallel DFlash draft generation but diverge in their token-level correction heads." data-tags="speculative-decoding dflash dspark domino architecture">
        <div class="announcement-card-meta">July 13, 2026 &middot; Model Optimizer Team</div>
