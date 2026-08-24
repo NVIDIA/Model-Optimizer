@@ -30,6 +30,7 @@ from modelopt.onnx.quantization.quant_utils import (
     quantize,
 )
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 
 from .base_exporter import ONNXQuantExporter
 
@@ -65,6 +66,23 @@ def _cast_fp8(array: np.ndarray) -> np.ndarray:
     array_f8_t = array_f32_t.clamp(min=-448, max=448).to(torch.float8_e4m3fn).view(torch.uint8)
     array_f8 = array_f8_t.cpu().numpy().astype(np.uint8)
     return array_f8
+
+
+def _encode_nvfp4_block_scale(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return FP8-rounded block scales as FP32 values and encoded bytes."""
+    if not np.all(np.isfinite(array)) or np.any(array < 0):
+        raise ValueError("NVFP4 block scales must be finite and nonnegative.")
+
+    array_f32_t = torch.from_numpy(array)
+    if torch.cuda.is_available():
+        array_f32_t = array_f32_t.cuda()
+    array_f8_t = _cast_per_block_scale_to_fp8(array_f32_t)
+    array_f32 = array_f8_t.float().cpu().numpy()
+    array_f8 = array_f8_t.view(torch.uint8).cpu().numpy().astype(np.uint8)
+
+    if not np.all(np.isfinite(array_f32)) or np.any(array_f32 <= 0):
+        raise ValueError("NVFP4 block scales are not representable in FLOAT8E4M3FN.")
+    return array_f32, array_f8
 
 
 def _replace_fp4qdq_with_2dq(
@@ -295,12 +313,12 @@ class NVFP4QuantExporter(ONNXQuantExporter):
 
             sw_f32_per_block = sw_f32_per_block.reshape(sw_per_block_shape)
 
-            # Quantize weights
-            w_f32 = quantize(w32, block_size, sw_f32_per_block, sw_f32_per_tensor)
+            if not np.all(np.isfinite(sw_f32_per_tensor)) or np.any(sw_f32_per_tensor <= 0):
+                raise ValueError("NVFP4 per-tensor scales must be finite and positive.")
 
-            # Cast to FP4 and FP8
+            sw_f32_per_block, sw_f8_per_block = _encode_nvfp4_block_scale(sw_f32_per_block)
+            w_f32 = quantize(w32, block_size, sw_f32_per_block, sw_f32_per_tensor)
             w_f4 = _cast_fp4(w_f32)
-            sw_f8_per_block = _cast_fp8(sw_f32_per_block)
 
             # Store compressed data as node attributes for post_process
             w_f4_attr = node.attribute.add()
