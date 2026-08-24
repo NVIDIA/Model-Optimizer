@@ -197,8 +197,10 @@ def gpu(session):
         "pip",
         "install",
         "--no-build-isolation",
-        "git+https://github.com/state-spaces/mamba.git",
-        "git+https://github.com/Dao-AILab/causal-conv1d.git",
+        # Install released sdists instead of Git main, which can pull an
+        # incompatible apache-tvm-ffi dependency through mamba_ssm.
+        "mamba_ssm",
+        "causal-conv1d",
     )
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
