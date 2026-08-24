@@ -33,23 +33,17 @@ import modelopt.onnx.quantization as moq
 
 
 def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
-    """Emit a Relu + 2-Conv ONNX with the node names the test filters on.
-
-    The leading ``Relu`` shifts ``conv_keep`` off the graph-input tensor so its input has a real
-    producer node (a common shape in real models) and mirrors what sensitivity's per-node probe
-    hits when it isolates an interior Conv.
-    """
+    """Emit a 2-Conv ONNX with the node names the test filters on."""
     rng = np.random.default_rng(0)
-    w1 = rng.standard_normal((4, 3, 3, 3)).astype(np.float32) * 0.1
-    b1 = np.zeros((4,), dtype=np.float32)
-    w2 = rng.standard_normal((4, 4, 3, 3)).astype(np.float32) * 0.1
-    b2 = np.zeros((4,), dtype=np.float32)
+    w1 = rng.standard_normal((16, 16, 3, 3)).astype(np.float32) * 0.1
+    b1 = np.zeros((16,), dtype=np.float32)
+    w2 = rng.standard_normal((16, 16, 3, 3)).astype(np.float32) * 0.1
+    b2 = np.zeros((16,), dtype=np.float32)
 
     nodes = [
-        helper.make_node("Relu", ["input"], ["relu_out"], name="pre_relu"),
         helper.make_node(
             "Conv",
-            ["relu_out", "w1", "b1"],
+            ["input", "w1", "b1"],
             ["conv_keep_out"],
             name="conv_keep",
             pads=[1, 1, 1, 1],
@@ -73,8 +67,8 @@ def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
     graph = helper.make_graph(
         nodes=nodes,
         name="nodes_to_quantize_test",
-        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 8, 8])],
-        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4, 8, 8])],
+        inputs=[helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 16, 8, 8])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 16, 8, 8])],
         initializer=initializers,
     )
     onnx.save(
@@ -106,7 +100,7 @@ def test_nodes_to_quantize_restricts_qdq_to_single_conv(tmp_path):
     onnx_path = str(tmp_path / "two_conv.onnx")
     _build_two_conv_onnx(onnx_path)
     calibration_data = {
-        "input": np.random.default_rng(0).standard_normal((2, 3, 8, 8)).astype(np.float32)
+        "input": np.random.default_rng(0).standard_normal((2, 16, 8, 8)).astype(np.float32)
     }
 
     moq.quantize(
