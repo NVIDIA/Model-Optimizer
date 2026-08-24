@@ -30,6 +30,15 @@ an FP32 QDQ carrier, like ``triton_fa``'s ``Q_IS_FP32``). Only the softmax P
 is quantized inside the kernel, after the row-sum, so the softmax denominator
 stays unquantized.
 
+Decode V is therefore NOT independently quantized: ``V = trans(k_nope)`` reuses
+the latent's K-side (feature-axis) quantization, so decode V inherits
+``k_format`` and there is no ``v_qdq`` here — ``v_format`` applies to prefill
+only. A shared latent cannot be stored quantized along both K's feature axis
+and V's token (contraction) axis at once; honoring an independent token-axis V
+in decode would require an on-read re-quant of the already-quantized latent
+(double-quant), or a raw cache with on-read K/V quant (the MNI-style model),
+which forfeits the write-once step/split stability documented below.
+
 P QDQ operates on split-local, unnormalized online-softmax probabilities;
 its numerics therefore include the fixed split count and tile size as part of
 the kernel schedule. Split bounds are tile-aligned so quant-relevant tile
