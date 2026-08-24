@@ -831,6 +831,7 @@ class TestLocalDatasetDirRoundTrips:
 
     def test_zero_quota_split_is_not_loaded(self, monkeypatch, make_toy_hf_dataset):
         """1 sample over 2 splits → quotas [0, 1]: the zero-quota split is never opened."""
+        # The optional datasets package is required to spy on local load_dataset calls.
         datasets = pytest.importorskip("datasets")
         loaded, real_load_dataset = [], datasets.load_dataset
 

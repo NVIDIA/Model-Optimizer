@@ -21,6 +21,7 @@ import os
 import random
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -636,9 +637,7 @@ def get_dataset_samples(
             # Skip zero-quota splits: starting a streamed split fetches its first record batch.
             if n == 0:
                 continue
-            for i, sample in enumerate(_load_split(split_name)):
-                if i >= n:
-                    break
+            for sample in islice(_load_split(split_name), n):
                 text = _preprocess(sample)
                 if text:
                     samples.append(text)
