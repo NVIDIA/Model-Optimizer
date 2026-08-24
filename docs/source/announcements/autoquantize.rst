@@ -17,16 +17,14 @@ LLMs carry a lot of redundancy, but not uniformly: a few layers — attention pr
 How AutoQuantize works
 **********************
 
-AutoQuantize is a neural architecture search (NAS) inspired method that works in three steps: score how sensitive each operation is to quantization, model the performance cost of each available format, and solve for the best layer-wise assignment under the cost budget with a knapsack-style optimization. The sensitivity score uses a second-order Taylor approximation in the spirit of Optimal Brain Surgeon [1]_ and the output-side diagonal-Fisher reconstruction used by BRECQ [2]_; the mixed-precision allocation is inspired by LLM-MQ [3]_.
-
-Where LLM-MQ handles only weight quantization, AutoQuantize works at the operator level — including joint weight-and-activation quantization for GEMMs — and respects real deployment constraints such as operator fusion.
+AutoQuantize is a neural architecture search (NAS) inspired method that works in three steps: score how sensitive each operation is to quantization, model the performance cost of each available format, and solve for the best layer-wise assignment under the cost budget with a knapsack-style optimization. The sensitivity score uses a second-order Taylor approximation in the spirit of Optimal Brain Surgeon [1]_, while the mixed-precision search builds on LLM-MQ [2]_.
 
 AutoQuantize gradient: A fast, yet accurate sensitivity scoring
 ===============================================================
 
 The sensitivity score we want is simple to state: how much the model loss changes when a layer is quantized in isolation. Measuring that directly — quantize one layer at a time, re-evaluate the whole model — requires a full model evaluation per layer per candidate format, as we'll quantify later (Table 1). We need a cheaper estimate.
 
-Two observations give us a shortcut. First, for a trained model, a Taylor expansion of the loss around a layer's output shows the loss change from a quantization perturbation is governed by the Hessian — the local curvature. Second, following BRECQ [2]_, we approximate that Hessian with the diagonal Fisher, whose entries are squared gradients. This drops the off-diagonal terms, treating cross-coordinate contributions from the output error as negligible. Together these observations turn sensitivity into a gradient-squared-weighted output error, no explicit Hessian required.
+Two observations give us a shortcut. First, for a trained model, a Taylor expansion of the loss around a layer's output shows the loss change from a quantization perturbation is governed by the Hessian — the local curvature. Second, we use the diagonal Fisher instead of the full Hessian to make the computation practical, treating interactions between output-error coordinates as negligible. This is analogous to the diagonal-Fisher approximation used by SqueezeLLM [3]_ in weight space. Together these observations turn sensitivity into a gradient-squared-weighted output error, no explicit Hessian required.
 
 Concretely, let :math:`Y_i` be the BF16 output of operator :math:`i`, :math:`Y_i^{Q_{i,f}}` its output under quantization format :math:`f`, :math:`g_i = \nabla_{Y_i}\mathcal{L}` the gradient at that output, and :math:`H_i` the local Hessian:
 
@@ -48,7 +46,7 @@ Keeping only the Hessian diagonal and estimating it with the diagonal Fisher (sq
 
 where :math:`d` is the feature dimension of the layer output.
 
-The intuition: quantization perturbs the model, and the loss impact of that perturbation is the output error weighted by squared gradients. The error can be measured at the operation's immediate output or further downstream (e.g. the block output); for linear layers we use the linear-layer output. This output-side formulation is also what separates AutoQuantize from LLM-MQ, which measures error at each weight and therefore can't handle joint weight-and-activation quantization or the coupled decisions deployment-aware search needs.
+The intuition: quantization perturbs the model, and the loss impact of that perturbation is the output error weighted by squared gradients. The error can be measured at the operation's immediate output or further downstream (e.g. the block output); for linear layers we use the linear-layer output. Unlike LLM-MQ's weight-space score, this output-side formulation can evaluate joint weight-and-activation formats. AutoQuantize also extends the search with deployment-restriction-aware grouped decisions, as described below.
 
 Both ingredients are cheap: the output error :math:`Y_{i,k} - Y_{i,k}^{Q_{i,f}}` comes from replaying the operator's captured input through simulated quantization for each candidate format, and the gradient :math:`g_{i,k}` from one backward pass per scoring batch.
 
@@ -97,15 +95,15 @@ Latent projections and shared experts are outside this all-sparse-experts restri
 Results
 *******
 
-.. image:: assets/autoquantize-qwen3-mmlu-effective-bits.png
-   :alt: MMLU accuracy versus effective bits under AutoQuantize for Qwen3 1.7B, 4B, 8B, and 14B
+.. image:: assets/autoquantize-qwen35-mmlu-effective-bits.png
+   :alt: MMLU accuracy versus effective bits under AutoQuantize for Qwen3.5-2B and Qwen3.5-9B
    :width: 100%
 
-**MMLU accuracy vs. effective bits under AutoQuantize, Qwen3 1.7B/4B/8B/14B.**
+**Figure 1. MMLU accuracy vs. effective bits under AutoQuantize, Qwen3.5-2B/9B.**
 
-The figure shows an AutoQuantize budget sweep on Qwen3 models: sweep the modeled bit budget, solve the additive sensitivity proxy at each point, and evaluate the resulting assignment on MMLU. Accuracy has an overall upward trend as the budget increases, with some non-monotonic points.
+Figure 1 sweeps the AutoQuantize effective-bits budget and evaluates each resulting assignment on MMLU: more budget buys accuracy, so the curve is the memory-vs-accuracy trade you get to pick a point on. The trend is upward but not strictly monotonic, likely a mix of evaluation noise and the knapsack solve reshuffling assignments between neighboring budgets. Dashed lines are BF16; the NVFP4 default markers quantize every layer except ``lm_head``.
 
-Adding FP8 to the format menu helps across the reported sweep: at every budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
+Adding FP8 to the format menu helps across both reported sweeps: at every plotted budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
 
 AutoQuantize gradient is fast!
 ==============================
@@ -175,5 +173,5 @@ References
 **********
 
 .. [1] B. Hassibi and D. G. Stork. `Second Order Derivatives for Network Pruning: Optimal Brain Surgeon <https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_. *NeurIPS*, 1992.
-.. [2] Y. Li, R. Gong, X. Tan, Y. Yang, P. Hu, Q. Zhang, F. Yu, W. Wang, and S. Gu. `BRECQ: Pushing the Limit of Post-Training Quantization by Block Reconstruction <https://openreview.net/forum?id=POWv6hDd9XH>`_. *ICLR*, 2021.
-.. [3] S. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. `LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment <https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf>`_. *NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)*, 2023.
+.. [2] S. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. `LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment <https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf>`_. *NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)*, 2023.
+.. [3] S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer. `SqueezeLLM: Dense-and-Sparse Quantization <https://arxiv.org/abs/2306.07629>`_. *ICML*, 2024.
