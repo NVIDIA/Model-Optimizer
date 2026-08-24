@@ -33,7 +33,12 @@ import modelopt.onnx.quantization as moq
 
 
 def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
-    """Emit a 2-Conv ONNX with the node names the test filters on."""
+    """Emit a Relu + 2-Conv ONNX with the node names the test filters on.
+
+    The leading ``Relu`` shifts ``conv_keep`` off the graph-input tensor so its input has a real
+    producer node (a common shape in real models) and mirrors what sensitivity's per-node probe
+    hits when it isolates an interior Conv.
+    """
     rng = np.random.default_rng(0)
     w1 = rng.standard_normal((4, 3, 3, 3)).astype(np.float32) * 0.1
     b1 = np.zeros((4,), dtype=np.float32)
@@ -41,9 +46,10 @@ def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
     b2 = np.zeros((4,), dtype=np.float32)
 
     nodes = [
+        helper.make_node("Relu", ["input"], ["relu_out"], name="pre_relu"),
         helper.make_node(
             "Conv",
-            ["input", "w1", "b1"],
+            ["relu_out", "w1", "b1"],
             ["conv_keep_out"],
             name="conv_keep",
             pads=[1, 1, 1, 1],
@@ -78,14 +84,21 @@ def _build_two_conv_onnx(path: str, opset: int = 17) -> None:
 
 
 def _has_dq_predecessor(node: gs.Node, input_idx: int) -> bool:
-    """Return True when the input at ``input_idx`` of ``node`` is produced by DequantizeLinear."""
+    """Return True when the input at ``input_idx`` of ``node`` is produced by DequantizeLinear.
+
+    Returns False (rather than raising) when the input has no producer (graph input) or when
+    the producer chain is shorter than expected.
+    """
     inp = node.inputs[input_idx]
-    if not isinstance(inp, gs.Variable):
+    if not isinstance(inp, gs.Variable) or not inp.inputs:
         return False
-    producer = node.i(input_idx)
-    if producer and producer.op == "Cast":
-        producer = producer.i(0)
-    return bool(producer and producer.op == "DequantizeLinear")
+    producer = inp.inputs[0]
+    if producer.op == "Cast":
+        cast_inp = producer.inputs[0] if producer.inputs else None
+        if not isinstance(cast_inp, gs.Variable) or not cast_inp.inputs:
+            return False
+        producer = cast_inp.inputs[0]
+    return producer.op == "DequantizeLinear"
 
 
 def test_nodes_to_quantize_restricts_qdq_to_single_conv(tmp_path):
