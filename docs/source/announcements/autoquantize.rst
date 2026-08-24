@@ -64,7 +64,7 @@ Following the effective-bits objective above, AutoQuantize solves the constraine
 
    \min_{\{f\}} \sum_i S(\mathrm{Op}_i, Q_{i,f}) \quad \text{s.t.} \quad \sum_i N_{\mathrm{params}}(\mathrm{Op}_i) \times \mathrm{bits}(Q_{i,f}) \leq N_{\mathrm{total}} \times \bar{b},
 
-where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the modeled bit cost per eligible weight of format :math:`f`, :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the eligible quantizable-weight count, and :math:`\bar{b}` the user-specified average effective-bits target (e.g. :math:`\bar{b} = 4.8`). A format-provided effective-bits value includes its declared overhead; formats without one use the ``num_bits`` estimate described above. Sweeping :math:`\bar{b}` produces a budget sweep of proxy-optimal assignments.
+where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the modeled bit cost per eligible weight of format :math:`f`, :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the eligible quantizable-weight count, and :math:`\bar{b}` the user-specified average effective-bits target (e.g. :math:`\bar{b} = 4.8`). A format-provided effective-bits value includes its declared overhead; formats without one use the ``num_bits`` estimate described above. Sweeping :math:`\bar{b}` produces an optimal assignment for each budget by minimizing the sum of sensitivity scores, which serves as a proxy for model accuracy loss.
 
 AutoQuantize expresses this optimization as an ILP, with one binary variable for every candidate format in each search decision. The solver selects exactly one format per decision while satisfying the effective-bits budget.
 
@@ -167,7 +167,7 @@ We are working on improving AutoQuantize in the following ways:
 Conclusion
 **********
 
-AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, an ILP solve under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.
+AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, optimization with an ILP solver under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.
 
 .. _references:
 
