@@ -4,7 +4,7 @@ AutoQuantize: A Fast Automatic Mixed-Precision Assignment
 #########################################################
 
 :Author: Model Optimizer Team
-:Date: July 15, 2026
+:Date: August 24, 2026
 :Tags: autoquantize, quantization, mixed-precision, modelopt
 
 Why do we need AutoQuantize?
@@ -132,7 +132,7 @@ Direct sensitivity measurement runs the whole model once per layer per format. K
 
 *ModelOpt AutoQuantize supports both sensitivity scoring methods — gradient (the default) and KL divergence. Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.*
 
-**Memory.** A backward pass is not inherently memory-heavy. With activation checkpointing, intermediate activations within checkpointed regions are recomputed during backward rather than all being retained from the forward pass. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, the peak memory overhead relative to forward-only execution is not significant.
+**Memory.** By default, AutoQuantize uses activation recomputation for gradient scoring. This is memory efficient because it avoids retaining all intermediate tensors from the forward pass. As shown in Table 1, the resulting peak memory overhead over a forward-only pass is small.
 
 How to use ModelOpt AutoQuantize
 ********************************
