@@ -1055,6 +1055,35 @@ def test_gradient_scoring_restores_model_after_failure():
             assert hparam.active == hparam.original
 
 
+def test_backward_scoring_session_restores_partial_setup():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4))
+    score_module = model[0]
+    score_module._hparams_for_scoring = []
+    score_module.weight.requires_grad = False
+    original_requires_grad = {name: param.requires_grad for name, param in model.named_parameters()}
+    original_backward_hook_mode = score_module._is_full_backward_hook
+
+    def fail_on_second_parameter(name, _model):
+        if name.endswith("bias"):
+            raise RuntimeError("stop during scoring setup")
+        return True
+
+    session = _AutoQuantizeGradientScoringSession(
+        model,
+        [score_module],
+        fail_on_second_parameter,
+    )
+    with pytest.raises(RuntimeError, match="stop during scoring setup"), session:
+        pytest.fail("scoring setup should not complete")
+
+    assert "forward" not in score_module.__dict__
+    assert not score_module._backward_hooks
+    assert score_module._is_full_backward_hook is original_backward_hook_mode
+    assert {
+        name: param.requires_grad for name, param in model.named_parameters()
+    } == original_requires_grad
+
+
 @pytest.mark.parametrize("instance_override", [False, True])
 def test_gradient_scoring_restores_forward_attribute_layout(instance_override):
     module = torch.nn.Identity()

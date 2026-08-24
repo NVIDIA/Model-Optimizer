@@ -1492,6 +1492,10 @@ class _AutoQuantizeBackwardScoringSession(ABC):
                     self._stack.callback(setattr, module, "forward", instance_forward)
                 else:
                     self._stack.callback(module.__dict__.pop, "forward", None)
+
+                # PyTorch does not reset this mode when the last full backward hook is removed.
+                backward_hook_mode = module._is_full_backward_hook
+                self._stack.callback(setattr, module, "_is_full_backward_hook", backward_hook_mode)
                 hook = module.register_full_backward_hook(self.backward_hook)
                 self._stack.callback(hook.remove)
 
