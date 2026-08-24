@@ -15,26 +15,11 @@
 
 """Exclusion picker for the sensitivity primitive.
 
-Turns a per-node or per-op-type score dictionary produced by :func:`sensitivity.score`
-into an actionable ``--nodes_to_exclude`` or ``--op_types_to_exclude`` list (depending on
-granularity) for :func:`modelopt.onnx.quantization.quantize`. Supports two policy modes:
-
-* **Coverage mode** (default): pick the largest target set whose cumulative
-  sensitivity score stays at or below ``coverage * total_mass``. Portable
-  across architectures because the target is a fraction, not an absolute
-  number.
-* **Threshold mode**: exclude every target whose individual sensitivity
-  score exceeds an absolute cutoff. Simpler and more predictable when the
-  operator already knows what per-target sensitivity score magnitude they
-  consider "too sensitive to quantize" for a given model.
-
-The picker also supports **block-aware grouping** via the ``blocks`` argument:
-per-node scores can be aggregated into user-defined architectural groups
-(transformer blocks, residual blocks, MBConv stages, ...) and the picker's
-coverage / threshold semantics apply to the group ranking rather than
-individual nodes. This is useful for transformer / attention-heavy
-architectures where per-node picking leaves precision boundaries scrambled
-inside the affected blocks and softmax numerics degrade.
+Turns a per-node or per-op-type score dictionary produced by :func:`sensitivity.score` into an
+actionable ``--nodes_to_exclude`` or ``--op_types_to_exclude`` list. Supports coverage mode (pick
+the largest set whose cumulative score stays at or below ``coverage * total_mass``) and threshold
+mode (exclude every target whose individual score exceeds an absolute cutoff), and can optionally
+aggregate per-node scores into user-defined architectural groups via the ``blocks`` argument.
 """
 
 from __future__ import annotations
@@ -60,117 +45,57 @@ def suggest_exclusion(
     """Return an exclusion list from a per-target sensitivity score dictionary.
 
     Two policy modes are supported:
-
-    * **Coverage mode** (the default): return the largest target set whose
-      cumulative sensitivity score stays at or below ``coverage * total_mass``.
-      Used when ``threshold`` is ``None``. The actual coverage will be less
-      than or equal to the requested value -- adding the next target in the
-      ranking would exceed the requested value, so the picker stops before
-      crossing it.
-    * **Threshold mode**: return every target whose sensitivity score
-      exceeds ``threshold``. Used when ``threshold`` is a float;
-      ``coverage`` is ignored in this mode.
-
-    Coverage mode is architecture-portable (the target is a fraction of the
-    model's total mass, so the same ``coverage`` value produces
-    proportionally-sized exclusion sets on different models). Threshold mode
-    is simpler and more predictable when the operator already knows the
-    sensitivity score magnitude they consider "too sensitive to quantize"
-    for the specific model.
+    - **Coverage mode** (default) returns the largest target set whose cumulative sensitivity score stays
+    at or below ``coverage * total_mass`` -- the picker stops *before* crossing the target, so the
+    actual coverage is always <= requested.
+    - **Threshold mode** (used when ``threshold`` is set; ``coverage`` is ignored) returns every target 
+    whose individual score strictly exceeds ``threshold``.
+    
+    Coverage is architecture-portable because it is a fraction of the model's own total mass; threshold 
+    is model-specific but simpler when the operator already knows a reasonable per-target cutoff.
 
     Args:
-        scores: Per-target (node or op-type) sensitivity scores from
-            :func:`sensitivity.score` output.
-        coverage: Fraction of total sensitivity score mass to leave unquantized (coverage
-            mode only). Guidance:
-
-            * ``0.85 - 0.90`` (default): balanced exploration. Recovers the
-              majority of the accuracy gap between default QDQ and the FP16
-              reference while keeping the exclusion set small enough to
-              preserve most of the INT8 latency benefit. For architectures
-              with concentrated sensitivity distributions (e.g.,
-              ResNet-family with sensitivity clustered in the first
-              bottleneck), ``0.80 - 0.85`` may produce equivalent accuracy
-              with a smaller exclusion set.
-            * ``0.95 - 0.99``: accuracy-critical deployments. Larger
-              exclusion set, approaches the FP16 accuracy ceiling, at the
-              cost of more Cast boundaries and reduced INT8 latency benefit.
-            * ``0.70 - 0.80``: performance-critical deployments. Smaller
-              exclusion set, maximizes INT8 coverage for latency at the
-              cost of a wider accuracy gap versus the FP16 reference.
-
-        threshold: Absolute sensitivity score cutoff (threshold mode). When
-            set, every target with individual sensitivity score strictly
-            greater than ``threshold`` is excluded from quantization;
-            ``coverage`` is ignored. Set to ``None`` (default) to use
-            coverage mode. Guidance is model-dependent because per-target
-            sensitivity score magnitudes scale with model complexity: on
-            ResNet-50 a value of ``0.005 - 0.02`` picks up
-            the load-bearing targets; on CoAtNet-0 or larger models
-            ``0.05 - 0.5`` is a similar magnitude in relative terms. Use
-            coverage mode if you need portability across models.
-        blocks: Optional mapping from group name to a list of regex patterns
-            (either compiled ``re.Pattern`` objects or plain regex strings)
-            that match node paths. When provided, the picker ranks *groups*
-            rather than individual nodes: each node in ``scores`` is
-            assigned to at most one group (first-match wins across the
-            ``blocks`` dict); nodes matching no pattern become their own
-            singleton group named after themselves. Group scores are
-            computed via ``block_agg``, and coverage / threshold /
-            ``max_nodes`` / ``near_tie_ratio`` apply identically to the
-            group ranking. The returned exclusion list is the union of
-            member node names across the selected groups. Default ``None``
-            -- every node is its own singleton group, equivalent to
-            per-node picking.
-        block_agg: Aggregation function used to compute a group's score
-            from its members' individual scores when ``blocks`` is set.
-            One of ``"sum"``, ``"max"``, ``"mean"``. Natural pairings with
-            the two policy modes:
-
-            * ``block_agg="sum"`` with **coverage** (recommended default):
-              identical "fraction of total KL mass" semantic as per-node
-              coverage, because summing group sums equals summing all node
-              scores. Portable across granularity choices.
-            * ``block_agg="max"`` with **threshold**: same units as
-              per-node threshold (excludes any group whose peak-node score
-              exceeds the cutoff). Preserves operator intuition when
-              transferring per-node threshold guidance to the block level.
-            * Other combinations are valid but change what ``coverage``
-              and ``threshold`` mean in units. Under ``block_agg="max"``
-              coverage counts fraction-of-total-group-max-scores (not
-              fraction-of-total-KL-mass). Under ``block_agg="sum"``
-              threshold operates in summed-KL units per group, so
-              per-node threshold values must be scaled up to be
-              meaningful. Ignored when ``blocks`` is ``None``.
-        max_nodes: Optional cap on the exclusion set size. When ``blocks``
-            is set, this caps the number of *groups* included in the
-            aggregate ranking before expansion; when ``blocks`` is ``None``,
-            it caps the number of individual targets. Prevents long-tail-
-            heavy distributions from producing very large exclusion sets
-            that fragment the graph and hurt latency. Applied in both
-            modes; whichever limit triggers first stops the accumulation.
-        min_score_floor: Targets with individual score below this value are
-            never included, even if the coverage target has not been
-            reached (coverage mode) or the target exceeds ``threshold``
-            (threshold mode -- a defensive check).
-        near_tie_ratio: If the first-excluded target's sensitivity score is
-            at least this fraction of the last-included target's sensitivity
-            score, a warning is emitted via ``logger.warning`` recommending
-            the operator consider a slightly larger coverage / smaller
-            threshold to avoid intra-group precision fragmentation. Default
-            0.99 (warn when the first-excluded target's sensitivity score is
-            within 1% of the last-included's). Set to ``None`` to disable
-            the warning entirely.
+        scores: Per-target (node or op-type) sensitivity scores from :func:`sensitivity.score`.
+        coverage: Fraction of total sensitivity score mass to leave unquantized (portable across models).
+            ``0.85-0.90`` (default) balances accuracy and INT8 latency benefit; ``0.95-0.99`` 
+            favors accuracy; ``0.70-0.80`` favors latency. Portable across models.
+        threshold: Absolute score cutoff. Every target with score strictly greater than
+            ``threshold`` is excluded. Magnitudes are model-dependent.
+        blocks: Optional mapping from group name to a list of regex patterns that match node paths
+            (i.e, ``{group_name: [regex, ...]}``). When set, the picker ranks *groups* rather than 
+            individual nodes: each node is assigned to at most one group (first-match wins across 
+            the dict), unmatched nodes become their own singleton group, and coverage / threshold / 
+            ``max_nodes`` / ``near_tie_ratio`` semantics apply to the group ranking. The returned 
+            exclusion list is the union of member nodes across the selected groups. 
+            Default ``None`` = per-node picking.
+        block_agg: Aggregation function used to compute a group's score from its members' individual 
+            scores when ``blocks`` is set. One of ``"sum"``, ``"max"``, ``"mean"``. Natural pairings 
+            with the two policy modes:
+            - ``block_agg="sum"`` with **coverage** (recommended default): preserves the coverage 
+              semantic regardless of granularity choices (group sums equals to summing all node scores)
+            - ``block_agg="max"`` with **threshold**: preserves per-node threshold units and operator
+              intuition when transferring per-node threshold guidance to the block level.
+            
+            Other combinations are valid but change what ``coverage`` and ``threshold`` mean in 
+            units. Under ``block_agg="max"`` coverage counts fraction-of-total-group-max-scores 
+            (not fraction-of-total-score-mass). Under ``block_agg="sum"`` threshold operates in 
+            summed-score units per group, so per-node threshold values must be scaled up to be
+            meaningful. Ignored when ``blocks`` is ``None``; ``"mean"`` is provided for completeness.
+        max_nodes: Optional cap on the number of selected items -- individual targets when
+            ``blocks`` is ``None``, or groups when ``blocks`` is set. Prevents long-tail-heavy
+            distributions from producing very large exclusion sets that fragment the graph and
+            hurt latency.
+        min_score_floor: Targets with individual score below this value are never included, even
+            if the coverage target has not been reached or the target exceeds ``threshold``.
+        near_tie_ratio: If the first-excluded target's score is at least this fraction of the
+            last-included target's score, a warning is emitted recommending a slightly larger
+            coverage / smaller threshold to avoid intra-group precision fragmentation. Set to
+            ``None`` to disable. Default 0.99.
 
     Returns:
-        List of target names (from ``scores`` keys), sorted from highest to
-        lowest sensitivity score. Pass to
-        ``modelopt.onnx.quantization.quantize(..., nodes_to_exclude=...)`` if
-        ``scores`` came from per-node granularity, or to
-        ``modelopt.onnx.quantization.quantize(..., op_types_to_exclude=...)``
-        if it came from per-op-type granularity. When ``blocks`` is set the
-        returned list is always suitable for ``nodes_to_exclude=`` because
-        it is the union of member node names across the selected groups.
+        List of target names sorted highest-to-lowest score. Pass to ``nodes_to_exclude=`` for
+        per-node scores (or when ``blocks`` is set) and to ``op_types_to_exclude=`` for
+        per-op-type scores.
     """
     if blocks is not None:
         if block_agg not in {"sum", "max", "mean"}:
@@ -208,21 +133,17 @@ def _pick_from_scores(
     min_score_floor: float,
     near_tie_ratio: float | None,
 ) -> list[str]:
-    """Core picker: coverage / threshold selection on any ``{name: score}`` dict.
+    """Coverage / threshold selection on any ``{name: score}`` dict.
 
-    Called for per-node picking (from :func:`suggest_exclusion` with
-    ``blocks=None``) and for per-group picking (from :func:`suggest_exclusion`
-    with ``blocks`` set, after aggregating per-node scores into per-group
-    scores). Extracted so both paths share identical coverage / threshold /
-    near-tie / ``max_nodes`` / ``min_score_floor`` semantics.
+    Shared between per-node picking and per-group picking (which aggregates per-node scores into
+    per-group scores first) so both paths use identical selection semantics.
     """
     ranked = sorted(scores.items(), key=lambda kv: -kv[1])
     if not ranked:
         return []
 
+    # Threshold mode
     if threshold is not None:
-        # Threshold mode: pick every target whose sensitivity score strictly
-        # exceeds ``threshold``. Iteration order is highest-to-lowest score.
         excluded: list[str] = []
         for name, score in ranked:
             if score <= threshold or score < min_score_floor:
@@ -233,10 +154,7 @@ def _pick_from_scores(
         _warn_near_tie(ranked, excluded, near_tie_ratio, mode="threshold")
         return excluded
 
-    # Coverage mode: pick the largest target set whose cumulative sensitivity
-    # score stays at or below ``coverage * total_mass``. Stops BEFORE crossing
-    # the requested value, so the actual coverage is <= requested. Guarantees
-    # the operator never gets more exclusion than they asked for.
+    # Coverage mode
     total = sum(scores.values())
     if total <= 0.0:
         return []
@@ -248,7 +166,6 @@ def _pick_from_scores(
         if score < min_score_floor:
             break
         if cumulative + score > target:
-            # Adding this target would exceed the requested coverage; stop.
             break
         excluded.append(name)
         cumulative += score
@@ -266,14 +183,11 @@ def _assign_groups(
     """Assign each node in ``scores`` to at most one group.
 
     Rules:
-
-    * A node matching any regex in ``blocks[name]`` joins group ``name``.
-    * First-match wins across the iteration order of ``blocks`` -- callers
-      that need mixed-depth grouping should list more-specific groups
-      earlier.
-    * Nodes matching no pattern become their own singleton group named
-      after themselves, so architecturally-important standalone nodes
-      compete for exclusion on equal footing with multi-node blocks.
+    - A node matching any regex in ``blocks[name]`` joins group ``name``.
+    - First-match wins across the iteration order of ``blocks``, so callers that mix depths list 
+    more-specific groups earlier.
+    - Nodes matching no pattern become their own singleton group named after themselves so
+    architecturally-important standalone nodes compete on equal footing with multi-node blocks.
     """
     compiled = {
         gname: [re.compile(p) if isinstance(p, str) else p for p in patterns]
@@ -296,7 +210,7 @@ def _aggregate_group_scores(
     groups: Mapping[str, Sequence[str]],
     block_agg: Literal["sum", "max", "mean"],
 ) -> dict[str, float]:
-    """Aggregate per-node scores into per-group scores using ``block_agg``."""
+    """Aggregate per-node scores into per-group scores."""
     if block_agg == "sum":
         return {g: sum(scores[n] for n in members) for g, members in groups.items()}
     if block_agg == "max":
@@ -314,15 +228,12 @@ def _warn_near_tie(
     near_tie_ratio: float | None,
     mode: str,
 ) -> None:
-    """Emit a logger warning if the cut-off between included and excluded is a near-tie.
+    """Warn if the last-included and first-excluded scores are within ``near_tie_ratio``.
 
-    A near-tie means the first-excluded target's sensitivity score is at
-    least ``near_tie_ratio`` of the last-included target's sensitivity score.
-    In that case, the two targets carry nearly equivalent sensitivity signal
-    but end up in different precisions (one FP16, one INT8), which can
-    produce intra-group fragmentation and unnecessary Cast overhead. The
-    operator can widen the coverage or lower the threshold to bring the
-    near-tied target into the exclusion set.
+    When the two boundary targets carry nearly equivalent sensitivity but land in different
+    precisions (one FP16, one INT8), the resulting Cast boundary tends to produce intra-group
+    fragmentation. This warning helps guiding the user into adjusting coverage or threshold 
+    to include the near-tied target.
     """
     if near_tie_ratio is None:
         return
@@ -350,30 +261,28 @@ def summarize_exclusion(
     scores: Mapping[str, float],
     excluded: list[str],
 ) -> dict:
-    """Return a summary dictionary describing an exclusion set.
+    """Return a summary dict describing an exclusion set.
 
-    Useful for logging or reporting the effect of :func:`suggest_exclusion`
-    before feeding the result into ``modelopt.onnx.quantization.quantize``.
+    Useful for logging the effect of :func:`suggest_exclusion` before feeding the result into
+    :func:`modelopt.onnx.quantization.quantize`.
 
     Args:
-        scores: The full per-target (node or op-type) sensitivity scores.
-        excluded: The list of target names that will be excluded from
-            quantization.
+        scores: The full per-target sensitivity scores.
+        excluded: The list of target names that will be excluded from quantization.
 
     Returns:
         Dict with:
-
-        * ``coverage_pct``: Percentage of total sensitivity score mass
+        - ``coverage_pct``: Percentage of total sensitivity score mass
           captured by the exclusion set.
-        * ``num_excluded``: Number of targets to exclude from quantization.
-        * ``num_previously_quantized``: Total number of quantizable targets
+        - ``num_excluded``: Number of targets to exclude from quantization.
+        - ``num_previously_quantized``: Total number of quantizable targets
           the primitive probed (i.e., what would have been quantized
           without the exclusion set).
-        * ``num_remaining_quantized``: How many targets will still be
+        - ``num_remaining_quantized``: How many targets will still be
           quantized after the exclusion set is applied.
-        * ``excluded_mass``: Absolute cumulative sensitivity score
+        - ``excluded_mass``: Absolute cumulative sensitivity score
           captured by the exclusion set.
-        * ``total_mass``: Sum of sensitivity scores across every probed target.
+        - ``total_mass``: Sum of sensitivity scores across every probed target.
     """
     total_mass = sum(scores.values())
     excluded_mass = sum(float(scores.get(name, 0.0)) for name in excluded)

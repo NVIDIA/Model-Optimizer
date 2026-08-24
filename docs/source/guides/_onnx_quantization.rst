@@ -135,22 +135,21 @@ downstream picker can decide which ops to keep at higher precision. Works across
 Transformer, and hybrid architectures alike -- the ranking reflects each model's own
 precision-sensitive pathways (residual paths, normalization boundaries, SE gating, attention
 projections, etc.) without any architecture-specific configuration. The primitive reuses
-:func:`modelopt.onnx.quantization.quantize` internally for each per-target probe, so scales are
-properly calibrated (not autotune's placement-only descriptors).
+:func:`modelopt.onnx.quantization.quantize` internally for each per-target probe.
 
 .. _sensitivity-supported-options:
 
 Supported options
 -----------------
 
-- ``granularity``: ``op_type`` (default; probes each quantizable op type once, ~10-15 probes) or
-  ``node`` (probes each ONNX node individually, N_nodes probes; slower but per-instance).
+- ``granularity``: ``op_type`` (default; probes each quantizable op type once) or
+  ``node`` (probes each ONNX node individually; slower).
 - ``metric``: ``kl_div`` (default; softmax-normalized KL divergence — recommended), ``mse``
   (raw mean squared error; cheaper but scale-sensitive) or ``cos`` (``1 - cosine_similarity``;
   scale-invariant, robust to activation magnitude variance).
 - ``target_precision``: ``int8`` (default) or ``fp8``.
-- ``calibration_method``: passed through to the underlying quantize call — ``entropy`` (default),
-  ``max``, ``mse``, ``percentile``, etc.
+- ``calibration_method``: passed through to the underlying quantize call — ``entropy`` (default)
+  or ``max``.
 - ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
   directory), or ``None`` to fall back to synthetic random tensors (directional-only; see note
   below).
@@ -170,8 +169,8 @@ Python API:
     result = score(
         onnx_path="coatnet-0.onnx",
         calibration_data="imagenet_calib_500.npz",
-        granularity="op_type",  # or "node"
-        metric="kl_div",        # or "mse" or "cos"
+        granularity="op_type",  # choices = {"op_type", "node"}
+        metric="kl_div",        # choices = {"kl_div", "mse", "cos"}
         target_precision="int8",
     )
     # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
@@ -252,8 +251,7 @@ Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
     Omitting ``--calibration_data_path`` falls back to synthetic random inputs. Absolute scores are
     then directional-only and must not be paired with absolute thresholds -- attention-heavy models
     are the highest-risk degradation case because random Q times K^T produces near-uniform softmax
-    that hides real-input MHA quantization pathology. The ``calibration_source`` field of the
-    output JSON records which mode was used.
+    that hides real-input MHA quantization pathology.
 
 In per-node granularity the scanner iterates over every quantizable node in the graph and runs
 one probe per node; each probe uses the existing ``--nodes_to_quantize <regex>`` flag on the main
@@ -270,7 +268,7 @@ function :func:`sensitivity.suggest_exclusion` turns that dictionary into an act
 :func:`modelopt.onnx.quantization.quantize`, and :func:`sensitivity.summarize_exclusion`
 reports what the exclusion set covers.
 
-In the rest of this documentation, we'll assume ``per-node`` granularity for simplicity,
+In the rest of this documentation, we'll cover ``per-node`` granularity for simplicity,
 but the same logic goes for ``per-op-type`` granularity.
 
 Two policy modes are supported:
@@ -327,39 +325,37 @@ Python API -- threshold mode:
     The picker emits a ``logger.warning`` when the boundary between included and
     excluded nodes is a near-tie -- specifically, if the first-excluded node's sensitivity
     score is at least 99% of the last-included node's sensitivity score. In that case two
-    nodes with nearly
-    equivalent sensitivity end up in different precisions (one FP16, one INT8), which
-    can produce intra-group precision fragmentation. The warning suggests a slightly
-    larger ``coverage`` (or smaller ``threshold``) to include the near-tied node. Set
-    ``near_tie_ratio=None`` to disable the warning entirely.
+    nodes with nearly equivalent sensitivity end up in different precisions (one FP16, 
+    one INT8), which can produce intra-group precision fragmentation. The warning suggests 
+    a slightly larger ``coverage`` (or smaller ``threshold``) to include the near-tied node.
+    Set ``near_tie_ratio=None`` to disable the warning entirely.
 
 Grouping per-node scores into architectural blocks
 --------------------------------------------------
 
-For attention-heavy transformer architectures (ViT, DeiT, Swin, and hybrids
-like CoAtNet's attention stages), per-node picking can miss the actual
-accuracy-driving pattern: the top-KL nodes are selected, but excluding them
-one by one leaves each affected transformer block with fragmented precision
--- some FP16 nodes, some INT8 nodes -- and softmax numerics degrade
-catastrophically. Making the *transformer block* the atomic exclusion unit
-avoids the fragmentation entirely.
+On attention-heavy transformer architectures (ViT, DeiT, Swin, CoAtNet's
+attention stages), per-node picking can leave affected transformer blocks with
+fragmented precision -- some FP16 nodes, some INT8 nodes -- and softmax
+numerics degrade catastrophically. Making the *transformer block* the atomic
+exclusion unit avoids the fragmentation.
 
 Pass a ``blocks`` mapping to :func:`suggest_exclusion` to switch the picker
-from per-node to per-block ranking. Every node in the score dict is assigned
+from per-node to per-block ranking. Each node in the score dict is assigned
 to at most one group (first-match wins across ``blocks``); unmatched nodes
-automatically become their own singleton group. The picker aggregates
-per-node scores into per-group scores via ``block_agg`` (default ``"sum"``),
-applies the same coverage / threshold / near-tie / ``max_nodes`` semantics
-to the *group* ranking, and returns the expanded node list ready for
-``modelopt.onnx.quantization.quantize``.
+become their own singleton group. Coverage / threshold / near-tie /
+``max_nodes`` semantics apply to the *group* ranking, and the returned
+exclusion list is the union of member nodes across the selected groups. See
+:func:`suggest_exclusion`'s docstring for the ``block_agg`` / picker-mode
+pairings (``sum`` + ``coverage`` and ``max`` + ``threshold`` preserve
+per-node units).
 
 Example: ``vit_tiny_patch16_224`` from timm
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The following recipe runs a per-node sensitivity scan on ViT-tiny
-(``timm.create_model("vit_tiny_patch16_224", pretrained=True)`` exported via
-``torch.onnx.export``), then uses ``suggest_exclusion`` with block-level
-grouping at ``coverage=0.95``:
+Per-node sensitivity scan on ViT-tiny (``timm.create_model(
+"vit_tiny_patch16_224", pretrained=True)`` exported via
+``torch.onnx.export``), then block-level exclusion at ``threshold=0.1`` on
+group max-KL:
 
 .. code-block:: python
 
@@ -376,20 +372,18 @@ grouping at ``coverage=0.95``:
         target_precision="int8",
     )
 
-    # One regex per transformer block: 12 depth-1 groups covering the whole
-    # block (norm1 + attn + norm2 + mlp + residual Adds). Nodes not matching
-    # any regex -- e.g. the final /norm/LayerNormalization before the head --
-    # automatically become singleton groups and compete for exclusion on equal
-    # footing with the multi-node blocks.
+    # 12 depth-1 groups, one per transformer block. Standalone nodes not
+    # matching any regex (e.g. the final /norm/LayerNormalization before the
+    # head) become singleton groups automatically.
     blocks = {f"blocks.{n}": [rf"^/blocks/blocks\.{n}/"] for n in range(12)}
 
+    # Exclude blocks with threshold above 0.1 KL. On ViT-tiny that cleanly 
+    # captures blocks 7-11 and the final /norm/LayerNormalization singleton 
+    # (see ranking below) while leaving blocks 0-6 in INT8.
     excluded = suggest_exclusion(
         result["scores"],
-        coverage=0.95,          # capture 95% of total KL mass at the block level
-        blocks=blocks,
-        block_agg="sum",        # preserves the per-node coverage semantic
+        threshold=0.1, blocks=blocks, block_agg="max",
     )
-
     print(summarize_exclusion(result["scores"], excluded))
 
     quantize(
@@ -400,18 +394,58 @@ grouping at ``coverage=0.95``:
         quantize_mode="int8",
     )
 
-Empirically on a 500-image ImageNet-1k validation subset, block-level
-exclusion at ``coverage=0.95`` recovers ~75% top-1 versus ~60% for the best
-per-node picking (top-K or coverage) -- closing the ViT-tiny parity gap to
-native ``trtexec --int8 --fp16``.
+Block-level ranking (ViT-tiny, real 500-sample ImageNet calibration). Both
+aggregations shown side-by-side; rows sorted by ``max``::
+
+    Block ranking (kl_div, sorted by max_agg):
+      Group                     max_agg   sum_agg
+      blocks.8                    6.737     24.97   <-- highest impact
+      blocks.10                   4.632     17.25
+      blocks.11                   4.296     14.70
+      blocks.9                    4.139     15.91
+      /norm/LayerNormalization    4.105      4.11
+      blocks.7                    0.857      1.85   <-- last included at threshold=0.1
+      blocks.0                    0.011      0.05
+      /Add                        0.008      0.01
+      blocks.6                    0.006     ~0.01
+      blocks.4                    0.005     ~0.01
+      blocks.1                    0.004     ~0.01
+      blocks.2                    0.003     ~0.01
+      blocks.3                    0.003     ~0.01
+      blocks.5                    0.003     ~0.01
+      /patch_embed/proj/Conv     ~0        ~0
+      /head/Gemm                  0         0       <-- lowest impact
+
+    summarize_exclusion:
+      coverage_pct              99.86
+      num_excluded             101 (5 whole transformer blocks + 1 singleton)
+      num_previously_quantized 244
+      num_remaining_quantized  143
+
+Both aggregations pick the same top-6 groups (only their internal ordering
+of the four hottest blocks differs: ``max`` orders them 8 > 10 > 11 > 9,
+while ``sum`` orders 8 > 10 > 9 > 11 because blocks.9 has a slightly heavier
+tail than blocks.11), so any of the following expressions produces the same
+101-node exclusion:
+
+.. code-block:: python
+
+    # max + threshold (recommended natural pairing, used in the example above)
+    suggest_exclusion(scores, threshold=0.1, blocks=blocks, block_agg="max")
+
+    # sum + max_nodes (equivalent -- top 6 groups by cumulative KL mass)
+    suggest_exclusion(scores, coverage=1.0, max_nodes=6, blocks=blocks, block_agg="sum")
+
+Empirically on a 500-image ImageNet-1k validation subset, this 101-node
+block-level exclusion recovers ~75% top-1 versus ~60% for the best per-node
+picking -- closing the ViT-tiny parity gap to implicit quantization.
 
 Choosing a grouping depth
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``blocks`` argument gives full control over grouping granularity. The
-example above uses *depth-1* -- one group per transformer block, each
-covering ~20 nodes. For finer control, split each block into its attention
-and MLP residual branches (*depth-2*):
+The example above is *depth-1* (one group per transformer block). For finer
+control, split each block into its attention and MLP residual branches
+(*depth-2*):
 
 .. code-block:: python
 
@@ -428,47 +462,17 @@ and MLP residual branches (*depth-2*):
             rf"^/blocks/blocks\.{n}/Add_1$",     # residual sum after MLP
         ]
 
-Depth-2 is useful when only one branch of a transformer block is sensitive
-and you want to keep the other branch at INT8 for latency. For hybrid
-architectures like CoAtNet (``/stages/stages.N/blocks/blocks.M/``) or CNNs
-like ResNet (``/layerN/M/``), the same principle applies with the
-architecture's own path prefixes.
-
-Mixed depth within one dict is supported -- first-match ordering decides
-group assignment when patterns overlap -- so you can use depth-2 for the
-sensitivity hot region and depth-1 for the rest of the graph.
-
-Natural pairings between ``block_agg`` and picker mode
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Under ``blocks``, the picker's ``coverage`` and ``threshold`` semantics
-operate on the *aggregated group score*, not on individual node scores. Two
-combinations preserve intuition:
-
-* **``block_agg="sum"`` with ``coverage``** (recommended default): identical
-  "fraction of total KL mass" semantic as per-node coverage, because summing
-  group sums equals summing all node scores. Same ``coverage`` value
-  produces proportionally-sized exclusion sets across per-node and per-block
-  picking on the same model.
-* **``block_agg="max"`` with ``threshold``**: same units as per-node
-  threshold (excludes any group whose peak-node score exceeds the cutoff).
-  Preserves operator intuition when transferring per-node threshold values
-  to the block level.
-
-Other combinations are valid but change what ``coverage`` and ``threshold``
-mean in units. Under ``block_agg="max"`` coverage counts fraction-of-total-
-group-max-scores, not fraction-of-total-KL-mass. Under ``block_agg="sum"``
-threshold operates in summed-KL units per group, so per-node threshold
-values must be scaled up by roughly the average block size to select a
-comparable number of groups.
+Use depth-2 to keep one branch of a transformer block at INT8 while
+excluding the other. The same principle transfers to hybrids like CoAtNet
+(``/stages/stages.N/blocks/blocks.M/``) or CNNs like ResNet (``/layerN/M/``)
+with the architecture's own path prefixes. Mixed depth in one dict works
+too -- first-match ordering decides assignment when patterns overlap.
 
 When per-block picking doesn't help
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Block-level grouping is architecture-specific. For Conv-heavy models where
+Block-level grouping is architecture-specific. On Conv-heavy models where
 sensitivity is diffuse across many small MBConv or Bottleneck contributors
-(MobileNet, ResNet families), per-node ``coverage`` or ``threshold``
-picking typically outperforms block grouping -- either by finding smaller
-exclusion sets at equivalent accuracy or by finding higher accuracy at the
-same latency. Reach for ``blocks`` first on transformer / attention-heavy
-architectures; keep the per-node picker for other cases.
+(MobileNet, ResNet families), per-node ``coverage`` or ``threshold`` picking
+typically outperforms block grouping. Reach for ``blocks`` first on
+transformer / attention-heavy architectures.

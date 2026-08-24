@@ -16,7 +16,7 @@
 """Command-line entrypoint for the ONNX quantization sensitivity scan.
 
 Runs :func:`modelopt.onnx.quantization.sensitivity.score` and renders the ranked results to stderr
-and to a JSON file. Mirrors the flag style of ``python -m modelopt.onnx.quantization.autotune``.
+and to a JSON file.
 """
 
 from __future__ import annotations
@@ -235,8 +235,7 @@ def main(argv: list[str] | None = None) -> int:
         calibration_eps=args.calibration_eps,
         op_types_scope=args.op_types_scope,
     )
-    # Round-trip through str(CalibrationSource(...)) is unnecessary -- score() already emits a plain
-    # string. Assert here for documentation of the expected schema.
+    # Sanity-check the JSON schema; score() already emits the enum's string value.
     assert result["calibration_source"] in {c.value for c in CalibrationSource}
 
     payload = {"onnx_path": os.path.abspath(args.onnx_path), **result}
