@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 import modelopt.torch.puzzletron as mtpz
 from modelopt.torch.puzzletron.manifest import (
-    StageManifest,
     semantic_stage_config,
+    stage_manifest_from_config,
     validate_stage_execution_record,
     write_stage_manifest,
 )
@@ -67,7 +67,12 @@ from modelopt.torch.puzzletron.stages.graph import (
 if __package__:
     from .acceptance_resume import build_payload, check_marker, marker_path, write_marker
 else:
-    from acceptance_resume import build_payload, check_marker, marker_path, write_marker
+    from acceptance_resume import (  # type: ignore[no-redef]
+        build_payload,
+        check_marker,
+        marker_path,
+        write_marker,
+    )
 
 STAGES = stage_ids()
 PIPELINE_STAGE_ORDER = topological_stage_ids()
@@ -415,6 +420,18 @@ def _run_embedding_stage(
     )
 
 
+def _run_tokenize_data_stage(config: dict):
+    """Run tokenization from either the package or standalone entry point."""
+    # The package and standalone entry points require different import paths.
+    if __package__:
+        from .tokenize_data import tokenize_data_stage as package_tokenize_data_stage
+
+        return package_tokenize_data_stage(config)
+    from tokenize_data import tokenize_data_stage as script_tokenize_data_stage
+
+    return script_tokenize_data_stage(config)
+
+
 def _run_worker(args: argparse.Namespace) -> None:
     cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
@@ -431,12 +448,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     if not _stage_enabled(cfg, args.worker_stage):
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
     elif args.worker_stage == "tokenize_data":
-        if __package__:
-            from .tokenize_data import tokenize_data_stage
-        else:
-            from tokenize_data import tokenize_data_stage
-
-        result = tokenize_data_stage(cfg)
+        result = _run_tokenize_data_stage(cfg)
     elif embedding_root and args.worker_stage in composite_only:
         outputs = _run_embedding_stage(
             config_path=args.config,
@@ -454,7 +466,6 @@ def _run_worker(args: argparse.Namespace) -> None:
                 stage=args.worker_stage,
                 gpus_per_node=gpus_per_node,
             )
-            outputs["base_manifest"] = str(result.manifest_path)
             result = _complete_composite_stage(cfg, args.worker_stage, outputs)
     if int(os.environ.get("RANK", "0")) == 0:
         if result.status == "failed":
@@ -470,7 +481,7 @@ def _run_worker(args: argparse.Namespace) -> None:
 def _complete_composite_stage(config: dict, stage: str, outputs: dict):
     puzzle_dir = Path(config.get("puzzle_dir") or (config.get("experiment") or {})["dir"])
     manifest_path = puzzle_dir / "manifests" / f"{stage}.json"
-    manifest = StageManifest(stage=stage, inputs={"config": config}, config=config)
+    manifest = stage_manifest_from_config(stage, config)
     manifest.complete(outputs=outputs)
     write_stage_manifest(manifest_path, manifest)
     return mtpz.stage_runner.StageResult(

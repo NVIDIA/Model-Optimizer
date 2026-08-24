@@ -23,6 +23,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ __all__ = [
     "StageManifest",
     "read_stage_manifest",
     "semantic_stage_config",
+    "stage_manifest_from_config",
     "validate_stage_execution_record",
     "write_stage_execution_record",
     "write_stage_manifest",
@@ -136,7 +138,7 @@ def write_stage_execution_record(
         or stable_hash(authored_config, prefix=f"{stage}_cfg")
     )
     resolved_config_content = _resolved_config_content(
-        semantic_stage_config(dict(effective_config), stage)
+        semantic_stage_config(dict(effective_config), stage, use_authored=False)
         if isinstance(effective_config, Mapping)
         else effective_config
     )
@@ -353,6 +355,31 @@ class StageManifest:
         if self.execution_record is not None:
             payload["execution_record"] = canonicalize(self.execution_record)
         return payload
+
+
+def stage_manifest_from_config(
+    stage: str,
+    config: Mapping[str, Any],
+    *,
+    inputs: Mapping[str, Any] | None = None,
+    effective_config: Mapping[str, Any] | None = None,
+    **manifest_fields: Any,
+) -> StageManifest:
+    """Build a worker manifest with separate authored and effective config views."""
+
+    runtime = config.get("_runtime")
+    authored = runtime.get("authored_config") if isinstance(runtime, Mapping) else None
+    authored_config = deepcopy(dict(authored if isinstance(authored, Mapping) else config))
+    manifest_inputs = deepcopy(dict(inputs or {}))
+    manifest_inputs["config"] = deepcopy(authored_config)
+    resolved_config = config if effective_config is None else effective_config
+    return StageManifest(
+        stage=stage,
+        inputs=manifest_inputs,
+        config=authored_config,
+        effective_config=deepcopy(dict(resolved_config)),
+        **manifest_fields,
+    )
 
 
 def write_stage_manifest(path: str | Path, manifest: StageManifest) -> None:

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Durable candidate lineage and observations for configurable post-MIP flows."""
 
@@ -106,6 +118,7 @@ class CandidateLedger:
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.registry_path = self.root / "candidate_registry.json"
+        self.execution_identities: dict[str, str] = {}
         self.architectures: dict[str, ArchitectureCandidate] = {}
         self.revisions: dict[str, CandidateRevision] = {}
         self.observations: dict[str, dict[str, NodeObservation]] = {}
@@ -129,21 +142,27 @@ class CandidateLedger:
             )
             for key, value in dict(payload.get("revisions") or {}).items()
         }
-        self.active_mip_execution_identity = str(
-            payload.get("active_mip_execution_identity") or ""
-        )
-        self.active_profile_ids = {
-            str(value) for value in payload.get("active_profile_ids") or ()
-        }
+        self.active_mip_execution_identity = str(payload.get("active_mip_execution_identity") or "")
+        self.active_profile_ids = {str(value) for value in payload.get("active_profile_ids") or ()}
+        execution_identities = {}
         for current_path in sorted((self.root / "nodes").glob("*/current.json")):
-            node_id = current_path.parent.name
             current = json.loads(current_path.read_text())
-            execution_identity = str(current["execution_identity"])
-            path = current_path.parent / "executions" / execution_identity / "observations.json"
-            rows = json.loads(path.read_text())
+            execution_identities[current_path.parent.name] = str(current["execution_identity"])
+        self.load_execution_observations(execution_identities)
+
+    def load_execution_observations(
+        self,
+        execution_identities: Mapping[str, str],
+    ) -> None:
+        """Load node observations from exact immutable executions."""
+
+        for node_id, execution_identity in execution_identities.items():
+            path = self.root / "nodes" / node_id / "executions" / execution_identity
+            rows = json.loads((path / "observations.json").read_text())
             self.observations[node_id] = {
                 row["input_revision_id"]: NodeObservation(**row) for row in rows
             }
+            self.execution_identities[node_id] = execution_identity
 
     def publish(self) -> Path:
         payload = {
@@ -184,19 +203,23 @@ class CandidateLedger:
         index["current"] = execution_identity
         self._atomic_json(index_path, index)
         self._atomic_json(node_root / "current.json", {"execution_identity": execution_identity})
+        self.execution_identities[node_id] = execution_identity
         self.publish()
         return observations_path, candidate_set_path
 
-    def load_candidate_set(self, node_id: str) -> CandidateSet:
+    def load_candidate_set(
+        self,
+        node_id: str,
+        *,
+        execution_identity: str | None = None,
+    ) -> CandidateSet:
         node_root = self.root / "nodes" / node_id
-        current = json.loads((node_root / "current.json").read_text())
+        execution_identity = execution_identity or self.execution_identities.get(node_id)
+        if execution_identity is None:
+            current = json.loads((node_root / "current.json").read_text())
+            execution_identity = str(current["execution_identity"])
         payload = json.loads(
-            (
-                node_root
-                / "executions"
-                / str(current["execution_identity"])
-                / "candidate_set.json"
-            ).read_text()
+            (node_root / "executions" / execution_identity / "candidate_set.json").read_text()
         )
         return CandidateSet(
             flow_id=str(payload["flow_id"]),
@@ -212,8 +235,7 @@ class CandidateLedger:
         owner, separator, metric = reference.partition(".")
         if not separator:
             raise ValueError(
-                "metric reference must be mip.<metric> or <node>.<metric>: "
-                f"{reference}"
+                f"metric reference must be mip.<metric> or <node>.<metric>: {reference}"
             )
         if owner == "mip":
             root_revision = revision
@@ -359,9 +381,7 @@ class CandidateLedger:
                 observations[node_id] = canonicalize(asdict(observation))
         return {
             "revision_id": revision_id,
-            "architecture": canonicalize(
-                asdict(self.architectures[revision.architecture_id])
-            ),
+            "architecture": canonicalize(asdict(self.architectures[revision.architecture_id])),
             "lineage": lineage,
             "observations": observations,
         }
@@ -433,15 +453,14 @@ class CandidateLedger:
                 origin
                 for origin in architecture.origins
                 if (
-                origin.get("profile_id") in self.active_profile_ids
-                and origin.get("mip_execution_identity")
-                == self.active_mip_execution_identity
-                and origin.get("run_id") == run
-                and (variants == "all" or origin.get("variant_id") in variants)
-                and (
-                    objectives == "all"
-                    or (origin.get("objective") or {}).get("metric") in objectives
-                )
+                    origin.get("profile_id") in self.active_profile_ids
+                    and origin.get("mip_execution_identity") == self.active_mip_execution_identity
+                    and origin.get("run_id") == run
+                    and (variants == "all" or origin.get("variant_id") in variants)
+                    and (
+                        objectives == "all"
+                        or (origin.get("objective") or {}).get("metric") in objectives
+                    )
                 )
             ]
             if matching_origins:
@@ -484,9 +503,7 @@ class CandidateLedger:
             prefix="architecture",
         )
         costs = {}
-        for key, value in dict(
-            result.get("total_costs") or raw.get("total_costs") or {}
-        ).items():
+        for key, value in dict(result.get("total_costs") or raw.get("total_costs") or {}).items():
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue
             key = str(key)

@@ -143,6 +143,28 @@ def test_dynamic_stage_semantic_projection_keeps_stage_id_fallback() -> None:
     assert semantic_stage_config(config, "post.custom") == config
 
 
+def test_semantic_projection_uses_authored_config_unless_effective_view_is_requested() -> None:
+    config = {
+        "model": {"source": "normalized-model"},
+        "convert": {"teacher_dir": "normalized-teacher"},
+        "_runtime": {
+            "authored_config": {
+                "model": {"source": "authored-model"},
+                "convert": {"teacher_dir": "authored-teacher"},
+            }
+        },
+    }
+
+    assert semantic_stage_config(config, "convert") == {
+        "model": {"source": "authored-model"},
+        "convert": {"teacher_dir": "authored-teacher"},
+    }
+    assert semantic_stage_config(config, "convert", use_authored=False) == {
+        "model": {"source": "normalized-model"},
+        "convert": {"teacher_dir": "normalized-teacher"},
+    }
+
+
 def test_registry_uses_the_approved_fixed_dependencies():
     assert selected_parent_stage_ids("tokenize_data", {}) == ("convert",)
     assert selected_parent_stage_ids("vllm_stats", {}) == ("convert",)

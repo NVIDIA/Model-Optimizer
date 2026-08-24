@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Lightweight experiment-config composition for the Puzzletron controller."""
 
@@ -16,6 +28,26 @@ import yaml
 __all__ = ["load_experiment_config"]
 
 _INTERPOLATION = re.compile(r"\$\{([^${}]*)\}")
+_SCIENTIFIC_FLOAT = re.compile(r"^[+-]?[0-9][0-9_]*[eE][+-]?[0-9]+$")
+
+
+class _HydraSafeLoader(yaml.SafeLoader):
+    """Parse plain scientific notation with Hydra-compatible numeric semantics."""
+
+
+_HydraSafeLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    _SCIENTIFIC_FLOAT,
+    list("-+0123456789"),
+)
+
+
+def _load_yaml(value: str) -> Any:
+    loader = _HydraSafeLoader(value)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 
 def _mapping(value: Any, *, source: Path) -> dict[str, Any]:
@@ -60,7 +92,7 @@ def _compose(path: Path, *, root: Path, stack: tuple[Path, ...]) -> dict[str, An
     if path in stack:
         chain = " -> ".join(str(item) for item in (*stack, path))
         raise ValueError(f"Config defaults cycle: {chain}")
-    payload = _mapping(yaml.safe_load(path.read_text()), source=path)
+    payload = _mapping(_load_yaml(path.read_text()), source=path)
     defaults = payload.pop("defaults", [])
     if not isinstance(defaults, list):
         raise ValueError(f"defaults must be a list: {path}")
@@ -104,7 +136,7 @@ def _resolve_expression(expression: str, config: Mapping[str, Any]) -> Any:
     if expression.startswith("to_path:"):
         return expression.removeprefix("to_path:")
     if expression.startswith("get_object:"):
-        return "${" + expression + "}"
+        return {"__type__": expression.removeprefix("get_object:")}
     try:
         return deepcopy(_lookup(config, expression))
     except KeyError:
@@ -144,17 +176,38 @@ def _resolve(value: Any, config: Mapping[str, Any]) -> Any:
 
 
 def _apply_override(config: dict[str, Any], override: str) -> None:
+    if override.startswith("~"):
+        raise ValueError(f"Deletion overrides are not supported: {override!r}")
     key, separator, raw_value = override.partition("=")
     if not separator:
         raise ValueError(f"Override must have KEY=VALUE form: {override!r}")
-    keys = key.lstrip("+").split(".")
+    addition_only = False
+    allow_missing = False
+    if key.startswith("++"):
+        key = key[2:]
+        allow_missing = True
+    elif key.startswith("+"):
+        key = key[1:]
+        addition_only = True
+        allow_missing = True
+    if not key or key.startswith(("+", "~")):
+        raise ValueError(f"Unsupported Hydra override form: {override!r}")
+    keys = key.split(".")
     target = config
     for part in keys[:-1]:
-        child = target.setdefault(part, {})
+        if part not in target:
+            if not allow_missing:
+                raise ValueError(f"Override path does not exist: {override!r}")
+            target[part] = {}
+        child = target[part]
         if not isinstance(child, dict):
             raise ValueError(f"Override path crosses a scalar: {override!r}")
         target = child
-    target[keys[-1]] = yaml.safe_load(raw_value)
+    if addition_only and keys[-1] in target:
+        raise ValueError(f"Addition override already exists: {override!r}")
+    if not allow_missing and keys[-1] not in target:
+        raise ValueError(f"Override key does not exist: {override!r}")
+    target[keys[-1]] = _load_yaml(raw_value)
 
 
 def load_experiment_config(
