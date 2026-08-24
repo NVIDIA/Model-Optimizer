@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the calibration-free Kimi-K3 checkpoint converter."""
+"""Integration tests for the calibration-free Kimi-K3 checkpoint converter."""
 
+import copy
 import importlib.util
 import json
 import sys
@@ -48,6 +49,28 @@ def test_published_recipe_resolves_to_streaming_conversion_settings():
     }
 
 
+def test_recipe_rejects_unknown_enabled_quantizer():
+    quantize = copy.deepcopy(k3_cast.load_recipe(k3_cast._PUBLISHED_RECIPE).quantize.model_dump())
+    quantize["quant_cfg"].append(
+        {
+            "quantizer_name": "*block_sparse_moe.shared_experts*weight_quantizer",
+            "enable": True,
+            "cfg": {},
+        }
+    )
+
+    with pytest.raises(ValueError, match="does not support"):
+        k3_cast._conversion_settings_from_quantize_config(quantize)
+
+
+def test_recipe_rejects_algorithm_drift():
+    quantize = copy.deepcopy(k3_cast.load_recipe(k3_cast._PUBLISHED_RECIPE).quantize.model_dump())
+    quantize["algorithm"]["method"] = "smoothquant"
+
+    with pytest.raises(ValueError, match="calibration-free max algorithm"):
+        k3_cast._conversion_settings_from_quantize_config(quantize)
+
+
 def test_recipe_rejects_explicit_input_scale(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         sys,
@@ -71,14 +94,44 @@ def test_recipe_rejects_explicit_input_scale(monkeypatch, tmp_path, capsys):
     assert "--recipe cannot be combined" in capsys.readouterr().err
 
 
-def test_rank0_rendezvous_rejects_mismatched_world_size(tmp_path):
+def test_rank0_rendezvous_rejects_mismatched_configuration(tmp_path):
     ready_path = tmp_path / "ready.json"
-    ready_path.write_text(json.dumps({"run_id": "run-1", "world_size": 4}))
+    fingerprint = {"source_ckpt": "/models/Kimi-K3", "shards": ["model-1.safetensors"]}
+    ready_path.write_text(
+        json.dumps({"run_id": "run-1", "world_size": 4, "fingerprint": fingerprint})
+    )
 
-    assert not k3_cast._rank0_ready(ready_path, "other-run", world_size=4, rank=1)
-    assert k3_cast._rank0_ready(ready_path, "run-1", world_size=4, rank=1)
+    assert not k3_cast._rank0_ready(
+        ready_path, "other-run", world_size=4, rank=1, fingerprint=fingerprint
+    )
+    assert k3_cast._rank0_ready(ready_path, "run-1", world_size=4, rank=1, fingerprint=fingerprint)
     with pytest.raises(ValueError, match="rank 1 has --world_size 2"):
-        k3_cast._rank0_ready(ready_path, "run-1", world_size=2, rank=1)
+        k3_cast._rank0_ready(ready_path, "run-1", world_size=2, rank=1, fingerprint=fingerprint)
+    with pytest.raises(ValueError, match=r"fingerprint differs in: \['source_ckpt'\]"):
+        k3_cast._rank0_ready(
+            ready_path,
+            "run-1",
+            world_size=4,
+            rank=1,
+            fingerprint={**fingerprint, "source_ckpt": "/other/Kimi-K3"},
+        )
+
+
+def test_rank_report_rejects_mismatched_fingerprint(tmp_path):
+    report_path = tmp_path / "rank-00001.json"
+    fingerprint = {"cast_mxfp4_to_nvfp4": True}
+    report_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "rank": 1,
+                "fingerprint": {"cast_mxfp4_to_nvfp4": False},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="rank 1 report conversion fingerprint"):
+        k3_cast._rank_report_ready(report_path, "run-1", rank=1, fingerprint=fingerprint)
 
 
 def test_module_name_aliases_strip_language_model_prefix():
@@ -146,17 +199,6 @@ def _write_source_checkpoint(tmp_path: Path) -> tuple[Path, str, dict[str, torch
     return source, shard_name, state
 
 
-def test_split_w1_w3_pair_fails_instead_of_using_independent_scales(tmp_path):
-    source, shard_name, _ = _write_source_checkpoint(tmp_path)
-    base = "language_model.model.layers.1.block_sparse_moe.experts.0.w1"
-
-    with (
-        safe_open(source / shard_name, framework="pt", device="cpu") as f,
-        pytest.raises(RuntimeError, match="split across shards"),
-    ):
-        k3_cast._build_w13_kmax_overrides(f, [base], "cpu")
-
-
 def test_convert_shard_casts_experts_and_quantizes_attention(tmp_path):
     source, shard_name, source_state = _write_source_checkpoint(tmp_path)
     output = tmp_path / "output"
@@ -211,6 +253,35 @@ def test_convert_shard_casts_experts_and_quantizes_attention(tmp_path):
     assert report["stats"]["cast_blocks_lossless"] == 24
     assert report["banks"] == ["language_model.model.layers.1.block_sparse_moe.experts"]
     assert report["attn_modules"] == [b_proj, f_a_proj, q_proj]
+
+
+def test_convert_shard_requantizes_w1_w3_with_shared_scale(tmp_path):
+    source, shard_name, _ = _write_source_checkpoint(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+
+    report = k3_cast.convert_shard(
+        source / shard_name,
+        output / shard_name,
+        device="cpu",
+        cast=False,
+        attn_fp8=False,
+        input_scale_value=1.0,
+    )
+
+    expert = "language_model.model.layers.1.block_sparse_moe.experts.0"
+    with safe_open(output / shard_name, framework="pt", device="cpu") as f:
+        assert torch.equal(
+            f.get_tensor(expert + ".w1.weight_scale_2"),
+            f.get_tensor(expert + ".w3.weight_scale_2"),
+        )
+        assert not torch.equal(
+            f.get_tensor(expert + ".w1.weight_scale_2"),
+            f.get_tensor(expert + ".w2.weight_scale_2"),
+        )
+
+    assert report["stats"]["experts_converted"] == 3
+    assert "cast_blocks_total" not in report["stats"]
 
 
 def test_convert_shard_quantizes_attention_to_mxfp8_without_input_scale(tmp_path):

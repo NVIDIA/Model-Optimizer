@@ -79,7 +79,6 @@ Usage (CPU partition, no GPU needed; ``--jobs`` shards convert in parallel):
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import math
 import multiprocessing
@@ -99,16 +98,20 @@ from safetensors.torch import save_file
 from modelopt import __version__ as modelopt_version
 from modelopt.recipe import load_recipe
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP4QTensor, MXFP8QTensor, NVFP4QTensor
-from modelopt.torch.quantization.utils.numeric_utils import (
-    E2M1_MAX,
-    E4M3_KMAX,
-    E4M3_KMIN,
-    E4M3_MAX,
-    E8M0_BIAS,
-    mxfp4_to_nvfp4_global_amax,
-    mxfp4_to_nvfp4_per_block_amax,
+from modelopt.torch.export.shard_cast_utils import (
+    build_w13_amax_overrides,
+    build_w13_kmax_overrides,
+    dequantize_mxfp4_to_bf16,
+    link_aux_files,
+    mxfp4_kmax,
+    prepare_output_dir,
+    quantize_mxfp4_to_nvfp4,
+    quantize_mxfp4_to_nvfp4_lossless,
+    validate_paths,
 )
+from modelopt.torch.export.shard_cast_utils import log as _log
+from modelopt.torch.quantization.qtensor import FP8QTensor, MXFP8QTensor
+from modelopt.torch.quantization.utils.numeric_utils import E2M1_MAX, E4M3_MAX
 
 # --------------------------------------------------------------------------
 # Kimi-K3 tensor schema (from model.safetensors.index.json, 497220 tensors).
@@ -155,19 +158,27 @@ _ATTN_WEIGHT_RE = re.compile(rf"^(?P<base>{_LM}\.self_attn\.(?P<proj>[a-z_0-9]+)
 _FP8_MAX = 448.0
 _FP8_PB_BLOCK = 128
 _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
-_MXFP4_BYTES_PER_BLOCK = 16  # 32 E2M1 nibbles packed 2-per-byte
-_MXFP4_BLOCK = 32
 
 _PUBLISHED_RECIPE = "huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
-
-
-def _log(msg: str) -> None:
-    print(msg, flush=True)
+_RECIPE_ALGORITHM = {
+    "method": "max",
+    "layerwise": {"enable": False},
+    "skip_forward_without_activation_calib": True,
+}
 
 
 def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
     """Translate the supported Kimi-K3 recipe into streaming-converter settings."""
-    quant_cfg = load_recipe(recipe_path).quantize.model_dump()["quant_cfg"]
+    quantize = load_recipe(recipe_path).quantize.model_dump()
+    return _conversion_settings_from_quantize_config(quantize)
+
+
+def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[str, Any]:
+    """Validate the complete recipe contract and return converter settings."""
+    if quantize.get("algorithm") != _RECIPE_ALGORITHM:
+        raise ValueError("recipe must use the calibration-free max algorithm")
+
+    quant_cfg = quantize["quant_cfg"]
     by_name = {
         entry["quantizer_name"]: entry
         for entry in quant_cfg
@@ -176,6 +187,31 @@ def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
 
     expert_weight_name = "*block_sparse_moe.experts.*weight_quantizer"
     expert_input_name = "*block_sparse_moe.experts.*input_quantizer"
+    expected_enabled = {
+        expert_weight_name,
+        expert_input_name,
+        *(f"*self_attn.{projection}*weight_quantizer" for projection in _ATTN_FP8_PB_PROJ),
+    }
+    enabled = {
+        entry["quantizer_name"]
+        for entry in quant_cfg
+        if isinstance(entry, dict) and entry.get("enable") is True
+    }
+    unexpected_enabled = enabled - expected_enabled
+    if unexpected_enabled:
+        raise ValueError(
+            "recipe enables quantizers the streaming converter does not support: "
+            f"{sorted(unexpected_enabled)}"
+        )
+    if not any(
+        entry.get("quantizer_name") == "*"
+        and entry.get("parent_class") is None
+        and entry.get("enable") is False
+        for entry in quant_cfg
+        if isinstance(entry, dict)
+    ):
+        raise ValueError("recipe must disable all quantizers by default")
+
     try:
         expert_weight = by_name[expert_weight_name]["cfg"]
         expert_input = by_name[expert_input_name]["cfg"]
@@ -193,6 +229,11 @@ def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
         raise ValueError("recipe routed-expert inputs must set constant_amax")
     input_scale = float(constant_amax) / (E2M1_MAX * E4M3_MAX)
 
+    if enabled != expected_enabled:
+        raise ValueError(
+            f"recipe is missing required quantizers: {sorted(expected_enabled - enabled)}"
+        )
+
     for projection in _ATTN_FP8_PB_PROJ:
         name = f"*self_attn.{projection}*weight_quantizer"
         try:
@@ -209,99 +250,6 @@ def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
         "attn_fp8_pb": True,
         "input_scale": input_scale,
     }
-
-
-# --------------------------------------------------------------------------
-# MXFP4 -> NVFP4 (routed experts)
-# --------------------------------------------------------------------------
-def _dequantize_mxfp4_to_bf16(
-    mxfp4_weight: torch.Tensor, mxfp4_scale: torch.Tensor, device: str
-) -> torch.Tensor:
-    packed = mxfp4_weight.to(device).contiguous().view(torch.uint8)
-    scale = mxfp4_scale.to(device).contiguous().view(torch.uint8)
-    original_shape = torch.Size((*packed.shape[:-1], packed.shape[-1] * 2))
-    assert packed.shape[:-1] == scale.shape[:-1] and (
-        2 * packed.shape[-1] == scale.shape[-1] * _MXFP4_BLOCK
-    ), f"Incompatible MXFP4 shapes: weight {tuple(packed.shape)} vs scale {tuple(scale.shape)}"
-    return MXFP4QTensor(original_shape, torch.bfloat16, packed).dequantize(
-        dtype=torch.bfloat16,
-        scale=scale,
-        block_sizes=[_MXFP4_BLOCK],
-    )
-
-
-def _kmax_from_mxfp4_scale(mxfp4_scale: torch.Tensor, device: str = "cpu") -> int:
-    """Largest non-zero E8M0 exponent ``k_j = e8m0 - 127`` (0 if all-zero).
-
-    Delegates to the GPT-OSS cast's ``k_max`` logic, which excludes the
-    all-zero sentinel (``e8m0 == 0`` => ``k == -127``).
-    """
-    e8m0 = mxfp4_scale.to(device).contiguous().view(torch.uint8)
-    return mxfp4_to_nvfp4_global_amax(e8m0)[1]["k_max"]
-
-
-def _build_w13_kmax_overrides(f, expert_bases: list[str], device: str) -> dict[str, int]:
-    """Shared ``k_max`` per w1/w3 pair so the fused GEMM1 gets one ``scale_2``."""
-    groups: dict[str, dict[str, str]] = defaultdict(dict)
-    for base in expert_bases:
-        prefix, proj = base.rsplit(".", 1)
-        if proj in {"w1", "w3"}:
-            groups[prefix][proj] = base
-
-    overrides: dict[str, int] = {}
-    for prefix, paths in groups.items():
-        if "w1" not in paths or "w3" not in paths:
-            raise RuntimeError(
-                "w1/w3 of one expert are split across shards, so they cannot share "
-                f"scale_2 for the fused GEMM1: {prefix}"
-            )
-        k1 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w1"] + ".weight_scale"), device)
-        k3 = _kmax_from_mxfp4_scale(f.get_tensor(paths["w3"] + ".weight_scale"), device)
-        shared = max(k1, k3)
-        overrides[paths["w1"]] = shared
-        overrides[paths["w3"]] = shared
-    return overrides
-
-
-def _quantize_weight_nvfp4_lossless(
-    mxfp4_weight: torch.Tensor,
-    mxfp4_scale: torch.Tensor,
-    k_max: int,
-    device: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
-    """Closed-form bit-exact MXFP4 -> NVFP4 weight conversion.
-
-    Pins ``scale_2 = 2^(k_max - 8)`` and the per-block E4M3 scale to
-    ``2^(k_j - m)`` so the NVFP4 nibbles equal the source MXFP4 nibbles for
-    every in-range block. ``k_max`` is shared across w1/w3 (fused GEMM1), so it
-    is passed in rather than derived per tensor. Returns
-    ``(packed, weight_scale, weight_scale_2, n_blocks, n_lossless)``.
-    """
-    bf16 = _dequantize_mxfp4_to_bf16(mxfp4_weight, mxfp4_scale, device)
-    e8m0 = mxfp4_scale.to(bf16.device).contiguous().view(torch.uint8)  # (out, nblk32)
-    packed = mxfp4_weight.to(bf16.device).contiguous().view(torch.uint8)
-    blocks = packed.view(*packed.shape[:-1], e8m0.shape[-1], _MXFP4_BYTES_PER_BLOCK)
-    per_block_amax = mxfp4_to_nvfp4_per_block_amax(blocks, e8m0)  # (out, nblk16) fp32
-
-    m = k_max - E4M3_KMAX
-    weight_scale_2 = torch.tensor(2.0**m, dtype=torch.float32, device=bf16.device).reshape(())
-    per_block_scale = (
-        (per_block_amax / (E2M1_MAX * weight_scale_2))
-        .clamp(min=2**E4M3_KMIN, max=E4M3_MAX)
-        .to(torch.float8_e4m3fn)
-    )
-
-    # Lossless accounting: a block is lossy only if k_max - k_j > 17. All-zero
-    # blocks (e8m0 == 0) reconstruct to 0 regardless of scale, always lossless.
-    k = e8m0.to(torch.int32) - E8M0_BIAS
-    lossless = (k >= (k_max - (E4M3_KMAX - E4M3_KMIN))) | (e8m0 == 0)
-    n_blocks = k.numel()
-    n_lossless = int(lossless.sum().item())
-
-    q_tensor, weight_scale, _ = NVFP4QTensor.quantize(
-        bf16, _NVFP4_BLOCK, per_block_scale, weight_scale_2, try_tensorrt=False
-    )
-    return q_tensor._quantized_data, weight_scale, weight_scale_2, n_blocks, n_lossless
 
 
 # --------------------------------------------------------------------------
@@ -428,7 +376,27 @@ def convert_shard(
         expert_scale_keys = {b + ".weight_scale" for b in expert_bases}
         expert_packed_keys = {b + ".weight_packed" for b in expert_bases}
 
-        w13_kmax = _build_w13_kmax_overrides(f, expert_bases, device) if cast else {}
+        if cast:
+            w13_kmax = build_w13_kmax_overrides(
+                expert_bases,
+                lambda base: f.get_tensor(base + ".weight_scale"),
+                device,
+            )
+            w13_weight_amax = {}
+        else:
+            w13_kmax = {}
+            w13_weight_amax = build_w13_amax_overrides(
+                expert_bases,
+                lambda base: (
+                    dequantize_mxfp4_to_bf16(
+                        f.get_tensor(base + ".weight_packed"),
+                        f.get_tensor(base + ".weight_scale"),
+                        device,
+                    )
+                    .abs()
+                    .max()
+                ),
+            )
 
         for key in all_keys:
             # Source MXFP4 E8M0 scales are rewritten below alongside the packed
@@ -447,21 +415,21 @@ def convert_shard(
                 if cast:
                     k_max = w13_kmax.get(base)
                     if k_max is None:
-                        k_max = _kmax_from_mxfp4_scale(s, device)
+                        k_max = mxfp4_kmax(s, device)
                     packed, weight_scale, weight_scale_2, n_blk, n_lossless = (
-                        _quantize_weight_nvfp4_lossless(w, s, k_max, device)
+                        quantize_mxfp4_to_nvfp4_lossless(w, s, k_max, device)
                     )
                     stats["cast_blocks_total"] += n_blk
                     stats["cast_blocks_lossless"] += n_lossless
                     if n_lossless < n_blk:
                         stats["cast_oor_tensors"] += 1
                 else:
-                    bf16 = _dequantize_mxfp4_to_bf16(w, s, device)
-                    weight_scale_2 = (bf16.abs().max().float() / (E2M1_MAX * E4M3_MAX)).reshape(())
-                    q_tensor, weight_scale, _ = NVFP4QTensor.quantize(
-                        bf16, _NVFP4_BLOCK, None, weight_scale_2, try_tensorrt=False
+                    packed, weight_scale, weight_scale_2, _ = quantize_mxfp4_to_nvfp4(
+                        w,
+                        s,
+                        w13_weight_amax.get(base),
+                        device,
                     )
-                    packed = q_tensor._quantized_data
 
                 out[base + ".weight"] = packed.cpu()
                 out[base + ".weight_scale"] = weight_scale.cpu()
@@ -550,34 +518,6 @@ _SKIP_TOP_LEVEL = {
     ".cache",  # HF download sidecars referencing old shards
 }
 _SKIP_SUBDIR_NAMES = {"__pycache__"}
-
-
-def _link_or_copy(src: Path, dst: Path) -> None:
-    try:
-        os.link(src, dst)
-    except OSError as e:
-        if e.errno in {errno.EXDEV, errno.EPERM, errno.EACCES, errno.EMLINK}:
-            shutil.copy2(src, dst)
-        else:
-            raise
-
-
-def _hard_link_aux(src_dir: Path, target: Path) -> None:
-    """Hard-link (or copy) tokenizer/modeling/processor files into the output."""
-    for root, dirs, files in os.walk(src_dir):
-        dirs[:] = [d for d in dirs if d not in _SKIP_SUBDIR_NAMES and d not in _SKIP_TOP_LEVEL]
-        rel = Path(root).relative_to(src_dir)
-        (target / rel).mkdir(parents=True, exist_ok=True)
-        for fname in files:
-            if rel == Path(".") and fname in _SKIP_TOP_LEVEL:
-                continue
-            if fname.endswith(".safetensors"):
-                continue  # rewritten shards
-            src_f = Path(root) / fname
-            dst_f = target / rel / fname
-            if dst_f.exists():
-                dst_f.unlink()
-            _link_or_copy(src_f, dst_f)
 
 
 # Modules deliberately left in BF16. Kept explicit so a reader can see that the
@@ -792,6 +732,33 @@ def _write_json_atomic(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+def _conversion_fingerprint(args: argparse.Namespace, shards: list[Path]) -> dict[str, Any]:
+    """Return the settings that must match across every conversion rank."""
+    return {
+        "source_ckpt": str(args.source_ckpt.resolve()),
+        "shards": [str(shard.resolve()) for shard in shards],
+        "device": args.device,
+        "cast_mxfp4_to_nvfp4": args.cast_mxfp4_to_nvfp4,
+        "attn_fp8": args.attn_fp8,
+        "attn_mxfp8": args.attn_mxfp8,
+        "attn_fp8_pb": args.attn_fp8_pb,
+        "input_scale": args.input_scale,
+    }
+
+
+def _validate_fingerprint(
+    published: dict[str, Any] | None,
+    expected: dict[str, Any],
+    description: str,
+) -> None:
+    published = published or {}
+    mismatched = sorted(
+        key for key in published.keys() | expected.keys() if published.get(key) != expected.get(key)
+    )
+    if mismatched:
+        raise ValueError(f"{description} conversion fingerprint differs in: {mismatched}")
+
+
 def _wait_for(
     predicate,
     description: str,
@@ -805,7 +772,13 @@ def _wait_for(
         time.sleep(poll_s)
 
 
-def _rank0_ready(ready_path: Path, run_id: str, world_size: int, rank: int) -> bool:
+def _rank0_ready(
+    ready_path: Path,
+    run_id: str,
+    world_size: int,
+    rank: int,
+    fingerprint: dict[str, Any],
+) -> bool:
     """Check that rank 0 published matching rendezvous settings."""
     if not ready_path.exists():
         return False
@@ -818,6 +791,28 @@ def _rank0_ready(ready_path: Path, run_id: str, world_size: int, rank: int) -> b
             f"rank {rank} has --world_size {world_size}, but rank 0 published "
             f"{published_world_size} for run {run_id}"
         )
+    _validate_fingerprint(ready.get("fingerprint"), fingerprint, f"rank {rank}")
+    return True
+
+
+def _rank_report_ready(
+    report_path: Path,
+    run_id: str,
+    rank: int,
+    fingerprint: dict[str, Any],
+) -> bool:
+    """Check that one rank atomically published a report for this conversion."""
+    if not report_path.exists():
+        return False
+    try:
+        report = json.loads(report_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    if report.get("run_id") != run_id:
+        return False
+    if report.get("rank") != rank:
+        raise ValueError(f"expected rank {rank} report, got rank {report.get('rank')}")
+    _validate_fingerprint(report.get("fingerprint"), fingerprint, f"rank {rank} report")
     return True
 
 
@@ -835,37 +830,6 @@ def _merge_rank_reports(
         banks.update(report["banks"])
         attn_modules.update(report["attn_modules"])
     return results, dict(totals), banks, attn_modules
-
-
-def _validate_paths(source_ckpt: Path, output_ckpt: Path) -> None:
-    source_resolved = source_ckpt.resolve()
-    output_resolved = output_ckpt.resolve()
-    if (
-        output_resolved == source_resolved
-        or source_resolved in output_resolved.parents
-        or output_resolved in source_resolved.parents
-    ):
-        raise ValueError(
-            "--source_ckpt and --output_ckpt must be disjoint directories; "
-            f"got source={source_ckpt}, output={output_ckpt}"
-        )
-
-
-def _prepare_output_dir(output_ckpt: Path, overwrite: bool) -> None:
-    if output_ckpt.exists():
-        if not output_ckpt.is_dir():
-            raise ValueError(f"--output_ckpt exists and is not a directory: {output_ckpt}")
-        if any(output_ckpt.iterdir()):
-            if not overwrite:
-                raise ValueError(
-                    f"--output_ckpt is not empty: {output_ckpt}; pass --overwrite to replace it"
-                )
-            for item in output_ckpt.iterdir():
-                if item.is_dir() and not item.is_symlink():
-                    shutil.rmtree(item)
-                else:
-                    item.unlink()
-    output_ckpt.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -984,7 +948,7 @@ def main():
     if args.device.startswith("cuda") and args.jobs > 1:
         p.error("--device cuda requires --jobs 1 so workers do not contend for one GPU")
 
-    _validate_paths(args.source_ckpt, args.output_ckpt)
+    validate_paths(args.source_ckpt, args.output_ckpt)
     src_index_path = args.source_ckpt / "model.safetensors.index.json"
     assert src_index_path.exists(), f"{src_index_path} not found"
     src_index = json.loads(src_index_path.read_text())
@@ -993,13 +957,21 @@ def main():
     assert shards, f"no HF-style shards in {args.source_ckpt}"
     if args.limit_shards:
         shards = shards[: args.limit_shards]
+    fingerprint = _conversion_fingerprint(args, shards)
 
     marker_dir = args.output_ckpt / ".kimi_k3_conversion"
     ready_path = marker_dir / "ready.json"
     if args.rank == 0:
-        _prepare_output_dir(args.output_ckpt, args.overwrite)
+        prepare_output_dir(args.output_ckpt, args.overwrite)
         marker_dir.mkdir()
-        _write_json_atomic(ready_path, {"run_id": args.run_id, "world_size": args.world_size})
+        _write_json_atomic(
+            ready_path,
+            {
+                "run_id": args.run_id,
+                "world_size": args.world_size,
+                "fingerprint": fingerprint,
+            },
+        )
     else:
         _wait_for(
             lambda: _rank0_ready(
@@ -1007,6 +979,7 @@ def main():
                 args.run_id,
                 args.world_size,
                 args.rank,
+                fingerprint,
             ),
             f"rank-0 rendezvous for run {args.run_id}",
             args.sync_timeout,
@@ -1066,6 +1039,7 @@ def main():
     rank_report = {
         "run_id": args.run_id,
         "rank": args.rank,
+        "fingerprint": fingerprint,
         "results": results,
         "stats": dict(local_totals),
         "banks": sorted(local_banks),
@@ -1081,18 +1055,17 @@ def main():
     rank_paths = [marker_dir / f"rank-{rank:05d}.json" for rank in range(args.world_size)]
 
     def all_ranks_done() -> bool:
-        for path in rank_paths:
-            if not path.exists():
-                return False
-            try:
-                if json.loads(path.read_text()).get("run_id") != args.run_id:
-                    return False
-            except (json.JSONDecodeError, OSError):
-                return False
-        return True
+        return all(
+            _rank_report_ready(path, args.run_id, rank, fingerprint)
+            for rank, path in enumerate(rank_paths)
+        )
 
     _wait_for(all_ranks_done, f"{args.world_size} rank reports", args.sync_timeout)
     rank_reports = [json.loads(path.read_text()) for path in rank_paths]
+    for rank, report in enumerate(rank_reports):
+        if report.get("run_id") != args.run_id or report.get("rank") != rank:
+            raise RuntimeError(f"rank {rank} report changed after rendezvous validation")
+        _validate_fingerprint(report.get("fingerprint"), fingerprint, f"rank {rank} report")
     results, totals, banks, attn_modules = _merge_rank_reports(rank_reports)
     if len(results) != len(shards):
         raise RuntimeError(f"expected {len(shards)} converted shards, got {len(results)}")
@@ -1139,13 +1112,20 @@ def main():
     )
     _rewrite_config_json(args.source_ckpt, args.output_ckpt, hf_quant_config)
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
-    _hard_link_aux(args.source_ckpt, args.output_ckpt)
+    link_aux_files(
+        args.source_ckpt,
+        args.output_ckpt,
+        skip_top_level=_SKIP_TOP_LEVEL,
+        skip_dir_names=_SKIP_SUBDIR_NAMES | _SKIP_TOP_LEVEL,
+        skip_file=lambda path: path.suffix == ".safetensors",
+    )
     _write_json_atomic(
         args.output_ckpt / "conversion_report.json",
         {
             "run_id": args.run_id,
             "recipe": args.recipe,
             "world_size": args.world_size,
+            "conversion_fingerprint": fingerprint,
             "shards": len(results),
             "stats": totals,
             "expert_banks": len(banks),
