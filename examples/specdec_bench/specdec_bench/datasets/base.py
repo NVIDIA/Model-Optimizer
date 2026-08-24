@@ -17,14 +17,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from specdec_bench.utils import encode_chat as _default_encode_chat
+
 
 @dataclass
 class Request:
     question_id: int | None = None
     category: str | None = None
+    source: str | None = None
     system_prompt: str | None = None
     turns: list[str] = field(default_factory=list)
     mm_content: Any | None = None  # TODO
+    messages: list[dict] | None = None  # pre-built full conversation history
+    tools: list[dict] | None = None  # tool definitions for agentic workloads
+    step: int | None = None  # step index within a multi-cut trajectory
 
     # not to be set by user
     output_turn_ids = None
@@ -38,6 +44,21 @@ class Dataset:
 
     def _preprocess(self):
         raise NotImplementedError
+
+    def encode_chat(
+        self,
+        tokenizer,
+        messages,
+        chat_template_args=None,
+        completions=False,
+        request=None,
+    ):
+        return _default_encode_chat(
+            tokenizer,
+            messages,
+            chat_template_args=chat_template_args,
+            completions=completions,
+        )
 
     @classmethod
     def prepare_data(cls, output_dir: str | Path, **kwargs) -> Path:

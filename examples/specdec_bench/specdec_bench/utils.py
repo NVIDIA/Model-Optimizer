@@ -110,6 +110,7 @@ def _get_engine_version(engine):
 
 
 def _get_gpu_name():
+    """Return the name of GPU 0 if CUDA is available, else None."""
     try:
         import torch
 

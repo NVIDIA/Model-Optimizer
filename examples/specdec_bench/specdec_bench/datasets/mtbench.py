@@ -30,15 +30,24 @@ MTBENCH_TOPICS = [
 
 
 class MTBench(Dataset):
-    def __init__(self, path, num_samples=80, **kwargs):
+    def __init__(self, path, num_samples=80, category: str | None = None, **kwargs):
         self.data: list[Request] = []  # list of list of questions.
         self.num_samples = num_samples
-        self._preprocess(path)
+        self._preprocess(path, category)
 
-    def _preprocess(self, path):
+    def _preprocess(self, path, category: str | None = None):
         with open(path) as f:
-            for json_line in f:
-                line = json.loads(json_line)
+            for raw in f:
+                line = json.loads(raw)
+                if category is not None and line["category"] != category:
+                    continue
                 key = "turns" if "turns" in line else "prompt"
-                self.data.append(Request(system_prompt=None, turns=line[key]))
+                self.data.append(
+                    Request(
+                        system_prompt=None,
+                        turns=line[key],
+                        category=line["category"],
+                        question_id=line["question_id"],
+                    )
+                )
         self.data = self.data[: self.num_samples]
