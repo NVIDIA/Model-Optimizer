@@ -258,6 +258,13 @@ def test_custom_dataset_rendering_does_not_add_acquisition_fields() -> None:
     assert "acquisition" not in experiment["data"]
 
 
+def test_rendered_data_keeps_controller_and_worker_sequence_length_in_sync() -> None:
+    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
+
+    assert experiment["data"]["sequence_length"] == 2048
+    assert experiment["data"]["sequence_length"] == experiment["data"]["max_sample_length"]
+
+
 def test_packed_text_uses_native_automodel_data_instead_of_fixed_token_memmaps() -> None:
     state = _nemotron_render_state(latent_moe=False)
     state["answers"]["data"]["layout"] = "packed_varlen"

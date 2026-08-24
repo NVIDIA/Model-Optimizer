@@ -16,6 +16,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 
 def test_profile_aiperf_filters_registry_to_explicit_solutions():
     from examples.puzzletron.run_profile_aiperf_worker import select_registry_solutions
@@ -136,3 +138,81 @@ def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
     payload = json.loads(output.read_text())
     assert payload["concurrencies"] == [1]
     assert len(payload["results"]) == 12
+
+
+def test_profile_aiperf_cli_forwards_explicit_security_flags(tmp_path, monkeypatch):
+    import sys
+
+    from examples.puzzletron import run_profile_aiperf_worker as worker_module
+
+    captured = {}
+
+    def run_worker(puzzle_dir, **kwargs):
+        captured["puzzle_dir"] = puzzle_dir
+        captured.update(kwargs)
+        return tmp_path / "worker.json"
+
+    monkeypatch.setattr(worker_module, "run_worker", run_worker)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_profile_aiperf_worker.py",
+            "--puzzle-dir",
+            str(tmp_path),
+            "--trust-remote-code",
+            "--allow-aiperf-v011-online-tokenizer-resolution",
+        ],
+    )
+
+    worker_module.main()
+
+    assert captured["puzzle_dir"] == tmp_path
+    assert captured["trust_remote_code"] is True
+    assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is True
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_profile_aiperf_worker_forwards_security_policy_to_real_sweep(
+    tmp_path, monkeypatch, enabled
+):
+    import json
+
+    from examples.puzzletron.run_profile_aiperf_worker import run_worker
+    from modelopt.torch.puzzletron import benchmarks
+
+    profile_id = "runtime-075"
+    registry_path = tmp_path / "mip/profiles" / profile_id / "selected_solutions.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "profile_id": profile_id,
+                "solutions": [{"solution_id": "teacher", "checkpoint": "/teacher"}],
+            }
+        )
+    )
+    observed = []
+
+    def run_aiperf_sweep(*args, **kwargs):
+        observed.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(benchmarks, "run_aiperf_sweep", run_aiperf_sweep)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+
+    run_worker(
+        tmp_path,
+        profile_id=profile_id,
+        worker_index=0,
+        worker_count=6,
+        input_tokens=32,
+        output_tokens=8,
+        trust_remote_code=enabled,
+        allow_aiperf_v011_online_tokenizer_resolution=enabled,
+    )
+
+    assert len(observed) == 1
+    _, kwargs = observed[0]
+    assert kwargs["trust_remote_code"] is enabled
+    assert kwargs["allow_aiperf_v011_online_tokenizer_resolution"] is enabled

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BACK",
     "InteractiveBackend",
+    "NonInteractiveBackend",
     "PromptBackend",
     "PromptChoice",
     "ScriptedBackend",
@@ -55,7 +56,7 @@ class PromptChoice:
 class PromptBackend(Protocol):
     """Minimal backend used by the navigable wizard session."""
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Request a text value."""
         raise NotImplementedError
 
@@ -127,10 +128,10 @@ class InteractiveBackend:
 
     _BACK_TITLE = "← Back"
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Request text while supporting semantic Back navigation."""
         print("  Press Esc to go back (or type :back).")
-        question = _bind_escape_back(_questionary().text(message, default=default))
+        question = _bind_escape_back(_questionary().text(message, default=default or ""))
         value = _answer(question)
         if value is BACK:
             return BACK
@@ -202,6 +203,60 @@ class InteractiveBackend:
         return list(values)
 
 
+class NonInteractiveBackend:
+    """Accept resolved prompt defaults without depending on prompt ordering or labels."""
+
+    def text(self, message: str, default: str | None) -> Any:
+        """Return a resolved text default, including an explicit empty string."""
+        if default is None:
+            raise SetupError(f"Non-interactive setup requires a default for {message!r}.")
+        return default
+
+    def select(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        default: Any,
+    ) -> Any:
+        """Return the enabled resolved choice default."""
+        enabled = [choice for choice in choices if choice.disabled is None]
+        if default is None:
+            if len(enabled) == 1:
+                return enabled[0].value
+            raise SetupError(f"Non-interactive setup requires a default for {message!r}.")
+        selected = next((choice for choice in choices if choice.value == default), None)
+        if selected is None:
+            raise SetupError(
+                f"Non-interactive default {default!r} is not a choice for {message!r}."
+            )
+        if selected.disabled is not None:
+            raise SetupError(
+                f"Non-interactive default {default!r} is unavailable for {message!r}: "
+                f"{selected.disabled}"
+            )
+        return selected.value
+
+    def checkbox(
+        self,
+        message: str,
+        choices: Sequence[PromptChoice],
+        defaults: Sequence[Any],
+    ) -> Any:
+        """Return the enabled resolved checkbox defaults."""
+        for value in defaults:
+            choice = next((item for item in choices if item.value == value), None)
+            if choice is None:
+                raise SetupError(
+                    f"Non-interactive default {value!r} is not a choice for {message!r}."
+                )
+            if choice.disabled is not None:
+                raise SetupError(
+                    f"Non-interactive default {value!r} is unavailable for {message!r}: "
+                    f"{choice.disabled}"
+                )
+        return list(defaults)
+
+
 class ScriptedBackend:
     """Deterministic non-interactive backend for embedding and automation."""
 
@@ -220,7 +275,7 @@ class ScriptedBackend:
         value = self._answers.popleft()
         return BACK if value == ":back" else value
 
-    def text(self, message: str, default: str) -> Any:
+    def text(self, message: str, default: str | None) -> Any:
         """Return the next scripted text answer."""
         del message, default
         return self._next()
