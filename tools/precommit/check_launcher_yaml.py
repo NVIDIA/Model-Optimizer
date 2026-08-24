@@ -112,6 +112,52 @@ def _try_load_recipe(recipe_path: Path, source: Path) -> list[str]:
     return []
 
 
+def _global_vars_schema() -> set[str] | None:
+    """Field names accepted by ``GlobalVariables``, or None if it can't be read.
+
+    Parsed out of ``core.py`` rather than imported: importing it pulls in ``nemo_run``,
+    which is not a dependency of the pre-commit environment.
+    """
+    core = _LAUNCHER_DIR / "core.py"
+    try:
+        source = core.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^class GlobalVariables.*?(?=^@|\Z)", source, re.MULTILINE | re.DOTALL)
+    if not match:
+        return None
+    return set(re.findall(r"^\s{4}(\w+)\s*:", match.group(0), re.MULTILINE))
+
+
+def _check_global_vars(pipeline: dict, path: Path) -> list[str]:
+    """Reject ``global_vars`` keys the launcher's dataclass cannot accept.
+
+    ``global_vars`` is a fixed-field dataclass, not a free-form mapping, so an unknown key
+    fails at launch with ``No parameter named 'X' exists`` — after the user has set up a
+    cluster environment. This has now bitten twice (OMNIML-5024, then the Nemotron-3.5
+    DSpark warm-start example), so it is checked here instead.
+    """
+    schema = _global_vars_schema()
+    global_vars = pipeline.get("global_vars")
+    if schema is None or not isinstance(global_vars, dict):
+        return []
+    errors = [
+        f"{path}: global_vars key {key!r} is not a field of GlobalVariables "
+        f"(valid: {', '.join(sorted(schema))})"
+        for key in global_vars
+        if key not in schema
+    ]
+    # A reference to a key that is never defined interpolates to the literal
+    # ``<<global_vars.X>>`` and reaches the job as a nonsense path.
+    refs = sorted(set(re.findall(r"<<global_vars\.(\w+)>>", path.read_text("utf-8"))))
+    errors.extend(
+        f"{path}: <<global_vars.{ref}>> is referenced but never defined"
+        for ref in refs
+        if ref not in global_vars
+    )
+    return errors
+
+
 def _scan_launcher_yaml(path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -123,6 +169,8 @@ def _scan_launcher_yaml(path: Path) -> list[str]:
     pipeline = data.get("pipeline")
     if not isinstance(pipeline, dict):
         return []
+
+    errors.extend(_check_global_vars(pipeline, path))
 
     for task in pipeline.values():
         if not isinstance(task, dict):
