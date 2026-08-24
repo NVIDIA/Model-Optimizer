@@ -25,10 +25,12 @@ aggregate per-node scores into user-defined architectural groups via the ``block
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from modelopt.onnx.logging_config import logger
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 def suggest_exclusion(
@@ -48,37 +50,37 @@ def suggest_exclusion(
     - **Coverage mode** (default) returns the largest target set whose cumulative sensitivity score stays
     at or below ``coverage * total_mass`` -- the picker stops *before* crossing the target, so the
     actual coverage is always <= requested.
-    - **Threshold mode** (used when ``threshold`` is set; ``coverage`` is ignored) returns every target 
+    - **Threshold mode** (used when ``threshold`` is set; ``coverage`` is ignored) returns every target
     whose individual score strictly exceeds ``threshold``.
-    
-    Coverage is architecture-portable because it is a fraction of the model's own total mass; threshold 
+
+    Coverage is architecture-portable because it is a fraction of the model's own total mass; threshold
     is model-specific but simpler when the operator already knows a reasonable per-target cutoff.
 
     Args:
         scores: Per-target (node or op-type) sensitivity scores from :func:`sensitivity.score`.
         coverage: Fraction of total sensitivity score mass to leave unquantized (portable across models).
-            ``0.85-0.90`` (default) balances accuracy and INT8 latency benefit; ``0.95-0.99`` 
+            ``0.85-0.90`` (default) balances accuracy and INT8 latency benefit; ``0.95-0.99``
             favors accuracy; ``0.70-0.80`` favors latency. Portable across models.
         threshold: Absolute score cutoff. Every target with score strictly greater than
             ``threshold`` is excluded. Magnitudes are model-dependent.
         blocks: Optional mapping from group name to a list of regex patterns that match node paths
-            (i.e, ``{group_name: [regex, ...]}``). When set, the picker ranks *groups* rather than 
-            individual nodes: each node is assigned to at most one group (first-match wins across 
-            the dict), unmatched nodes become their own singleton group, and coverage / threshold / 
-            ``max_nodes`` / ``near_tie_ratio`` semantics apply to the group ranking. The returned 
-            exclusion list is the union of member nodes across the selected groups. 
+            (i.e, ``{group_name: [regex, ...]}``). When set, the picker ranks *groups* rather than
+            individual nodes: each node is assigned to at most one group (first-match wins across
+            the dict), unmatched nodes become their own singleton group, and coverage / threshold /
+            ``max_nodes`` / ``near_tie_ratio`` semantics apply to the group ranking. The returned
+            exclusion list is the union of member nodes across the selected groups.
             Default ``None`` = per-node picking.
-        block_agg: Aggregation function used to compute a group's score from its members' individual 
-            scores when ``blocks`` is set. One of ``"sum"``, ``"max"``, ``"mean"``. Natural pairings 
+        block_agg: Aggregation function used to compute a group's score from its members' individual
+            scores when ``blocks`` is set. One of ``"sum"``, ``"max"``, ``"mean"``. Natural pairings
             with the two policy modes:
-            - ``block_agg="sum"`` with **coverage** (recommended default): preserves the coverage 
+            - ``block_agg="sum"`` with **coverage** (recommended default): preserves the coverage
               semantic regardless of granularity choices (group sums equals to summing all node scores)
             - ``block_agg="max"`` with **threshold**: preserves per-node threshold units and operator
               intuition when transferring per-node threshold guidance to the block level.
-            
-            Other combinations are valid but change what ``coverage`` and ``threshold`` mean in 
-            units. Under ``block_agg="max"`` coverage counts fraction-of-total-group-max-scores 
-            (not fraction-of-total-score-mass). Under ``block_agg="sum"`` threshold operates in 
+
+            Other combinations are valid but change what ``coverage`` and ``threshold`` mean in
+            units. Under ``block_agg="max"`` coverage counts fraction-of-total-group-max-scores
+            (not fraction-of-total-score-mass). Under ``block_agg="sum"`` threshold operates in
             summed-score units per group, so per-node threshold values must be scaled up to be
             meaningful. Ignored when ``blocks`` is ``None``; ``"mean"`` is provided for completeness.
         max_nodes: Optional cap on the number of selected items -- individual targets when
@@ -99,9 +101,7 @@ def suggest_exclusion(
     """
     if blocks is not None:
         if block_agg not in {"sum", "max", "mean"}:
-            raise ValueError(
-                f"block_agg must be 'sum', 'max', or 'mean' (got {block_agg!r})"
-            )
+            raise ValueError(f"block_agg must be 'sum', 'max', or 'mean' (got {block_agg!r})")
         groups = _assign_groups(scores, blocks)
         group_scores = _aggregate_group_scores(scores, groups, block_agg)
         selected_groups = _pick_from_scores(
@@ -184,7 +184,7 @@ def _assign_groups(
 
     Rules:
     - A node matching any regex in ``blocks[name]`` joins group ``name``.
-    - First-match wins across the iteration order of ``blocks``, so callers that mix depths list 
+    - First-match wins across the iteration order of ``blocks``, so callers that mix depths list
     more-specific groups earlier.
     - Nodes matching no pattern become their own singleton group named after themselves so
     architecturally-important standalone nodes compete on equal footing with multi-node blocks.
@@ -232,7 +232,7 @@ def _warn_near_tie(
 
     When the two boundary targets carry nearly equivalent sensitivity but land in different
     precisions (one FP16, one INT8), the resulting Cast boundary tends to produce intra-group
-    fragmentation. This warning helps guiding the user into adjusting coverage or threshold 
+    fragmentation. This warning helps guiding the user into adjusting coverage or threshold
     to include the near-tied target.
     """
     if near_tie_ratio is None:

@@ -22,10 +22,7 @@ both the FP16 reference and the quantized model through ONNXRuntime, and reports
 target so a downstream picker can decide which ops or nodes to keep at higher precision.
 """
 
-from modelopt.onnx.quantization.sensitivity.picker import (
-    suggest_exclusion,
-    summarize_exclusion,
-)
+from modelopt.onnx.quantization.sensitivity.picker import suggest_exclusion, summarize_exclusion
 from modelopt.onnx.quantization.sensitivity.score import (
     CalibrationSource,
     Granularity,

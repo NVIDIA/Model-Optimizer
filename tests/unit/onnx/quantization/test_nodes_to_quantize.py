@@ -92,7 +92,9 @@ def test_nodes_to_quantize_restricts_qdq_to_single_conv(tmp_path):
     """`nodes_to_quantize=["conv_keep"]` inserts Q/DQ around conv_keep only."""
     onnx_path = str(tmp_path / "two_conv.onnx")
     _build_two_conv_onnx(onnx_path)
-    calibration_data = {"input": np.random.default_rng(0).standard_normal((2, 3, 8, 8)).astype(np.float32)}
+    calibration_data = {
+        "input": np.random.default_rng(0).standard_normal((2, 3, 8, 8)).astype(np.float32)
+    }
 
     moq.quantize(
         onnx_path,
@@ -109,8 +111,12 @@ def test_nodes_to_quantize_restricts_qdq_to_single_conv(tmp_path):
     graph = gs.import_onnx(onnx.load(quantized_path))
     keep_nodes = [n for n in graph.nodes if n.name == "conv_keep"]
     skip_nodes = [n for n in graph.nodes if n.name == "conv_skip"]
-    assert len(keep_nodes) == 1, f"conv_keep not found in quantized graph: {[n.name for n in graph.nodes]}"
-    assert len(skip_nodes) == 1, f"conv_skip not found in quantized graph: {[n.name for n in graph.nodes]}"
+    assert len(keep_nodes) == 1, (
+        f"conv_keep not found in quantized graph: {[n.name for n in graph.nodes]}"
+    )
+    assert len(skip_nodes) == 1, (
+        f"conv_skip not found in quantized graph: {[n.name for n in graph.nodes]}"
+    )
 
     # conv_keep must have DQ on its activation input; conv_skip must not.
     assert _has_dq_predecessor(keep_nodes[0], 0), (

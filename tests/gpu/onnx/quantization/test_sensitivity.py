@@ -90,12 +90,8 @@ def _build_conv_mm_ln_onnx(path: str, opset: int = 17) -> None:
             pads=[1, 1, 1, 1],
             strides=[1, 1],
         ),
-        helper.make_node(
-            "Flatten", ["conv2_out"], ["flat_out"], name="flatten_1", axis=1
-        ),
-        helper.make_node(
-            "MatMul", ["flat_out", "mm_w"], ["mm_out"], name="matmul_1"
-        ),
+        helper.make_node("Flatten", ["conv2_out"], ["flat_out"], name="flatten_1", axis=1),
+        helper.make_node("MatMul", ["flat_out", "mm_w"], ["mm_out"], name="matmul_1"),
         helper.make_node(
             "LayerNormalization",
             ["mm_out", "ln_scale", "ln_bias"],
@@ -109,19 +105,11 @@ def _build_conv_mm_ln_onnx(path: str, opset: int = 17) -> None:
     graph = helper.make_graph(
         nodes=nodes,
         name="sens_test_graph",
-        inputs=[
-            helper.make_tensor_value_info(
-                _INPUT_NAME, TensorProto.FLOAT, [1, _C_IN, _H, W]
-            )
-        ],
-        outputs=[
-            helper.make_tensor_value_info(_OUTPUT_NAME, TensorProto.FLOAT, [1, _LOGITS])
-        ],
+        inputs=[helper.make_tensor_value_info(_INPUT_NAME, TensorProto.FLOAT, [1, _C_IN, _H, W])],
+        outputs=[helper.make_tensor_value_info(_OUTPUT_NAME, TensorProto.FLOAT, [1, _LOGITS])],
         initializer=initializers,
     )
-    model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=8
-    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", opset)], ir_version=8)
     onnx.save(model, path)
 
 
@@ -227,9 +215,7 @@ def test_coatnet_op_type_matches_manual_groundtruth():
       * ``coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx`` -- baseline ONNX.
       * ``imagenet_calib_500.npz`` -- 500-sample ImageNet calibration dict.
     """
-    onnx_path = _require_fixture(
-        "coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx"
-    )
+    onnx_path = _require_fixture("coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx")
     calib_path = _require_fixture("imagenet_calib_500.npz")
 
     result = score(
@@ -256,9 +242,7 @@ def test_coatnet_op_type_matches_manual_groundtruth():
     # These cluster at ~0 -- primitive won't recommend excluding them because there's
     # nothing to exclude.
     for op in ("Softmax", "Gemm", "GlobalAveragePool"):
-        assert scores.get(op, 0.0) < 0.001, (
-            f"{op} score {scores.get(op, 0.0):.3g} should be ~0"
-        )
+        assert scores.get(op, 0.0) < 0.001, f"{op} score {scores.get(op, 0.0):.3g} should be ~0"
 
 
 @pytest.mark.slow_gpu
@@ -267,9 +251,7 @@ def test_coatnet_per_node_matches_manual_groundtruth():
 
     Wall clock ~30-60 min; gated behind ``@pytest.mark.slow_gpu`` so default CI stays fast.
     """
-    onnx_path = _require_fixture(
-        "coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx"
-    )
+    onnx_path = _require_fixture("coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx")
     calib_path = _require_fixture("imagenet_calib_500.npz")
 
     result = score(

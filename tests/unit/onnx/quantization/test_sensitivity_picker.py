@@ -17,10 +17,7 @@
 
 import pytest
 
-from modelopt.onnx.quantization.sensitivity.picker import (
-    suggest_exclusion,
-    summarize_exclusion,
-)
+from modelopt.onnx.quantization.sensitivity.picker import suggest_exclusion, summarize_exclusion
 
 
 class TestCoverageMode:
@@ -135,10 +132,36 @@ class TestNearTieWarning:
     def test_warning_fires_on_near_tied_cutoff(self, caplog):
         # Ranks 16 and 17 are near-tied at KL 3.06 vs 3.05 (99.7% ratio); coverage=0.94
         # cuts between them.
-        scores = {f"node_{i:02d}": kl for i, kl in enumerate(
-            [6.7, 5.7, 4.6, 4.3, 4.1, 4.1, 4.0, 4.0, 3.8, 3.8,
-             3.8, 3.8, 3.7, 3.7, 3.7, 3.06, 3.05, 0.8, 0.5, 0.1], 1)}
+        scores = {
+            f"node_{i:02d}": kl
+            for i, kl in enumerate(
+                [
+                    6.7,
+                    5.7,
+                    4.6,
+                    4.3,
+                    4.1,
+                    4.1,
+                    4.0,
+                    4.0,
+                    3.8,
+                    3.8,
+                    3.8,
+                    3.8,
+                    3.7,
+                    3.7,
+                    3.7,
+                    3.06,
+                    3.05,
+                    0.8,
+                    0.5,
+                    0.1,
+                ],
+                1,
+            )
+        }
         import logging
+
         with caplog.at_level(logging.WARNING, logger="modelopt.onnx"):
             suggest_exclusion(scores, coverage=0.94)
         messages = [r.message for r in caplog.records]
@@ -146,9 +169,11 @@ class TestNearTieWarning:
 
     def test_no_warning_when_cut_is_not_a_near_tie(self, caplog):
         # ViT-like distribution where coverage=0.75 cuts between very different KL values.
-        scores = {f"node_{i:02d}": kl for i, kl in enumerate(
-            [6.7, 5.7, 4.6, 4.3, 4.1, 0.5, 0.2, 0.1], 1)}
+        scores = {
+            f"node_{i:02d}": kl for i, kl in enumerate([6.7, 5.7, 4.6, 4.3, 4.1, 0.5, 0.2, 0.1], 1)
+        }
         import logging
+
         with caplog.at_level(logging.WARNING, logger="modelopt.onnx"):
             suggest_exclusion(scores, coverage=0.75)
         messages = [r.message for r in caplog.records]
@@ -158,6 +183,7 @@ class TestNearTieWarning:
         # Setting near_tie_ratio=None disables the warning entirely.
         scores = {"a": 5.0, "b": 4.99, "c": 0.1}
         import logging
+
         with caplog.at_level(logging.WARNING, logger="modelopt.onnx"):
             suggest_exclusion(scores, coverage=0.5, near_tie_ratio=None)
         messages = [r.message for r in caplog.records]
@@ -167,6 +193,7 @@ class TestNearTieWarning:
         # threshold=3.056 cuts between KL 3.06 (above threshold) and 3.05 (below) -- near-tie.
         scores = {"a": 6.7, "b": 5.7, "c": 3.06, "d": 3.05, "e": 0.1}
         import logging
+
         with caplog.at_level(logging.WARNING, logger="modelopt.onnx"):
             suggest_exclusion(scores, threshold=3.056)
         messages = [r.message for r in caplog.records]

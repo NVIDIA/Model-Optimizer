@@ -86,9 +86,8 @@ def mse(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
     Returns:
         Mean squared error across all elements, as a Python float.
     """
-    diff = (
-        _flatten_per_sample(fp16_act).astype(np.float64)
-        - _flatten_per_sample(quant_act).astype(np.float64)
+    diff = _flatten_per_sample(fp16_act).astype(np.float64) - _flatten_per_sample(quant_act).astype(
+        np.float64
     )
     return float(np.mean(diff * diff))
 

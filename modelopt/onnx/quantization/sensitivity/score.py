@@ -29,8 +29,8 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Callable, Sequence
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import numpy as np
 import onnx
@@ -47,6 +47,9 @@ from modelopt.onnx.quantization.ort_utils import create_inference_session
 from modelopt.onnx.quantization.quantize import quantize
 from modelopt.onnx.quantization.sensitivity.metrics import cos_dist, kl_div, mse
 from modelopt.onnx.utils import gen_random_inputs, get_input_names, get_op_types_in_graph
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
 __all__ = ["CalibrationSource", "Granularity", "Metric", "score"]
 
@@ -104,7 +107,8 @@ def _default_op_types_scope(onnx_model: onnx.ModelProto) -> set[str]:
     """
     activation_ops = get_activation_ops()
     return {
-        op for op in get_op_types_in_graph(onnx_model)
+        op
+        for op in get_op_types_in_graph(onnx_model)
         if (
             is_default_quantizable_op_by_ort(op)
             or op in activation_ops
@@ -191,9 +195,7 @@ def score(
             f"Unknown metric '{metric}'. Expected one of {list(_METRIC_FUNCS.keys())}."
         )
     if granularity not in (Granularity.OP_TYPE.value, Granularity.NODE.value):
-        raise ValueError(
-            f"Unknown granularity '{granularity}'. Expected 'op_type' or 'node'."
-        )
+        raise ValueError(f"Unknown granularity '{granularity}'. Expected 'op_type' or 'node'.")
     if target_precision not in ("int8", "fp8"):
         raise ValueError(
             f"Unsupported target_precision '{target_precision}'. Expected 'int8' or 'fp8'."
@@ -210,9 +212,7 @@ def score(
         f"target_precision={target_precision}"
     )
 
-    quantizable_ops = (
-        set(op_types_scope) if op_types_scope else _default_op_types_scope(onnx_model)
-    )
+    quantizable_ops = set(op_types_scope) if op_types_scope else _default_op_types_scope(onnx_model)
     if granularity == Granularity.OP_TYPE.value:
         targets = _enumerate_op_type_targets(onnx_model, quantizable_ops)
     else:
@@ -317,9 +317,7 @@ def _resolve_calibration_data(
     return _stack_sample_list(list(calibration_data)), CalibrationSource.REAL
 
 
-def _load_calibration_from_path(
-    path: str, input_names: list[str]
-) -> dict[str, np.ndarray]:
+def _load_calibration_from_path(path: str, input_names: list[str]) -> dict[str, np.ndarray]:
     """Load real calibration data from ``.npy``, ``.npz``, or a directory of ``.npz`` files.
 
     Args:

@@ -96,7 +96,10 @@ def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
         ranked = visible
 
     if not ranked:
-        return header + f"\n  (all {hidden} target(s) scored 0.0 -- pass --show_zero_scores to see them)"
+        return (
+            header
+            + f"\n  (all {hidden} target(s) scored 0.0 -- pass --show_zero_scores to see them)"
+        )
 
     name_width = max(len(name) for name, _ in ranked)
     lines = [header]
