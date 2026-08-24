@@ -103,7 +103,7 @@ Adding FP8 to the format menu helps across both reported sweeps: at every plotte
 AutoQuantize gradient is fast!
 ==============================
 
-Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method uses one backward pass and locally replays every candidate format at each scored module. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~52× difference (Table 1).
+Direct sensitivity measurement evaluates the full model for every layer-format pair. For instance, KL-divergence-based mixed-precision assignment algorithms, including AutoQuantize KL-divergence scoring, quantize one layer at a time and compare the output distributions of the quantized and unquantized models. Because each layer requires a full-model pass, scoring scales as :math:`O(N_{\mathrm{layers}}^2)`. In contrast, for each scoring batch, AutoQuantize gradient scoring uses one backward pass and locally replays every candidate format at each scored module. Hence, its scoring complexity is :math:`O(N_{\mathrm{layers}})`, resulting in a ~52× speedup on Qwen3.6-35B-A3B (Table 1).
 
 **Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
