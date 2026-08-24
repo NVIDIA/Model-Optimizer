@@ -495,6 +495,8 @@ def get_dataset_samples(
             "Use ``get_dataset_dataloader`` to expand combos, or pass one of "
             f"its members: {DATASET_COMBOS[dataset_name]}"
         )
+    if num_samples < 0:
+        raise ValueError(f"``num_samples`` must be non-negative, got {num_samples}.")
 
     # Local JSONL: load via HF's ``json`` builder and route through the same
     # auto-preprocess path as unregistered HF datasets so chat / prompt / text
@@ -613,7 +615,7 @@ def get_dataset_samples(
     # load_dataset does not support a list of splits while streaming, so load each separately.
     print_rank_0(f"Loading dataset with {config=} and {splits=} {data_files_tmpl=}")
 
-    def _load_split(s: str):
+    def _load_split(s: str | None):
         if data_files_tmpl:
             # Raw files via the ``json`` builder: schema is inferred from data, and the
             # file-based builder labels everything as the ``train`` split.
@@ -626,14 +628,15 @@ def get_dataset_samples(
         return load_dataset(streaming=True, **config, split=s)
 
     try:
-        dataset_splits = [_load_split(s) for s in splits]
-
-        num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+        num_per_split = [num_samples // len(splits)] * len(splits)
         num_per_split[-1] += num_samples - sum(num_per_split)
 
         samples: list[str] = []
-        for dataset, n in zip(dataset_splits, num_per_split):
-            for i, sample in enumerate(dataset):
+        for split_name, n in zip(splits, num_per_split):
+            # Skip zero-quota splits: starting a streamed split fetches its first record batch.
+            if n == 0:
+                continue
+            for i, sample in enumerate(_load_split(split_name)):
                 if i >= n:
                     break
                 text = _preprocess(sample)
