@@ -76,23 +76,16 @@ A mixed-precision assignment must respect the coupling constraints of its target
 Grouped decisions for coupled operators
 =======================================
 
-Inference runtimes commonly fuse each layer's Q, K, and V projections into one GEMM, so AutoQuantize constrains the three projections to share a format. Each projection is still scored at its own output, and the three scores are summed into the shared decision:
-
-The same grouping mechanism covers other supported fused layouts, including gate/up MLP projections and expert-weight layouts.
+Deployment runtimes such as TensorRT-LLM, vLLM, and SGLang require coupled operators to use a single quantization format. AutoQuantize imposes the same restriction during the search by combining those operators into one format decision. For example, the Q, K, and V projections form one group, as do the gate and up projections in a dense MLP. Their individual sensitivity scores and costs are summed:
 
 .. math::
 
-   S(\mathrm{Op}_{\mathrm{qkv}}, Q_{\mathrm{qkv},f}) = \sum_{p \in \{\mathrm{q},\mathrm{k},\mathrm{v}\}} S(\mathrm{Op}_p, Q_{p,f}).
+   S(\mathrm{group}, f) = \sum_{i \in \mathrm{group}} S(\mathrm{Op}_i, Q_{i,f}), \qquad
+   C(\mathrm{group}, f) = \sum_{i \in \mathrm{group}} C(\mathrm{Op}_i, Q_{i,f}).
 
-Adding the three scores isn't a shortcut — it follows from the approximation we already made. Dropping the off-diagonal Hessian terms means the errors from Q, K, and V don't interact, so their sensitivities simply add. Measuring them jointly after the attention block instead would capture that interaction; we leave that as a future investigation.
+Summing sensitivities is consistent with the diagonal-Hessian approximation, which ignores interactions between the operators' quantization errors. For QKV, this assumes that the Q, K, and V errors do not interact. A future investigation could instead quantize them jointly and measure sensitivity at the self-attention block output to capture those interactions.
 
-Costs are summed the same way. The quantized MoE APIs in TensorRT-LLM, vLLM, and SGLang impose the same kind of restriction, so each layer's sparse routed experts are merged into a single decision in exactly this manner. For the Qwen3 models benchmarked here, that decision includes every expert's ``gate_proj``, ``up_proj``, and ``down_proj``. Unlike the QKV case, sensitivity is measured once downstream at the MoE block output rather than at each expert projection:
-
-.. math::
-
-   S(\mathrm{Op}_{\mathrm{moe}}, Q_{\mathrm{moe},f}) \propto \sum_{k=1}^{d} \left(g_{\mathrm{moe},k}\right)^2 \left(Y_{\mathrm{moe},k} - Y_{\mathrm{moe},k}^{Q_{\mathrm{moe},f}}\right)^2.
-
-Latent projections and shared experts are outside this all-sparse-experts restriction, but other applicable fusion constraints still apply. For example, a shared expert's ``gate_proj`` and ``up_proj`` share a format while its ``down_proj`` is searched separately.
+Similarly, deployment runtimes may require all sparse experts in an MoE layer to use a single quantization format. AutoQuantize imposes this restriction by grouping them into one format decision. Their sensitivity is measured jointly at the MoE block output, while their individual costs are summed. Other MoE-block components, such as latent projections and shared experts, are not subject to this restriction and therefore remain separate decisions.
 
 Results
 *******
@@ -110,7 +103,7 @@ Adding FP8 to the format menu helps across both reported sweeps: at every plotte
 AutoQuantize gradient is fast!
 ==============================
 
-Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method instead visits every scored module, locally replays every candidate format, and performs one backward pass. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~52× difference (Table 1).
+Direct sensitivity measurement runs the whole model once per layer per format. KL-divergence scoring is one such direct measurement: quantize one layer, run a forward pass, and compare the output distributions of the quantized and unquantized models. For each scoring batch, the gradient method uses one backward pass and locally replays every candidate format at each scored module. Its total work therefore scales with both layers and formats, but it avoids a full-model evaluation for every layer-format pair. On Qwen3.6-35B-A3B that is a ~52× difference (Table 1).
 
 **Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
