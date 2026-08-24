@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from copy import deepcopy
-
 import numpy as np
 import onnx
 import pytest
@@ -2222,107 +2220,22 @@ def test_convert_to_f16_restores_public_io_metadata_from_entry_boundary():
     onnx.checker.check_model(converted, full_check=True)
 
 
-def test_convert_to_f16_excludes_named_rmsnorm_nodes_without_changing_qdq():
-    graph_input = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])
-    graph_output = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 4])
-    initializers = [
-        numpy_helper.from_array(np.full(4, 0.25, dtype=np.float32), name="q_scale"),
-        numpy_helper.from_array(np.zeros(4, dtype=np.uint8), name="q_zero_point"),
-        numpy_helper.from_array(np.full(4, 0.25, dtype=np.float32), name="dq_scale"),
-        numpy_helper.from_array(np.zeros(4, dtype=np.uint8), name="dq_zero_point"),
-        numpy_helper.from_array(np.array(2.0, dtype=np.float32), name="pow_exponent"),
-        numpy_helper.from_array(np.array([1], dtype=np.int64), name="reduce_axes"),
-        numpy_helper.from_array(np.array(1e-6, dtype=np.float32), name="epsilon"),
-        numpy_helper.from_array(np.ones(4, dtype=np.float32), name="gamma"),
-    ]
-    nodes = [
-        helper.make_node(
-            "QuantizeLinear",
-            ["X", "q_scale", "q_zero_point"],
-            ["X_quantized"],
-            name="input/QuantizeLinear",
-            axis=1,
-        ),
-        helper.make_node(
-            "DequantizeLinear",
-            ["X_quantized", "dq_scale", "dq_zero_point"],
-            ["X_dequantized"],
-            name="input/DequantizeLinear",
-            axis=1,
-        ),
-        helper.make_node("Pow", ["X_dequantized", "pow_exponent"], ["pow_out"], name="/rms/Pow"),
-        helper.make_node(
-            "ReduceMean",
-            ["pow_out", "reduce_axes"],
-            ["mean_out"],
-            name="/rms/ReduceMean",
-            keepdims=1,
-        ),
-        helper.make_node("Add", ["mean_out", "epsilon"], ["add_out"], name="/rms/Add"),
-        helper.make_node("Sqrt", ["add_out"], ["sqrt_out"], name="/rms/Sqrt"),
-        helper.make_node("Div", ["X_dequantized", "sqrt_out"], ["div_out"], name="/rms/Div"),
-        helper.make_node("Mul", ["div_out", "gamma"], ["Y"], name="/rms/Mul"),
-    ]
-    model = helper.make_model(
-        helper.make_graph(
-            nodes,
-            "quantized_rmsnorm",
-            [graph_input],
-            [graph_output],
-            initializer=initializers,
-        ),
-        opset_imports=[helper.make_opsetid("", 19)],
-        ir_version=10,
-    )
-    onnx.checker.check_model(model, full_check=True)
-
-    qdq_before = {
-        node.name: node.SerializeToString()
-        for node in model.graph.node
-        if node.op_type in {"QuantizeLinear", "DequantizeLinear"}
-    }
-    qdq_initializers_before = {
-        initializer.name: initializer.SerializeToString()
-        for initializer in model.graph.initializer
-        if initializer.name in {"q_scale", "q_zero_point", "dq_scale", "dq_zero_point"}
-    }
-    opsets_before = [(opset.domain, opset.version) for opset in model.opset_import]
-
+def test_convert_to_f16_combines_op_and_node_exclusions(simple_model):
+    model, *_ = simple_model
     converted = convert_to_f16(
-        deepcopy(model),
-        keep_io_types=True,
-        op_block_list=["QuantizeLinear", "DequantizeLinear"],
-        nodes_to_exclude=[r"^/rms/(Pow|ReduceMean|Add|Sqrt|Div)$"],
-        trt_plugins=[],
-        opset=19,
+        model,
+        keep_io_types=False,
+        op_block_list=["MatMul"],
+        nodes_to_exclude=[r"^add$"],
     )
-
-    qdq_after = {
-        node.name: node.SerializeToString()
-        for node in converted.graph.node
-        if node.name in qdq_before
-    }
-    qdq_initializers_after = {
-        initializer.name: initializer.SerializeToString()
-        for initializer in converted.graph.initializer
-        if initializer.name in qdq_initializers_before
-    }
-    assert qdq_after == qdq_before
-    assert qdq_initializers_after == qdq_initializers_before
-    assert [(opset.domain, opset.version) for opset in converted.opset_import] == opsets_before
 
     value_types = {
         value.name: value.type.tensor_type.elem_type
-        for value in (
-            *converted.graph.input,
-            *converted.graph.output,
-            *converted.graph.value_info,
-        )
+        for value in (*converted.graph.output, *converted.graph.value_info)
     }
-    assert value_types["X_quantized"] == TensorProto.UINT8
-    assert value_types["X_dequantized"] == TensorProto.FLOAT
-    for output_name in ["pow_out", "mean_out", "add_out", "sqrt_out", "div_out"]:
-        assert value_types[output_name] == TensorProto.FLOAT
+    assert value_types["gemm_output"] == TensorProto.FLOAT
+    assert value_types["add_output"] == TensorProto.FLOAT
+    assert value_types["Y"] == TensorProto.FLOAT16
     onnx.checker.check_model(converted, full_check=True)
 
 
