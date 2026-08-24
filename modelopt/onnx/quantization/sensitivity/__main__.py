@@ -29,12 +29,7 @@ import sys
 import numpy as np
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.sensitivity.score import (
-    CalibrationSource,
-    Granularity,
-    Metric,
-    score,
-)
+from modelopt.onnx.quantization.sensitivity.score import Granularity, Metric, score
 
 
 def _default_output_json(onnx_path: str) -> str:
@@ -46,9 +41,9 @@ def _default_output_json(onnx_path: str) -> str:
 def _load_calibration(path: str | None) -> str | dict | None:
     """Return calibration input for :func:`score`.
 
-    If ``path`` is a ``.npz`` file, load it eagerly so the caller sees a proper ``dict`` (matches
-    what the main quantize CLI does). Directories and ``.npy`` files are passed through as strings so
-    :func:`score` uses its path-loader.
+    If ``path`` is a ``.npz`` file, load it eagerly so the caller sees a proper ``dict``.
+    Directories and ``.npy`` files are passed through as strings so :func:`score` uses its
+    path-loader.
 
     Args:
         path: Filesystem location or ``None`` for the synthetic-random fallback.
@@ -72,9 +67,6 @@ def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
     Args:
         result: The return value of :func:`score`.
         show_zero_scores: If False (default), hide targets whose drift score is exactly ``0.0``.
-            Such targets typically indicate op types the underlying quantize call skipped (graph
-            plumbing like ``Cast`` or ``Reshape``); their zero score is legitimate but noisy in
-            the ranked table. All scores -- including zeros -- always appear in the JSON output.
 
     Returns:
         A newline-joined string with a header, one row per non-hidden target, and highest / lowest
@@ -199,10 +191,7 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show_zero_scores",
         action="store_true",
-        help=(
-            "Include zero-drift targets (op types the underlying quantize call could not affect) "
-            "in the stderr ranked table. They always appear in the JSON regardless."
-        ),
+        help="Include zero-score targets in the stderr ranked table.",
     )
     return parser
 
@@ -238,9 +227,6 @@ def main(argv: list[str] | None = None) -> int:
         calibration_eps=args.calibration_eps,
         op_types_scope=args.op_types_scope,
     )
-    # Sanity-check the JSON schema; score() already emits the enum's string value.
-    assert result["calibration_source"] in {c.value for c in CalibrationSource}
-
     payload = {"onnx_path": os.path.abspath(args.onnx_path), **result}
     output_json = args.output_json or _default_output_json(args.onnx_path)
     os.makedirs(os.path.dirname(os.path.abspath(output_json)) or ".", exist_ok=True)

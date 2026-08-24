@@ -15,14 +15,14 @@
 
 """Tests for the ONNX quantization sensitivity primitive.
 
-Tiers:
+Tiers, from lightest to heaviest:
 
-1. Synthetic-graph unit test with real deterministic inputs -- LayerNorm scores highest.
-2. CoAtNet-0 op-type integration (``@pytest.mark.slow`` + real ImageNet calibration).
-3. CoAtNet-0 per-node integration (``@pytest.mark.slow_gpu`` + real ImageNet calibration).
-4. Synthetic-random calibration regression guard -- LayerNorm still > Conv directionally.
+1. Synthetic-random calibration smoke test -- LayerNorm > Conv directionally.
+2. Synthetic graph + deterministic real inputs -- LayerNorm scores highest.
+3. CoAtNet-0 op-type integration (``@pytest.mark.slow`` + real ImageNet calibration).
+4. CoAtNet-0 per-node integration (``@pytest.mark.slow_gpu`` + real ImageNet calibration).
 
-Tiers 2 and 3 read a pre-staged CoAtNet-0 ONNX + calibration ``.npz`` from a fixtures directory
+Tiers 3 and 4 read a pre-staged CoAtNet-0 ONNX + calibration ``.npz`` from a fixtures directory
 resolved via ``MODELOPT_ONNX_ACCURACY_MODELS_DIR`` (default ``/tmp``). Missing fixtures ``pytest.skip``
 cleanly.
 """
@@ -128,9 +128,28 @@ def _assert_ln_over_conv(scores: dict[str, float]) -> None:
     )
 
 
+def test_synthetic_random_calibration_directional(tmp_path):
+    """Tier 1: with ``calibration_data=None`` -- LN > Conv holds."""
+    onnx_path = str(tmp_path / "sens_synth.onnx")
+    _build_conv_mm_ln_onnx(onnx_path)
+
+    result = score(
+        onnx_path,
+        calibration_data=None,
+        num_synthetic_samples=8,
+        metric="kl_div",
+        target_precision="int8",
+        granularity="op_type",
+        calibration_eps=("cpu",),
+        op_types_scope=_SYNTHETIC_OP_SCOPE,
+    )
+    assert result["calibration_source"] == "synthetic"
+    _assert_ln_over_conv(result["scores"])
+
+
 @pytest.mark.parametrize("metric", ["kl_div", "mse", "cos"])
 def test_synthetic_deterministic_ln_highest(tmp_path, metric):
-    """Tier 1: synthetic graph + deterministic real inputs -- LN scores highest of all ops."""
+    """Tier 2: synthetic graph + deterministic real inputs -- LN scores highest of all ops."""
     onnx_path = str(tmp_path / "sens_synth.onnx")
     _build_conv_mm_ln_onnx(onnx_path)
     calib = _deterministic_calibration()
@@ -156,25 +175,6 @@ def test_synthetic_deterministic_ln_highest(tmp_path, metric):
     _assert_ln_over_conv(scores)
 
 
-def test_synthetic_random_calibration_directional(tmp_path):
-    """Tier 4: with ``calibration_data=None``, LN > Conv invariant still holds directionally."""
-    onnx_path = str(tmp_path / "sens_synth.onnx")
-    _build_conv_mm_ln_onnx(onnx_path)
-
-    result = score(
-        onnx_path,
-        calibration_data=None,
-        num_synthetic_samples=8,
-        metric="kl_div",
-        target_precision="int8",
-        granularity="op_type",
-        calibration_eps=("cpu",),
-        op_types_scope=_SYNTHETIC_OP_SCOPE,
-    )
-    assert result["calibration_source"] == "synthetic"
-    _assert_ln_over_conv(result["scores"])
-
-
 def _require_fixture(name: str) -> str:
     """Return a fixture path or ``pytest.skip`` if it isn't staged on this host."""
     path = os.path.join(_FIXTURE_DIR, name)
@@ -183,40 +183,29 @@ def _require_fixture(name: str) -> str:
     return path
 
 
+@pytest.fixture(scope="module")
+def coatnet_fixtures() -> tuple[str, str]:
+    """CoAtNet-0 baseline ONNX + 500-sample ImageNet calibration for tier 3 / 4 tests."""
+    return (
+        _require_fixture("coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx"),
+        _require_fixture("imagenet_calib_500.npz"),
+    )
+
+
 @pytest.mark.slow
-def test_coatnet_op_type_matches_manual_groundtruth():
-    """Tier 2: CoAtNet-0 op-type ranking must surface the ops that ``--op_types_to_quantize
+def test_coatnet_op_type_matches_manual_groundtruth(coatnet_fixtures):
+    """Tier 3: CoAtNet-0 op-type ranking must surface the ops that ``--op_types_to_quantize
     Conv`` implicitly avoids.
 
-    Empirical ranking on CoAtNet-0 with 500-sample ImageNet calibration and ``kl_div``:
+    On CoAtNet-0 with 500-sample ImageNet calibration and ``kl_div``, the top-4 are
+    ``Add`` / ``Mul`` / ``LayerNormalization`` / ``ReduceMean`` (all > 1.5 KL) and
+    ``Conv`` sits ~10x below, matching the manual "Conv-only wins 82% top-1" ground truth.
+    Full ranking is documented in :doc:`_onnx_quantization`.
 
-        Add                 2.848  <-- highest impact
-        Mul                 1.890
-        LayerNormalization  1.653
-        ReduceMean          1.570
-        BatchNormalization  0.355
-        Conv                0.181
-        AveragePool         0.057
-        Sigmoid             0.039
-        MatMul              0.015
-        Relu               ~0
-        Softmax            ~0
-        GlobalAveragePool  ~0
-        Gemm                0
-
-    Top-4 = Add / Mul / LayerNormalization / ReduceMean are the load-bearing failures
-    (residual paths, SE gating + softmax scale, norm boundaries).  Conv sits ~10x below
-    the top-4 and quantizes cleanly, matching the manual "Conv-only wins 82% top-1"
-    ground truth read as a quantization policy.
-
-    Wall-clock ~14 min on H100 with 500 samples / 13 probes (~60s per probe).
-
-    Fixtures (override root via ``MODELOPT_SENSITIVITY_FIXTURES``):
-      * ``coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx`` -- baseline ONNX.
-      * ``imagenet_calib_500.npz`` -- 500-sample ImageNet calibration dict.
+    Wall-clock ~14 min on H100. Fixtures (override root via ``MODELOPT_ONNX_ACCURACY_MODELS_DIR``):
+    ``coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx`` and ``imagenet_calib_500.npz``.
     """
-    onnx_path = _require_fixture("coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx")
-    calib_path = _require_fixture("imagenet_calib_500.npz")
+    onnx_path, calib_path = coatnet_fixtures
 
     result = score(
         onnx_path,
@@ -246,13 +235,12 @@ def test_coatnet_op_type_matches_manual_groundtruth():
 
 
 @pytest.mark.slow_gpu
-def test_coatnet_per_node_matches_manual_groundtruth():
-    """Tier 3: CoAtNet-0 per-node ranking (LN/MHA nodes top, Conv nodes bottom).
+def test_coatnet_per_node_matches_manual_groundtruth(coatnet_fixtures):
+    """Tier 4: CoAtNet-0 per-node ranking (LN/MHA nodes top, Conv nodes bottom).
 
     Wall clock ~30-60 min; gated behind ``@pytest.mark.slow_gpu`` so default CI stays fast.
     """
-    onnx_path = _require_fixture("coatnet-0_rw_inpsize_1x3x224x224_opsetv_17_simplified.onnx")
-    calib_path = _require_fixture("imagenet_calib_500.npz")
+    onnx_path, calib_path = coatnet_fixtures
 
     result = score(
         onnx_path,

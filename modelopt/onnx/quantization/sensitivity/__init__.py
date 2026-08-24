@@ -13,14 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ONNX quantization sensitivity scan.
-
-Ranks quantization targets (op types or individual nodes) by the accuracy impact they would have if
-quantized. The core primitive, :func:`score`, mutates the graph with a properly calibrated single-
-target Q/DQ pass (via the standard :func:`modelopt.onnx.quantization.quantize` entry point), runs
-both the FP16 reference and the quantized model through ONNXRuntime, and reports a proxy metric per
-target so a downstream picker can decide which ops or nodes to keep at higher precision.
-"""
+"""ONNX quantization sensitivity: rank quantizable targets by per-target Q/DQ drift."""
 
 from modelopt.onnx.quantization.sensitivity.picker import suggest_exclusion, summarize_exclusion
 from modelopt.onnx.quantization.sensitivity.score import (

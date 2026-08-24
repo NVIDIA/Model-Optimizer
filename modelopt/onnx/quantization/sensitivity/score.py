@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core ONNX quantization sensitivity primitive: :func:`score`.
+"""Core sensitivity primitive: rank quantizable targets by per-target Q/DQ drift.
 
-For every quantization target (an op type or a single node), inserts calibrated Q/DQ nodes on just
-that target via the standard :func:`modelopt.onnx.quantization.quantize` entry point, runs the
-resulting ONNX and the unquantized reference through ONNXRuntime on the same calibration inputs,
-and computes a proxy metric between the two graph-output activation sets. Higher score means the
-target degrades the model more if quantized -- so callers keep high scores at higher precision.
+For every op type or node, :func:`score` inserts calibrated Q/DQ on that target only via
+:func:`modelopt.onnx.quantization.quantize`, runs both the reference and quantized graphs through
+ONNXRuntime, and computes a proxy metric between their outputs. Higher score means the target
+degrades the model more if quantized.
 """
 
 from __future__ import annotations
@@ -88,16 +87,11 @@ _SYNTHETIC_SEED = 0
 
 
 def _default_op_types_scope(onnx_model: onnx.ModelProto) -> set[str]:
-    """Return op types worth probing by default: present in the graph AND known-quantizable.
+    """Return op types worth probing by default.
 
-    Intersects the set of op types actually present in the graph with the union of ORT's default
-    quantizable ops, activation ops, normalization ops, and fusible reduction ops. Layout / copy
-    ops (``Transpose`` / ``Reshape`` / ``Concat`` / ...) are then excluded via
-    :func:`is_copy_op` -- they show up in ORT's default quantizable set but their sensitivity
-    signal reflects Q/DQ insertion at data-movement boundaries rather than any INT8-kernel
-    trade-off, and TensorRT never actually produces INT8 kernels for them, so ranking them
-    clutters the output with "don't do this anyway" entries. Graph plumbing (``Cast`` /
-    ``Constant`` / ``Shape`` / ...) not on any of the above lists is also skipped.
+    Intersects ops present in the graph with ORT's default quantizable set / activation /
+    normalization / fusible-reduction ops, minus copy ops (such as Transpose and Reshape)
+    because TensorRT never produces INT8 kernels for them.
 
     Args:
         onnx_model: Loaded ONNX model to enumerate.
@@ -173,8 +167,7 @@ def score(
             ``Shape`` / ...) is skipped by default because it produces zero-drift probes.
             Ops that slip past the filter but that the underlying
             :func:`modelopt.onnx.quantization.quantize` still cannot quantize are reported
-            with score ``0.0`` -- the CLI hides those from the pretty-printed table by
-            default but they always appear in the JSON output.
+            with score ``0.0``.
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.
 

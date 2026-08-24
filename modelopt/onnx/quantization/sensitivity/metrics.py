@@ -13,14 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Proxy metrics for ONNX quantization sensitivity scoring.
-
-Each metric maps a pair ``(fp16_act, quant_act)`` of aligned activation tensors to a non-negative
-scalar. Higher values mean the quantization target under test caused more distortion of the model's
-output, so the caller ranks targets by increasing sensitivity to decide what to keep at higher
-precision. Callers pass the raw activations exactly as ORT returned them; each metric normalizes
-internally where relevant (e.g. softmax for KL) and averages across the leading batch dimension.
-"""
+"""Proxy metrics between reference and quantized activations. Higher = more distortion."""
 
 import numpy as np
 
@@ -55,10 +48,8 @@ def _softmax(logits: np.ndarray, axis: int = -1) -> np.ndarray:
 def kl_div(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
     """KL divergence between softmax-normalized FP16 and quantized activations.
 
-    Both tensors are flattened per-sample and passed through softmax to obtain probability
-    distributions, then the KL divergence ``sum(p * log(p / q))`` is computed per sample and
-    averaged. This is the recommended default metric because it matches the intuition "output
-    distribution should be similar" and is robust to activation magnitude scale.
+    Robust to activation magnitude scale. Both tensors are flattened per-sample, passed through
+    softmax, and ``sum(p * log(p / q))`` is averaged across samples.
 
     Args:
         fp16_act: FP16 reference activations, shape ``(num_samples, ...)``.
@@ -74,10 +65,7 @@ def kl_div(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
 
 
 def mse(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
-    """Mean squared error on raw activation values.
-
-    Cheap to compute but sensitive to activation magnitude scale; a target whose output happens to
-    be large in absolute value will look more sensitive under MSE than under KL / cosine.
+    """Mean squared error on raw activation values. Sensitive to activation magnitude scale.
 
     Args:
         fp16_act: FP16 reference activations.
@@ -93,10 +81,7 @@ def mse(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
 
 
 def cos_dist(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
-    """Cosine distance ``1 - cos(fp16, quant)`` averaged across samples.
-
-    Scale-invariant: robust to models with wide activation-magnitude variance where MSE would be
-    dominated by the largest tensors.
+    """Cosine distance ``1 - cos(fp16, quant)`` averaged across samples. Scale-invariant.
 
     Args:
         fp16_act: FP16 reference activations.

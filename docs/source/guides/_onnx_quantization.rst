@@ -125,16 +125,9 @@ The following command will build the engine using fp16 precision. After building
 Quantization Sensitivity Scan
 =============================
 
-Post-training quantization of any ONNX model often runs into the same friction: it is unclear
-which ops or nodes destroy accuracy at INT8/FP8, and practitioners iterate through hand-crafted
-exclusion policies until they find one that works. The
-:func:`modelopt.onnx.quantization.sensitivity.score` primitive automates that investigation for
-any ONNX model with a calibration dataset. It ranks quantizable targets (op types or individual
-nodes) by a proxy metric between the reference and per-target quantized activations, so a
-downstream picker can decide which ops to keep at higher precision. Works across CNN,
-Transformer, and hybrid architectures alike -- the ranking reflects each model's own
-precision-sensitive pathways (residual paths, normalization boundaries, SE gating, attention
-projections, etc.) without any architecture-specific configuration. The primitive reuses
+:func:`modelopt.onnx.quantization.sensitivity.score` ranks each quantizable target (op type or
+individual node) by a proxy metric between the reference and per-target quantized activations,
+so a downstream picker can decide which targets to keep at higher precision. It reuses
 :func:`modelopt.onnx.quantization.quantize` internally for each per-target probe.
 
 .. _sensitivity-supported-options:
@@ -144,21 +137,15 @@ Supported options
 
 - ``granularity``: ``op_type`` (default; probes each quantizable op type once) or
   ``node`` (probes each ONNX node individually; slower).
-- ``metric``: ``kl_div`` (default; softmax-normalized KL divergence — recommended), ``mse``
-  (raw mean squared error; cheaper but scale-sensitive) or ``cos`` (``1 - cosine_similarity``;
-  scale-invariant, robust to activation magnitude variance).
+- ``metric``: ``kl_div`` (default), ``mse``, or ``cos`` (``1 - cosine_similarity``).
 - ``target_precision``: ``int8`` (default) or ``fp8``.
-- ``calibration_method``: passed through to the underlying quantize call — ``entropy`` (default)
-  or ``max``.
+- ``calibration_method``: ``entropy`` (default) or ``max``.
 - ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
-  directory), or ``None`` to fall back to synthetic random tensors (directional-only; see note
-  below).
-- ``op_types_scope``: optional whitelist of op types to probe. If omitted, defaults to the
-  intersection of ops actually present in the graph and the union of ORT's default quantizable
-  set, activation ops, normalization ops, and fusible reduction ops. Graph plumbing (``Cast`` /
-  ``Constant`` / ``Shape`` / ...) is skipped so wall-clock is not wasted on zero-drift probes.
-  Any ops that slip past the filter but still produce zero drift are hidden from the CLI table
-  by default (pass ``--show_zero_scores`` to see them; they always appear in the JSON).
+  directory), or ``None`` for synthetic random tensors (directional-only; see note below).
+- ``op_types_scope``: optional whitelist of op types to probe. If omitted, defaults to ops
+  present in the graph intersected with the union of ORT's default quantizable set, activation
+  ops, normalization ops, and fusible reduction ops (graph plumbing like ``Cast`` /
+  ``Constant`` / ``Shape`` is skipped).
 
 Python API:
 
@@ -169,8 +156,8 @@ Python API:
     result = score(
         onnx_path="coatnet-0.onnx",
         calibration_data="imagenet_calib_500.npz",
-        granularity="op_type",  # choices = {"op_type", "node"}
-        metric="kl_div",        # choices = {"kl_div", "mse", "cos"}
+        granularity="op_type",
+        metric="kl_div",
         target_precision="int8",
     )
     # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
@@ -204,10 +191,6 @@ from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks l
                for i, ex in enumerate(ds) if i < 500]
     np.savez("imagenet_calib_500.npz",
              **{input_name: np.stack(samples).astype(np.float32)})
-
-Use the analogous timm handle for any other model family (``resnet50``, ``mobilenetv3_large_100``,
-``vit_base_patch16_224``, ...); the ``resolve_model_data_config`` +``create_transform`` pair keeps
-preprocessing consistent with the exported ONNX regardless of architecture.
 
 Command line:
 
@@ -248,15 +231,9 @@ Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
 
 .. note::
 
-    Omitting ``--calibration_data_path`` falls back to synthetic random inputs. Absolute scores are
-    then directional-only and must not be paired with absolute thresholds -- attention-heavy models
-    are the highest-risk degradation case because random Q times K^T produces near-uniform softmax
-    that hides real-input MHA quantization pathology.
-
-In per-node granularity the scanner iterates over every quantizable node in the graph and runs
-one probe per node; each probe uses the existing ``--nodes_to_quantize <regex>`` flag on the main
-quantize CLI to quantize that node alone (everything else stays FP16) so the resulting output
-drift attributes to that specific node.
+    Omitting ``--calibration_data_path`` falls back to synthetic random inputs; scores are
+    directional-only and must not be paired with absolute thresholds. Attention-heavy models
+    are the highest-risk degradation case.
 
 Turning scores into an exclusion list
 -------------------------------------
@@ -268,22 +245,16 @@ function :func:`sensitivity.suggest_exclusion` turns that dictionary into an act
 :func:`modelopt.onnx.quantization.quantize`, and :func:`sensitivity.summarize_exclusion`
 reports what the exclusion set covers.
 
-In the rest of this documentation, we'll cover ``per-node`` granularity for simplicity,
-but the same logic goes for ``per-op-type`` granularity.
-
 Two policy modes are supported:
 
-- **Coverage mode** (default): return the largest node set whose cumulative sensitivity
-  score stays at or below ``coverage * total_mass``. The actual coverage is always less
-  than or equal to the requested value ("at most X%"). Architecture-portable because the
-  target is a fraction, not an absolute number -- ``coverage=0.90`` means the same thing
-  on any model regardless of sensitivity score magnitudes.
-- **Threshold mode**: return every node whose individual sensitivity score exceeds
-  ``threshold`` (no cumulative-mass logic). Simpler and more predictable when the
-  operator already knows the per-node sensitivity score magnitude that separates
-  "quantize safely" from "keep at higher precision" for a specific model. Per-node
-  sensitivity score magnitudes are not portable across models. When ``threshold`` is
-  set, ``coverage`` is ignored.
+- **Coverage mode** (default): exclude the largest node set whose cumulative sensitivity score
+  stays at or below ``coverage * total_mass``. Architecture-portable -- ``coverage=0.90`` means
+  the same thing on any model.
+- **Threshold mode**: exclude every node whose individual score exceeds ``threshold``. Simpler
+  when the operator already knows a per-node cutoff for a specific model. Setting ``threshold``
+  ignores ``coverage``.
+
+See :func:`suggest_exclusion` for the full argument reference.
 
 Python API -- coverage mode:
 
@@ -322,32 +293,24 @@ Python API -- threshold mode:
 
 .. note::
 
-    The picker emits a ``logger.warning`` when the boundary between included and
-    excluded nodes is a near-tie -- specifically, if the first-excluded node's sensitivity
-    score is at least 99% of the last-included node's sensitivity score. In that case two
-    nodes with nearly equivalent sensitivity end up in different precisions (one FP16, 
-    one INT8), which can produce intra-group precision fragmentation. The warning suggests 
-    a slightly larger ``coverage`` (or smaller ``threshold``) to include the near-tied node.
-    Set ``near_tie_ratio=None`` to disable the warning entirely.
+    The picker warns when the exclusion boundary is a near-tie (default:
+    first-excluded score >= 99% of last-included). Widen ``coverage`` or narrow
+    ``threshold`` to absorb the near-tied target, or set ``near_tie_ratio=None`` to silence.
 
 Grouping per-node scores into architectural blocks
 --------------------------------------------------
 
 On attention-heavy transformer architectures (ViT, DeiT, Swin, CoAtNet's
-attention stages), per-node picking can leave affected transformer blocks with
-fragmented precision -- some FP16 nodes, some INT8 nodes -- and softmax
-numerics degrade catastrophically. Making the *transformer block* the atomic
-exclusion unit avoids the fragmentation.
+attention stages), per-node picking can leave transformer blocks with
+fragmented precision -- some FP16 nodes, some INT8 nodes. Making the
+*transformer block* the atomic exclusion unit avoids the fragmentation.
 
 Pass a ``blocks`` mapping to :func:`suggest_exclusion` to switch the picker
-from per-node to per-block ranking. Each node in the score dict is assigned
-to at most one group (first-match wins across ``blocks``); unmatched nodes
-become their own singleton group. Coverage / threshold / near-tie /
-``max_nodes`` semantics apply to the *group* ranking, and the returned
-exclusion list is the union of member nodes across the selected groups. See
-:func:`suggest_exclusion`'s docstring for the ``block_agg`` / picker-mode
-pairings (``sum`` + ``coverage`` and ``max`` + ``threshold`` preserve
-per-node units).
+from per-node to per-block ranking. Each node is assigned to at most one
+group (first-match wins across ``blocks``); unmatched nodes become their
+own singleton group. Coverage / threshold / near-tie / ``max_nodes``
+semantics apply to the *group* ranking, and the returned exclusion list is
+the union of member nodes across the selected groups.
 
 Example: ``vit_tiny_patch16_224`` from timm
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -436,9 +399,8 @@ tail than blocks.11), so any of the following expressions produces the same
     # sum + max_nodes (equivalent -- top 6 groups by cumulative KL mass)
     suggest_exclusion(scores, coverage=1.0, max_nodes=6, blocks=blocks, block_agg="sum")
 
-Empirically on a 500-image ImageNet-1k validation subset, this 101-node
-block-level exclusion recovers ~75% top-1 versus ~60% for the best per-node
-picking -- closing the ViT-tiny parity gap to implicit quantization.
+On a 500-image ImageNet-1k validation subset, this 101-node block-level
+exclusion recovers ~75% top-1 versus ~60% for the best per-node picking.
 
 Choosing a grouping depth
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -474,5 +436,5 @@ When per-block picking doesn't help
 Block-level grouping is architecture-specific. On Conv-heavy models where
 sensitivity is diffuse across many small MBConv or Bottleneck contributors
 (MobileNet, ResNet families), per-node ``coverage`` or ``threshold`` picking
-typically outperforms block grouping. Reach for ``blocks`` first on
-transformer / attention-heavy architectures.
+outperforms block grouping. Use ``blocks`` on transformer / attention-heavy
+architectures.
