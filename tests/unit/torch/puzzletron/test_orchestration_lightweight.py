@@ -235,7 +235,7 @@ quoted: \"1e-4\"
 """
     )
 
-    config = load_experiment_config(experiment, overrides=["threshold=1e-4"])
+    config = load_experiment_config(experiment, overrides=["+threshold=1e-4"])
 
     assert config["bypass"]["best_val_loss"] == 1e9
     assert config["bypass"]["training"] == {
@@ -277,10 +277,16 @@ def test_load_experiment_config_distinguishes_hydra_addition_modes(
     added = load_experiment_config(experiment, overrides=["+added.value=2"])
     with pytest.raises(ValueError, match="^Addition override already exists"):
         load_experiment_config(experiment, overrides=["+value=2"])
+    with pytest.raises(ValueError, match="^Override key does not exist"):
+        load_experiment_config(experiment, overrides=["missing=2"])
+    with pytest.raises(ValueError, match="^Override path does not exist"):
+        load_experiment_config(experiment, overrides=["missing.value=2"])
     replaced = load_experiment_config(experiment, overrides=["++value=2"])
+    created = load_experiment_config(experiment, overrides=["++created.value=3"])
 
     assert added["added"] == {"value": 2}
     assert replaced["value"] == 2
+    assert created["created"] == {"value": 3}
 
 
 def test_convert_completeness_requires_runtime_subblock_library(
