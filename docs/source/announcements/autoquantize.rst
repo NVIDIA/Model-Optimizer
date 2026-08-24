@@ -3,7 +3,7 @@
 AutoQuantize: A Fast Automatic Mixed-Precision Assignment
 #########################################################
 
-:Authors: Asma Beevi K T, Wei Ming, Frida Hou, Juhi Mittal, Jenny Chen, Ajinkya Rasane, Meng Xin, Shengliang Xu
+:Author: Model Optimizer Team
 :Date: July 15, 2026
 :Tags: autoquantize, quantization, mixed-precision, modelopt
 
@@ -17,7 +17,7 @@ LLMs carry a lot of redundancy, but not uniformly: a few layers — attention pr
 How AutoQuantize works
 **********************
 
-AutoQuantize is a neural architecture search (NAS) inspired method that works in three steps: score how sensitive each operation is to quantization, model the performance cost of each available format, and solve for the best layer-wise assignment under the cost budget with a knapsack-style optimization. The sensitivity score uses a second-order Taylor approximation in the spirit of Optimal Brain Surgeon [1]_, while the mixed-precision search builds on LLM-MQ [2]_.
+AutoQuantize is a neural architecture search (NAS) inspired method that works in three steps: score how sensitive each operation is to quantization, model the performance cost of each available format, and solve a knapsack-style integer linear program (ILP) for the lowest-scoring assignment under the cost budget. The sensitivity score uses a second-order Taylor approximation in the spirit of Optimal Brain Surgeon [1]_, while the ILP-based mixed-precision search builds on LLM-MQ [2]_.
 
 AutoQuantize gradient: A fast, yet accurate sensitivity scoring
 ===============================================================
@@ -66,10 +66,12 @@ Following the effective-bits objective above, AutoQuantize solves the constraine
 
 where :math:`Q_{i,f}` is the chosen format for operator :math:`i`, :math:`\mathrm{bits}(Q_{i,f})` the modeled bit cost per eligible weight of format :math:`f`, :math:`N_{\mathrm{total}} = \sum_i N_{\mathrm{params}}(\mathrm{Op}_i)` the eligible quantizable-weight count, and :math:`\bar{b}` the user-specified average effective-bits target (e.g. :math:`\bar{b} = 4.8`). A format-provided effective-bits value includes its declared overhead; formats without one use the ``num_bits`` estimate described above. Sweeping :math:`\bar{b}` produces a budget sweep of proxy-optimal assignments.
 
+AutoQuantize expresses this optimization as an ILP, with one binary variable for every candidate format in each search decision. The solver selects exactly one format per decision while satisfying the effective-bits budget.
+
 Deployment-restriction-aware search
 ***********************************
 
-A mixed-precision assignment must respect the coupling constraints of its target runtime. AutoQuantize folds selected constraints directly into the search: any restriction of the form "this group of operators takes one joint format decision" becomes a merged knapsack item with aggregated sensitivity and cost. This narrows the assignment to formats that coupled operators can share; runtime support still depends on the model, quantization formats, and documented export and deployment workflow.
+A mixed-precision assignment must respect the coupling constraints of its target runtime. AutoQuantize folds selected constraints directly into the search: any restriction of the form "this group of operators takes one joint format decision" becomes a single ILP decision with aggregated sensitivity and cost. This narrows the assignment to formats that coupled operators can share; runtime support still depends on the model, quantization formats, and documented export and deployment workflow.
 
 Grouped decisions for coupled operators
 =======================================
@@ -101,7 +103,7 @@ Results
 
 **Figure 1. MMLU accuracy vs. effective bits under AutoQuantize, Qwen3.5-2B/9B.**
 
-Figure 1 sweeps the AutoQuantize effective-bits budget and evaluates each resulting assignment on MMLU: more budget buys accuracy, so the curve is the memory-vs-accuracy trade you get to pick a point on. The trend is upward but not strictly monotonic, likely a mix of evaluation noise and the knapsack solve reshuffling assignments between neighboring budgets. Dashed lines are BF16; the NVFP4 default markers quantize every layer except ``lm_head``.
+Figure 1 sweeps the AutoQuantize effective-bits budget and evaluates each resulting assignment on MMLU: more budget buys accuracy, so the curve is the memory-vs-accuracy trade you get to pick a point on. The trend is upward but not strictly monotonic, likely a mix of evaluation noise and the ILP solver selecting different assignments at neighboring budgets. Dashed lines are BF16; the NVFP4 default markers quantize every layer except ``lm_head``.
 
 Adding FP8 to the format menu helps across both reported sweeps: at every plotted budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
 
@@ -130,7 +132,7 @@ Direct sensitivity measurement runs the whole model once per layer per format. K
 
 *ModelOpt AutoQuantize supports both sensitivity scoring methods — gradient (the default) and KL divergence. Measured on 4× NVIDIA RTX 6000 Ada GPUs with 128 samples at sequence length 512. Times cover sensitivity scoring only — not the end-to-end AutoQuantize run, which also includes calibration time for each format.*
 
-**Memory.** A backward pass is not inherently memory-heavy. With activation checkpointing, activations are recomputed on demand instead of retained for backward, trading additional compute for a smaller footprint. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, peak memory remains close to forward-only execution: 29 GB versus 23 GB for KL-divergence in Table 1.
+**Memory.** A backward pass is not inherently memory-heavy. With activation checkpointing, intermediate activations within checkpointed regions are recomputed during backward rather than all being retained from the forward pass. AutoQuantize also performs a scoring pass rather than a training step, so it needs no optimizer state or persistent weight-gradient buffers. Consequently, the peak memory overhead relative to forward-only execution is not significant.
 
 How to use ModelOpt AutoQuantize
 ********************************
@@ -165,13 +167,13 @@ We are working on improving AutoQuantize in the following ways:
 Conclusion
 **********
 
-AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, a knapsack solve under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.
+AutoQuantize turns mixed-precision quantization from trial and error into a principled search: gradient-based sensitivity scoring in a single sweep, an ILP solve under your cost budget, and selected runtime coupling constraints incorporated into the assignment. Sweep the bit budget to find your model's accuracy-vs-compression sweet spot, then follow the documented export and deployment workflow for the target model, formats, and runtime.
 
 .. _references:
 
 References
 **********
 
-.. [1] B. Hassibi and D. G. Stork. `Second Order Derivatives for Network Pruning: Optimal Brain Surgeon <https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_. *NeurIPS*, 1992.
-.. [2] S. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. `LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment <https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf>`_. *NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)*, 2023.
-.. [3] S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer. `SqueezeLLM: Dense-and-Sparse Quantization <https://arxiv.org/abs/2306.07629>`_. *ICML*, 2024.
+.. [1] B\. Hassibi and D. G. Stork. `Second Order Derivatives for Network Pruning: Optimal Brain Surgeon <https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_. *NeurIPS*, 1992.
+.. [2] S\. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. `LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment <https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf>`_. *NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)*, 2023.
+.. [3] S\. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer. `SqueezeLLM: Dense-and-Sparse Quantization <https://arxiv.org/abs/2306.07629>`_. *ICML*, 2024.
