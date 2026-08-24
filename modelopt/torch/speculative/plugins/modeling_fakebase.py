@@ -34,6 +34,40 @@ from transformers import (
 
 from .modeling_final_norm import _FINAL_NORM_CLASSES, _select_final_norm_type
 
+# Model types whose embedding layer scales its output by sqrt(hidden_size) inside
+# ``forward()`` rather than baking the factor into the stored weight. FakeBaseModel
+# rebuilds the embedding as a plain ``nn.Embedding`` and copies only the raw weight,
+# so that scaling is silently lost -- the draft then trains on inputs ~sqrt(H) times
+# smaller than the ones vLLM feeds it at serving time, and acceptance collapses with
+# no error anywhere. Measured on Gemma-4-E4B: serve/train noise_embedding ratio was
+# 50.5998 == sqrt(2560), and draft layer 0 diverged to cos 0.467.
+_SQRT_HIDDEN_EMBED_SCALE_MODEL_TYPES = {
+    "gemma",
+    "gemma2",
+    "gemma3",
+    "gemma3_text",
+    "gemma4",
+    "gemma4_text",
+}
+
+
+def _resolve_embed_scale(base_cfg) -> float:
+    """The multiplier the base model applies to its embedding lookup.
+
+    Prefers an explicit ``embed_scale`` on the config; otherwise falls back to
+    sqrt(hidden_size) for the model families known to scale in ``forward()``.
+    Returns 1.0 for everything else, which keeps Qwen/Llama-style bases bit-exact.
+    """
+    explicit = getattr(base_cfg, "embed_scale", None)
+    if explicit is not None:
+        return float(explicit)
+    model_type = str(getattr(base_cfg, "model_type", "") or "")
+    if model_type in _SQRT_HIDDEN_EMBED_SCALE_MODEL_TYPES:
+        hidden = getattr(base_cfg, "hidden_size", None)
+        if hidden:
+            return float(hidden) ** 0.5
+    return 1.0
+
 # Candidate module paths searched in order — shared with HFEagleModel._find_base_model_parts
 _EMBED_TOKENS_PATHS = [
     "embed_tokens",
@@ -106,6 +140,27 @@ def _resolve_rope_theta(base_cfg, attn_kind: str = "sliding_attention") -> float
     return entry.get("rope_theta") if isinstance(entry, dict) else None
 
 
+class _ScaledEmbedding(nn.Embedding):
+    """``nn.Embedding`` that scales its output, like Gemma's embedding layer.
+
+    Gemma-family bases multiply the embedding lookup by sqrt(hidden_size) inside
+    ``forward()``; the factor is NOT part of the stored weight. FakeBaseModel is
+    reconstructed from weights alone, so without this the factor is dropped and
+    the draft trains on inputs sqrt(H) times smaller than vLLM feeds it at serve
+    time. ``embed_scale=1.0`` makes this exactly ``nn.Embedding``.
+    """
+
+    def __init__(self, *args, embed_scale: float = 1.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embed_scale = float(embed_scale)
+
+    def forward(self, input_ids):
+        out = super().forward(input_ids)
+        if self.embed_scale == 1.0:
+            return out
+        return out * torch.tensor(self.embed_scale, dtype=out.dtype, device=out.device)
+
+
 class FakeBaseConfig(PretrainedConfig):
     """Minimal config for FakeBaseModel that supports offline speculative decoding training."""
 
@@ -126,6 +181,7 @@ class FakeBaseConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         rope_theta=None,
         final_norm_type=None,
+        embed_scale=1.0,
         **kwargs,
     ):
         """Initialize FakeBaseConfig with minimal model configuration parameters."""
@@ -135,6 +191,10 @@ class FakeBaseConfig(PretrainedConfig):
         # (model whose final-norm type we don't know). See _FINAL_NORM_CLASSES /
         # _FINAL_NORM_TYPE_BY_MODEL_TYPE. Persisted so a reloaded config rebuilds the same norm.
         self.final_norm_type = final_norm_type
+        # Multiplier applied to the embedding lookup (sqrt(hidden_size) on Gemma-family
+        # bases, 1.0 elsewhere). Persisted so a reloaded checkpoint rebuilds the same
+        # scaling; see _resolve_embed_scale.
+        self.embed_scale = embed_scale
         self.num_hidden_layers = num_hidden_layers
         # Mirror the original base layer count. The non-fake offline path loads with
         # num_hidden_layers=0 and stashes the real count here (see utils.load_vlm_or_llm);
@@ -187,7 +247,12 @@ class FakeBaseModel(PreTrainedModel):
         self.model = nn.Module()
         self.model.layers = nn.ModuleList()
         self.model.dtype = config.dtype
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
+        self.embed_tokens = _ScaledEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            dtype=config.dtype,
+            embed_scale=getattr(config, "embed_scale", 1.0),
+        )
         self.lm_head = nn.Linear(
             config.hidden_size, config.vocab_size, bias=False, dtype=config.dtype
         )
@@ -241,6 +306,7 @@ class FakeBaseModel(PreTrainedModel):
             final_norm_type=_select_final_norm_type(
                 getattr(base_cfg, "model_type", None), base_cfg
             ),
+            embed_scale=_resolve_embed_scale(base_cfg),
         )
         model = cls(config)
         # Load lm_head, embed_tokens, and (for known models) the final norm into the model.
