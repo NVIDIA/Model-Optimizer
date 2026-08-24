@@ -1780,6 +1780,62 @@ _AQ_MINIMAL_BODY = (
 )
 
 
+def test_load_recipe_autoquantize_method_options(tmp_path):
+    """Method-specific settings load from an AutoQuantize recipe."""
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    num_path_nodes: 2\n"
+        + "    damage_link: additive\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+
+    assert aq.auto_quantize_method == "aumann_shapley"
+    assert aq.method_options == {"num_path_nodes": 2, "damage_link": "additive"}
+
+
+def test_load_recipe_autoquantize_rejects_two_search_targets(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    with pytest.raises(ValueError, match=r"must omit constraints\.effective_bits"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_damage_bound_requires_aumann_shapley(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+
+    with pytest.raises(ValueError, match="requires auto_quantize_method='aumann_shapley'"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_damage_bound_without_bit_budget(tmp_path):
+    recipe_file = tmp_path / "aq_opts.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY.replace("  constraints:\n    effective_bits: 4.8\n", "  constraints: {}\n")
+        + "  auto_quantize_method: aumann_shapley\n"
+        + "  method_options:\n"
+        + "    max_predicted_damage: 0.05\n"
+    )
+    aq = load_recipe(recipe_file).auto_quantize
+
+    assert aq.constraints.effective_bits == 4.8
+    assert "effective_bits" not in aq.constraints.model_fields_set
+    assert aq.method_options == {"max_predicted_damage": 0.05}
+
+
 def test_load_recipe_autoquantize_minimal(tmp_path):
     """Minimal AutoQuantize recipe loads with the right type and field defaults."""
     recipe_file = tmp_path / "aq.yml"
@@ -1790,6 +1846,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     aq = recipe.auto_quantize
     assert aq.auto_quantize_method == "gradient"
+    assert aq.method_options is None
     assert aq.score_size == 128
     assert aq.kv_cache is None
     assert aq.constraints.effective_bits == 4.8

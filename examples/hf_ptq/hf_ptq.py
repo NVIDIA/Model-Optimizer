@@ -352,6 +352,10 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
+    method_options = aq_config.method_options
+    if aq_config.uses_predicted_damage_target:
+        # The recipe validator rejects an explicit bit budget; remove only the schema default.
+        constraints.pop("effective_bits", None)
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
@@ -390,6 +394,7 @@ def _mtq_inputs_from_auto_quantize_config(
         "disabled_layers": aq_config.disabled_layers,
         "kv_cache_quant_cfg": kv_cache_quant_cfg,
         "method": aq_config.auto_quantize_method,
+        "method_options": method_options,
         "score_size": aq_config.score_size,
     }
 
@@ -457,7 +462,7 @@ def auto_quantize(
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
             return model(**inputs_)
 
-    elif inputs["method"] == "kl_div":
+    elif inputs["method"] in ("kl_div", "aumann_shapley"):
 
         def forward_step(model, batch):
             inputs_ = {k: v for k, v in batch.items() if k != "labels"} if is_base_model else batch
@@ -467,9 +472,13 @@ def auto_quantize(
                 return full_model.lm_head(output.last_hidden_state)
             return output.logits
 
+        if inputs["method"] == "aumann_shapley":
+            loss_func = None
+
     else:
         raise ValueError(
-            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
+            f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient', 'kl_div', "
+            "or 'aumann_shapley'"
         )
 
     language_model, _ = mtq.auto_quantize(
@@ -486,6 +495,7 @@ def auto_quantize(
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],
+        method_options=inputs["method_options"],
         checkpoint=args.auto_quantize_checkpoint,
     )
 
