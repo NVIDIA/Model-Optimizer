@@ -25,6 +25,7 @@ import copy
 import functools
 import itertools
 import math
+from collections import namedtuple
 
 import numpy as np
 import pytest
@@ -326,6 +327,20 @@ def test_coverage_inversion_recovers_forward_model():
     assert converged, a
     assert np.allclose(a, a_true, rtol=1e-5)
     assert np.allclose(b, -np.log1p(-a_true), rtol=1e-5)
+
+
+def test_anchor_ceiling_honors_max_inflation():
+    """A fit that only converges beyond the ceiling backstop must remain invalid."""
+    ceiling, _b, _kappa, inflation, converged = _anchor_ceiling(
+        {"fmt": np.array([10.0])},
+        f_corner=1.0,
+        corner_mask_by_key={"fmt": np.array([True])},
+        max_inflation=10.0,
+    )
+
+    assert ceiling == pytest.approx(10.0)
+    assert inflation == pytest.approx(10.0)
+    assert not converged
 
 
 def test_both_targets_rejected_before_model_conversion():
@@ -854,14 +869,19 @@ def test_all_candidates_non_finite_falls_back_to_no_quant(monkeypatch):
     assert not state["best"]["is_satisfied"]
 
 
-def test_nested_score_modules_are_scored():
+@pytest.mark.parametrize("structured_output", [False, True], ids=["tensor", "namedtuple"])
+def test_nested_score_modules_are_scored(structured_output):
     """A score module nested inside another must not be zeroed by the outer replay.
 
     Routed experts score at ``...mlp`` while shared experts inside that same mlp score at
     themselves. The outer module's replay loop re-enters the inner forward under
     ``no_grad``; if that clears the inner's cached diffs, the shared experts silently
     score zero and the solver treats them as free to quantize.
+
+    The namedtuple case also ensures path shifting preserves structured output attributes.
     """
+
+    mlp_output = namedtuple("MlpOutput", ["hidden_states"])
 
     class _Expert(torch.nn.Module):
         """Minimal expert block."""
@@ -887,7 +907,7 @@ def test_nested_score_modules_are_scored():
             out = self.shared_experts(hidden_states)
             for expert in self.experts:
                 out = out + expert(hidden_states)
-            return out
+            return mlp_output(out) if structured_output else out
 
     class _Layer(torch.nn.Module):
         """Minimal decoder layer."""
@@ -897,7 +917,8 @@ def test_nested_score_modules_are_scored():
             self.mlp = _MLP()
 
         def forward(self, x):
-            return self.mlp(hidden_states=x)
+            output = self.mlp(hidden_states=x)
+            return output.hidden_states if structured_output else output
 
     class _Model(torch.nn.Module):
         """Minimal model wrapper."""
