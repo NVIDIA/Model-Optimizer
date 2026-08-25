@@ -620,6 +620,29 @@ def test_auto_quantize_rejects_empty_module_formats(formats):
         )
 
 
+def test_gradient_search_config_none_score_func_does_not_warn():
+    """An explicitly empty score_func must not emit the ignored-value warning."""
+    searcher = AutoQuantizeGradientSearcher()
+
+    def forward_backward_step(model, data):
+        pass
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = searcher.sanitize_search_config(
+            {
+                "score_func": None,
+                "data_loader": [object()],
+                "forward_step": lambda model, data: None,
+                "forward_backward_step": forward_backward_step,
+            }
+        )
+
+    assert not any("`score_func` is ignored" in str(warning.message) for warning in caught)
+    assert "score_func" not in config
+    assert config["forward_backward_step"] is forward_backward_step
+
+
 def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
     model = TransformerBlock()
     calibration_states = []
