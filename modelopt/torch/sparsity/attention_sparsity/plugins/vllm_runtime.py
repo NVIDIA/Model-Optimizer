@@ -601,12 +601,6 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
         plans.append(
             _AttentionPlan(name, module, new_impl, {}, None, None, requires_flashinfer_patch)
         )
-    if any(plan.requires_flashinfer_patch for plan in plans):
-        layout = attention_plugin._flashinfer_kv_cache_layout()
-        if layout is not None and layout.upper() != "NHD":
-            errors.append(
-                f"FlashInfer KV-cache layout {layout!r} is unsupported for calibration (NHD only)"
-            )
     _raise_unsupported(errors, "skip-softmax calibration")
 
     plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")

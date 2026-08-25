@@ -311,11 +311,13 @@ def attention_calibrate(
     Args:
         threshold_trials: List of threshold values to measure sparsity for.
             Each value is converted to log2-scaled space for the kernel.
-        k_cache: Paged K cache ``[num_blocks, page_size, num_kv_heads, head_dim]``.
-            When provided, K/V are read from the paged cache via ``block_table``
-            (vLLM NHD layout) instead of from the contiguous ``k``/``v`` tensors.
-            ``k``/``v`` are then dummies whose only meaningful dimension is
-            ``shape[1] == num_kv_heads`` (used to compute the GQA ratio).
+        k_cache: Logical paged K-cache view
+            ``[num_blocks, page_size, num_kv_heads, head_dim]``. Arbitrary
+            strides support both NHD and HND physical layouts. When provided,
+            K/V are read via ``block_table`` instead of from the contiguous
+            ``k``/``v`` tensors. ``k``/``v`` are then dummies whose only
+            meaningful dimension is ``shape[1] == num_kv_heads`` (used to
+            compute the GQA ratio).
         v_cache: Paged V cache ``[num_blocks, page_size, num_kv_heads, head_dim]``.
         block_table: Page table ``[batch, max_blocks_per_seq]`` mapping each
             sequence's block indices to global page IDs.
