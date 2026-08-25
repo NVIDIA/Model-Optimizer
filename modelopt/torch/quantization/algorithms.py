@@ -1464,6 +1464,7 @@ class _AutoQuantizeBackwardScoringSession(ABC):
         self.verbose = verbose
         self._stack = ExitStack()
         self._original_forwards: dict[nn.Module, Callable] = {}
+        self._output_grad_hook_handles: set[Any] = set()
         self._grad_accumulators: list[Any] = []
 
     def __enter__(self):
@@ -1512,6 +1513,7 @@ class _AutoQuantizeBackwardScoringSession(ABC):
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         """Restore all model state changed for scoring."""
+        self._clear_output_grad_hooks()
         self._stack.close()
         self._original_forwards.clear()
         self._grad_accumulators.clear()
@@ -1520,10 +1522,24 @@ class _AutoQuantizeBackwardScoringSession(ABC):
         """Return the forward method saved before scoring."""
         return self._original_forwards[module]
 
+    def _clear_output_grad_hooks(self) -> None:
+        """Remove output hooks whose backward pass has not run."""
+        for handle in self._output_grad_hook_handles:
+            handle.remove()
+        self._output_grad_hook_handles.clear()
+
     def _register_output_grad_hook(self, output: torch.Tensor, hook: Callable) -> None:
         """Attach an invocation-specific output-gradient hook for this session."""
-        handle = output.register_hook(hook)
-        self._stack.callback(handle.remove)
+
+        def run_once(grad):
+            try:
+                return hook(grad)
+            finally:
+                handle.remove()
+                self._output_grad_hook_handles.discard(handle)
+
+        handle = output.register_hook(run_once)
+        self._output_grad_hook_handles.add(handle)
 
     @abstractmethod
     def forward(self, module: nn.Module, *args, **kwargs):
@@ -1732,14 +1748,20 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
             score_modules,
             is_param_grad_enabled,
             verbose=self.config.get("verbose", False),
-        ):
+        ) as scoring_session:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
                 report_memory("AutoQuantize: starting score estimation, ")
 
+            def score_step(model, data):
+                try:
+                    return self.config["forward_backward_step"](model, data)
+                finally:
+                    scoring_session._clear_output_grad_hooks()
+
             self._run_func(
-                self.config["forward_backward_step"],
+                score_step,
                 num_iters=self.config["num_score_steps"],
                 desc="Estimating auto_quantize scores",
             )

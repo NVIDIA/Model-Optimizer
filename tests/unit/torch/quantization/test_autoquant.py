@@ -1058,6 +1058,16 @@ def test_gradient_scoring_tracks_reused_module_invocations():
     score_module._hparams_for_scoring = [hparam]
     inputs = torch.tensor([[1.0, 2.0]], requires_grad=True)
 
+    hparam._importance_dict[quant_recipe][score_module] = None
+    delayed_session = _AutoQuantizeGradientScoringSession(model, [score_module], lambda *_: True)
+    with delayed_session:
+        delayed_loss = model(inputs)
+        assert delayed_session._output_grad_hook_handles
+
+    assert not delayed_session._output_grad_hook_handles
+    delayed_loss.backward()
+    assert hparam._importance_dict[quant_recipe][score_module] is None
+
     with _AutoQuantizeGradientScoringSession(model, [score_module], lambda *_: True):
         model(inputs).backward()
 
