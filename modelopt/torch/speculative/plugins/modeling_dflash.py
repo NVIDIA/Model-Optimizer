@@ -470,7 +470,12 @@ class DFlashModule(nn.Module):
         1e6 vs 1e4). vLLM builds RoPE per layer for exactly this reason; a single
         shared module silently mismatches the head dim on one of the two kinds.
         """
-        if not hasattr(self, "rotary_emb"):
+        # The shared module is only used when there are no per-kind ones. Building it anyway
+        # would crash on a Gemma4 draft: its config carries the NESTED, dict-of-dicts
+        # ``rope_parameters`` (keyed by attention kind), and ``_ROTARY_CLS`` indexes it as a
+        # flat dict via ``rope_parameters["rope_type"]``. The per-kind configs built below
+        # each hold a flattened single-kind dict, so they are the ones that can be built.
+        if not self._gemma4_rope_kinds and not hasattr(self, "rotary_emb"):
             self.rotary_emb = _ROTARY_CLS(config=self._rotary_config, device=device)
         if self._gemma4_rope_kinds and not hasattr(self, "rotary_emb_by_kind"):
             self.rotary_emb_by_kind = nn.ModuleDict(
@@ -518,11 +523,18 @@ class DFlashModule(nn.Module):
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
         self._maybe_init_rotary_emb(device=hidden_states.device)
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         per_kind = {
             kind: emb(hidden_states, position_ids)
             for kind, emb in getattr(self, "rotary_emb_by_kind", {}).items()
         }
+        # A Gemma4 draft has per-kind modules and NO shared one (its nested rope_parameters
+        # cannot build a single rotary module — see _maybe_init_rotary_emb), so fall back to
+        # the first kind rather than to a `self.rotary_emb` that does not exist.
+        position_embeddings = (
+            next(iter(per_kind.values()))
+            if per_kind
+            else self.rotary_emb(hidden_states, position_ids)
+        )
 
         for layer_idx, layer in enumerate(self.layers):
             layer_pos = position_embeddings

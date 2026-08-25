@@ -419,6 +419,31 @@ class HFDFlashModel(DFlashModel):
         # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
         # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
         # added only at export via dflash_export_rope_scaling.)
+        # Gemma 4 nests rope_parameters PER ATTENTION KIND, e.g.
+        #   {"full_attention":    {"rope_theta": 1e6, "rope_type": "proportional",
+        #                          "partial_rotary_factor": 0.25},
+        #    "sliding_attention": {"rope_theta": 1e4, "rope_type": "default"}}
+        # The flat loop below cannot express that: it collapses the two kinds to a single theta
+        # and silently drops rope_type / partial_rotary_factor, so the draft rotates every
+        # channel at default frequencies while the target rotates only a quarter of them. Hand
+        # the nested dict to the draft verbatim instead and let
+        # DFlashModule._build_gemma4_rope_kinds() build one rotary module per kind. Only the
+        # kinds the DRAFT actually uses are kept, so an all-full_attention draft never sees the
+        # sliding entry.
+        base_rope_params = getattr(base_config, "rope_parameters", None)
+        _nested_rope = None
+        if isinstance(base_rope_params, dict) and any(
+            isinstance(v, dict) for v in base_rope_params.values()
+        ):
+            draft_layer_types = getattr(self.dflash_config, "layer_types", None) or list(
+                base_rope_params
+            )
+            _nested_rope = {
+                kind: dict(base_rope_params[kind])
+                for kind in dict.fromkeys(draft_layer_types)
+                if isinstance(base_rope_params.get(kind), dict)
+            } or None
+
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
             if not hasattr(base_config, attr):
                 continue
@@ -434,6 +459,18 @@ class HFDFlashModel(DFlashModel):
                     base_val,
                 )
             setattr(self.dflash_config, attr, base_val)
+
+        if _nested_rope is not None:
+            # Installed AFTER the flat loop: Qwen3Config auto-populates rope_parameters from
+            # rope_theta at construction, and the loop above refreshes that flat mirror, so
+            # assigning earlier would be overwritten by a single-kind dict.
+            self.dflash_config.rope_parameters = _nested_rope
+            _first = next(iter(_nested_rope.values()))
+            if "rope_theta" in _first:
+                # A multi-kind draft has no single theta; keep the flat mirror pointing at the
+                # first kind (layer_types order) for the exporter and for logging.
+                self.dflash_config.rope_theta = _first["rope_theta"]
+            logger.info("DFlash: per-attention-kind RoPE from base: %s", _nested_rope)
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
