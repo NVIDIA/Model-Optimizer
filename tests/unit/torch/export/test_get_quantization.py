@@ -161,6 +161,50 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     }
 
 
+def test_uniform_weight_quantization_exports_mixed_kv_cache_map():
+    class FakeAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k_bmm_quantizer = TensorQuantizer()
+            self.v_bmm_quantizer = TensorQuantizer()
+
+    model = ToyModel()
+    mtq.quantize(model, partial_fp8_config, lambda x: x(torch.randn(1, 4, 10)))
+    model.attn0 = FakeAttention()
+    model.attn1 = FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model.attn0,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            }
+        ],
+    )
+    mtq.set_quantizer_by_cfg(
+        model.attn1,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            }
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quantized_layers"] == {
+        "attn0": {"quant_algo": "FP8"},
+        "attn1": {"quant_algo": "NVFP4"},
+    }
+
+
 def test_unsupported_asymmetric_kv_cache_pair_fails_export():
     class FakeAttention(torch.nn.Module):
         def __init__(self):

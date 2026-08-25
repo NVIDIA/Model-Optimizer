@@ -425,6 +425,19 @@ For models without backprop support (e.g. Llama-4), use the `kl_div` scoring met
 Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
 `--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
 
+To optimize GEMM and KV cache in one invocation, compose ordered stages in the same recipe. A fixed
+`quantize` block followed by a KV-domain `auto_quantize` first calibrates the GEMM weight/activation
+configuration, then searches K/V while the existing GEMM QDQ remains enabled with calibration
+frozen. See `general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits`.
+
+A weight-domain `auto_quantize` can instead add a `kv_auto_quantize` follow-up with its own method,
+constraints, candidates, score size, and disabled layers. This supports, for example, a
+gradient-based GEMM search followed by a KL-divergence KV search; see
+`general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits`. When the
+follow-up is present, the recipe owns KV configuration and suppresses the CLI's uniform
+`--kv_cache_qformat` fallback. Use `--auto_quantize_checkpoint` for the weight search and
+`--kv_auto_quantize_checkpoint` for the KV search.
+
 KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
 packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
@@ -454,8 +467,9 @@ the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
 > Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
 > kernels once the layer-wise metadata consumer is available.
 
-The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
-interrupted search (skips re-scoring):
+For a single-stage search, `--auto_quantize_checkpoint` saves/restores the search state to resume an
+interrupted search (skips re-scoring). Composed weight-plus-KV recipes additionally use
+`--kv_auto_quantize_checkpoint` for the independent KV search state:
 
 ```bash
 scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits \

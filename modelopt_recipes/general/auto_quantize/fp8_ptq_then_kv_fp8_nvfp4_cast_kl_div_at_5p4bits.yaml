@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Fixed FP8 GEMM PTQ followed by layer-wise KV-cache AutoQuantize.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  kv_fp8: configs/ptq/units/kv_fp8
+  kv_nvfp4: configs/ptq/units/kv_nvfp4
+  w8a8_fp8_fp8: configs/ptq/units/w8a8_fp8_fp8
+
+metadata:
+  recipe_type: auto_quantize
+  description: Fixed FP8 GEMM PTQ followed by mixed FP8/NVFP4 KV-cache search.
+
+quantize:
+  algorithm: max
+  quant_cfg:
+    - $import: base_disable_all
+    - $import: w8a8_fp8_fp8
+    - $import: default_disabled_quantizers
+
+auto_quantize:
+  constraints:
+    kv_effective_bits: 5.4
+
+  candidate_formats:
+    - quant_cfg:
+        - $import: kv_fp8
+      algorithm: max
+      effective_bits: 8.0
+    - quant_cfg:
+        - $import: kv_nvfp4
+      algorithm: max
+      effective_bits: 4.5
+
+  auto_quantize_method: kl_div
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+    - "*mtp*"

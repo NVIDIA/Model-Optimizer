@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Gradient-based GEMM AutoQuantize followed by layer-wise KV-cache AutoQuantize.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  fp8: configs/ptq/presets/model/fp8
+  kv_fp8: configs/ptq/units/kv_fp8
+  kv_nvfp4: configs/ptq/units/kv_nvfp4
+  nvfp4: configs/ptq/presets/model/nvfp4
+
+metadata:
+  recipe_type: auto_quantize
+  description: Gradient GEMM search followed by KL-divergence mixed-KV search at 5.4 bits.
+
+auto_quantize:
+  constraints:
+    effective_bits: 5.4
+
+  candidate_formats:
+    - $import: nvfp4
+    - $import: fp8
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers
+
+kv_auto_quantize:
+  constraints:
+    kv_effective_bits: 5.4
+
+  candidate_formats:
+    - quant_cfg:
+        - $import: kv_fp8
+      algorithm: max
+      effective_bits: 8.0
+    - quant_cfg:
+        - $import: kv_nvfp4
+      algorithm: max
+      effective_bits: 4.5
+
+  auto_quantize_method: kl_div
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+    - "*mtp*"
