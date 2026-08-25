@@ -23,14 +23,13 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import Cache, DynamicCache
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
-    _is_kv_cache,
     _SkipLayer,
     _with_empty_kv_cache,
 )
@@ -1043,53 +1042,35 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
     assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
 
 
-def test_capture_stores_no_kv_cache():
-    """Captured inputs must carry no cache.
+@pytest.mark.parametrize("entry_point", ["capture", "resume"])
+def test_stored_layer_inputs_never_hold_a_kv_cache(entry_point):
+    """Neither way inputs enter stored state may leave a cache on them.
 
-    Asserted structurally because the amax comparison cannot see it: a retained cache
-    only accumulates across replays, and max calibration's max absorbs that on a small
-    model, so amaxes match while the invariant is broken.
+    Stored inputs are replayed many times, so a retained cache lets a layer attend over
+    its own earlier writes. Asserted structurally because an amax comparison cannot see
+    it: a retained cache only accumulates across replays, and max calibration's max
+    absorbs that on a small model, so amaxes match while the invariant is broken.
+
+    ``resume`` is the entry point capture does not feed -- ``_move_to_device`` passes a
+    ``Cache`` through untouched, so a checkpoint predating the clear still holds one.
     """
     model = get_tiny_llama(num_hidden_layers=3).eval()
     collector = LayerActivationCollector(model)
     collector._patch_all_layers(decoder_layers=model.model.layers)
     try:
-        captured = collector.get_input_activations(
-            model.model.layers[0], lambda m: m(torch.randint(0, 32, (2, 8)))
-        )
+        if entry_point == "capture":
+            stored = collector.get_input_activations(
+                model.model.layers[0], lambda m: m(torch.randint(0, 32, (2, 8)))
+            )
+        else:
+            restored = [((torch.randn(1, 4, 32),), {"past_key_values": DynamicCache()})]
+            stored = collector.get_first_layer_inputs(0, restored, forward_loop=None)
     finally:
         collector._unpatch_all_layers()
 
-    assert captured, "nothing was captured"
-    live = [
-        k
-        for args, kwargs in captured
-        for k, v in [*enumerate(args), *kwargs.items()]
-        if _is_kv_cache(v)
-    ]
-    assert not live, f"captured inputs still hold a KV cache at {live}"
-
-
-def test_resume_clears_a_kv_cache_left_in_the_checkpoint():
-    """Inputs restored from ``next_inputs.pt`` must be cleared too.
-
-    ``_move_to_device`` passes a ``Cache`` through untouched, so a checkpoint written
-    before the clear still holds a live one, and resume is the one path into stored
-    inputs that capture does not feed.
-    """
-    model = get_tiny_llama(num_hidden_layers=3).eval()
-    collector = LayerActivationCollector(model)
-    collector._patch_all_layers(decoder_layers=model.model.layers)
-    try:
-        restored = [((torch.randn(1, 4, 32),), {"past_key_values": DynamicCache()})]
-        returned = collector.get_first_layer_inputs(0, restored, forward_loop=None)
-        stored = model.model.layers[0]._layerwise_calib.collected_inputs
-    finally:
-        collector._unpatch_all_layers()
-
-    for label, entries in (("returned", returned), ("stored", stored)):
-        live = [v for _, kwargs in entries for v in kwargs.values() if _is_kv_cache(v)]
-        assert not live, f"{label} resume inputs still hold a KV cache"
+    assert stored, f"{entry_point} produced no inputs"
+    live = [v for args, kwargs in stored for v in (*args, *kwargs.values()) if isinstance(v, Cache)]
+    assert not live, f"{entry_point} inputs still hold a KV cache"
 
 
 def test_with_empty_kv_cache_matches_by_shape_not_by_name():
@@ -1108,8 +1089,8 @@ def test_with_empty_kv_cache_matches_by_shape_not_by_name():
         ((hidden, cache), {}),
     ):
         out_args, out_kwargs = _with_empty_kv_cache(args, kwargs)
-        assert not any(_is_kv_cache(a) for a in out_args)
-        assert not any(_is_kv_cache(v) for v in out_kwargs.values())
+        assert not any(isinstance(a, Cache) for a in out_args)
+        assert not any(isinstance(v, Cache) for v in out_kwargs.values())
 
     # Non-cache values pass through untouched.
     out_args, out_kwargs = _with_empty_kv_cache((hidden,), {"attention_mask": None})
