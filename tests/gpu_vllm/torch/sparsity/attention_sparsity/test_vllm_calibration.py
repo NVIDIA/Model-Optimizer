@@ -15,7 +15,6 @@
 
 """Tests for skip-softmax calibration through the vLLM adapters and installer."""
 
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -192,69 +191,12 @@ class TestQuantSkipRejection:
         assert plan.layers[0].sparse_kw.get("sparsity_n") == 2
 
 
-class TestFlashInferLayoutGuard:
-    """HND FlashInfer caches are rejected via layout metadata, pre-measurement."""
-
-    def test_layout_helper_preserves_none(self, monkeypatch):
-        """A getter returning None must not become the truthy string 'None'."""
-        fake = SimpleNamespace(get_kv_cache_layout=lambda: None)
-        monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.utils", fake)
-        assert attention_plugin._flashinfer_kv_cache_layout() is None
-
-        fake.get_kv_cache_layout = lambda: "HND"
-        assert attention_plugin._flashinfer_kv_cache_layout() == "HND"
-
-    def test_installer_rejects_hnd_layout(self, monkeypatch):
-        monkeypatch.setattr(attention_plugin, "_flashinfer_kv_cache_layout", lambda: "HND")
+class TestFlashInferLayout:
+    def test_installer_accepts_flashinfer(self):
         attention = _bare_attention(FlashInferImpl)
-        original_impl = attention.impl
         runner = _model_runner(nn.ModuleDict({"attn": attention}))
-        with pytest.raises(NotImplementedError, match="HND"):
-            vllm_runtime.install_vllm_skip_softmax_calibration(runner)
-        assert attention.impl is original_impl
-
-    def test_forward_rejects_hnd_layout_before_cache_write(self, monkeypatch):
-        monkeypatch.setattr(attention_plugin, "_flashinfer_kv_cache_layout", lambda: "HND")
-        writes = []
-        monkeypatch.setattr(
-            attention_plugin,
-            "_maybe_update_flashinfer_cache",
-            lambda *args, **kwargs: writes.append(1),
-        )
-        num_heads, num_kv_heads, head_dim, page = 4, 2, 64, 16
-        impl = SimpleNamespace(
-            num_kv_heads=num_kv_heads,
-            head_size=head_dim,
-            scale=1.0 / (head_dim**0.5),
-            _calibrate=True,
-            _calib_threshold_trials=list(TRIALS),
-            _calib_records=[],
-        )
-        kv_cache = torch.zeros(3, 2, page, num_kv_heads, head_dim, dtype=torch.bfloat16)
-        attn_metadata = SimpleNamespace(
-            _modelopt_block_table=torch.zeros(1, 1, dtype=torch.int32),
-            _modelopt_seq_lens=torch.tensor([8], dtype=torch.int32),
-            _modelopt_query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-            _modelopt_num_actual_tokens=1,
-            _modelopt_max_query_len=1,
-            _modelopt_max_seq_len=8,
-            _modelopt_causal=False,
-            slot_mapping=torch.zeros(1, dtype=torch.int64),
-        )
-        q = torch.zeros(1, num_heads, head_dim, dtype=torch.bfloat16)
-        with pytest.raises(NotImplementedError, match="HND"):
-            attention_plugin._flashinfer_forward(
-                impl,
-                None,
-                None,
-                q,
-                q[:, :num_kv_heads],
-                q[:, :num_kv_heads],
-                kv_cache,
-                attn_metadata,
-                output=torch.empty_like(q),
-            )
-        assert not writes, "layout must be validated before the cache write"
+        report = vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+        assert report.installed_count == 1
 
 
 class TestSparseOnlyGraphGuard:
@@ -431,11 +373,11 @@ class TestCalibrationForward:
             {"sample_length": 128, "total_tiles": [8, 8, 8], "skipped_tiles": [1, 3, 5]}
         ]
 
-    def test_rejects_non_nhd_cache_layout(self):
+    def test_rejects_non_logical_cache_shape(self):
         num_heads, num_kv_heads, head_dim = 4, 2, 64
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
         enable_calibration([impl], TRIALS)
-        # HND-shaped cache: [blocks, kv_heads, page, dim] -> axis 2 != num_kv_heads.
+        # A physical HND tensor must be exposed as a logical [blocks, page, heads, dim] view.
         kv_cache = torch.zeros(2, 1, num_kv_heads, 16, head_dim, dtype=torch.bfloat16)
         attn_metadata = SimpleNamespace(
             num_actual_tokens=1,
@@ -446,7 +388,7 @@ class TestCalibrationForward:
             block_table=torch.zeros(1, 1, dtype=torch.int32),
         )
         q = torch.zeros(1, num_heads, head_dim, dtype=torch.bfloat16)
-        with pytest.raises(NotImplementedError, match="not NHD"):
+        with pytest.raises(NotImplementedError, match="logical KV-cache view"):
             impl.forward(
                 layer=None,
                 query=q,
@@ -487,7 +429,8 @@ class TestCalibrationForward:
 # FlashInfer adapter: cache write must precede the calibrate-kernel read
 # ---------------------------------------------------------------------------
 class TestFlashInferCalibrationOrdering:
-    def test_cache_write_happens_before_calibrate_read(self, monkeypatch):
+    @pytest.mark.parametrize("layout", ["NHD", "HND"])
+    def test_cache_write_happens_before_calibrate_read(self, monkeypatch, layout):
         calls = []
         monkeypatch.setattr(
             attention_plugin,
@@ -497,6 +440,7 @@ class TestFlashInferCalibrationOrdering:
 
         def fake_calibrate(q, *args, **kwargs):
             calls.append("calibrate")
+            calls.append(kwargs["k_cache"].stride())
             counters = torch.zeros(len(TRIALS), 2, dtype=torch.int64)
             return torch.zeros_like(q), counters
 
@@ -511,7 +455,12 @@ class TestFlashInferCalibrationOrdering:
             _calib_threshold_trials=list(TRIALS),
             _calib_records=[],
         )
-        kv_cache = torch.zeros(3, 2, page, num_kv_heads, head_dim, dtype=torch.bfloat16)
+        shape = (3, 2, page, num_kv_heads, head_dim)
+        kv_cache = torch.zeros(shape, dtype=torch.bfloat16)
+        if layout == "HND":
+            kv_cache = torch.zeros(
+                shape[0], shape[1], shape[3], shape[2], shape[4], dtype=torch.bfloat16
+            ).permute(0, 1, 3, 2, 4)
         attn_metadata = SimpleNamespace(
             _modelopt_block_table=torch.zeros(1, 1, dtype=torch.int32),
             _modelopt_seq_lens=torch.tensor([8], dtype=torch.int32),
@@ -536,7 +485,7 @@ class TestFlashInferCalibrationOrdering:
             output=torch.empty_like(q),
         )
 
-        assert calls == ["cache_write", "calibrate"]
+        assert calls == ["cache_write", "calibrate", kv_cache[:, 0].stride()]
         assert torch.isfinite(out).all()
         assert len(impl._calib_records) == 1
         assert impl._calib_records[0]["phase"] == "decode"

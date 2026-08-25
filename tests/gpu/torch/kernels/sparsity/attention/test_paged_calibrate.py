@@ -30,12 +30,15 @@ pytestmark = pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA +
 TRIALS = [1e-3, 1e-2, 1e-1, 3e-1]
 
 
-def _pack_paged(k, v, page_size, *, shuffle=True, num_spare_blocks=7):
+def _pack_paged(k, v, page_size, *, layout="NHD", shuffle=True, num_spare_blocks=7):
     """Pack one sequence's contiguous K/V into a (optionally shuffled) paged cache."""
     seq = k.shape[0]
     num_blocks = (seq + page_size - 1) // page_size
     order = torch.randperm(num_blocks) if shuffle else torch.arange(num_blocks)
-    k_cache = k.new_zeros(num_blocks + num_spare_blocks, page_size, k.shape[1], k.shape[2])
+    shape = (num_blocks + num_spare_blocks, page_size, k.shape[1], k.shape[2])
+    k_cache = k.new_zeros(shape)
+    if layout == "HND":
+        k_cache = k.new_zeros(shape[0], shape[2], shape[1], shape[3]).permute(0, 2, 1, 3)
     v_cache = torch.zeros_like(k_cache)
     block_table = torch.zeros(1, num_blocks, device=k.device, dtype=torch.int32)
     for i in range(num_blocks):
@@ -48,8 +51,9 @@ def _pack_paged(k, v, page_size, *, shuffle=True, num_spare_blocks=7):
 
 
 class TestPagedCalibrate:
+    @pytest.mark.parametrize("layout", ["NHD", "HND"])
     @pytest.mark.parametrize("seq_len", [256, 300, 512])  # 300: non-128-aligned padding
-    def test_paged_matches_contiguous_prefill(self, seq_len):
+    def test_paged_matches_contiguous_prefill(self, seq_len, layout):
         """Paged and contiguous calibration agree exactly on counters and output."""
         torch.manual_seed(0)
         num_heads, num_kv_heads, head_dim, page_size = 8, 2, 64, 16
@@ -60,7 +64,7 @@ class TestPagedCalibrate:
             q, k, v, locs, lens, seq_len, is_causal=True, threshold_trials=TRIALS
         )
 
-        k_cache, v_cache, block_table = _pack_paged(k, v, page_size)
+        k_cache, v_cache, block_table = _pack_paged(k, v, page_size, layout=layout)
         k_dummy = torch.empty(0, num_kv_heads, head_dim, device=q.device, dtype=q.dtype)
         out_paged, counters_paged = attention_calibrate(
             q,
