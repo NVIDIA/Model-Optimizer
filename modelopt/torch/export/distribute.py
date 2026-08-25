@@ -509,57 +509,96 @@ def _gather_shard0_to_owners(
     """Gather each dim-0-sharded DTensor to its owner and drop it elsewhere, in place.
 
     ``full_tensor()`` is an ALL-gather: it lands a full copy on every rank, so moving N bytes costs
-    ``world x N`` of traffic and a full-size allocation on every rank -- even though exactly one rank
-    keeps the result. Here each non-owner sends its shard straight to the owner, so the cost is ``N``
-    and only the owner allocates. Requests are posted in large batches and awaited together, so
-    transfers for different keys overlap instead of serializing one blocking collective per key.
+    ``world x N`` and every rank allocates the whole tensor even though one rank keeps it. Here each
+    shard travels once, to its owner only.
 
-    ``all_shapes[r][k]`` is rank ``r``'s local dim-0 extent for key ``k``, gathered by the caller;
-    the caller has also already checked that the shards tile the global tensor exactly.
+    Transfers are bucketed BY PEER rather than per key: everything this rank owes a given peer is
+    concatenated into one flat buffer per (peer, dtype) and sent as a single operation. One op per
+    (key, peer) pair does not survive leaving NVLink -- at 235B that was ~12.7k operations and took
+    660s, with the payload only a few GB. Bucketing makes it O(world x dtypes) operations.
 
-    Deadlock safety: every rank walks the same globally-sorted ``keys`` in the same batches, and the
-    owner map is computed identically everywhere, so every send has its matching receive posted.
+    ``all_shapes[r][k]`` is rank ``r``'s local dim-0 extent for key ``k``; the caller has already
+    checked that the shards tile the global tensor exactly.
+
+    Deadlock safety: both sides derive their buckets from the same globally-sorted key list and the
+    same owner map, so every send has a matching receive of exactly the same length.
     """
     import torch.distributed as dist
 
-    # Batched large: NCCL establishes a channel per peer pair on first use, and each batch costs a
-    # wait point, so a few big batches amortize far better than many small ones.
-    batch_size = 512
-    for start in range(0, len(keys), batch_size):
-        batch = keys[start : start + batch_size]
+    def _numel(shape):
+        n = 1
+        for s in shape:
+            n *= s
+        return n
+
+    device = local_sd[keys[0]].to_local().device
+
+    # Chunk the key list so the in-flight receive buffers stay bounded. Within a chunk the op count
+    # is O(world x dtypes) regardless of how many keys it holds, so chunks can be large.
+    chunk = 4096
+    for base in range(0, len(keys), chunk):
+        part = keys[base : base + chunk]
+
+        # (peer, dtype) -> keys. A rank sends its shard of every key the peer owns; the owner
+        # receives, from every other rank, its shard of every key this rank owns. Both sides build
+        # the identical grouping from shared state. Empty shards are skipped on both sides.
+        send_groups: dict = {}
+        recv_groups: dict = {}
+        for k in part:
+            dt = local_sd[k].dtype
+            o = owner[k]
+            if o != rank:
+                if _numel(all_shapes[rank][k]):
+                    send_groups.setdefault((o, dt), []).append(k)
+            else:
+                for r in range(world):
+                    if r != rank and _numel(all_shapes[r][k]):
+                        recv_groups.setdefault((r, dt), []).append(k)
+
         ops: list = []
         keepalive: list = []
-        pending: dict = {}
-        for k in batch:
-            dst = owner[k]
-            mine = local_sd[k].to_local().contiguous()
-            keepalive.append(mine)  # must outlive the wait
-            if rank == dst:
-                parts = []
-                for r in range(world):
-                    if r == rank:
-                        parts.append(mine)
-                        continue
-                    shape = all_shapes[r][k]
-                    if 0 in shape:
-                        continue  # uneven split left this rank with no rows to send
-                    buf = torch.empty(shape, dtype=mine.dtype, device=mine.device)
-                    parts.append(buf)
-                    ops.append(dist.P2POp(dist.irecv, buf, r))
-                pending[k] = parts
-            elif mine.numel():
-                ops.append(dist.P2POp(dist.isend, mine, dst))
+        pending: list = []
+        for (peer, dt) in sorted(send_groups, key=lambda kd: (kd[0], str(kd[1]))):
+            ks = sorted(send_groups[(peer, dt)])
+            buf = torch.cat([local_sd[k].to_local().reshape(-1) for k in ks])
+            keepalive.append(buf)  # must outlive the wait
+            ops.append(dist.P2POp(dist.isend, buf, peer))
+        for (srcr, dt) in sorted(recv_groups, key=lambda kd: (kd[0], str(kd[1]))):
+            ks = sorted(recv_groups[(srcr, dt)])
+            total = sum(_numel(all_shapes[srcr][k]) for k in ks)
+            buf = torch.empty(total, dtype=dt, device=device)
+            pending.append((srcr, ks, buf))
+            ops.append(dist.P2POp(dist.irecv, buf, srcr))
+
         if ops:
             for req in dist.batch_isend_irecv(ops):
                 req.wait()
+
+        # Unpack each peer's flat buffer back into per-key views, in the same order it was packed.
+        parts_by_key: dict = {}
+        for srcr, ks, buf in pending:
+            off = 0
+            for k in ks:
+                shape = all_shapes[srcr][k]
+                n = _numel(shape)
+                parts_by_key.setdefault(k, {})[srcr] = buf[off : off + n].view(shape)
+                off += n
+
         # Rank order is mesh order (checked by _is_full_world_shard0), so concatenating the parts in
         # rank order reproduces exactly what full_tensor() would have built.
-        for k, parts in pending.items():
-            local_sd[k] = torch.cat(parts, dim=0)
-        for k in batch:
+        for k in part:
             if owner[k] != rank:
                 del local_sd[k]
-        del keepalive, pending
+                continue
+            got = parts_by_key.get(k, {})
+            pieces = []
+            for r in range(world):
+                if r == rank:
+                    pieces.append(local_sd[k].to_local())
+                elif r in got:
+                    pieces.append(got[r])
+            local_sd[k] = torch.cat(pieces, dim=0)
+        del keepalive, pending, parts_by_key
 
 
 def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: int) -> None:
