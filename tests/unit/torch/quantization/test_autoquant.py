@@ -1018,6 +1018,45 @@ def test_score_hparam_registration_preserves_order():
     assert score_module._hparams_for_scoring == [first, second]
 
 
+def test_gradient_scoring_tracks_reused_module_invocations():
+    """Each use of a shared score module must retain its own replay difference."""
+    no_quant_recipe = QuantRecipe(quant_cfg=None)
+    quant_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+
+    class TestHparam:
+        is_configurable = True
+        choices = [no_quant_recipe, quant_recipe]
+        active = no_quant_recipe
+
+    class ScoreModule(torch.nn.Module):
+        def forward(self, x):
+            scale = 1.0 if hparam.active == no_quant_recipe else 2.0
+            return scale * x
+
+    class ReusedScoreModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.shared = ScoreModule()
+
+        def forward(self, x):
+            first = self.shared(x)
+            second = self.shared(3.0 * x)
+            return first.sum() + 2.0 * second.sum()
+
+    model = ReusedScoreModule()
+    score_module = model.shared
+    hparam = TestHparam()
+    hparam._importance_dict = {recipe: {score_module: None} for recipe in hparam.choices}
+    score_module._hparams_for_scoring = [hparam]
+    inputs = torch.tensor([[1.0, 2.0]], requires_grad=True)
+
+    with _AutoQuantizeGradientScoringSession(model, [score_module], lambda *_: True):
+        model(inputs).backward()
+
+    # First use: sum(x**2) = 5. Second use: sum((2 * 3x)**2) = 180.
+    assert hparam._importance_dict[quant_recipe][score_module].item() == pytest.approx(185.0)
+
+
 def test_gradient_scoring_restores_model_after_failure():
     model = SimpleLinear()
     patched_modules = []

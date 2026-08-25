@@ -1540,7 +1540,7 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._output_diffs: dict[nn.Module, dict] = {}
+        self._output_diffs: dict[nn.Module, list[dict]] = {}
 
     def forward(self, module: nn.Module, *args, **kwargs):
         """Run the reference forward and cache each recipe's output perturbation."""
@@ -1556,7 +1556,9 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
             return output
 
         output_diffs = {hparam: {} for hparam in module._hparams_for_scoring}
-        self._output_diffs[module] = output_diffs
+        # A module may be invoked more than once in a forward pass. Backward visits those
+        # invocations in reverse order, so retain one replay result per invocation as a stack.
+        self._output_diffs.setdefault(module, []).append(output_diffs)
         with torch.no_grad():
             for hparam in module._hparams_for_scoring:
                 if not hparam.is_configurable:
@@ -1576,7 +1578,10 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
 
     def backward_hook(self, module: nn.Module, grad_input, grad_output) -> None:
         """Accumulate squared gradient-weighted output perturbations."""
-        for hparam, output_diffs in self._output_diffs[module].items():
+        invocation_diffs = self._output_diffs[module].pop()
+        if not self._output_diffs[module]:
+            del self._output_diffs[module]
+        for hparam, output_diffs in invocation_diffs.items():
             for recipe, output_diff in output_diffs.items():
                 importance = hparam._importance_dict[recipe][module]
                 if importance is None:
