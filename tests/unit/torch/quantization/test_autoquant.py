@@ -1041,8 +1041,10 @@ def test_gradient_scoring_tracks_reused_module_invocations():
         def forward(self, x):
             first = self.shared(x)
             second = self.shared(3.0 * x)
-            # This use has no autograd edge and therefore no matching backward hook.
+            # This use does not participate in autograd.
             self.shared(5.0 * x.detach())
+            # This output requires grad but is intentionally unused by the loss.
+            self.shared(7.0 * x)
             return first.sum() + 2.0 * second.sum()
 
     model = ReusedScoreModule()
@@ -1095,7 +1097,6 @@ def test_gradient_scoring_restores_model_after_failure():
         getattr(module.forward, "__name__", None) != "patched_forward" for module in patched_modules
     )
     assert all("forward" not in module.__dict__ for module in patched_modules)
-    assert all(not module._backward_hooks for module in patched_modules)
     assert all(param.requires_grad for param in model.parameters())
     for module in model.modules():
         for hparam in getattr(module, "_hparams_for_scoring", []):
@@ -1108,7 +1109,6 @@ def test_backward_scoring_session_restores_partial_setup():
     score_module._hparams_for_scoring = []
     score_module.weight.requires_grad = False
     original_requires_grad = {name: param.requires_grad for name, param in model.named_parameters()}
-    original_backward_hook_mode = score_module._is_full_backward_hook
 
     def fail_on_second_parameter(name, _model):
         if name.endswith("bias"):
@@ -1124,8 +1124,6 @@ def test_backward_scoring_session_restores_partial_setup():
         pytest.fail("scoring setup should not complete")
 
     assert "forward" not in score_module.__dict__
-    assert not score_module._backward_hooks
-    assert score_module._is_full_backward_hook is original_backward_hook_mode
     assert {
         name: param.requires_grad for name, param in model.named_parameters()
     } == original_requires_grad

@@ -1493,12 +1493,6 @@ class _AutoQuantizeBackwardScoringSession(ABC):
                 else:
                     self._stack.callback(module.__dict__.pop, "forward", None)
 
-                # PyTorch does not reset this mode when the last full backward hook is removed.
-                backward_hook_mode = module._is_full_backward_hook
-                self._stack.callback(setattr, module, "_is_full_backward_hook", backward_hook_mode)
-                hook = module.register_full_backward_hook(self.backward_hook)
-                self._stack.callback(hook.remove)
-
             for name, param in self.model.named_parameters():
                 requires_grad = param.requires_grad
                 enable_grad = self.is_param_grad_enabled(name, self.model)
@@ -1526,21 +1520,18 @@ class _AutoQuantizeBackwardScoringSession(ABC):
         """Return the forward method saved before scoring."""
         return self._original_forwards[module]
 
+    def _register_output_grad_hook(self, output: torch.Tensor, hook: Callable) -> None:
+        """Attach an invocation-specific output-gradient hook for this session."""
+        handle = output.register_hook(hook)
+        self._stack.callback(handle.remove)
+
     @abstractmethod
     def forward(self, module: nn.Module, *args, **kwargs):
         """Run a score module forward pass and collect method-specific state."""
 
-    @abstractmethod
-    def backward_hook(self, module: nn.Module, grad_input, grad_output) -> None:
-        """Accumulate scores from a score module's output gradient."""
-
 
 class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
     """Collect gradient-based scores while candidate recipes are replayed."""
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._output_diffs: dict[nn.Module, list[dict]] = {}
 
     def forward(self, module: nn.Module, *args, **kwargs):
         """Run the reference forward and cache each recipe's output perturbation."""
@@ -1557,9 +1548,6 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
             return output
 
         output_diffs = {hparam: {} for hparam in module._hparams_for_scoring}
-        # A module may be invoked more than once in a forward pass. Backward visits those
-        # invocations in reverse order, so retain one replay result per invocation as a stack.
-        self._output_diffs.setdefault(module, []).append(output_diffs)
         with torch.no_grad():
             for hparam in module._hparams_for_scoring:
                 if not hparam.is_configurable:
@@ -1575,26 +1563,23 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
                     output_diffs[hparam][recipe] = output_diff.detach()
                 hparam.active = no_quant_recipe
 
+        self._register_output_grad_hook(
+            base_output,
+            lambda grad_output: self._accumulate_scores(module, output_diffs, grad_output),
+        )
         return output
 
-    def backward_hook(self, module: nn.Module, grad_input, grad_output) -> None:
-        """Accumulate squared gradient-weighted output perturbations."""
-        invocation_diffs = self._output_diffs[module].pop()
-        if not self._output_diffs[module]:
-            del self._output_diffs[module]
+    def _accumulate_scores(self, module, invocation_diffs, grad_output) -> None:
+        """Accumulate scores for the invocation that produced ``grad_output``."""
         for hparam, output_diffs in invocation_diffs.items():
             for recipe, output_diff in output_diffs.items():
                 importance = hparam._importance_dict[recipe][module]
                 if importance is None:
                     hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
-                        grad_output[0], output_diff
+                        grad_output, output_diff
                     )
                 else:
-                    _add_auto_quantize_score(grad_output[0], output_diff, importance)
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self._output_diffs.clear()
-        super().__exit__(exc_type, exc_value, traceback)
+                    _add_auto_quantize_score(grad_output, output_diff, importance)
 
 
 class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
