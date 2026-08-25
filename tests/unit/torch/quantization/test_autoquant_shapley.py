@@ -39,7 +39,7 @@ from modelopt.torch.quantization._auto_quantize_shapley import (
     _as_seed_coverage,
     _predict_damage,
 )
-from modelopt.torch.quantization.algorithms import QuantRecipe
+from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBackwardScoringSearcher
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
@@ -336,6 +336,56 @@ def test_both_targets_rejected_before_model_conversion():
         _search(model, effective_bits=8.0, method_options={"max_predicted_damage": 1e-3})
     assert type(model.mlp) is torch.nn.Linear
     assert not any(isinstance(m, TensorQuantizer) for m in model.modules())
+
+
+def test_damage_bound_searcher_accepts_none_constraints(monkeypatch):
+    """The searcher treats a missing constraint mapping like an empty mapping."""
+    searcher = AutoQuantizeAumannShapleySearcher()
+    searcher.model = _Block()
+    searcher.constraints = None
+    searcher.config = {
+        **searcher.default_search_config,
+        "max_predicted_damage": 0.1,
+    }
+    searcher.candidate_stats = {}
+    monkeypatch.setattr(_AutoQuantizeBackwardScoringSearcher, "before_search", lambda self: None)
+
+    searcher.before_search()
+
+    assert searcher.constraints == {"effective_bits": 16.0}
+
+
+def test_damage_bound_search_ignores_fixed_group_scores():
+    """A fixed group's score cannot consume the configurable allocation's damage budget."""
+    aggressive = QuantRecipe("INT4_BLOCKWISE_WEIGHT_ONLY_CFG")
+    moderate = QuantRecipe("INT8_DEFAULT_CFG")
+    no_quant = QuantRecipe(quant_cfg=None)
+    searcher = _synthetic_searcher(n_groups=1)
+    searcher.candidate_stats["g0.quant_recipe"].update(
+        formats=[aggressive, moderate, no_quant],
+        scores=[0.2, 0.1, 0.0],
+        costs=[4.0, 8.0, 16.0],
+        uncompressed_cost=16.0,
+    )
+    searcher.candidate_stats["fixed.quant_recipe"] = {
+        "formats": [moderate],
+        "scores": [10.0],
+        "costs": [8.0],
+        "module_names": ["fixed"],
+        "quantizer_attrs": {"fixed": ("input_quantizer", "weight_quantizer")},
+        "cost_weight": 1.0,
+        "allow_no_quant": False,
+        "is_fixed": True,
+        "uncompressed_cost": 16.0,
+    }
+    searcher.damage_model = {"link": "additive", "valid": True}
+    searcher.config["max_predicted_damage"] = 0.1
+
+    best, is_satisfied = searcher.run_search_with_stats(max_weight_size=np.inf)
+
+    assert is_satisfied
+    assert best["g0.quant_recipe"]["format"] == moderate
+    assert best["fixed.quant_recipe"]["format"] == moderate
 
 
 def _inject_scores_and_corner(monkeypatch, injected, corner):
