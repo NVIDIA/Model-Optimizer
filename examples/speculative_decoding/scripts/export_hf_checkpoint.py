@@ -16,6 +16,7 @@
 """Export a HF checkpoint (with ModelOpt state) for deployment."""
 
 import argparse
+import json
 
 import torch
 
@@ -33,13 +34,28 @@ def parse_args():
     parser.add_argument(
         "--export_path", type=str, default="Destination directory for exported files."
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=(
+            "JSON dict of config fields to override on the model config and its text_config "
+            "before instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints "
+            "whose nested text_config dims don't propagate to the parent config."
+        ),
+    )
     return parser.parse_args()
 
 
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-model = load_vlm_or_llm(args.model_path, dtype="auto", trust_remote_code=args.trust_remote_code)
+model = load_vlm_or_llm(
+    args.model_path,
+    dtype="auto",
+    trust_remote_code=args.trust_remote_code,
+    config_overrides=json.loads(args.config_overrides) if args.config_overrides else None,
+)
 model.eval()
 with torch.inference_mode():
     export_speculative_decoding(
