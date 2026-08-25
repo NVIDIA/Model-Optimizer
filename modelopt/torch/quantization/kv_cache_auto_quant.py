@@ -155,6 +155,11 @@ def _validate_deployable_candidate(config: QuantizeConfig) -> None:
 
     algorithm_method = _algorithm_method(config)
     for attr, quantizer in quantizers.items():
+        if quantizer._dynamic:
+            raise ValueError(
+                f"KV-cache AutoQuant candidate {attr} uses top-level dynamic quantization, "
+                "which does not retain a persistent export scale."
+            )
         will_calibrate = algorithm_method == "max" and not quantizer._use_constant_amax
         if not hasattr(quantizer, "_amax") and not will_calibrate:
             raise ValueError(
@@ -435,6 +440,20 @@ def _restore_quantizer_state_dict(
                 quantizer.load_state_dict(quantizer_state)
 
 
+def _validate_persistent_candidate_scales(
+    candidate_quantizers: dict[str, dict[str, dict[str, TensorQuantizer]]],
+) -> None:
+    """Require every calibrated candidate scale to be persistent in its state dict."""
+    for layer_name, layer_candidates in candidate_quantizers.items():
+        for candidate_name, layer_quantizers in layer_candidates.items():
+            for attr, quantizer in layer_quantizers.items():
+                if "_amax" not in quantizer.state_dict():
+                    raise ValueError(
+                        f"KV-cache AutoQuant candidate {candidate_name!r} for "
+                        f"{layer_name!r}/{attr} has no persistent export scale after calibration."
+                    )
+
+
 def _report_state(state: dict[str, Any]) -> dict[str, Any]:
     """Return the JSON-safe search report, excluding calibration tensors."""
     return {key: value for key, value in state.items() if key != "quantizer_state"}
@@ -526,6 +545,7 @@ def auto_quantize_kv_cache(
                     "Use a different checkpoint path."
                 )
             _restore_quantizer_state_dict(candidate_quantizers, quantizer_state)
+            _validate_persistent_candidate_scales(candidate_quantizers)
         else:
             from .model_quant import calibrate
 
@@ -560,6 +580,7 @@ def auto_quantize_kv_cache(
                 for layer_name, module, _ in layers:
                     _apply_layer_quantizers(module, disabled_quantizers[layer_name])
 
+            _validate_persistent_candidate_scales(candidate_quantizers)
             state = {
                 "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
                 "search_signature": signature,

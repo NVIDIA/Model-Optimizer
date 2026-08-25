@@ -190,6 +190,22 @@ def test_kv_candidate_rejects_non_exportable_or_incorrect_cost(config, match):
         _validate_kv_only_config(config)
 
 
+def test_kv_candidate_rejects_top_level_dynamic_fp8():
+    config = QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "type": "dynamic"},
+            }
+        ],
+        algorithm="max",
+        effective_bits=8.0,
+    )
+
+    with pytest.raises(ValueError, match="top-level dynamic"):
+        _validate_kv_only_config(config)
+
+
 class _ToyKVAttention(nn.Module):
     def __init__(self, width, gain):
         super().__init__()
@@ -212,6 +228,30 @@ class _ToyKVModel(nn.Module):
 
     def forward(self, x):
         return self.lm_head(self.attn1(self.attn0(x)))
+
+
+def test_kv_autoquant_rejects_missing_scale_after_calibration(monkeypatch):
+    model = _ToyKVModel()
+    original_quantizers = {
+        name: (module.k_bmm_quantizer, module.v_bmm_quantizer)
+        for name, module in (("attn0", model.attn0), ("attn1", model.attn1))
+    }
+    monkeypatch.setattr(model_quant, "calibrate", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="no persistent export scale after calibration"):
+        auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 8.0},
+            [(_kv_config((4, 3), 8.0).model_dump(), "fp8")],
+            [torch.randn(1, 2, 8)],
+            lambda search_model, batch: search_model(batch),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+    assert model.training
+    for name, module in (("attn0", model.attn0), ("attn1", model.attn1)):
+        assert (module.k_bmm_quantizer, module.v_bmm_quantizer) == original_quantizers[name]
 
 
 def test_kv_eligible_layers_supports_hybrid_attention_mixers_only():

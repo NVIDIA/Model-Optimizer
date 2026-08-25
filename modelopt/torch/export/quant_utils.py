@@ -18,7 +18,6 @@
 import logging
 from collections import defaultdict
 from collections.abc import Generator
-from types import SimpleNamespace
 from typing import Any
 from warnings import warn
 
@@ -1744,8 +1743,6 @@ def get_quant_config(
             layer_config_dict[name + ".quantization"] = quantization_format
             layer_config_dict[name + ".awq_block_size"] = block_size
 
-        not_enabled = SimpleNamespace(is_enabled=False)
-
         # Find kv cache quant format
         has_kv_quantizers = all(
             hasattr(module, quantizer_name)
@@ -1753,16 +1750,11 @@ def get_quant_config(
         )
         if has_kv_quantizers:
             kv_cache_eligible_layers += 1
-
-        if (
-            getattr(module, "k_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "v_bmm_quantizer", not_enabled).is_enabled
-            or getattr(module, "output_quantizer", not_enabled).is_enabled
-        ):
-            module_kv_quant = get_kv_cache_dtype(module)
-            if module_kv_quant != QUANTIZATION_NONE:
-                kv_cache_formats.add(module_kv_quant)
-                kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
+            if module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled:
+                module_kv_quant = get_kv_cache_dtype(module)
+                if module_kv_quant != QUANTIZATION_NONE:
+                    kv_cache_formats.add(module_kv_quant)
+                    kv_cache_quantized_layers[name] = {"quant_algo": module_kv_quant}
 
     # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
     # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise

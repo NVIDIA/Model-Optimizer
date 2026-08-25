@@ -150,12 +150,9 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
     """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
 
     effective_bits: float | None = ModeloptField(
-        default=None,
+        default=4.8,
         title="Effective bits per weight",
-        description=(
-            "Average weight-storage bits target for the LP, in (0, 16]. Defaults to 4.8 "
-            "when neither bit constraint is specified."
-        ),
+        description=("Average weight-storage bits target for the LP, in (0, 16]. Defaults to 4.8."),
     )
     kv_effective_bits: float | None = ModeloptField(
         default=None,
@@ -179,11 +176,10 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
 
     @model_validator(mode="before")
     @classmethod
-    def _default_weight_constraint(cls, data):
-        if isinstance(data, dict):
+    def _select_kv_constraint(cls, data):
+        if isinstance(data, dict) and "kv_effective_bits" in data and "effective_bits" not in data:
             data = dict(data)
-            if "effective_bits" not in data and "kv_effective_bits" not in data:
-                data["effective_bits"] = 4.8
+            data["effective_bits"] = None
         return data
 
     @field_validator("effective_bits", "kv_effective_bits")

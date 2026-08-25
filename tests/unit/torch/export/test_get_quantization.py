@@ -67,6 +67,38 @@ def test_nvfp4_static_quantizer_export():
     assert quant_config["quantization"]["group_size"] == 16
 
 
+def test_projection_output_quantizers_are_not_exported_as_kv_cache():
+    model = ToyModel()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.output_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10)))
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] is None
+    assert "kv_cache_quantized_layers" not in quantization
+
+
 def test_mixed_kv_cache_quantization_exports_per_layer_map():
     class FakeAttention(torch.nn.Module):
         def __init__(self):

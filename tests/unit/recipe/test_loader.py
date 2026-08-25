@@ -1770,6 +1770,15 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.module_search_spaces == []
 
 
+def test_autoquantize_constraints_preserve_default_with_kv_override():
+    assert AutoQuantizeConstraints.model_fields["effective_bits"].default == 4.8
+    assert AutoQuantizeConstraints().effective_bits == 4.8
+
+    constraints = AutoQuantizeConstraints(kv_effective_bits=5.4)
+    assert constraints.effective_bits is None
+    assert constraints.kv_effective_bits == 5.4
+
+
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
     """cost_model + cost.active_moe_expert_ratio parse and dump to the mtq constraints dict shape."""
     recipe_file = tmp_path / "aq.yml"
