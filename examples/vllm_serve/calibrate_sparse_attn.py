@@ -50,6 +50,7 @@ import os
 import sys
 from pathlib import Path
 
+from modelopt.torch.sparsity.attention_sparsity.calibration.ruler_dataset import RulerDatasetBuilder
 from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration import (
     DEFAULT_THRESHOLD_TRIALS,
     build_sparse_attention_config,
@@ -71,10 +72,6 @@ def _load_prompts(llm, args) -> list[str]:
 
     # Same dataset as the HF calibration path (calibration/calibrate.py), so the
     # vLLM- and PyTorch-calibrated thresholds are fit on identical data.
-    from modelopt.torch.sparsity.attention_sparsity.calibration.ruler_dataset import (
-        RulerDatasetBuilder,
-    )
-
     builder = RulerDatasetBuilder(
         samples=args.calib_samples,
         max_seqlen=args.calib_max_seqlen,
@@ -83,6 +80,12 @@ def _load_prompts(llm, args) -> list[str]:
         data_dir=args.calib_data_dir,
     )
     samples = builder.build_calibration_dataset()
+    if not samples:
+        raise ValueError(
+            "RULER produced no calibration samples (all candidates exceeded "
+            f"max_length_filter={int(args.calib_max_seqlen * 1.5)} tokens). "
+            "Adjust --calib_max_seqlen / --calib_samples, or pass --prompts_file."
+        )
     prompts = [sample["input"] for sample in samples]
     lengths = sorted(sample["length"] for sample in samples)
     print(
@@ -117,7 +120,11 @@ def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> No
     config_json = Path(ckpt) / "config.json"
     config = json.loads(config_json.read_text())
     config["sparse_attention_config"] = sparse_config
-    config_json.write_text(json.dumps(config, indent=2))
+    # Atomic replace: a crash mid-write must not truncate the checkpoint's
+    # config.json (write_text would rewrite it in place).
+    tmp_path = config_json.with_name(config_json.name + ".tmp")
+    tmp_path.write_text(json.dumps(config, indent=2))
+    os.replace(tmp_path, config_json)
     print(f"[ModelOpt] Merged sparse_attention_config into {config_json}")
 
 
@@ -211,6 +218,14 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.update_checkpoint_config and not (Path(args.model) / "config.json").is_file():
+        # Fail before the (expensive, multi-GPU) calibration run, not after:
+        # merging requires a local checkpoint directory, not a HF hub ID.
+        parser.error(
+            f"--update_checkpoint_config requires a local checkpoint directory "
+            f"containing config.json; {args.model!r} has none"
+        )
+
     # Workers run in separate processes and must import the calibration worker.
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
@@ -218,6 +233,8 @@ def main():
     current = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = os.pathsep.join([current, repo_root]) if current else repo_root
 
+    # Deferred heavy import: keep argparse/--help (and arg errors) fast, and
+    # only import vLLM after the PYTHONPATH setup above.
     from vllm import LLM, SamplingParams
 
     llm_kwargs = {
@@ -284,6 +301,12 @@ def main():
             "so observed sparsity spans the (10%, 90%) fitting window."
         )
         sys.exit(1)
+    # Export only requested phases: a stray record (e.g. a scheduling corner
+    # case classified into an unrequested phase) must not bake an
+    # uncalibrated-by-intent phase into the config.
+    calibration_params = {
+        phase: params for phase, params in calibration_params.items() if phase in requested_phases
+    }
 
     sparse_config = build_sparse_attention_config(
         calibration_params,

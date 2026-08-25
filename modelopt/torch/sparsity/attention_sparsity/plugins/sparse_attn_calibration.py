@@ -33,11 +33,13 @@ vLLM installed.
 
 from typing import Any
 
-import modelopt
-
 # One canonical sweep for both calibration paths: re-exported from the HF-path
 # calibrator so the vLLM path fits on the identical trial grid.
-from ..calibration.calibrator import DEFAULT_THRESHOLD_TRIALS
+from ..calibration.calibrator import DEFAULT_THRESHOLD_TRIALS, DynamicThresholdCalibrator
+
+# One canonical schema for both calibration paths: the exported skip-softmax
+# blocks come from the HF exporter's helpers so the formats cannot drift.
+from ..conversion import export_config_producer, export_threshold_scale_factor
 
 __all__ = [
     "DEFAULT_THRESHOLD_TRIALS",
@@ -115,7 +117,9 @@ def merge_count_records(sources: list[list[dict]]) -> list[dict]:
     return merged
 
 
-def merge_phase_counts(rank_counts: list[dict[str, list[dict]]]) -> dict[str, list[dict]]:
+def merge_phase_counts(
+    rank_counts: list[dict[str, list[dict]]], *, source_desc: str = "rank"
+) -> dict[str, list[dict]]:
     """Merge per-phase raw-count records collected from every TP rank.
 
     ``rank_counts`` is the list of per-rank results (one
@@ -123,7 +127,9 @@ def merge_phase_counts(rank_counts: list[dict[str, list[dict]]]) -> dict[str, li
     ``collect_calibration_counts``). Use ALL ranks: with tensor parallelism
     each rank only measures its attention-head shard, so any single rank's
     counts are incomplete. A phase recorded by some ranks but not others
-    indicates a collection bug and raises.
+    indicates a collection bug and raises. The same merge also sums one
+    rank's per-layer splits (``collect_calibration_counts`` delegates here
+    with ``source_desc="attention layer"``).
     """
     phases = {phase for rank in rank_counts for phase in rank}
     merged: dict[str, list[dict]] = {}
@@ -132,10 +138,11 @@ def merge_phase_counts(rank_counts: list[dict[str, list[dict]]]) -> dict[str, li
         empty = sum(1 for source in sources if not source)
         if empty and empty != len(sources):
             raise ValueError(
-                f"Misaligned calibration records: {empty}/{len(sources)} rank(s) "
+                f"Misaligned calibration records: {empty}/{len(sources)} {source_desc}(s) "
                 f"recorded no {phase!r} samples while others did"
             )
-        merged[phase] = merge_count_records([] if empty else sources)
+        # All-empty sources merge to [] (merge_count_records sums zero samples).
+        merged[phase] = merge_count_records(sources)
     return merged
 
 
@@ -172,8 +179,6 @@ def fit_from_counts(
         ``{phase: {"a", "b", "min_observed_sparsity", "max_observed_sparsity"}}``
         for each phase that produced a valid fit.
     """
-    from ..calibration.calibrator import DynamicThresholdCalibrator
-
     calibration_params: dict[str, dict[str, float]] = {}
     for phase, records in per_phase_counts.items():
         if not records:
@@ -228,37 +233,49 @@ def build_sparse_attention_config(
 
     Non-skip groups from ``existing_config`` (e.g. exported N:M
     ``sparse_softmax`` metadata) are preserved after the skip group; an
-    existing ``skip_softmax`` group is replaced by the new calibration.
+    existing ``skip_softmax`` group is replaced by the new calibration,
+    carrying over its layer policy (``ignore`` — layers deliberately kept
+    dense — and ``initial_disabled_steps``): recalibration replaces the
+    fitted thresholds, not which layers the export sparsifies.
     """
-    threshold_scale_factor: dict[str, Any] = {"formula": "a * exp(b * target_sparsity)"}
-    for phase in _PHASES:
-        if phase in calibration_params:
-            threshold_scale_factor[phase] = {
-                "a": float(calibration_params[phase]["a"]),
-                "b": float(calibration_params[phase]["b"]),
-            }
+    # target_sparsity covers only fitted phases: claiming a target for a phase
+    # without calibrated (a, b) would advertise sparsity the serving path
+    # silently serves dense (it needs the per-phase scale factors).
+    target_sparsity_by_phase = {
+        phase: value
+        for phase, value in _normalize_target_sparsity(target_sparsity).items()
+        if phase in calibration_params
+    }
 
     skip_group: dict[str, Any] = {
         "algorithm": "skip_softmax",
         "targets": ["Attention"],
-        "threshold_scale_factor": threshold_scale_factor,
-        "target_sparsity": _normalize_target_sparsity(target_sparsity),
+        "threshold_scale_factor": export_threshold_scale_factor(calibration_params),
+        "target_sparsity": target_sparsity_by_phase,
     }
 
     config_groups: dict[str, Any] = {"group_0": skip_group}
     existing_groups = (existing_config or {}).get("config_groups")
     if isinstance(existing_groups, dict):
-        preserved = [
-            group
-            for group in existing_groups.values()
-            if isinstance(group, dict) and group.get("algorithm") != "skip_softmax"
-        ]
+        preserved = []
+        for group in existing_groups.values():
+            if not isinstance(group, dict):
+                continue
+            if group.get("algorithm") == "skip_softmax":
+                # Keep the replaced group's layer policy: dropping ``ignore``
+                # would sparsify layers the original export deliberately kept
+                # dense (e.g. first/last blocks).
+                for key in ("ignore", "initial_disabled_steps"):
+                    if key in group and key not in skip_group:
+                        skip_group[key] = group[key]
+            else:
+                preserved.append(group)
         for idx, group in enumerate(preserved, start=1):
             config_groups[f"group_{idx}"] = group
 
     result: dict[str, Any] = {
         "config_groups": config_groups,
-        "producer": {"name": "modelopt", "version": modelopt.__version__},
+        "producer": export_config_producer(),
     }
     # Legacy checkpoints carry N:M parameters as a top-level ``sparse_softmax``
     # dict (read by the serving loader ahead of group params) — preserve it so
