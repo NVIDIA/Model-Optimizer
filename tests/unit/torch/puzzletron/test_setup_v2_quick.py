@@ -407,6 +407,25 @@ def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
     assert _parser().parse_args([]).full is False
     assert _parser().parse_args(["--full"]).full is True
 
+    full_state = _fresh_state(
+        ScriptedBackend([]),
+        None,
+        full=True,
+        campaign_dir=tmp_path / "full-campaign",
+        setup_profile="smoke",
+    )
+    assert full_state.setup_mode == "full"
+    assert full_state.preset == "smoke"
+
+    with pytest.raises(SetupError, match="Unknown setup preset"):
+        _fresh_state(
+            ScriptedBackend([]),
+            None,
+            full=True,
+            campaign_dir=tmp_path / "invalid-campaign",
+            setup_profile="invalid",
+        )
+
 
 def test_non_interactive_backend_uses_semantic_defaults() -> None:
     backend = NonInteractiveBackend()

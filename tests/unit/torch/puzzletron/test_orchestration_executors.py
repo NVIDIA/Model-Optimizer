@@ -413,6 +413,9 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     submitted = []
 
     class FakeLocalExecutor:
+        def __init__(self, configured_runner):
+            assert configured_runner is runner
+
         def submit(self, attempt):
             submitted.append(attempt)
             return JobHandle(

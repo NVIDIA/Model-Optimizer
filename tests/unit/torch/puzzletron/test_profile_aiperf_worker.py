@@ -16,12 +16,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Tests for sharded AIPerf worker selection, merging, and policy forwarding."""
+
+import json
+import sys
+
 import pytest
+
+from examples.puzzletron import run_profile_aiperf_worker as worker_module
+from examples.puzzletron.run_profile_aiperf_worker import (
+    TOPOLOGIES,
+    build_work_items,
+    expected_result_count,
+    merge_results,
+    run_worker,
+    select_registry_solutions,
+    shard_work,
+)
+from modelopt.torch.puzzletron import benchmarks
 
 
 def test_profile_aiperf_filters_registry_to_explicit_solutions():
-    from examples.puzzletron.run_profile_aiperf_worker import select_registry_solutions
-
     registry = {
         "profile_id": "latency-095",
         "solutions": [
@@ -39,8 +54,6 @@ def test_profile_aiperf_filters_registry_to_explicit_solutions():
 
 
 def test_profile_aiperf_work_matrix_uses_six_all_eight_gpu_topologies():
-    from examples.puzzletron.run_profile_aiperf_worker import build_work_items
-
     registry = {
         "profile_id": "params-080",
         "solutions": [
@@ -58,8 +71,6 @@ def test_profile_aiperf_work_matrix_uses_six_all_eight_gpu_topologies():
 
 
 def test_profile_aiperf_work_shards_cover_every_item_once():
-    from examples.puzzletron.run_profile_aiperf_worker import shard_work
-
     items = [{"id": value} for value in range(15)]
     shards = [shard_work(items, worker_index=index, worker_count=8) for index in range(8)]
 
@@ -68,8 +79,6 @@ def test_profile_aiperf_work_shards_cover_every_item_once():
 
 
 def test_profile_aiperf_expected_results_follow_registry_size():
-    from examples.puzzletron.run_profile_aiperf_worker import expected_result_count
-
     registry = {
         "solutions": [
             {"solution_id": "best-loss"},
@@ -81,10 +90,6 @@ def test_profile_aiperf_expected_results_follow_registry_size():
 
 
 def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
-    import json
-
-    from examples.puzzletron.run_profile_aiperf_worker import TOPOLOGIES, merge_results
-
     profile_id = "latency-095"
     solutions = ("teacher", "h4096-d4")
     registry_path = tmp_path / "mip/profiles" / profile_id / "selected_solutions.json"
@@ -141,10 +146,6 @@ def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
 
 
 def test_profile_aiperf_cli_forwards_explicit_security_flags(tmp_path, monkeypatch):
-    import sys
-
-    from examples.puzzletron import run_profile_aiperf_worker as worker_module
-
     captured = {}
 
     def run_worker(puzzle_dir, **kwargs):
@@ -172,15 +173,13 @@ def test_profile_aiperf_cli_forwards_explicit_security_flags(tmp_path, monkeypat
     assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is True
 
 
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("trust_remote_code", "online_tokenizer"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
 def test_profile_aiperf_worker_forwards_security_policy_to_real_sweep(
-    tmp_path, monkeypatch, enabled
+    tmp_path, monkeypatch, trust_remote_code, online_tokenizer
 ):
-    import json
-
-    from examples.puzzletron.run_profile_aiperf_worker import run_worker
-    from modelopt.torch.puzzletron import benchmarks
-
     profile_id = "runtime-075"
     registry_path = tmp_path / "mip/profiles" / profile_id / "selected_solutions.json"
     registry_path.parent.mkdir(parents=True)
@@ -208,11 +207,11 @@ def test_profile_aiperf_worker_forwards_security_policy_to_real_sweep(
         worker_count=6,
         input_tokens=32,
         output_tokens=8,
-        trust_remote_code=enabled,
-        allow_aiperf_v011_online_tokenizer_resolution=enabled,
+        trust_remote_code=trust_remote_code,
+        allow_aiperf_v011_online_tokenizer_resolution=online_tokenizer,
     )
 
     assert len(observed) == 1
     _, kwargs = observed[0]
-    assert kwargs["trust_remote_code"] is enabled
-    assert kwargs["allow_aiperf_v011_online_tokenizer_resolution"] is enabled
+    assert kwargs["trust_remote_code"] is trust_remote_code
+    assert kwargs["allow_aiperf_v011_online_tokenizer_resolution"] is online_tokenizer

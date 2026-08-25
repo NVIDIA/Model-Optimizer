@@ -724,7 +724,14 @@ def test_gradient_groups_are_observed_at_optimizer_step():
     assert all(value.item() > 0 for value in recipe._gradient_squared.values())
 
 
-def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "checkpoint_config",
+    [
+        {"block_configs": [{"subblock_configs": []}]},
+        {"text_config": {"block_configs": [{"subblock_configs": []}]}},
+    ],
+)
+def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch, checkpoint_config):
     # Lazy import keeps the optional NeMo AutoModel runtime out of test collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
@@ -744,9 +751,7 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch):
             checkpoint = tmp_path / f"epoch_{epoch}_step_{step}"
             consolidated = checkpoint / "model/consolidated"
             consolidated.mkdir(parents=True)
-            (consolidated / "config.json").write_text(
-                json.dumps({"block_configs": [{"subblock_configs": []}]})
-            )
+            (consolidated / "config.json").write_text(json.dumps(checkpoint_config))
             return "saved"
 
     class Recipe(_WeightedObjectiveMixin, BaseRecipe):
@@ -792,8 +797,11 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     publication = {"error": None, "broadcasts": 0}
+    parent_save_errors = [None, None]
 
     class BaseRecipe:
+        fail_rank = None
+
         def save_checkpoint(
             self,
             epoch,
@@ -803,6 +811,9 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
             best_metric_key="default",
         ):
             del train_loss, val_loss, best_metric_key
+            rank = 0 if self.dist_env.is_main else 1
+            if self.fail_rank == rank:
+                raise OSError("parent save failed")
             consolidated = tmp_path / f"epoch_{epoch}_step_{step}/model/consolidated"
             consolidated.mkdir(parents=True, exist_ok=True)
             (consolidated / "config.json").write_text(
@@ -822,6 +833,12 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
             payload[0] = publication["error"]
 
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_gather_object",
+        lambda output, _value: output.__setitem__(slice(None), parent_save_errors),
+    )
     monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast_object_list)
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
@@ -841,7 +858,10 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
 
     with pytest.raises(ValueError, match="refresh failed"):
         recipe(is_main=True).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
-    assert publication == {"error": "ValueError: refresh failed", "broadcasts": 1}
+    assert publication == {
+        "error": "publication failed on rank 0: ValueError: refresh failed",
+        "broadcasts": 1,
+    }
     assert not (tmp_path / "epoch_2_step_19/saving_completed").exists()
 
     with pytest.raises(
@@ -849,6 +869,42 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
         match="global KD checkpoint publication failed on rank 0: ValueError: refresh failed",
     ):
         recipe(is_main=False).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
+    assert publication["broadcasts"] == 2
+
+    publication.update(error=None, broadcasts=0)
+    parent_save_errors[:] = ["OSError: parent save failed", None]
+    BaseRecipe.fail_rank = 0
+    with pytest.raises(OSError, match="parent save failed"):
+        recipe(is_main=True).save_checkpoint(2, 23, 0.5, {"lm_loss": 0.25})
+    assert publication == {
+        "error": "parent save failed on rank 0: OSError: parent save failed",
+        "broadcasts": 1,
+    }
+    assert not (tmp_path / "epoch_2_step_23/saving_completed").exists()
+
+    with pytest.raises(
+        RuntimeError,
+        match="global KD checkpoint parent save failed on rank 0: OSError: parent save failed",
+    ):
+        recipe(is_main=False).save_checkpoint(2, 23, 0.5, {"lm_loss": 0.25})
+    assert publication["broadcasts"] == 2
+
+    publication.update(error=None, broadcasts=0)
+    parent_save_errors[:] = [None, "OSError: parent save failed"]
+    BaseRecipe.fail_rank = 1
+    with pytest.raises(
+        RuntimeError,
+        match="global KD checkpoint parent save failed on rank 1: OSError: parent save failed",
+    ):
+        recipe(is_main=True).save_checkpoint(2, 29, 0.5, {"lm_loss": 0.25})
+    assert publication == {
+        "error": "parent save failed on rank 1: OSError: parent save failed",
+        "broadcasts": 1,
+    }
+    assert not (tmp_path / "epoch_2_step_29/saving_completed").exists()
+
+    with pytest.raises(OSError, match="parent save failed"):
+        recipe(is_main=False).save_checkpoint(2, 29, 0.5, {"lm_loss": 0.25})
     assert publication["broadcasts"] == 2
 
 

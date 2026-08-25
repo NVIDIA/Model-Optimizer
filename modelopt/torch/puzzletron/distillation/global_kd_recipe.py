@@ -653,25 +653,48 @@ class _WeightedObjectiveMixin:
     ):
         """Publish a completion marker only after model and optimizer DCP succeed."""
 
-        result = super().save_checkpoint(  # type: ignore[misc]
-            epoch,
-            step,
-            train_loss,
-            val_loss,
-            best_metric_key=best_metric_key,
-        )
+        result = None
+        publication_error: Exception | None = None
+        publication_error_text: str | None = None
+        try:
+            result = super().save_checkpoint(  # type: ignore[misc]
+                epoch,
+                step,
+                train_loss,
+                val_loss,
+                best_metric_key=best_metric_key,
+            )
+        except Exception as error:  # noqa: BLE001 - all ranks must reach the collective
+            publication_error = error
+            publication_error_text = f"{type(error).__name__}: {error}"
+        distributed = torch.distributed.is_initialized()
+        if distributed:
+            parent_save_errors: list[str | None] = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(parent_save_errors, publication_error_text)
+            parent_save_failure = next(
+                (
+                    (rank, error)
+                    for rank, error in enumerate(parent_save_errors)
+                    if error is not None
+                ),
+                None,
+            )
+            if parent_save_failure is not None:
+                failing_rank, error_text = parent_save_failure
+                publication_error_text = f"parent save failed on rank {failing_rank}: {error_text}"
         checkpoint_path = os.path.join(
             str(self.checkpointer.config.checkpoint_dir),
             f"epoch_{epoch}_step_{step}",
         )
-        publication_error: Exception | None = None
-        publication_error_text: str | None = None
-        if self.dist_env.is_main:
+        if publication_error_text is None and self.dist_env.is_main:
             try:
                 consolidated = Path(checkpoint_path, "model", "consolidated")
                 config_path = consolidated / "config.json"
                 config = json.loads(config_path.read_text()) if config_path.is_file() else {}
-                if config.get("block_configs"):
+                text_config = config.get("text_config")
+                if config.get("block_configs") or (
+                    isinstance(text_config, dict) and text_config.get("block_configs")
+                ):
                     from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
                     model_config = _config_value(getattr(self, "cfg", None), "model")
@@ -687,17 +710,17 @@ class _WeightedObjectiveMixin:
                 Path(checkpoint_path, "saving_completed").touch()
             except Exception as error:  # noqa: BLE001 - all ranks must reach the collective
                 publication_error = error
-                publication_error_text = f"{type(error).__name__}: {error}"
-        if torch.distributed.is_initialized():
+                publication_error_text = (
+                    f"publication failed on rank 0: {type(error).__name__}: {error}"
+                )
+        if distributed:
             publication_status = [publication_error_text]
             torch.distributed.broadcast_object_list(publication_status, src=0)
             publication_error_text = publication_status[0]
         if publication_error is not None:
             raise publication_error
         if publication_error_text is not None:
-            raise RuntimeError(
-                f"global KD checkpoint publication failed on rank 0: {publication_error_text}"
-            )
+            raise RuntimeError(f"global KD checkpoint {publication_error_text}")
         return result
 
     def _install_vision_observers(self, parts, *, role: str):

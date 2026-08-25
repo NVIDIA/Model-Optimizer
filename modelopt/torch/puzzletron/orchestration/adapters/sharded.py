@@ -154,7 +154,7 @@ def _run_local_aggregate(
         metadata={"gpus_per_node": 0},
         task_topology=TaskTopology(task_count=1, gpus_per_task=0),
     )
-    executor = LocalExecutor()
+    executor = LocalExecutor(plan.runner)
     handle = executor.submit(attempt)
     while True:
         status = executor.poll([handle])[0]

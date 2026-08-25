@@ -34,6 +34,9 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MoEConfig,
 )
+from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
+    AutoModelReplaceBlockExecutor,
+)
 from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
     _can_skip_parent_model_load,
@@ -62,6 +65,7 @@ from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTar
 from modelopt.torch.puzzletron.pruning.gated_delta_net import GDNShape
 from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
 from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
+from modelopt.torch.utils import distributed as dist
 
 
 def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
@@ -254,9 +258,6 @@ def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch,
 
 
 def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
-    from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
-        AutoModelReplaceBlockExecutor,
-    )
     from modelopt.torch.puzzletron.distributed_eval.schema import EvaluationRequest
 
     teacher_blocks = [
@@ -316,11 +317,6 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
 
 
 def test_rpc_executor_non_output_pipeline_rank_reaches_collective(monkeypatch):
-    from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
-        AutoModelReplaceBlockExecutor,
-    )
-    from modelopt.torch.utils import distributed as dist
-
     class NonOutputRecipe:
         has_outputs = False
         _groups = None

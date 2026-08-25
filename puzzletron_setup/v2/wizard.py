@@ -4505,13 +4505,14 @@ def _fresh_state(
     setup_profile: str = "balanced",
 ) -> WizardState:
     if campaign_dir is not None:
+        get_setup_preset(setup_profile)
         if full:
             return WizardState.start(
                 Path(campaign_dir).expanduser(),
                 defaults_path=defaults_path,
                 setup_mode="full",
+                preset=setup_profile,
             )
-        get_setup_preset(setup_profile)
         return WizardState.start(
             Path(campaign_dir).expanduser(),
             defaults_path=defaults_path,
