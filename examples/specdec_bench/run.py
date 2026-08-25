@@ -65,19 +65,35 @@ def _speculation_profile_metadata(args):
     the exhaustive run record (engine version, checkpoint hashes, redacted argv, GPU)
     is already written to configuration.json by dump_env().
 
-    On K: `--draft_length` is the number of *draft positions*, which is what the
-    acceptance vectors are indexed by, and is what the engines receive as
-    `speculative_num_steps`. `--block_size` is the DFlash trained block size, one
-    larger than the draft length, and bounds K -- serving above it is invalid rather
-    than merely degraded, so it is published as max_supported_k.
+    On K -- which flag actually sets it depends on the method, so this mirrors the
+    engine wrappers rather than guessing:
+
+    * DFLASH is configured by ``--block_size``. Both the vLLM and SGLang wrappers
+      forward it as ``num_speculative_tokens`` / ``speculative_num_draft_tokens`` and
+      *ignore* ``--draft_length`` (``models/sglang.py`` warns about this explicitly).
+    * Everything else uses ``--draft_length``, forwarded as ``speculative_num_steps``
+      (TRT-LLM turns it into ``max_draft_len``).
+
+    Reading K off the wrong flag would silently mislabel the vectors, so it is
+    derived here rather than assumed.
+
+    ``max_supported_k`` is deliberately left to default to the measured K. A
+    block-parallel draft does have a hard architectural ceiling, but specdec_bench
+    cannot observe it: ``--block_size`` here is the value handed to the engine as
+    num_speculative_tokens, which is not the same quantity as the trained
+    ``dflash_block_size`` in the checkpoint config despite the shared name. Publishing
+    a ceiling we cannot verify would be worse than publishing none.
     """
     method = (args.speculative_algorithm or "").lower() or None
     block_size = getattr(args, "block_size", None)
+    if method == "dflash" and block_size:
+        num_speculative_tokens = block_size
+    else:
+        num_speculative_tokens = args.draft_length
     return {
-        "num_speculative_tokens": args.draft_length,
+        "num_speculative_tokens": num_speculative_tokens,
         "method": method,
         "block_size": block_size,
-        "max_supported_k": (block_size - 1) if block_size else args.draft_length,
         "draft_checkpoint": {"path": args.draft_model_dir} if args.draft_model_dir else None,
         "target_model": {"path": args.model_dir},
         "measurement_conditions": {
