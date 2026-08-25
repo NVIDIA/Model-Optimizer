@@ -22,6 +22,7 @@ from collections import deque
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
@@ -841,8 +842,6 @@ def test_layerwise_replay_does_not_attend_over_its_own_kv_cache():
     input amax collapsed to exactly 0.0, while ``down_proj`` picked up a
     plausible but wrong value from the residual alone.
     """
-    from _test_utils.torch.transformers_models import get_tiny_llama
-
     calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
 
     def fwd(m):

@@ -51,6 +51,21 @@ class _EarlyStopForwardError(Exception):
     """Raised to halt the forward pass after capturing layer inputs."""
 
 
+def _with_empty_kv_cache(kwargs_input: dict) -> dict:
+    """Drop any attention cache, so a replay does not attend over its own earlier writes.
+
+    Both replay paths -- the patched ``run`` forward below and ``calib_func``'s replay in
+    ``layerwise_calibrate`` -- consume the same captured kwargs, so each clears the cache
+    itself rather than relying on the other not having written to it.
+
+    Not ``Cache.reset()``: that zeroes the key/value tensors but keeps them at full
+    length, leaving the replay attending over an all-zero cache instead of none.
+    """
+    if kwargs_input.get("past_key_values") is None:
+        return kwargs_input
+    return {**kwargs_input, "past_key_values": None}
+
+
 @dataclass
 class _LayerCalibState:
     """Mutable per-layer state used during layerwise calibration.
@@ -236,7 +251,7 @@ class LayerActivationCollector:
                     f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
                 )
                 real_args, real_kwargs = info.cached_inputs.popleft()
-                output = self._original_forward(*real_args, **real_kwargs)
+                output = self._original_forward(*real_args, **_with_empty_kv_cache(real_kwargs))
                 info.output_meta = LayerActivationCollector._extract_output_meta(output)
                 return output
 

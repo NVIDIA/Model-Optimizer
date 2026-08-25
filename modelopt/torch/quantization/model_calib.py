@@ -34,6 +34,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _with_empty_kv_cache,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
@@ -2045,17 +2046,6 @@ def svdquant(
             with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
-
-
-def _with_empty_kv_cache(kwargs_input: dict) -> dict:
-    """Drop any attention cache, so a replay does not attend over its own earlier writes.
-
-    Not ``Cache.reset()``: that zeroes the key/value tensors but keeps them at full
-    length, leaving the replay attending over an all-zero cache instead of none.
-    """
-    if kwargs_input.get("past_key_values") is None:
-        return kwargs_input
-    return {**kwargs_input, "past_key_values": None}
 
 
 @torch.no_grad()
