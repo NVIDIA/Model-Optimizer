@@ -28,7 +28,6 @@ live in ``plugins/sparse_attn_config.py`` and are unit-testable without vLLM.
 """
 
 import functools
-import importlib
 import inspect
 import math
 import warnings
@@ -272,35 +271,6 @@ def _calibration_active(impl) -> bool:
     )
 
 
-def _flashinfer_kv_cache_layout() -> str | None:
-    """Best-effort query of vLLM's configured FlashInfer KV-cache layout.
-
-    Returns ``"NHD"`` / ``"HND"`` when the running vLLM exposes the layout
-    (newer releases select HND for some Blackwell FlashInfer paths), or
-    ``None`` when it cannot be determined — callers then fall back to the
-    shape-based check in :func:`_forward_calibrate`.
-    """
-    for module_name in (
-        "vllm.v1.attention.backends.utils",
-        "vllm.attention.backends.utils",
-    ):
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError:
-            continue
-        getter = getattr(module, "get_kv_cache_layout", None)
-        if getter is None:
-            continue
-        try:
-            value = getter()
-        except Exception:
-            return None
-        # Preserve a genuine None (layout unset) so the shape fallback runs;
-        # str(None) would become the truthy string "None" and hard-reject.
-        return None if value is None else str(value)
-    return None
-
-
 def _forward_calibrate(
     impl,
     *,
@@ -342,13 +312,11 @@ def _forward_calibrate(
         raise NotImplementedError(
             f"skip-softmax calibration requires an fp16/bf16 KV cache, got {key_cache.dtype}"
         )
-    if key_cache.shape[2] != impl.num_kv_heads:
-        # NHD is the only supported paged layout: [blocks, page, kv_heads, dim].
-        # An HND FlashInfer cache would put kv_heads on axis 1.
+    if key_cache.ndim != 4 or key_cache.shape[2] != impl.num_kv_heads:
         raise NotImplementedError(
-            f"KV cache layout is not NHD (shape {tuple(key_cache.shape)}, "
-            f"expected axis 2 == num_kv_heads == {impl.num_kv_heads}); "
-            "HND caches are unsupported for calibration"
+            "skip-softmax calibration requires a logical KV-cache view shaped "
+            f"[blocks, page, heads, dim], got {tuple(key_cache.shape)} with "
+            f"num_kv_heads={impl.num_kv_heads}"
         )
     page_size = key_cache.shape[1]
     trials = impl._calib_threshold_trials
@@ -944,14 +912,6 @@ def _flashinfer_forward(
         if kv_cache.ndim != 5 or kv_cache.shape[1] != 2:
             raise ValueError(
                 "FlashInfer KV cache must have logical shape [blocks, 2, page, heads, dim]"
-            )
-        layout = _flashinfer_kv_cache_layout()
-        if layout is not None and layout.upper() != "NHD":
-            # Authoritative layout metadata beats the shape heuristic (which is
-            # ambiguous when page_size equals the per-rank KV-head count).
-            raise NotImplementedError(
-                f"FlashInfer KV-cache layout {layout!r} is unsupported for "
-                "skip-softmax calibration; only NHD is supported"
             )
         # Order matters: releases that update the KV cache inside forward must
         # write the current K/V before the calibrate kernel reads the cache.
