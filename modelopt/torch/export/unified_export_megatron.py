@@ -623,24 +623,13 @@ class GPTModelExporter:
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
 
     def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
-        """Export the MTP (Multi-Token Prediction) module.
-
-        Walks the live MCore ``model.mtp`` module and applies the same quantization
-        rules used for the base decoder, so the exported draft head reflects the
-        actual (quantized / co-trained) weights. Falls back to copying the BF16 MTP
-        weights from the pretrained model only when the live model has no ``mtp``
-        module (e.g. exporting a base-only checkpoint that grafts a pretrained head).
-        """
+        """Export the live MTP module, or copy it from the pretrained model if absent."""
         model = getattr(self, "model", None)
         mtp = getattr(model, "mtp", None)
         if mtp is None or not hasattr(mtp, "layers") or len(mtp.layers) == 0:
             return self._copy_mtp_state_dict_from_pretrained()
 
-        # The MTP inner attention / MoE layers are structurally identical to the base
-        # decoder layers, so the same layer walker + rules are reused with is_mtp=True,
-        # which swaps the ``backbone``/``model`` target root for ``mtp`` (mirroring the
-        # importer). Only the predictor-specific projections (enorm/hnorm/eh_proj) and the
-        # MTP block's own final_layernorm use dedicated ``mtp.*`` rules.
+        # Inner layers reuse the base walker with is_mtp=True (retargets backbone -> mtp).
         saved_state_dict = self._state_dict
         self._state_dict = OrderedDict()
         try:
@@ -657,8 +646,7 @@ class GPTModelExporter:
                 if "mtp.eh_proj" in self.rules:
                     self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
 
-                # Inner hybrid stack (e.g. [attention, MoE] for the ``*E`` pattern)
-                # reuses the base decoder walker; is_mtp=True retargets to mtp.layers.{}.
+                # Inner layers reuse the base decoder walker (is_mtp=True).
                 for inner in inner_layers:
                     hf_layer_id = inner.layer_number - 1
                     if isinstance(inner, MambaLayer):
@@ -688,11 +676,7 @@ class GPTModelExporter:
         return mtp_state_dict
 
     def _copy_mtp_state_dict_from_pretrained(self) -> dict[str, torch.Tensor]:
-        """Fallback: copy the BF16 MTP weights from the pretrained model.
-
-        Used only when the live model has no ``mtp`` module. This does not reflect any
-        quantization or co-training applied to the MTP head.
-        """
+        """Copy the BF16 MTP weights from the pretrained model (used when there is no live MTP)."""
         mtp_state_dict = {}
         if not self._hf_pretrained_model_name:
             return mtp_state_dict
@@ -1029,12 +1013,7 @@ class GPTModelExporter:
 
     @staticmethod
     def _mtp_prefix(prefix: str) -> str:
-        """Rewrite a base-model target prefix to its MTP counterpart.
-
-        Mirrors the importer so import/export naming stays symmetric: the MTP inner
-        layers reuse the base decoder rules, only the ``backbone``/``model`` root is
-        swapped for ``mtp``.
-        """
+        """Rewrite a base-model target prefix (backbone/model root) to its MTP counterpart."""
         if "backbone" in prefix:
             return prefix.replace("backbone", "mtp")
         return prefix.replace("model", "mtp")
