@@ -426,7 +426,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         self._raise_if_vocab_sharded()
         if self.config["max_predicted_damage"] is not None:
             self.validate_search_input(self.constraints, self.config)
-            self.constraints = {"effective_bits": 16.0, **self.constraints}
+            self.constraints = {"effective_bits": 16.0, **(self.constraints or {})}
         # Stored scores are only reusable when their meaning is unchanged (see
         # _current_scoring_signature); damage-bound re-solves are allowed on resume.
         current_signature = self._current_scoring_signature()
@@ -1026,6 +1026,10 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
         else:
             score_budget = float(max_predicted_damage)
 
+        damage_constraint_costs = [
+            [0.0] * len(stat["scores"]) if stat.get("is_fixed", False) else stat["scores"]
+            for stat in self.candidate_stats.values()
+        ]
         if math.isinf(score_budget):
             selections = [
                 min(
@@ -1039,9 +1043,7 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
             lps = LPS(
                 name="AutoQuantizeDamageBound",
                 constraints={"damage_score": score_budget},
-                constraints_to_candidate_costs={
-                    "damage_score": [stat["scores"] for stat in self.candidate_stats.values()]
-                },
+                constraints_to_candidate_costs={"damage_score": damage_constraint_costs},
                 candidate_scores=[stat["costs"] for stat in self.candidate_stats.values()],
                 objective_type="minimize",
                 verbose=verbose,
@@ -1049,8 +1051,8 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
             selections, self.status = lps()
 
         selected_score = sum(
-            stat["scores"][selected_idx]
-            for stat, selected_idx in zip(self.candidate_stats.values(), selections, strict=True)
+            scores[selected_idx]
+            for scores, selected_idx in zip(damage_constraint_costs, selections, strict=True)
         )
         is_satisfied = self.status == "Optimal" and selected_score <= score_budget + 1e-12
         if not is_satisfied:
@@ -1062,10 +1064,8 @@ class AutoQuantizeAumannShapleySearcher(_AutoQuantizeBackwardScoringSearcher):
 
         if verbose:
             selected_score = sum(
-                stat["scores"][selected_idx]
-                for stat, selected_idx in zip(
-                    self.candidate_stats.values(), selections, strict=True
-                )
+                scores[selected_idx]
+                for scores, selected_idx in zip(damage_constraint_costs, selections, strict=True)
             )
             total_cost = sum(
                 stat["costs"][selected_idx]
