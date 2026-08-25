@@ -857,9 +857,7 @@ def test_layerwise_replay_does_not_attend_over_its_own_kv_cache():
         return model
 
     sequential = calibrate({"method": "max"})
-    layerwise = calibrate(
-        {"method": "max", "layerwise": {"enable": True, "calib_mutates_weights": False}}
-    )
+    layerwise = calibrate({"method": "max", "layerwise": {"enable": True}})
 
     expected = _collect_amax(sequential)
     assert expected, "sequential calibration populated no amax values"
