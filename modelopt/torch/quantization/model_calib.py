@@ -2047,6 +2047,23 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
+def _with_empty_kv_cache(kwargs_input: dict) -> dict:
+    """Return *kwargs_input* with any attention cache dropped.
+
+    A layer replayed during calibration must not see the keys and values its own
+    earlier run wrote, or it attends over stale state and its activation amaxes
+    describe the wrong tensor. Dropping the cache is what makes each replay
+    independent; the layer recomputes keys and values from the captured inputs.
+
+    ``Cache.reset()`` is not usable here: it zeroes the key/value tensors while
+    keeping them at full length, so the replay attends over a same-length,
+    all-zero cache rather than no cache at all.
+    """
+    if kwargs_input.get("past_key_values") is None:
+        return kwargs_input
+    return {**kwargs_input, "past_key_values": None}
+
+
 @torch.no_grad()
 def layerwise_calibrate(
     model: nn.Module,
@@ -2125,22 +2142,7 @@ def layerwise_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
-                    # Reset past_key_values to prevent the KV cache from
-                    # accumulating across multiple forward replays (e.g.
-                    # max_calibrate then Hessian collection in GPTQ).
-                    # The layer doesn't need stale KV data — each replay
-                    # should start with a fresh cache.
-                    if (
-                        "past_key_values" in kwargs_input
-                        and kwargs_input["past_key_values"] is not None
-                    ):
-                        kwargs_input = dict(kwargs_input)
-                        cache = kwargs_input["past_key_values"]
-                        if hasattr(cache, "reset"):
-                            cache.reset()
-                        else:
-                            kwargs_input["past_key_values"] = None
-                    m(*args, **kwargs_input)
+                    m(*args, **_with_empty_kv_cache(kwargs_input))
 
             is_last = layer_idx + 1 >= num_layers
 

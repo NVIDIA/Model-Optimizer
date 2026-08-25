@@ -43,6 +43,7 @@ Changelog
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
+- Fix layerwise calibration producing wrong **activation** amaxes: a replayed decoder layer attended over the KV cache its own earlier run had written, so ``self_attn.o_proj``'s input amax collapsed to ``0.0`` on every layer but the last and other intra-layer activation scales were silently off. Models with an explicit sliding-window mask raised a shape mismatch instead. Weight-only recipes are unaffected; re-run calibration for any layerwise recipe that quantizes activations.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^

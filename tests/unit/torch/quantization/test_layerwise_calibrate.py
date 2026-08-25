@@ -830,6 +830,53 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
     _assert_amax_close(_collect_amax(model_lw), seq_amax, "layerwise vs sequential")
 
 
+def test_layerwise_replay_does_not_attend_over_its_own_kv_cache():
+    """A layer replayed during calibration must not see the keys and values its
+    own earlier run wrote.
+
+    The equivalence test above uses a model with no attention cache, so it cannot
+    reach this: only the captured ``past_key_values`` makes a replay stateful.
+    With the cache left in place, ``o_proj`` saw an all-zero attention output on
+    every layer but the last (the one with no preceding capture pass) and its
+    input amax collapsed to exactly 0.0, while ``down_proj`` picked up a
+    plausible but wrong value from the residual alone.
+    """
+    from _test_utils.torch.transformers_models import get_tiny_llama
+
+    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
+
+    def fwd(m):
+        for batch in calib_data:
+            m(batch)
+
+    def calibrate(algorithm):
+        torch.manual_seed(0)
+        model = get_tiny_llama(num_hidden_layers=4).eval()
+        cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+        cfg["algorithm"] = algorithm
+        mtq.quantize(model, cfg, forward_loop=fwd)
+        return model
+
+    sequential = calibrate({"method": "max"})
+    layerwise = calibrate(
+        {"method": "max", "layerwise": {"enable": True, "calib_mutates_weights": False}}
+    )
+
+    expected = _collect_amax(sequential)
+    assert expected, "sequential calibration populated no amax values"
+    layerwise_amax = _collect_amax(layerwise)
+    _assert_amax_close(layerwise_amax, expected, "layerwise vs sequential (KV cache)")
+
+    # Pinned separately from the comparison: a future regression that made both
+    # paths collapse to zero would still satisfy the equality above.
+    collapsed = [
+        name
+        for name, amax in layerwise_amax.items()
+        if name.endswith("input_quantizer") and not torch.count_nonzero(amax)
+    ]
+    assert not collapsed, f"activation amax collapsed to zero: {collapsed}"
+
+
 def test_layerwise_no_qdq_captures_inputs_before_calib_func_mutates_weights(monkeypatch):
     """A destructive ``calib_func`` (zeros weights) must not affect what is
     captured for downstream layers under ``qdq_from_prev=False`` — otherwise
