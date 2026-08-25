@@ -631,7 +631,8 @@ class GPTModelExporter:
         weights from the pretrained model only when the live model has no ``mtp``
         module (e.g. exporting a base-only checkpoint that grafts a pretrained head).
         """
-        mtp = getattr(self.model, "mtp", None)
+        model = getattr(self, "model", None)
+        mtp = getattr(model, "mtp", None)
         if mtp is None or not hasattr(mtp, "layers") or len(mtp.layers) == 0:
             return self._copy_mtp_state_dict_from_pretrained()
 
