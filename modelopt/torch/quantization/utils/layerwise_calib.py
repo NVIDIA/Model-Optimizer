@@ -54,9 +54,9 @@ class _EarlyStopForwardError(Exception):
 def _with_empty_kv_cache(kwargs_input: dict) -> dict:
     """Drop any attention cache, so a replay does not attend over its own earlier writes.
 
-    Both replay paths -- the patched ``run`` forward below and ``calib_func``'s replay in
-    ``layerwise_calibrate`` -- consume the same captured kwargs, so each clears the cache
-    itself rather than relying on the other not having written to it.
+    Applied at capture, so the cache is never stored, checkpointed or held across the
+    layer loop, and again at both replay sites, which costs nothing on the ``None`` fast
+    path and covers inputs restored from a checkpoint.
 
     Not ``Cache.reset()``: that zeroes the key/value tensors but keeps them at full
     length, leaving the replay attending over an all-zero cache instead of none.
@@ -256,7 +256,7 @@ class LayerActivationCollector:
                 return output
 
             if info.mode == "capture":
-                info.collected_inputs.append((args, kwargs))
+                info.collected_inputs.append((args, _with_empty_kv_cache(kwargs)))
                 raise _EarlyStopForwardError()
 
             return self._original_forward(*args, **kwargs)

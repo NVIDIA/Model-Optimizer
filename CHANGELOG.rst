@@ -43,7 +43,7 @@ Changelog
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
-- Fix layerwise calibration miscalibrating every module downstream of attention within a decoder layer; models using an explicit sliding-window mask raised a shape mismatch instead. Re-run calibration for any recipe with ``layerwise.enable: true``, including the shipped ``nvfp4_experts_only-kv_fp8_layerwise*`` and ``nvfp4_default-kv_none-gptq`` recipes — under ``gptq`` and ``awq_lite`` the exported weights change too, not just activation scales.
+- Fix layerwise calibration miscalibrating every module downstream of attention within a decoder layer; models using an explicit sliding-window mask raised a shape mismatch instead. Re-run calibration from a fresh ``layerwise.checkpoint_dir`` for any recipe with ``layerwise.enable: true``, including the shipped ``nvfp4_experts_only-kv_fp8_layerwise*`` and ``nvfp4_default-kv_none-gptq`` recipes; algorithms that derive weight scales or weight updates from activations (``gptq``, ``awq_lite``, ``awq_clip``, ``local_hessian``, ``smoothquant``) change their exported weights too, not just activation scales.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
