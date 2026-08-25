@@ -28,6 +28,8 @@ import pytest
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -1919,11 +1921,16 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
-    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
-    # them unconditionally, so a general recipe is the migration target and must match it. Without
-    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
     assert "*output_layer*" in recipe.auto_quantize.disabled_layers
-    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+    if recipe.auto_quantize.constraints.kv_effective_bits is not None:
+        assert "*mtp*" in recipe.auto_quantize.disabled_layers
+        assert recipe.auto_quantize.cost_excluded_layers == []
+    else:
+        assert recipe.auto_quantize.cost_excluded_layers == [
+            "*visual*",
+            "*mtp*",
+            "*vision_tower*",
+        ]
 
 
 def test_load_recipe_kv_autoquantize_contract():
@@ -1933,6 +1940,8 @@ def test_load_recipe_kv_autoquantize_contract():
     assert aq.constraints.effective_bits is None
     assert aq.constraints.kv_effective_bits == 5.4
     assert aq.auto_quantize_method == "kl_div"
+    assert "*mtp*" in aq.disabled_layers
+    assert aq.cost_excluded_layers == []
     assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
@@ -1940,6 +1949,16 @@ def test_load_recipe_kv_autoquantize_contract():
             assert not entry.cfg.use_constant_amax
             assert entry.cfg.constant_amax is None
         assert fmt.algorithm == "max"
+
+
+def test_kv_autoquantize_rejects_cost_excluded_layers():
+    with pytest.raises(ValueError, match=r"cost_excluded_layers.*disabled_layers"):
+        AutoQuantizeConfig(
+            constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
+            candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], effective_bits=8.0)],
+            auto_quantize_method="kl_div",
+            cost_excluded_layers=["*mtp*"],
+        )
 
 
 def _all_shipped_ptq_recipe_paths():

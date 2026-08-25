@@ -321,6 +321,11 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 raise ValueError(
                     "KV-cache AutoQuant candidate_formats replace the uniform kv_cache post-step."
                 )
+            if self.cost_excluded_layers:
+                raise ValueError(
+                    "KV-cache AutoQuant does not support cost_excluded_layers; use "
+                    "disabled_layers to exclude non-KV-cache modules from the search."
+                )
         return self
 
 

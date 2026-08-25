@@ -68,6 +68,23 @@ def _kv_config(bits, effective_bits, *, algorithm="max", constant_amax=None):
     )
 
 
+def _asymmetric_kv_config():
+    return QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": _quantizer_cfg((2, 1), constant_amax=1.0),
+            },
+            {
+                "quantizer_name": "*.k_bmm_quantizer",
+                "cfg": _quantizer_cfg((4, 3), constant_amax=1.0),
+            },
+        ],
+        algorithm=None,
+        effective_bits=6.25,
+    )
+
+
 def test_kv_candidate_requires_exact_bits_and_both_sides():
     _validate_kv_only_config(_kv_config((4, 3), 8.0))
 
@@ -307,31 +324,7 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
 
 def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quant_stub):
     model = _ToyKVModel()
-    candidate = (
-        {
-            "quant_cfg": [
-                {
-                    "quantizer_name": "*[kv]_bmm_quantizer",
-                    "cfg": {
-                        "num_bits": (2, 1),
-                        "block_sizes": {
-                            -1: 16,
-                            "type": "dynamic",
-                            "scale_bits": (4, 3),
-                        },
-                        "constant_amax": 1.0,
-                    },
-                },
-                {
-                    "quantizer_name": "*.k_bmm_quantizer",
-                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                },
-            ],
-            "algorithm": None,
-            "effective_bits": 6.25,
-        },
-        "fp8_k_nvfp4_v",
-    )
+    candidate = (_asymmetric_kv_config().model_dump(exclude_none=True), "fp8_k_nvfp4_v")
 
     model, state = auto_quantize_kv_cache(
         model,
@@ -351,6 +344,25 @@ def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quan
         assert layer.k_bmm_quantizer.num_bits == (4, 3)
         assert layer.v_bmm_quantizer.num_bits == (2, 1)
     assert get_quant_config(model)["quantization"]["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
+
+
+def test_kv_autoquant_rejects_asymmetric_candidate_for_unequal_kv_widths(
+    nvfp4_fake_quant_stub,
+):
+    model = _ToyKVModel()
+    model.attn0.k_proj = nn.Linear(8, 12, bias=False)
+    model.attn0.v_proj = nn.Linear(8, 8, bias=False)
+
+    with pytest.raises(ValueError, match=r"asymmetric K/V candidates.*unequal K/V widths"):
+        auto_quantize_kv_cache(
+            model,
+            {"kv_effective_bits": 6.25},
+            [(_asymmetric_kv_config().model_dump(exclude_none=True), "fp8_k_nvfp4_v")],
+            [torch.randn(1, 2, 8)],
+            lambda search_model, batch: search_model(batch),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
 
 
 def test_kv_autoquant_rejects_invalid_logits_and_restores_model_state():

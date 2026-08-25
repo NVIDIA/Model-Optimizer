@@ -100,6 +100,8 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
         8.0,
         4.5,
     ]
+    assert aq.cost_excluded_layers == []
+    assert "*mtp*" in inputs["disabled_layers"]
     assert "kv_cache_quant_cfg" not in inputs
 
 

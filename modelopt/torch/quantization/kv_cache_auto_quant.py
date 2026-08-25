@@ -133,6 +133,14 @@ def _deployable_kv_bits(quantizer: TensorQuantizer) -> float:
     )
 
 
+def _candidate_kv_bits(config: QuantizeConfig) -> tuple[float, float]:
+    quantizers = _candidate_quantizers(config)
+    return (
+        _deployable_kv_bits(quantizers["k_bmm_quantizer"]),
+        _deployable_kv_bits(quantizers["v_bmm_quantizer"]),
+    )
+
+
 def _validate_deployable_candidate(config: QuantizeConfig) -> None:
     quantizers = _candidate_quantizers(config)
     k_quantizer = quantizers["k_bmm_quantizer"]
@@ -242,6 +250,27 @@ def _kv_scalar_weight(module: nn.Module, name: str) -> int:
             "num_key_value_heads plus head_dim."
         )
     return k_width + v_width
+
+
+def _validate_candidate_cost_geometry(
+    candidates: list[tuple[str, QuantizeConfig]],
+    layers: list[tuple[str, nn.Module, int]],
+) -> None:
+    candidate_bits = [_candidate_kv_bits(config) for _, config in candidates]
+    if all(k_bits == v_bits for k_bits, v_bits in candidate_bits):
+        return
+
+    unequal_width_layers = []
+    for name, module, _ in layers:
+        k_width = _projection_width(module, "k")
+        v_width = _projection_width(module, "v")
+        if k_width != v_width:
+            unequal_width_layers.append(f"{name} (K={k_width}, V={v_width})")
+    if unequal_width_layers:
+        raise ValueError(
+            "KV-cache AutoQuant cannot cost asymmetric K/V candidates on layers with unequal "
+            "K/V widths: " + ", ".join(unequal_width_layers) + "."
+        )
 
 
 def _eligible_layers(
@@ -438,6 +467,7 @@ def auto_quantize_kv_cache(
     )
 
     layers = _eligible_layers(model, disabled_layers)
+    _validate_candidate_cost_geometry(candidates, layers)
     signature = _search_signature(
         candidates,
         layers,

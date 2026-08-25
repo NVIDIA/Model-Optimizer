@@ -8,7 +8,6 @@
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
-  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
   kv_fp8: configs/ptq/units/kv_fp8
   kv_nvfp4: configs/ptq/units/kv_nvfp4
 
@@ -35,6 +34,4 @@ auto_quantize:
 
   disabled_layers:
     - $import: base_disabled_layers
-
-  cost_excluded_layers:
-    - $import: base_cost_excluded_layers
+    - "*mtp*"
