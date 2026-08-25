@@ -2048,16 +2048,10 @@ def svdquant(
 
 
 def _with_empty_kv_cache(kwargs_input: dict) -> dict:
-    """Return *kwargs_input* with any attention cache dropped.
+    """Drop any attention cache, so a replay does not attend over its own earlier writes.
 
-    A layer replayed during calibration must not see the keys and values its own
-    earlier run wrote, or it attends over stale state and its activation amaxes
-    describe the wrong tensor. Dropping the cache is what makes each replay
-    independent; the layer recomputes keys and values from the captured inputs.
-
-    ``Cache.reset()`` is not usable here: it zeroes the key/value tensors while
-    keeping them at full length, so the replay attends over a same-length,
-    all-zero cache rather than no cache at all.
+    Not ``Cache.reset()``: that zeroes the key/value tensors but keeps them at full
+    length, leaving the replay attending over an all-zero cache instead of none.
     """
     if kwargs_input.get("past_key_values") is None:
         return kwargs_input
