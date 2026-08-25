@@ -10,8 +10,9 @@ Examples: `tools/launcher/examples/*/*/hf_online_dflash.yaml`,
 
 ## Pipeline tasks
 
-Task count depends on the variant — DFlash has three, and none of them is the 4-task
-shape EAGLE3 offline uses.
+DFlash has three variants, and none uses EAGLE3 offline's 4-task shape: **online is 3
+tasks, offline is 2, streaming is 3.** Read the task count off the config you're
+using rather than assuming one.
 
 **Online** (`hf_online_dflash.yaml`) — base model forwards during training:
 

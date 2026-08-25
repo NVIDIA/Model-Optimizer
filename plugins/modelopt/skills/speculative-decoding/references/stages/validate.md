@@ -34,18 +34,42 @@ If any task failed, go to `triage.md` instead.
 
 ## Step 2 — Verify artifacts exist
 
-Check each task produced its expected output. Artifacts live on the cluster under
-`/scratchspace/`, so confirm via log messages. The per-task log evidence and artifact
+Check each task produced its expected output. The per-task log evidence and artifact
 paths are in *Success markers* in `../algorithms/<algorithm>.md`.
+
+A success line in a log is not proof the artifact survived — the next task reads it
+from a shared `/scratchspace`, where it may be missing, empty, or unreadable. **When
+you can reach the cluster, check the filesystem directly** and treat a missing or
+zero-byte artifact as a validation failure:
+
+```bash
+test -s <artifact_path> && echo "ok: $(du -sh <artifact_path>)" || echo "MISSING/EMPTY"
+ls -la <artifact_dir>/ | head
+```
+
+Fall back to log evidence only when the cluster isn't reachable, and say so in the
+report rather than implying the artifacts were verified.
 
 ## Step 3 — Check the quality gate
 
-*Quality gate* in `../algorithms/<algorithm>.md` gives the metric, the log line it
-appears on, and the pass threshold. Extract the value from the benchmark task's log
-and compare.
+Read *Quality gate* in `../algorithms/<algorithm>.md` first — **not every algorithm
+produces an in-pipeline metric**, so what you check depends on the sheet:
 
-If the log already reports the metric below its lower bound, the run tripped the
-threshold check itself and exited non-zero.
+- **Sheet defines a benchmark metric** (e.g. EAGLE3's MT-Bench AR, DFlash's
+  `Average_AL`) — extract it from the benchmark task's log and compare against the
+  threshold. If the log already reports the metric below its lower bound, the run
+  tripped the threshold check itself and exited non-zero.
+- **Sheet defines no inference metric** (currently Domino and DSpark — their eval path
+  runs the DFlash backbone with the new head bypassed, and Domino ships no benchmark
+  task at all) — do **not** go looking for a benchmark log. Report the training
+  regression gate instead, and state plainly that acceptance quality requires a
+  separate evaluation of the exported checkpoint. Never report a backbone-only
+  acceptance rate as the model's result.
+
+Where the gate is the training regression check (`check_regression.py` against
+`trainer_state.json`), confirm the `=== Regression Check ===` block is actually
+present in the log — it is invoked with `|| true` and only warns when no
+`trainer_state.json` exists, so a green exit does not prove it ran.
 
 ## Step 4 — Check training quality
 

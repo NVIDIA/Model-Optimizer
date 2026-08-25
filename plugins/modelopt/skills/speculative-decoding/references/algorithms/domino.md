@@ -30,9 +30,14 @@ The committed example is **online**, 2 tasks:
 
 **The inference side is intentionally not wired up yet.** The Domino correction head
 is not applied in `pseudo_speculative_generate` or in the serving stack, so the
-example ships no vLLM smoke test and no MT-Bench AR eval. When that path lands, add
-the two steps from `hf_online_dflash.yaml` (task_1 / task_2). Do not treat their
-absence as a broken config.
+example ships no vLLM smoke test and no MT-Bench AR eval. Do not treat their absence
+as a broken config.
+
+When that path lands, copy the smoke-test and AR-eval steps from
+`hf_online_dflash.yaml` (its `task_1` and `task_2`) and append them to the Domino
+config as **`task_2` and `task_3`** — Domino's `task_0`/`task_1` are already the
+dataset build and training, so keep the source file's numbering and the destination's
+distinct.
 
 ## Recipe and training knobs
 

@@ -41,16 +41,30 @@ algorithm and account for most runs:
 | Error pattern | Root cause | Fix |
 | --- | --- | --- |
 | Server never becomes healthy (hangs at the health check) | Model too large for the allocated GPUs, or a server startup crash | Compare BF16 weight size against total allocated GPU memory; increase TP and/or nodes |
-| `CUDA out of memory` during model load | Insufficient GPU memory | Reduce `--max-model-len`, or increase `--tensor-parallel-size` |
+| `CUDA out of memory` **while loading weights** (before the KV cache is allocated) | The weights themselves don't fit | Increase `--tensor-parallel-size`, add nodes, or switch backend. `--max-model-len` will **not** help — it doesn't change weight memory. |
+| `CUDA out of memory` **after weights load** — KV-cache allocation, or during a forward pass | Activation / KV-cache pressure | Reduce `--max-model-len`, batch size, or concurrency; raising TP also helps by splitting the cache |
 | `CUDA out of memory` during the hidden-state dump | Model too large for the chosen backend | Switch to a `device_map="auto"` backend, or increase TP |
 | `CUDA out of memory` during training | Batch or sequence length too large | Reduce the recipe's training batch size or sequence length (see the algorithm sheet's *Recipe and training knobs*) |
 | `CUDA out of memory` at benchmark | Target plus draft exceeds GPU memory | Increase TP |
 | `pyxis: child terminated with signal 15` | SIGTERM — usually OOM | Increase TP or switch backends |
 | `NCCL timeout` / `NCCL error` | Multi-node communication failure | Retry; reduce EP |
 | `CANCELLED ... DUE TO TIME LIMIT` | Slurm wall-clock limit too short | Increase `--time`. Note that `afterany` dependencies let the next task start anyway. |
-| `trust_remote_code` error | Model needs custom code but the flag isn't set | Add the flag to the serving task args (before the `--` separator) **and** to the benchmark task args |
+| `trust_remote_code` error | Model needs custom code but the flag isn't set for **that** task | Set it on **every** task that loads the model — see the spellings below |
 | Vocab / tokenizer error | Missing tokenizer cache (e.g. a tiktoken cache) | Point the relevant cache env var at a pre-populated path |
 | Architecture not supported by the serving engine | Engine version too old for this model | Try a newer container image |
+
+### `trust_remote_code` spellings
+
+The flag is spelled differently per task type, so setting it once is not enough — a
+custom-code model needs it everywhere it is loaded:
+
+| Task type | How to set it |
+| --- | --- |
+| Serving / benchmark | CLI flag before the `--` separator: `--trust-remote-code` (vLLM) or `--trust_remote_code` (trtllm-serve) |
+| Hidden-state dump | `TRUST_REMOTE_CODE: "1"` in the task `environment` |
+| Training | `model.trust_remote_code=true` as an OmegaConf override |
+| Streaming serve replicas | `SERVE_EXTRA_ARGS: "--trust-remote-code"` |
+| Export | `EXPORT_EXTRA_ARGS: "--trust_remote_code"` |
 
 Then check *Known failures* in `../algorithms/<algorithm>.md` for failures specific
 to this algorithm — wrong script paths, missing scratchspace artifacts, export
@@ -75,7 +89,16 @@ Provide:
 3. **How to re-run** — skip earlier successful tasks by pointing at the existing
    scratchspace artifacts
 
-To skip the first two tasks and re-run from the third:
+Re-runs work by adding `pipeline.task_N.skip=true` for each task you want to skip.
+**Read the task list out of the config first** — task count varies (EAGLE3 offline is
+4, DFlash offline is 2, Domino is 2), so there is no fixed set of skip flags:
+
+```bash
+grep -n '^  task_[0-9]*:' examples/<Org>/<Model>/<config>.yaml
+```
+
+To resume from a failed task, skip every task before it. For a 4-task EAGLE3 offline
+config whose `task_2` failed:
 
 ```bash
 uv run launch.py --yaml examples/<Org>/<Model>/<config>.yaml \
@@ -84,7 +107,8 @@ uv run launch.py --yaml examples/<Org>/<Model>/<config>.yaml \
     --yes
 ```
 
-To run a single task standalone, skip every other one:
+To run one task standalone, skip every other task in that config. For the same 4-task
+config, running only `task_1`:
 
 ```bash
 uv run launch.py --yaml examples/<Org>/<Model>/<config>.yaml \
@@ -93,6 +117,9 @@ uv run launch.py --yaml examples/<Org>/<Model>/<config>.yaml \
     pipeline.task_3.skip=true \
     --yes
 ```
+
+Both are EAGLE3-offline examples — translate the flags to the config at hand rather
+than copying them verbatim.
 
 ## Step 5 — Record the failure pattern
 

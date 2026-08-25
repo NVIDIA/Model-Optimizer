@@ -5,7 +5,7 @@ description: >-
   DSpark, Domino) through the ModelOpt launcher pipeline. Use when the user wants
   to add a new model to a draft-training pipeline, asks why a pipeline run failed,
   wants experiment logs reviewed, or wants to check whether a run's acceptance rate
-  meets threshold. Triggers on "EAGLE3", "DFlash", "DSpark", "draft model",
+  meets threshold. Triggers on "EAGLE3", "DFlash", "DSpark", "Domino", "draft model",
   "acceptance rate", "speculative decoding pipeline". Do NOT use for quantizing a
   model (use ptq) or serving a checkpoint (use deployment).
 user_invocable: true
@@ -57,7 +57,7 @@ All recipes live in `modelopt_recipes/general/speculative_decoding/<algorithm>.y
 | --- | --- | --- |
 | EAGLE3 | `references/algorithms/eagle3.md` | Autoregressive draft head |
 | DFlash | `references/algorithms/dflash.md` | Block diffusion |
-| DSpark | `references/algorithms/dspark.md` | DFlash backbone + Markov head + confidence head |
+| DSpark | `references/algorithms/dspark.md` | DFlash backbone + Markov head + optional confidence head |
 | Domino | `references/algorithms/domino.md` | DFlash backbone + GRU causal correction head |
 
 DSpark and Domino are **DFlash variants**, not separate pipelines: same
