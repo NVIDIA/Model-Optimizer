@@ -123,7 +123,14 @@ def main():
         accelerator.device,
     )
 
-    if results and accelerator.is_main_process:
+    if not results:
+        raise RuntimeError(
+            f"AR validation produced no results: all {args.num_samples} samples failed. "
+            "See the per-sample WARNING lines above for the underlying error. "
+            "Exiting non-zero so this is not mistaken for a successful validation."
+        )
+
+    if accelerator.is_main_process:
         all_ars = [ar for _, ar in results]
         avg_ar = sum(all_ars) / len(all_ars)
         print(f"\n==== AR Validation Results (osl={args.osl}, steps={args.steps}) ====")
