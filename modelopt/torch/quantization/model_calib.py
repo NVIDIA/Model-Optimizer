@@ -36,6 +36,7 @@ from modelopt.torch.quantization.utils.layerwise_calib import (
     _CheckpointState,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
+from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
@@ -2111,61 +2112,66 @@ def layerwise_calibrate(
 
     input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
-    try:
-        input_getter._patch_all_layers(decoder_layers=transformer_layers)
-        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    # Calibration never reads a KV cache, and a layer replayed with one would attend
+    # over the keys and values its own earlier replay wrote.
+    with _disable_use_cache(model):
+        try:
+            input_getter._patch_all_layers(decoder_layers=transformer_layers)
+            resumed_inputs = (
+                ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+            )
 
-        # Bootstrap: get first layer's inputs (or use resumed inputs).
-        layer_inputs = input_getter.get_first_layer_inputs(
-            start_layer, resumed_inputs, forward_loop
-        )
+            # Bootstrap: get first layer's inputs (or use resumed inputs).
+            layer_inputs = input_getter.get_first_layer_inputs(
+                start_layer, resumed_inputs, forward_loop
+            )
 
-        for layer_idx in range(start_layer, num_layers):
-            layer = transformer_layers[layer_idx]
+            for layer_idx in range(start_layer, num_layers):
+                layer = transformer_layers[layer_idx]
 
-            def _layer_forward_loop(m, _inputs=layer_inputs):
-                for args, kwargs_input in _inputs:
-                    m(*args, **kwargs_input)
+                def _layer_forward_loop(m, _inputs=layer_inputs):
+                    for args, kwargs_input in _inputs:
+                        m(*args, **kwargs_input)
 
-            is_last = layer_idx + 1 >= num_layers
+                is_last = layer_idx + 1 >= num_layers
 
-            with persistent_materialization(layer, writeback=calib_mutates_weights):
-                # qdq_from_prev=False: capture before calib_func so the forward
-                # replay uses the original FP weights. Disable quantizers too in
-                # case any pre-calibration observer behavior would perturb the
-                # captured activations.
-                if not is_last and not qdq_from_prev:
-                    with set_quantizer_by_cfg_context(
-                        layer, [{"quantizer_name": "*", "enable": False}]
-                    ):
+                with persistent_materialization(layer, writeback=calib_mutates_weights):
+                    # qdq_from_prev=False: capture before calib_func so the forward
+                    # replay uses the original FP weights. Disable quantizers too in
+                    # case any pre-calibration observer behavior would perturb the
+                    # captured activations.
+                    if not is_last and not qdq_from_prev:
+                        with set_quantizer_by_cfg_context(
+                            layer, [{"quantizer_name": "*", "enable": False}]
+                        ):
+                            next_inputs = input_getter.cache_outputs_for_next_layer_calib(
+                                layer, forward_loop
+                            )
+                        # cache_outputs left this layer in "run" mode with an empty
+                        # deque; reset so calib_func's replay hits the real forward.
+                        layer._layerwise_calib.mode = "original"
+
+                    calib_func(layer, _layer_forward_loop, **calib_kwargs)
+
+                    # qdq_from_prev=True: capture after calib_func so the next layer
+                    # sees QDQ error and any in-place weight updates from this layer.
+                    if not is_last and qdq_from_prev:
                         next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                             layer, forward_loop
                         )
-                    # cache_outputs left this layer in "run" mode with an empty
-                    # deque; reset so calib_func's replay hits the real forward.
-                    layer._layerwise_calib.mode = "original"
+                    elif is_last:
+                        next_inputs = None
 
-                calib_func(layer, _layer_forward_loop, **calib_kwargs)
+                    if ckpt:
+                        ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
-                # qdq_from_prev=True: capture after calib_func so the next layer
-                # sees QDQ error and any in-place weight updates from this layer.
-                if not is_last and qdq_from_prev:
-                    next_inputs = input_getter.cache_outputs_for_next_layer_calib(
-                        layer, forward_loop
-                    )
-                elif is_last:
-                    next_inputs = None
-
-                if ckpt:
-                    ckpt.save(layer_idx, model, transformer_layers, next_inputs)
-
-            layer_pbar.update(1)
-            del layer_inputs
-            torch.cuda.empty_cache()
-            layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
-    finally:
-        input_getter._unpatch_all_layers()
-        layer_pbar.close()
+                layer_pbar.update(1)
+                del layer_inputs
+                torch.cuda.empty_cache()
+                layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
+        finally:
+            input_getter._unpatch_all_layers()
+            layer_pbar.close()
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)

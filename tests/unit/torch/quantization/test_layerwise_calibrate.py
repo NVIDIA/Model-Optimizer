@@ -22,17 +22,17 @@ from collections import deque
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.transformers_models import get_tiny_llama
-from transformers.cache_utils import Cache, DynamicCache
+from _test_utils.torch.transformers_models import (
+    get_tiny_gpt_oss,
+    get_tiny_llama,
+    get_tiny_nemotron_h,
+)
+from transformers.cache_utils import Cache
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils.layerwise_calib import (
-    LayerActivationCollector,
-    _SkipLayer,
-    _with_empty_kv_cache,
-)
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
 
 
 class _DecoderBlock(nn.Module):
@@ -1042,60 +1042,47 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
     assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
 
 
-@pytest.mark.parametrize("entry_point", ["capture", "resume"])
-def test_stored_layer_inputs_never_hold_a_kv_cache(entry_point):
-    """Neither way inputs enter stored state may leave a cache on them.
+@pytest.mark.parametrize(
+    "factory",
+    [get_tiny_llama, get_tiny_nemotron_h, get_tiny_gpt_oss],
+    ids=["llama", "nemotron_h_hybrid", "gpt_oss_sliding_window"],
+)
+def test_layerwise_calibration_builds_no_kv_cache(factory):
+    """No cache may reach a decoder layer while layerwise calibration runs.
 
-    Stored inputs are replayed many times, so a retained cache lets a layer attend over
-    its own earlier writes. Asserted structurally because an amax comparison cannot see
-    it: a retained cache only accumulates across replays, and max calibration's max
-    absorbs that on a small model, so amaxes match while the invariant is broken.
+    Layerwise replays each layer's captured inputs several times, so a cache on them
+    lets a layer attend over the keys and values its own earlier replay wrote. This is
+    prevented upstream, by not building one -- which rests on the model honouring
+    ``config.use_cache``, hence the sweep over attention styles.
 
-    ``resume`` is the entry point capture does not feed -- ``_move_to_device`` passes a
-    ``Cache`` through untouched, so a checkpoint predating the clear still holds one.
+    Asserted structurally: a retained cache only accumulates across replays, and max
+    calibration's max absorbs that on a small model, so amaxes can match while the
+    invariant is broken.
     """
-    model = get_tiny_llama(num_hidden_layers=3).eval()
-    collector = LayerActivationCollector(model)
-    collector._patch_all_layers(decoder_layers=model.model.layers)
+    model = factory().eval()
+    assert model.config.use_cache, "fixture must start with caching on to be meaningful"
+    layers = LayerActivationCollector.get_decoder_layers(model)
+
+    seen = []
+    handles = [
+        layer.register_forward_pre_hook(
+            lambda mod, args, kwargs: seen.extend(
+                v for v in (*args, *kwargs.values()) if isinstance(v, Cache)
+            ),
+            with_kwargs=True,
+        )
+        for layer in layers
+    ]
     try:
-        if entry_point == "capture":
-            stored = collector.get_input_activations(
-                model.model.layers[0], lambda m: m(torch.randint(0, 32, (2, 8)))
-            )
-        else:
-            restored = [((torch.randn(1, 4, 32),), {"past_key_values": DynamicCache()})]
-            stored = collector.get_first_layer_inputs(0, restored, forward_loop=None)
+        cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+        cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+        mtq.quantize(model, cfg, lambda m: m(torch.randint(0, 20, (1, 8))))
     finally:
-        collector._unpatch_all_layers()
+        for h in handles:
+            h.remove()
 
-    assert stored, f"{entry_point} produced no inputs"
-    live = [v for args, kwargs in stored for v in (*args, *kwargs.values()) if isinstance(v, Cache)]
-    assert not live, f"{entry_point} inputs still hold a KV cache"
-
-
-def test_with_empty_kv_cache_matches_by_shape_not_by_name():
-    """The cache must be cleared however it reaches the layer.
-
-    Kimi-K2's remote code passes it as ``past_key_value`` (see
-    ``modelopt/torch/speculative/utils.py``), so matching only the plural keyword
-    would silently no-op on a model layerwise calibration exists for.
-    """
-    cache = DynamicCache()
-    hidden = torch.randn(1, 4)
-
-    for args, kwargs in (
-        ((), {"past_key_values": cache}),
-        ((), {"past_key_value": cache}),
-        ((hidden, cache), {}),
-    ):
-        out_args, out_kwargs = _with_empty_kv_cache(args, kwargs)
-        assert not any(isinstance(a, Cache) for a in out_args)
-        assert not any(isinstance(v, Cache) for v in out_kwargs.values())
-
-    # Non-cache values pass through untouched.
-    out_args, out_kwargs = _with_empty_kv_cache((hidden,), {"attention_mask": None})
-    assert out_args[0] is hidden
-    assert out_kwargs == {"attention_mask": None}
+    assert not seen, f"{len(seen)} KV cache(s) reached a decoder layer during calibration"
+    assert model.config.use_cache, "config.use_cache was not restored"
 
 
 def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):

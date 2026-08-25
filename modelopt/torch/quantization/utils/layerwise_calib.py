@@ -51,27 +51,6 @@ class _EarlyStopForwardError(Exception):
     """Raised to halt the forward pass after capturing layer inputs."""
 
 
-def _is_kv_cache(obj: Any) -> bool:
-    """Duck-typed ``transformers.Cache``, avoiding a transformers import here.
-
-    Matched by shape, not name: the keyword is ``past_key_values`` on HF-native layers
-    but ``past_key_value`` on older remote-code ones (Kimi-K2), and may be positional.
-    """
-    return hasattr(obj, "update") and hasattr(obj, "get_seq_length")
-
-
-def _with_empty_kv_cache(args: tuple, kwargs_input: dict) -> tuple[tuple, dict]:
-    """Strip the attention cache, so a replay cannot attend over its own earlier writes.
-
-    Not ``Cache.reset()``: it zeroes the keys and values but keeps them at full length,
-    so the replay attends over an all-zero cache instead of none.
-    """
-    return (
-        tuple(None if _is_kv_cache(a) else a for a in args),
-        {k: (None if _is_kv_cache(v) else v) for k, v in kwargs_input.items()},
-    )
-
-
 @dataclass
 class _LayerCalibState:
     """Mutable per-layer state used during layerwise calibration.
@@ -262,7 +241,7 @@ class LayerActivationCollector:
                 return output
 
             if info.mode == "capture":
-                info.collected_inputs.append(_with_empty_kv_cache(args, kwargs))
+                info.collected_inputs.append((args, kwargs))
                 raise _EarlyStopForwardError()
 
             return self._original_forward(*args, **kwargs)
@@ -456,8 +435,6 @@ class LayerActivationCollector:
             for i in range(start_layer):
                 self._swap_to_dummy(i)
             layer = self._decoder_layers[start_layer]
-            # Not fed by capture: an older checkpoint can still carry a live cache.
-            resumed_inputs = [_with_empty_kv_cache(a, kw) for a, kw in resumed_inputs]
             layer._layerwise_calib.collected_inputs = resumed_inputs
             layer._layerwise_calib.mode = "original"
             return resumed_inputs
