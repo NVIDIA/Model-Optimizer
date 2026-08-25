@@ -15,6 +15,7 @@
 
 """Tests for skip-softmax calibration through the vLLM adapters and installer."""
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
+from modelopt.torch.quantization.plugins import vllm as quant_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm as attention_plugin
 from modelopt.torch.sparsity.attention_sparsity.plugins import vllm_runtime
 from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
@@ -177,8 +179,6 @@ class TestQuantSkipRejection:
         assert report.installed_count == 1
 
     def test_quantized_plan_allows_nm_sparsity(self, monkeypatch):
-        from modelopt.torch.quantization.plugins import vllm as quant_plugin
-
         monkeypatch.setattr(
             quant_plugin,
             "_get_device_dtype",
@@ -197,8 +197,6 @@ class TestFlashInferLayoutGuard:
 
     def test_layout_helper_preserves_none(self, monkeypatch):
         """A getter returning None must not become the truthy string 'None'."""
-        import sys
-
         fake = SimpleNamespace(get_kv_cache_layout=lambda: None)
         monkeypatch.setitem(sys.modules, "vllm.v1.attention.backends.utils", fake)
         assert attention_plugin._flashinfer_kv_cache_layout() is None

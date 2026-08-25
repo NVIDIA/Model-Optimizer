@@ -48,6 +48,17 @@ from modelopt.torch.kernels.common.attention.triton_fa import attention as trito
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
 from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
+from .sparse_attn_calibration import merge_phase_counts, split_records_by_phase
+
+__all__ = [
+    "ModelOptSparseAttentionBackend",
+    "ModelOptSparseAttentionImpl",
+    "collect_calibration_counts",
+    "disable_calibration",
+    "enable_calibration",
+    "iter_sparse_impls",
+]
+
 
 @functools.cache
 def _flash_attention_kv_cache_layout() -> str:
@@ -311,10 +322,17 @@ def _forward_calibrate(
     sparsification is applied to generation (the dense Triton kernel's
     numerics may differ slightly from the native backend's).
 
-    Phase and causality are decided per request: ``q_len == 1`` is a decode
-    step (full-cache, non-causal); ``q_len > 1`` is (chunked) prefill (causal
-    — the kernel offsets the query into the KV span). A mixed prefill/decode
-    batch therefore contributes correctly to both phase fits.
+    Phase and causality are decided per request: ``q_len > 1`` is (chunked)
+    prefill (causal — the kernel offsets the query into the KV span). A
+    ``q_len == 1`` row is a decode step (full-cache, non-causal) only when
+    its KV span exceeds the request's prompt (at least one generated token);
+    a 1-token row still inside the prompt is the final chunk of a chunked
+    prefill and is recorded as prefill. Prompt lengths come from the runner's
+    input batch (the installer attaches the runner as ``_calib_model_runner``;
+    the input batch is resolved per forward because vLLM can rebuild it after
+    install, same request order as the metadata rows); without it,
+    ``q_len == 1`` falls back to decode. A mixed prefill/decode batch
+    therefore contributes correctly to both phase fits.
 
     Records raw per-threshold tile counts (not ratios) on
     ``impl._calib_records`` so tensor-parallel workers can be aggregated by
@@ -335,8 +353,20 @@ def _forward_calibrate(
     page_size = key_cache.shape[1]
     trials = impl._calib_threshold_trials
     batch = seq_lens.shape[0]
-    b_start_loc = cu_seqlens_q[:batch]
-    b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
+    # Hoist per-request tensors out of the loop: kernel args are sliced views
+    # of these, so the loop performs no allocations or casts.
+    b_seq_len_i32 = (cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]).to(torch.int32)
+    seq_lens_i32 = seq_lens[:batch].to(torch.int32)
+    b_start_loc_zero = torch.zeros(1, device=query.device, dtype=torch.int32)
+    # vLLM v1 metadata tensors are GPU-resident: take one host copy per launch
+    # instead of stalling the stream with per-request ``.item()`` syncs.
+    cu_seqlens_q_cpu = cu_seqlens_q[: batch + 1].cpu()
+    seq_lens_cpu = seq_lens[:batch].cpu()
+    # Per-request prompt lengths (same request order as the metadata rows)
+    # distinguish decode steps from 1-token final chunks of a chunked
+    # prefill. Resolved from the runner per forward: vLLM can replace
+    # input_batch after install (KV-cache init for hybrid models).
+    input_batch = getattr(getattr(impl, "_calib_model_runner", None), "input_batch", None)
 
     q = query[:num_actual_tokens].contiguous()
     # Dummy K/V: in paged mode KV is read from the cache via block_table.
@@ -344,23 +374,29 @@ def _forward_calibrate(
     k_dummy = torch.empty(0, impl.num_kv_heads, impl.head_size, device=q.device, dtype=q.dtype)
 
     for i in range(batch):
-        q_len = int(b_seq_len[i].item())
+        q_start = int(cu_seqlens_q_cpu[i])
+        q_len = int(cu_seqlens_q_cpu[i + 1]) - q_start
         if q_len <= 0:
             continue
-        q_start = int(b_start_loc[i].item())
-        seq_k = int(seq_lens[i].item())
-        phase = "decode" if q_len <= 1 else "prefill"
+        seq_k = int(seq_lens_cpu[i])
+        if q_len > 1:
+            phase = "prefill"
+        elif input_batch is not None and seq_k <= int(input_batch.num_prompt_tokens[i]):
+            # 1-token final chunk of a chunked prefill: still inside the prompt.
+            phase = "prefill"
+        else:
+            phase = "decode"
 
         oi, counters = attention_calibrate(
             q[q_start : q_start + q_len],
             k_dummy,
             k_dummy,
-            b_start_loc=torch.zeros(1, device=q.device, dtype=torch.int32),
-            b_seq_len=b_seq_len[i : i + 1].to(torch.int32),
+            b_start_loc=b_start_loc_zero,
+            b_seq_len=b_seq_len_i32[i : i + 1],
             max_input_len=q_len,
             is_causal=q_len > 1,
             softmax_scale=impl.scale,
-            b_seq_len_k=seq_lens[i : i + 1].to(torch.int32),
+            b_seq_len_k=seq_lens_i32[i : i + 1],
             max_input_len_k=seq_k,
             threshold_trials=trials,
             k_cache=key_cache,
@@ -370,12 +406,14 @@ def _forward_calibrate(
         )
         output[q_start : q_start + q_len] = oi
 
+        # One host transfer for both counter columns (counters is GPU-resident).
+        counters_cpu = counters.cpu()
         impl._calib_records.append(
             {
                 "phase": phase,
                 "sample_length": seq_k,
-                "total_tiles": counters[:, 0].tolist(),
-                "skipped_tiles": counters[:, 1].tolist(),
+                "total_tiles": counters_cpu[:, 0].tolist(),
+                "skipped_tiles": counters_cpu[:, 1].tolist(),
             }
         )
 
@@ -518,6 +556,8 @@ def _dispatch_modelopt(
     num_prefills: int,
     num_decode_tokens: int,
     num_prefill_tokens: int,
+    max_seq_len_decode: int | None = None,
+    max_seq_len_prefill: int | None = None,
     **common_kw,
 ) -> torch.Tensor:
     """Run the ModelOpt path, splitting mixed decode+prefill batches by phase.
@@ -527,8 +567,14 @@ def _dispatch_modelopt(
     ``q_len==1`` decode rows with ``q_len>1`` (chunked-)prefill rows,
     ``max_query_len > 1`` and the whole batch would otherwise take the prefill
     skip-softmax path. Split so each phase runs its own schedule -- decode rows
-    always take the fixed decode path. Both the FlashAttention and FlashInfer
-    adapters share this dispatch.
+    always take the fixed decode path.
+
+    Both adapters route through this dispatch, but the split is live only on
+    FlashInfer: its metadata carries the ``num_decodes``/``num_prefills``
+    counts (and vLLM reorders those batches decode-first). vLLM's
+    FlashAttention metadata has no phase counts, so FA mixed batches fall
+    through to the whole-batch path and are classified by ``max_query_len``
+    alone (decode rows then follow the prefill contract for that launch).
     """
     if not (num_decodes and num_prefills):
         return _forward_modelopt(
@@ -554,6 +600,18 @@ def _dispatch_modelopt(
     if not common_kw.get("quant_active", False):
         common_kw["dense_fallback"]()
 
+    # Each phase derives its skip threshold from its own KV maximum: reusing
+    # the batch-global max_seq_len (e.g. a co-scheduled 32k prefill next to 2k
+    # decodes) would shrink the decode threshold far below — much denser than
+    # — the calibrated target. Fall back to the batch-global value only when
+    # the builder did not provide per-phase maxima.
+    decode_kw = dict(common_kw)
+    if max_seq_len_decode is not None:
+        decode_kw["max_seq_len"] = max_seq_len_decode
+    prefill_kw = dict(common_kw)
+    if max_seq_len_prefill is not None:
+        prefill_kw["max_seq_len"] = max_seq_len_prefill
+
     _forward_modelopt(
         impl,
         query=query[:num_decode_tokens],
@@ -563,7 +621,7 @@ def _dispatch_modelopt(
         num_actual_tokens=num_decode_tokens,
         max_query_len=num_decode_tokens // num_decodes,
         output=output[:num_decode_tokens],
-        **common_kw,
+        **decode_kw,
     )
     prefill_start = num_decode_tokens
     prefill_cu_seqlens_q = cu_seqlens_q[num_decodes:] - cu_seqlens_q[num_decodes]
@@ -576,7 +634,7 @@ def _dispatch_modelopt(
         num_actual_tokens=num_prefill_tokens,
         max_query_len=max_query_len,
         output=output[prefill_start : prefill_start + num_prefill_tokens],
-        **common_kw,
+        **prefill_kw,
     )
     return output
 
@@ -778,6 +836,23 @@ def patch_flashinfer_metadata_builder() -> bool:
         common = build_sig.bind(*args, **kwargs).arguments["common_attn_metadata"]
         for target, source in _FLASHINFER_METADATA_FIELDS.items():
             setattr(metadata, target, getattr(common, source))
+        # Per-phase KV maxima for the mixed-batch split (batch is reordered
+        # decode-first): computed once per build — not per layer forward — so
+        # the split's threshold derivation neither reuses the batch-global max
+        # nor syncs the stream inside every layer.
+        num_decodes = getattr(metadata, "num_decodes", 0)
+        num_prefills = getattr(metadata, "num_prefills", 0)
+        max_seq_len_decode = max_seq_len_prefill = None
+        if num_decodes and num_prefills:
+            # Prefer the host-resident copy the runner may already carry;
+            # fall back to one device->host copy per mixed-batch build.
+            seq_lens_cpu = getattr(common, "_seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                seq_lens_cpu = common.seq_lens.cpu()
+            max_seq_len_decode = int(seq_lens_cpu[:num_decodes].max())
+            max_seq_len_prefill = int(seq_lens_cpu[num_decodes : num_decodes + num_prefills].max())
+        metadata._modelopt_max_seq_len_decode = max_seq_len_decode
+        metadata._modelopt_max_seq_len_prefill = max_seq_len_prefill
         return metadata
 
     setattr(build, "_modelopt_sparse_metadata_patch", True)
@@ -940,6 +1015,8 @@ def _flashinfer_forward(
         num_prefills=getattr(attn_metadata, "num_prefills", 0),
         num_decode_tokens=getattr(attn_metadata, "num_decode_tokens", 0),
         num_prefill_tokens=getattr(attn_metadata, "num_prefill_tokens", 0),
+        max_seq_len_decode=getattr(attn_metadata, "_modelopt_max_seq_len_decode", None),
+        max_seq_len_prefill=getattr(attn_metadata, "_modelopt_max_seq_len_prefill", None),
         **common_kw,
     )
 
@@ -1068,23 +1145,11 @@ def collect_calibration_counts(model) -> dict[str, list[dict]]:
     phase with :func:`~.sparse_attn_calibration.fit_from_counts` — sparsity
     ratios are only formed after the global merge.
     """
-    from .sparse_attn_calibration import merge_count_records, split_records_by_phase
-
     splits = [
         split_records_by_phase(getattr(impl, "_calib_records", []))
         for impl in iter_sparse_impls(model)
     ]
-    phases = {phase for split in splits for phase, records in split.items() if records}
-    counts: dict[str, list[dict]] = {}
-    for phase in phases:
-        sources = [split.get(phase, []) for split in splits]
-        empty = sum(1 for source in sources if not source)
-        if empty:
-            # Every layer sees every launch, so a layer with no records for a
-            # phase others measured indicates a collection bug.
-            raise ValueError(
-                f"Misaligned calibration records: {empty}/{len(sources)} attention "
-                f"layer(s) recorded no {phase!r} samples while others did"
-            )
-        counts[phase] = merge_count_records(sources)
-    return counts
+    # Same merge as the cross-rank aggregation: every layer sees every launch,
+    # so a layer with no records for a phase others measured indicates a
+    # collection bug (merge_phase_counts raises).
+    return merge_phase_counts(splits, source_desc="attention layer")

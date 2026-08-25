@@ -22,6 +22,7 @@ sparse-attention calibration workflow in
 ``modelopt.torch.sparsity.attention_sparsity`` to fit a skip threshold.
 """
 
+import functools
 import math
 
 import torch
@@ -263,6 +264,22 @@ def _attn_fwd_calibrate(
     tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
 
 
+@functools.lru_cache(maxsize=64)
+def _log2_threshold_tensor(
+    threshold_trials: tuple[float, ...], device: torch.device
+) -> torch.Tensor:
+    """Build the log2-space threshold tensor, cached per (trials, device).
+
+    Scores already include sm_scale and LOG2E; convert lambda to log2 space
+    only. Trials are constant for a whole calibration run, and the vLLM path
+    calls :func:`attention_calibrate` once per request per layer per step, so
+    rebuilding (and re-uploading) the tensor per call would be pure waste.
+    """
+    return torch.tensor(
+        [math.log2(t) for t in threshold_trials], dtype=torch.float32, device=device
+    )
+
+
 def attention_calibrate(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -363,19 +380,22 @@ def attention_calibrate(
         b_seq_len_k = b_seq_len
         b_start_loc_k = b_start_loc
 
-    # Paged mode: KV positions come from block_table, so the contiguous KV
-    # offsets are unused. Provide a dummy so Triton can compile the tl.load.
     if b_start_loc_k is None:
-        b_start_loc_k = torch.zeros_like(b_start_loc)
+        if not is_paged:
+            # A zeros dummy here would silently read every sequence's K/V from
+            # offset 0 — fail loudly instead (contiguous K/V needs real offsets).
+            raise ValueError(
+                "b_start_loc_k is required when b_seq_len_k is provided for "
+                "contiguous (non-paged) K/V"
+            )
+        # Paged mode: KV positions come from block_table, so the contiguous KV
+        # offsets are unused. Alias b_start_loc (same shape/dtype/device) so
+        # Triton can compile the tl.load without allocating a dummy per call.
+        b_start_loc_k = b_start_loc
 
     num_thresholds = len(threshold_trials)
 
-    # Scores already include sm_scale and LOG2E; convert lambda to log2 space only.
-    threshold_tensor = torch.tensor(
-        [math.log2(t) for t in threshold_trials],
-        dtype=torch.float32,
-        device=q.device,
-    )
+    threshold_tensor = _log2_threshold_tensor(tuple(threshold_trials), q.device)
 
     o = torch.empty_like(q)
 

@@ -177,6 +177,31 @@ class TestBuildSparseAttentionConfig:
         assert group["target_sparsity"] == {"prefill": 0.4, "decode": 0.4}
         assert config["producer"]["name"] == "modelopt"
 
+    def test_target_sparsity_covers_only_fitted_phases(self):
+        """A phase without calibrated (a, b) must not claim a sparsity target."""
+        config = build_sparse_attention_config({"prefill": {"a": 7.9, "b": 8.6}}, 0.4)
+        group = config["config_groups"]["group_0"]
+        assert group["target_sparsity"] == {"prefill": 0.4}
+        assert "decode" not in group["threshold_scale_factor"]
+
+    def test_replaced_skip_group_keeps_layer_policy(self):
+        """Recalibration replaces thresholds but keeps ignore/initial_disabled_steps."""
+        existing = {
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "ignore": ["model.layers.0.self_attn"],
+                    "initial_disabled_steps": 4,
+                    "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 1.0}},
+                }
+            }
+        }
+        config = build_sparse_attention_config(self._PARAMS, 0.5, existing_config=existing)
+        group = config["config_groups"]["group_0"]
+        assert group["ignore"] == ["model.layers.0.self_attn"]
+        assert group["initial_disabled_steps"] == 4
+        assert group["threshold_scale_factor"]["prefill"] == {"a": 7.9, "b": 8.6}
+
     def test_preserves_nm_groups_and_replaces_old_skip_group(self):
         existing = {
             "config_groups": {
