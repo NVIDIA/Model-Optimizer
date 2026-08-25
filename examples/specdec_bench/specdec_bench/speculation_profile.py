@@ -39,6 +39,11 @@ producer appears, move this file to a shared location; nothing here binds it to
 specdec_bench.
 """
 
+# Not re-exported from specdec_bench/__init__.py: that module deliberately exposes
+# only __version__ (and must stay importable without modelopt), so widening it here
+# would break its own convention.
+__all__ = ["SCHEMA_VERSION", "build_profile", "checkpoint_id", "stub_profile"]
+
 SCHEMA_VERSION = "1.0"
 
 # Methods whose K=n draft is a strict prefix of their K=n+1 draft. For those, the
@@ -46,6 +51,25 @@ SCHEMA_VERSION = "1.0"
 # single measurement extrapolates. Block-parallel methods (dflash, dspark) and tree
 # drafting re-plan the whole block when K changes, so each K must be measured.
 _CHAIN_DRAFTING_METHODS = frozenset({"eagle", "eagle1", "eagle2", "eagle3", "draft_model"})
+
+
+def checkpoint_id(path):
+    """Reduce a checkpoint path to its ``org/model`` identifier.
+
+    Unlike ``configuration.json``, which stays with the benchmark run, this profile is
+    meant to be *published* next to a checkpoint. Absolute paths would then carry
+    internal cluster layout (``/lustre/fsw/portfolios/...``) into a public artifact,
+    and they are not portable for a reader anyway. The trailing two components are
+    both the useful part and the HuggingFace-style id.
+
+    The full path remains in ``configuration.json`` for local debugging.
+    """
+    if not path:
+        return None
+    parts = [p for p in str(path).replace("\\", "/").split("/") if p]
+    if not parts:
+        return None
+    return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
 
 def _as_int_keyed(mapping):
