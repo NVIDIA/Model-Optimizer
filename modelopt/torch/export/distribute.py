@@ -435,6 +435,7 @@ def _dump_phase_times(rank: int, world: int) -> None:
     if rank != 0:
         return
     order = ["state_dict", "amax_sync", "expert_split", "dense_postprocess", "materialize_owned",
+             "mat_classify", "mat_gather", "mat_p2p", "mat_fallback",
              "reverse_conversion", "write_shards", "dcp_save", "consolidate", "TOTAL"]
     names = [n for n in order if any(n in d for d in per_rank)]
     names += sorted({n for d in per_rank for n in d} - set(names))
@@ -478,64 +479,52 @@ def _nbytes(v) -> int:
     return int(v.numel() * v.element_size())
 
 
-def _is_full_world_shard0(v, world: int) -> bool:
+def _is_full_world_shard0(v, world: int, _mesh_memo: dict | None = None) -> bool:
     """True when ``v`` is sharded on dim 0 over a 1-D mesh that is exactly global ranks ``0..world-1``.
 
     Restricting the point-to-point fast path to that case keeps the peer in ``P2POp`` unambiguous --
     a plain global rank on the default process group, with no mesh-local/global translation to get
     wrong. Any other layout takes the ``full_tensor()`` fallback, which is slower but always correct.
+
+    ``_mesh_memo`` caches the mesh-layout answer by mesh identity. Reading ``mesh.mesh`` back to the
+    host is a device sync, and FSDP2 gives every parameter the SAME mesh object, so without the memo
+    a few hundred keys cost a few hundred redundant syncs.
     """
-    mesh = v.device_mesh
-    if mesh.ndim != 1 or len(v.placements) != 1 or not v.placements[0].is_shard(0):
+    if len(v.placements) != 1 or not v.placements[0].is_shard(0):
         return False
-    return mesh.mesh.flatten().tolist() == list(range(world))
+    mesh = v.device_mesh
+    if mesh.ndim != 1:
+        return False
+    if _mesh_memo is None:
+        return mesh.mesh.flatten().tolist() == list(range(world))
+    key = id(mesh)
+    if key not in _mesh_memo:
+        _mesh_memo[key] = mesh.mesh.flatten().tolist() == list(range(world))
+    return _mesh_memo[key]
 
 
-def _gather_shard0_to_owners(local_sd: dict, keys: list, owner: dict, rank: int, world: int) -> list:
+def _gather_shard0_to_owners(
+    local_sd: dict, keys: list, owner: dict, all_shapes: list, rank: int, world: int
+) -> None:
     """Gather each dim-0-sharded DTensor to its owner and drop it elsewhere, in place.
 
     ``full_tensor()`` is an ALL-gather: it lands a full copy on every rank, so moving N bytes costs
     ``world x N`` of traffic and a full-size allocation on every rank -- even though exactly one rank
     keeps the result. Here each non-owner sends its shard straight to the owner, so the cost is ``N``
-    and only the owner allocates. Requests are posted in batches and awaited together, so transfers
-    for different keys overlap instead of serializing one blocking collective per key.
+    and only the owner allocates. Requests are posted in large batches and awaited together, so
+    transfers for different keys overlap instead of serializing one blocking collective per key.
+
+    ``all_shapes[r][k]`` is rank ``r``'s local dim-0 extent for key ``k``, gathered by the caller;
+    the caller has also already checked that the shards tile the global tensor exactly.
 
     Deadlock safety: every rank walks the same globally-sorted ``keys`` in the same batches, and the
     owner map is computed identically everywhere, so every send has its matching receive posted.
-
-    Returns the keys it declined -- those whose local shards do not provably concatenate back into
-    the global tensor -- for the caller to route through the ``full_tensor()`` fallback.
     """
     import torch.distributed as dist
 
-    # One collective for ALL keys: each rank's local dim-0 extent, needed to size the recv buffers.
-    # Uneven dim-0 splits mean a shard's row count is not derivable from the global shape alone.
-    my_shapes = {k: tuple(local_sd[k].to_local().shape) for k in keys}
-    all_shapes: list = [None] * world
-    dist.all_gather_object(all_shapes, my_shapes)
-
-    # Concatenating local shards reproduces the global tensor only if they tile it exactly: dim-0
-    # extents summing to the global dim 0, and every other dim equal to the global one. Uneven
-    # sharding can leave to_local() returning a PADDED chunk, which would concatenate into a wrong
-    # (too large, misaligned) tensor rather than failing -- so verify instead of assuming. Every
-    # rank computes this from the same gathered shapes and so agrees on the split.
-    safe, declined = [], []
-    for k in keys:
-        gshape = tuple(local_sd[k].shape)
-        shard_shapes = [all_shapes[r][k] for r in range(world)]
-        ok = sum(s[0] for s in shard_shapes) == gshape[0] and all(
-            tuple(s[1:]) == gshape[1:] for s in shard_shapes
-        )
-        (safe if ok else declined).append(k)
-    if declined:
-        _xdbg(f"nocons: {len(declined)} key(s) are not exactly tiled -> all-gather fallback")
-    keys = safe
-    # Force the NCCL communicator to exist before any P2P. Below, a rank with nothing to send or
-    # receive in a batch skips batch_isend_irecv entirely -- fine for pairwise P2P, but NOT if it
-    # would have been that rank's first NCCL op, since communicator init is itself collective.
-    dist.barrier()
-
-    batch_size = 64
+    # Batched large: NCCL establishes a channel per peer pair on first use, and each batch costs a
+    # wait point, so a few big batches amortize far better than many small ones.
+    batch_size = 512
     for start in range(0, len(keys), batch_size):
         batch = keys[start : start + batch_size]
         ops: list = []
@@ -571,7 +560,6 @@ def _gather_shard0_to_owners(local_sd: dict, keys: list, owner: dict, rank: int,
             if owner[k] != rank:
                 del local_sd[k]
         del keepalive, pending
-    return declined
 
 
 def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: int) -> None:
@@ -586,41 +574,20 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
     tensor is partial, so transformers' conversion ops see the whole tensors they were written for.
     It is NOT a gather to a single rank -- peak memory is this rank's owned set, not the model.
     """
-    import gc
     import os
 
     import torch.distributed as dist
     from torch.distributed.tensor import DTensor
 
+    _t = _tick()
     expert_keys = sorted(k for k in local_sd if k in expert_key_set)
     dense_keys = sorted(k for k in local_sd if k not in expert_key_set)
+    _mesh_memo: dict = {}
 
-    # Everything below is a collective keyed on this list, so a rank that disagreed about it would
-    # HANG instead of failing. Check once, up front, and turn that hang into a diagnosable error.
-    key_sig: list = [None] * world
-    dist.all_gather_object(key_sig, dense_keys)
-    if any(ks != dense_keys for ks in key_sig):
-        mine = set(dense_keys)
-        diff = {r: sorted(set(ks) ^ mine)[:5] for r, ks in enumerate(key_sig) if ks != dense_keys}
-        raise RuntimeError(
-            f"rank {rank}: dense key sets differ across ranks, so the export would deadlock; "
-            f"sample divergences per rank: {diff}"
-        )
-
-    my_expert_bytes = sum(_nbytes(local_sd[k]) for k in expert_keys)
-    expert_bytes: list = [None] * world
-    dist.all_gather_object(expert_bytes, my_expert_bytes)
-    dense_sizes = {k: _nbytes(local_sd[k]) for k in dense_keys}
-
-    # Deterministic on every rank: the sort and the argmin both break ties explicitly.
-    loads = list(expert_bytes)
-    owner: dict = {}
-    for k in sorted(dense_keys, key=lambda k: (-dense_sizes[k], k)):
-        r = min(range(world), key=lambda i: (loads[i], i))
-        owner[k] = r
-        loads[r] += dense_sizes[k]
-
-    # Placements are global DTensor metadata, so every rank sorts the keys into the same buckets.
+    # Classify FIRST: placements are local DTensor metadata, so this needs no communication, and
+    # doing it up front means the shard shapes can ride along in the single metadata collective
+    # below. Every rank sees the same placements and so agrees on the buckets.
+    use_p2p = os.environ.get("MODELOPT_EXPORT_P2P", "1") != "0"
     replicated, shard0, other, plain = [], [], [], []
     for k in dense_keys:
         v = local_sd[k]
@@ -628,10 +595,46 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
             plain.append(k)
         elif all(p.is_replicate() for p in v.placements):
             replicated.append(k)
-        elif _is_full_world_shard0(v, world):
+        elif use_p2p and _is_full_world_shard0(v, world, _mesh_memo):
             shard0.append(k)
         else:
             other.append(k)
+
+    # ONE collective for all the metadata: the key list (to catch divergence), this rank's expert
+    # byte count (to seed load balancing), and its local dim-0 extents (to size receive buffers).
+    # These were three separate all_gather_object round trips, each pickling a ~900-entry payload.
+    my_meta = (
+        dense_keys,
+        sum(_nbytes(local_sd[k]) for k in expert_keys),
+        {k: tuple(local_sd[k].to_local().shape) for k in shard0},
+    )
+    _tock("mat_classify", _t)
+
+    _t = _tick()
+    meta: list = [None] * world
+    dist.all_gather_object(meta, my_meta)
+    _tock("mat_gather", _t)
+
+    # Everything below is keyed on the dense key list, so a rank that disagreed about it would HANG
+    # in a collective rather than fail. Check once, up front, and make that a diagnosable error.
+    if any(m[0] != dense_keys for m in meta):
+        mine = set(dense_keys)
+        diff = {r: sorted(set(m[0]) ^ mine)[:5] for r, m in enumerate(meta) if m[0] != dense_keys}
+        raise RuntimeError(
+            f"rank {rank}: dense key sets differ across ranks, so the export would deadlock; "
+            f"sample divergences per rank: {diff}"
+        )
+    expert_bytes = [m[1] for m in meta]
+    all_shapes = [m[2] for m in meta]
+
+    dense_sizes = {k: _nbytes(local_sd[k]) for k in dense_keys}
+    # Deterministic on every rank: the sort and the argmin both break ties explicitly.
+    loads = list(expert_bytes)
+    owner: dict = {}
+    for k in sorted(dense_keys, key=lambda k: (-dense_sizes[k], k)):
+        r = min(range(world), key=lambda i: (loads[i], i))
+        owner[k] = r
+        loads[r] += dense_sizes[k]
 
     # Replicated and plain values are already whole on every rank -- the owner just unwraps, the
     # rest just forget. No communication at all.
@@ -644,20 +647,30 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         if owner[k] != rank:
             del local_sd[k]
 
-    if shard0 and os.environ.get("MODELOPT_EXPORT_P2P", "1") != "0":
-        declined = _gather_shard0_to_owners(local_sd, shard0, owner, rank, world)
-        if declined:
-            # Same set on every rank (derived from globally gathered shapes), so the all-gather
-            # below stays in lockstep.
-            other = other + declined
-            shard0 = [k for k in shard0 if k not in set(declined)]
-    else:
-        # Escape hatch (MODELOPT_EXPORT_P2P=0): route dim-0 shards through the all-gather fallback.
-        other = other + shard0
-        shard0 = []
+    # Concatenating local shards reproduces the global tensor only if they tile it exactly: dim-0
+    # extents summing to the global dim 0, every other dim equal. Uneven sharding can leave
+    # to_local() returning a PADDED chunk, which would concatenate into a wrong (too large,
+    # misaligned) tensor rather than failing -- so verify instead of assuming. Derived from the
+    # same gathered shapes on every rank, so the split is agreed.
+    safe = []
+    for k in shard0:
+        gshape = tuple(local_sd[k].shape)
+        shard_shapes = [all_shapes[r][k] for r in range(world)]
+        if sum(s[0] for s in shard_shapes) == gshape[0] and all(
+            tuple(s[1:]) == gshape[1:] for s in shard_shapes
+        ):
+            safe.append(k)
+        else:
+            other.append(k)
 
-    # Fallback for layouts the fast path does not cover (2-D mesh, non-dim-0 shard, partial sums).
-    # Correct but world x the traffic, so the trace counts these to make the cost visible.
+    _t = _tick()
+    if safe:
+        _gather_shard0_to_owners(local_sd, safe, owner, all_shapes, rank, world)
+    _tock("mat_p2p", _t)
+
+    # Fallback for layouts the fast path does not cover (2-D mesh, non-dim-0 shard, partial sums,
+    # and shards that do not tile). Correct but world x the traffic, so the trace counts these.
+    _t = _tick()
     for k in sorted(other):
         full = local_sd[k].full_tensor()  # collective: every rank must call it for this key
         if owner[k] == rank:
@@ -665,13 +678,13 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         else:
             del local_sd[k]
         del full
+    _tock("mat_fallback", _t)
 
-    gc.collect()
     _xdbg(
         f"nocons: materialized -- {len(expert_keys)} expert + "
         f"{sum(1 for k in dense_keys if owner[k] == rank)} dense owned "
-        f"[{len(replicated)} replicated, {len(shard0)} p2p, {len(other)} all-gather, "
-        f"{len(plain)} plain] ({my_expert_bytes / 1e9:.2f}G experts)"
+        f"[{len(replicated)} replicated, {len(safe)} p2p, {len(other)} all-gather, "
+        f"{len(plain)} plain] ({expert_bytes[rank] / 1e9:.2f}G experts)"
     )
 
 
@@ -968,12 +981,6 @@ def _distributed_save_hf_checkpoint_impl(
     del sharded_sd, dense_sd
     gc.collect()
 
-    # torch DCP HuggingFaceStorageWriter consolidation writes 0-dim (scalar) tensors as ZERO (shape ()
-    # -> value dropped); shape (1,) and larger survive. modelopt stores per-tensor scales (input_scale/
-    # weight_scale/weight_scale_2) as 0-dim scalars, so promote any 0-dim tensor to (1,) to preserve its
-    # value. Per-tensor () vs (1,) scales are equivalent for deployment; applies to plain + DTensor.
-    # (Values are already normal tensors -- re-materialized right after get_model_state_dict.)
-    local_sd = {k: (v.reshape(1) if v.dim() == 0 else v) for k, v in local_sd.items()}
     _tock("dense_postprocess", _t)
 
     # (3) Whole-tensor redistribution -> reverse conversion -> write. Each tensor ends up WHOLE on
@@ -998,6 +1005,14 @@ def _distributed_save_hf_checkpoint_impl(
         return
 
     # ---- legacy DCP + distributed-consolidation path (MODELOPT_EXPORT_CONSOLIDATION=1) ----
+    # torch DCP HuggingFaceStorageWriter consolidation writes 0-dim (scalar) tensors as ZERO (shape ()
+    # -> value dropped); shape (1,) and larger survive. modelopt stores per-tensor scales (input_scale/
+    # weight_scale/weight_scale_2) as 0-dim scalars, so promote any 0-dim tensor to (1,) to preserve its
+    # value. Only needed HERE: the no-gather writer above calls safetensors.save_file directly and
+    # never meets the consolidation bug, and promoting there would emit (1,) scales where the rank-0
+    # gather path emits (), making the two checkpoints differ for no reason.
+    # (Values are already normal tensors -- re-materialized right after get_model_state_dict.)
+    local_sd = {k: (v.reshape(1) if v.dim() == 0 else v) for k, v in local_sd.items()}
     # Keeps each tensor sharded and merges FILES instead, so the reverse conversion cannot run here.
     # (3) Global shard layout: bin-pack ALL keys into ~max_shard_size files so every rank passes the
     # SAME fqn_to_index_mapping to the writer. A DTensor's byte size is its GLOBAL size (numel() is
