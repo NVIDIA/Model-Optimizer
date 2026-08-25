@@ -27,7 +27,7 @@ from itertools import pairwise
 
 import pytest
 from specdec_bench.metrics.acceptance_rate import AcceptanceRate
-from specdec_bench.speculation_profile import build_profile, stub_profile
+from specdec_bench.speculation_profile import build_profile, checkpoint_id, stub_profile
 
 
 def _acceptance_out_from_histogram(histogram):
@@ -123,3 +123,22 @@ def test_stub_profile_is_marked_unmeasured():
     assert stub["measured"] is False
     assert stub["mean_accept_length"] is None
     assert len(stub["conditional_accept_rates"]) == 3
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (
+            "/lustre/fsw/portfolios/coreai/projects/x/hf-local/nvidia/MiniMax-M2.7-DFlash",
+            "nvidia/MiniMax-M2.7-DFlash",
+        ),
+        ("/hf-local/Qwen/Qwen3-8B", "Qwen/Qwen3-8B"),
+        ("nvidia/MiniMax-M2.7-DFlash", "nvidia/MiniMax-M2.7-DFlash"),
+        ("bare-name", "bare-name"),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_checkpoint_id_strips_internal_paths(path, expected):
+    """The profile is published with checkpoints, so it must not carry cluster layout."""
+    assert checkpoint_id(path) == expected

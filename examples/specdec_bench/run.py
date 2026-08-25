@@ -18,6 +18,7 @@ import asyncio
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
+from specdec_bench.speculation_profile import checkpoint_id
 from specdec_bench.utils import (
     decode_chat,
     dump_env,
@@ -94,8 +95,13 @@ def _speculation_profile_metadata(args):
         "num_speculative_tokens": num_speculative_tokens,
         "method": method,
         "block_size": block_size,
-        "draft_checkpoint": {"path": args.draft_model_dir} if args.draft_model_dir else None,
-        "target_model": {"path": args.model_dir},
+        # Identifiers, not paths: this artifact is meant to be published alongside a
+        # checkpoint, so it must not carry internal cluster layout. configuration.json
+        # keeps the full paths for local debugging.
+        "draft_checkpoint": (
+            {"id": checkpoint_id(args.draft_model_dir)} if args.draft_model_dir else None
+        ),
+        "target_model": {"id": checkpoint_id(args.model_dir)},
         "measurement_conditions": {
             "dataset": args.dataset or ("mtbench" if args.mtbench else None),
             "concurrency": args.concurrency,
@@ -260,6 +266,10 @@ def run_simple(args):
         for metric in metrics_list:
             metric.update_directory(args.save_dir)
         metrics.AcceptanceRate.set_profile_metadata(_speculation_profile_metadata(args))
+    else:
+        # Class-level state, so clear it: a second in-process run (e.g. an AR-vs-K
+        # sweep) without --save_dir must not inherit the previous run's metadata.
+        metrics.AcceptanceRate.set_profile_metadata(None)
         # Stamp configuration.json BEFORE the run loop so the file lands even
         # when the run crashes mid-way. Engine init is already done, so the
         # live serving_config from the model is available.
