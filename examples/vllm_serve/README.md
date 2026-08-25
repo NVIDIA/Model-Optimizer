@@ -213,7 +213,8 @@ report = install_vllm_nvfp4_attention(model_runner, sparse_cfg="checkpoint")
 Limitations:
 
 - vLLM V1 chunked prefill and prefix-cache suffix attention are supported by offsetting query positions into the longer KV span. This applies to sparse-only serving; quantized attention installs and skip-softmax calibration reject `enable_prefix_caching` (quantize-on-write and per-request measurement both require uncached prefills).
-- `SparseAttnWorker` CUDA graph capture is not validated yet — use `--enforce-eager`.
+- `SparseAttnWorker` CUDA graph capture is not validated yet — use `--enforce-eager`. Checkpoints with a calibrated `decode` `threshold_scale_factor` are rejected at install under a FULL decode CUDA graph mode (including vLLM's default `FULL_AND_PIECEWISE`): the captured graph would replay one request's stale threshold.
+- Sparse-only installs validate engine-level compatibility like quantized installs do: decode context parallelism, DBO, speculative decoding, and FULL mixed-batch CUDA graphs are rejected (prefix caching remains supported, per the bullet above).
 
 ### Compact NVFP4 attention worker
 

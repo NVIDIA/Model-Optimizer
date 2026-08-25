@@ -180,7 +180,10 @@ def _dynamic_block_quantize_impl(
             and not DISABLE_TRITON_KERNEL
             and amax is not None
         ):
-            return triton_kernel.fp4_fake_quant_block(inputs, amax)
+            # Forward the configured block size: the kernel defaults to 16, and
+            # silently ignoring a non-16 NVFP4 block config here would diverge
+            # from the cuda_ext fallback below (which honors block_size).
+            return triton_kernel.fp4_fake_quant_block(inputs, amax, block_size=block_size)
         cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
         return cuda_ext_mx.fused_amax_convert(
             inputs,

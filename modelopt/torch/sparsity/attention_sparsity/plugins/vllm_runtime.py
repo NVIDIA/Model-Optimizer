@@ -156,7 +156,7 @@ def _cudagraph_mode(model_runner):
     return mode if mode is not None else CUDAGraphMode.NONE
 
 
-def _global_errors(model_runner) -> list[str]:
+def _global_errors(model_runner, *, sparse_only: bool = False) -> list[str]:
     config = getattr(model_runner, "vllm_config", None)
     if config is None:
         return ["model_runner.vllm_config is required"]
@@ -174,10 +174,16 @@ def _global_errors(model_runner) -> list[str]:
         errors.append("decode_context_parallel_size must be 1")
     if getattr(parallel, "enable_dbo", False) or getattr(parallel, "use_ubatching", False):
         errors.append("DBO/ubatching is unsupported")
-    if getattr(cache_config, "enable_prefix_caching", False):
-        errors.append("prefix caching is unsupported")
-    if getattr(config, "kv_transfer_config", None) is not None:
-        errors.append("KV transfer is unsupported")
+    if not sparse_only:
+        # Prefix caching and KV transfer break only flows that quantize the
+        # cache on write or measure per-request prefills (quantized installs,
+        # skip-softmax calibration). Sparse-only serving reads the cache
+        # unmodified and supports prefix-cache suffix attention by offsetting
+        # query positions (see the vllm_serve README limitations).
+        if getattr(cache_config, "enable_prefix_caching", False):
+            errors.append("prefix caching is unsupported")
+        if getattr(config, "kv_transfer_config", None) is not None:
+            errors.append("KV transfer is unsupported")
     if getattr(config, "speculative_config", None) is not None:
         errors.append("speculative decoding is unsupported")
     if _cudagraph_mode(model_runner).mixed_mode() == CUDAGraphMode.FULL:
@@ -355,7 +361,12 @@ def _plan_vllm_attention(
         )
 
     _require_supported_vllm()
-    errors = _global_errors(model_runner) if quantize else []
+    # Engine-level checks apply to sparse-only installs too: the ModelOpt
+    # kernel path silently ignores decode context parallelism, DBO, and
+    # speculative decoding, and FULL mixed-batch graphs would capture stale
+    # per-launch thresholds (same rationale as the decode graph guard below).
+    # Sparse-only installs skip only the cache-mutation checks.
+    errors = _global_errors(model_runner, sparse_only=not quantize)
     mode = _cudagraph_mode(model_runner)
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
@@ -599,6 +610,16 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
     _raise_unsupported(errors, "skip-softmax calibration")
 
     plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")
+    # Per-request prompt lengths (same request order as the attention-metadata
+    # rows, kept aligned by vLLM's in-place batch reorder) let the adapter
+    # classify q_len == 1 rows: a decode step's KV span exceeds the prompt,
+    # while a 1-token final chunk of a chunked prefill is still inside it.
+    # The runner — not its input_batch — is attached: vLLM can rebuild
+    # input_batch after load_model (may_reinitialize_input_batch during KV
+    # cache init, e.g. hybrid Mamba/attention models), so the adapter must
+    # resolve the live object per forward.
+    for attention_plan in plans:
+        attention_plan.new_impl._calib_model_runner = model_runner
     return _apply_vllm_attention_plans(plan)
 
 
