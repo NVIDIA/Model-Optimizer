@@ -112,12 +112,10 @@ class TestMLAInstall:
             assert float(amax) == 6.0 * 448.0
         assert attention._query_quant_in_kernel is True
         assert not hasattr(attention, "_value_quant_in_kernel")
-        # Latent QDQ is moved to the impl's cache-write hook (single-quant
-        # prefill): the module flag skips the module-side kv_c/k_pe quant, and
-        # the impl carries the quantizer refs its override applies.
-        assert attention._kv_quant_in_cache_write is True
-        assert attention.impl._kv_c_quantizer is attention.kv_c_bmm_quantizer
-        assert attention.impl._k_pe_quantizer is attention.k_pe_bmm_quantizer
+        # Quantized-BMM model: the module flag keeps the latent cache raw by
+        # skipping the module-side kv_c/k_pe quant; operands are quantized
+        # in-kernel (prefill projected K/V; decode on-read latent K/V).
+        assert attention._skip_module_kv_quant is True
         assert attention.impl.quant_kw.prefill == {
             "q_quant": "nvfp4",
             "q_amax": None,
@@ -128,7 +126,14 @@ class TestMLAInstall:
             "v_quant": "nvfp4",
             "v_amax": 6.0 * 448.0,
         }
-        assert attention.impl.quant_kw.decode == {"p_qdq": "nvfp4", "p_qdq_amax": 1.0}
+        assert attention.impl.quant_kw.decode == {
+            "p_qdq": "nvfp4",
+            "p_qdq_amax": 1.0,
+            "k_qdq": "nvfp4",
+            "k_qdq_amax": 6.0 * 448.0,
+            "v_qdq": "nvfp4",
+            "v_qdq_amax": 6.0 * 448.0,
+        }
         assert attention.impl.sparse_kw == {}
         assert report.installed_layers == ("mla_attn",)
         assert report.quantized_layers == ("mla_attn",)
@@ -227,7 +232,14 @@ def _bare_mla_impl(*, p_qdq="nvfp4", prefill_active=True, sparse_kw=None):
             "v_quant": mode,
             "v_amax": None,
         },
-        decode={"p_qdq": p_qdq, "p_qdq_amax": 1.0},
+        decode={
+            "p_qdq": p_qdq,
+            "p_qdq_amax": 1.0,
+            "k_qdq": mode,
+            "k_qdq_amax": None,
+            "v_qdq": mode,
+            "v_qdq_amax": None,
+        },
     )
     impl.sparse_kw = dict(sparse_kw or {})
     return impl
@@ -274,6 +286,9 @@ class TestMLAImplDispatch:
         assert recorded["num_kv_splits"] == 32
         assert recorded["p_qdq"] == "nvfp4"
         assert recorded["p_qdq_amax"] == 1.0
+        # Decode quantizes K (feature) and V (token) on read from the raw cache.
+        assert recorded["k_qdq"] == "nvfp4"
+        assert recorded["v_qdq"] == "nvfp4"
         assert recorded["kv_lora_rank"] == 128
         assert recorded["qk_rope_head_dim"] == 64
         assert recorded["out_dtype"] == cache.dtype
@@ -347,54 +362,9 @@ class TestMLAImplDispatch:
         assert seen["backend_during_call"] is base_backend  # untouched
 
 
-class _RecorderQuantizer:
-    """Stand-in TensorQuantizer that records calls and returns a marked tensor."""
-
-    def __init__(self, *, is_enabled=True):
-        self.is_enabled = is_enabled
-        self.calls = []
-
-    def __call__(self, x):
-        self.calls.append(x)
-        return f"quant({x})"  # distinct object => out-of-place
-
-
-class TestMLACacheWriteQuant:
-    def test_do_kv_cache_update_quantizes_latent_out_of_place(self, monkeypatch):
-        impl = _bare_mla_impl()
-        impl._kv_c_quantizer = _RecorderQuantizer()
-        impl._k_pe_quantizer = _RecorderQuantizer()
-        seen = {}
-
-        def _fake_super(self, kv_c_normed, k_pe, *args, **kwargs):
-            seen["kv_c"] = kv_c_normed
-            seen["k_pe"] = k_pe
-
-        monkeypatch.setattr(TritonMLAImpl, "do_kv_cache_update", _fake_super)
-
-        impl.do_kv_cache_update("kvc", "kpe", "cache", "slot", "auto", "scale")
-
-        # The latent QDQ is applied here (cache write), not skipped.
-        assert impl._kv_c_quantizer.calls == ["kvc"]
-        assert impl._k_pe_quantizer.calls == ["kpe"]
-        # The quantized (new) tensors are what gets written to cache.
-        assert seen["kv_c"] == "quant(kvc)"
-        assert seen["k_pe"] == "quant(kpe)"
-
-    def test_do_kv_cache_update_skips_disabled_quantizers(self, monkeypatch):
-        impl = _bare_mla_impl()
-        impl._kv_c_quantizer = _RecorderQuantizer(is_enabled=False)
-        impl._k_pe_quantizer = None
-        seen = {}
-
-        def _fake_super(self, kv_c_normed, k_pe, *args, **kwargs):
-            seen["kv_c"] = kv_c_normed
-            seen["k_pe"] = k_pe
-
-        monkeypatch.setattr(TritonMLAImpl, "do_kv_cache_update", _fake_super)
-
-        impl.do_kv_cache_update("kvc", "kpe", "cache", "slot", "auto", "scale")
-
-        assert impl._kv_c_quantizer.calls == []  # disabled => passthrough
-        assert seen["kv_c"] == "kvc"
-        assert seen["k_pe"] == "kpe"
+def test_impl_keeps_cache_raw_no_update_override():
+    """Quantized-BMM model: the latent cache stays RAW, so the impl must NOT
+    override do_kv_cache_update (which would re-introduce a cache-write quant).
+    Decode instead quantizes K/V on read; prefill quantizes projected operands.
+    """
+    assert vllm_mla.ModelOptMLAImpl.do_kv_cache_update is TritonMLAImpl.do_kv_cache_update

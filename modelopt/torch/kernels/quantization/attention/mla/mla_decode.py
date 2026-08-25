@@ -21,29 +21,23 @@ features (576 for DeepSeek-family models); K is the full latent cache row and
 V is its first ``kv_lora_rank`` features — the same memory read once per tile
 and reused for both BMMs.
 
-Quantization contract: the latent cache is expected to hold write-once
-fake-quantized values (module-level ``kv_c``/``k_pe`` quantizers applied
-before the cache write). Both BMM1-K and BMM2-V consume that single
-representation as-is — there is deliberately no on-read re-quantization. The
-absorbed Q is expected to be fake-quantized by the caller (dynamic NVFP4 uses
-an FP32 QDQ carrier, like ``triton_fa``'s ``Q_IS_FP32``). Only the softmax P
-is quantized inside the kernel, after the row-sum, so the softmax denominator
-stays unquantized.
+Quantization contract (quantized-BMM model): the latent cache holds RAW
+(bf16/fp16) values. Each BMM operand is fake-quantized once, on read, along
+its own contraction axis, and K and V are quantized INDEPENDENTLY from the
+raw latent — K along the feature axis (``k_qdq``), V along the token axis
+(``v_qdq``). So decode honors ``k_format`` and ``v_format`` separately, the
+same faithful independent-operand model the prefill kernel and the dense
+Q/K/P/V path use. The absorbed Q is fake-quantized by the caller (dynamic
+NVFP4 uses an FP32 carrier, like ``triton_fa``'s ``Q_IS_FP32``); P is
+quantized in-kernel after the row-sum, so the softmax denominator stays
+unquantized.
 
-Decode V is therefore NOT independently quantized: ``V = trans(k_nope)`` reuses
-the latent's K-side (feature-axis) quantization, so decode V inherits
-``k_format`` and there is no ``v_qdq`` here — ``v_format`` applies to prefill
-only. A shared latent cannot be stored quantized along both K's feature axis
-and V's token (contraction) axis at once; honoring an independent token-axis V
-in decode would require an on-read re-quant of the already-quantized latent
-(double-quant), or a raw cache with on-read K/V quant (the MNI-style model),
-which forfeits the write-once step/split stability documented below.
-
-P QDQ operates on split-local, unnormalized online-softmax probabilities;
-its numerics therefore include the fixed split count and tile size as part of
-the kernel schedule. Split bounds are tile-aligned so quant-relevant tile
-boundaries sit at absolute token positions and results are stable as the
-sequence grows. Inference-only.
+Split determinism: P and V groups are block-16 at absolute token positions
+(``kv_start`` is a multiple of ``BLOCK_N``) under a fixed split/tile schedule,
+so partial results are reproducible across batch shapes and devices. The
+token-axis V QDQ does re-quantize the open (incomplete) tail block as the
+sequence grows — the inherent tradeoff of on-read operand quantization versus
+an immutable write-once cache. Inference-only.
 """
 
 import torch
@@ -52,7 +46,7 @@ import triton.language as tl
 
 from modelopt.torch.kernels.common.attention.decode_attention import _qdq_scale
 from modelopt.torch.kernels.common.attention.triton_fa import LOG2E
-from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4
+from modelopt.torch.kernels.quantization.attention.bmm2_qdq import _p_qdq_nvfp4, _v_qdq_nvfp4
 from modelopt.torch.kernels.quantization.common.fp8_quant import fp8_scalar_qdq
 
 __all__ = ["mla_attention_decode"]
@@ -86,6 +80,8 @@ def _mla_decode_split_kernel(
     stride_ah,
     stride_as,
     p_qdq_scale,
+    k_qdq_scale,
+    v_qdq_scale,
     max_blocks_per_seq,
     H: tl.constexpr,  # number of query heads
     BLOCK_H: tl.constexpr,  # query heads per program (grouped MQA)
@@ -96,6 +92,8 @@ def _mla_decode_split_kernel(
     QK_ROPE_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     NUM_KV_SPLITS: tl.constexpr,
+    K_QDQ: tl.constexpr,  # 0=off, 1=FP8 E4M3, 2=NVFP4 (on-read, feature axis)
+    V_QDQ: tl.constexpr,  # 0=off, 1=FP8 E4M3, 2=NVFP4 (on-read, token axis)
     P_QDQ: tl.constexpr,  # 0=off, 1=FP8 E4M3, 2=NVFP4
     Q_IS_FP32: tl.constexpr,  # dynamic NVFP4 QDQ carrier uses FP32
 ):
@@ -150,7 +148,7 @@ def _mla_decode_split_kernel(
         ).to(tl.int64)
         pos_ptrs = page * stride_lc_block + (kv_abs % PAGE_SIZE) * stride_lc_pos
 
-        # K^T tiles from the latent cache: NOPE [BLOCK_DL, BLOCK_N], PE [BLOCK_DPE, BLOCK_N]
+        # K^T tiles from the RAW latent cache: NOPE [BLOCK_DL, BLOCK_N], PE [BLOCK_DPE, BLOCK_N]
         k_nope = tl.load(
             Latent_cache + pos_ptrs[None, :] + dl_pos[:, None],
             mask=kv_valid[None, :] & dl_mask[:, None],
@@ -162,9 +160,23 @@ def _mla_decode_split_kernel(
             other=0.0,
         )
 
-        if Q_IS_FP32:
-            scores = tl.dot(q_nope, k_nope.to(tl.float32), input_precision="ieee")
-            scores += tl.dot(q_pe, k_pe.to(tl.float32), input_precision="ieee")
+        # Capture RAW V (tokens x features) before the K on-read quant reassigns
+        # k_nope. K and V are quantized independently from the raw latent, each
+        # along its own BMM contraction axis (K: feature; V: token), so decode
+        # honors k_format and v_format separately (quantized-BMM model).
+        v = tl.trans(k_nope)
+
+        # On-read K quant along the feature (BMM1 contraction) axis.
+        if K_QDQ == 1:
+            k_nope = fp8_scalar_qdq(k_nope, k_qdq_scale).to(k_nope.dtype)
+            k_pe = fp8_scalar_qdq(k_pe, k_qdq_scale).to(k_pe.dtype)
+        elif K_QDQ == 2:
+            k_nope = _v_qdq_nvfp4(k_nope.to(tl.float32), k_qdq_scale, BLOCK_DL, BLOCK_N)
+            k_pe = _v_qdq_nvfp4(k_pe.to(tl.float32), k_qdq_scale, BLOCK_DPE, BLOCK_N)
+
+        if Q_IS_FP32 or K_QDQ == 2:
+            scores = tl.dot(q_nope.to(tl.float32), k_nope.to(tl.float32), input_precision="ieee")
+            scores += tl.dot(q_pe.to(tl.float32), k_pe.to(tl.float32), input_precision="ieee")
         else:
             scores = tl.dot(q_nope, k_nope) + tl.dot(q_pe, k_pe)
         scores = scores * qk_scale
@@ -185,11 +197,17 @@ def _mla_decode_split_kernel(
             p = p.to(Latent_cache.dtype.element_ty).to(tl.float32)
             p = _p_qdq_nvfp4(p, p_qdq_scale, BLOCK_H, BLOCK_N)
 
-        # V is the first KV_LORA_RANK features of the same latent tile,
-        # consumed as-is (single stored representation; no on-read re-quant).
-        v = tl.trans(k_nope)
-        if P_QDQ == 2:
-            acc = tl.dot(p, v.to(tl.float32), acc, input_precision="ieee")
+        # On-read V quant along the token (BMM2 contraction) axis, independent of
+        # K. Groups are block-16 at absolute token positions (kv_start is a
+        # multiple of BLOCK_N), so split results are deterministic; the open tail
+        # block re-quantizes as the sequence grows (the on-read tradeoff).
+        if V_QDQ == 1:
+            v = fp8_scalar_qdq(v, v_qdq_scale).to(v.dtype)
+        elif V_QDQ == 2:
+            v = _v_qdq_nvfp4(v.to(tl.float32), v_qdq_scale, BLOCK_N, BLOCK_DL)
+
+        if P_QDQ == 2 or V_QDQ == 2:
+            acc = tl.dot(p.to(tl.float32), v.to(tl.float32), acc, input_precision="ieee")
         else:
             acc = tl.dot(p.to(v.dtype), v, acc)
         running_max = m_new
@@ -276,6 +294,10 @@ def mla_attention_decode(
     qk_rope_head_dim: int = 64,
     page_size: int | None = None,
     num_kv_splits: int = _DEFAULT_KV_SPLITS,
+    k_qdq: str | None = None,
+    k_qdq_amax: float | None = None,
+    v_qdq: str | None = None,
+    v_qdq_amax: float | None = None,
     p_qdq: str | None = None,
     p_qdq_amax: float = 1.0,
     return_lse: bool = True,
@@ -283,22 +305,34 @@ def mla_attention_decode(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Decode one absorbed query token per request over a paged latent cache.
 
+    Quantized-BMM model: the latent cache holds RAW (bf16/fp16) values, and each
+    BMM operand is fake-quantized once, on read, along its own contraction axis
+    — K along the feature axis (``k_qdq``), V along the token axis (``v_qdq``),
+    independently. So decode honors ``k_format`` and ``v_format`` separately.
+    Q is fake-quantized by the caller (dynamic NVFP4 uses an FP32 carrier); P is
+    quantized in-kernel after the row-sum (denominator stays unquantized).
+
     Args:
         q: ``[batch, num_heads, kv_lora_rank + qk_rope_head_dim]`` absorbed
             query. Pass FP32 for the dynamic-NVFP4 QDQ carrier (Q is expected
             to be fake-quantized by the caller); BF16/FP16 otherwise.
         latent_cache: ``[num_blocks, page_size, kv_lora_rank + qk_rope_head_dim]``
-            paged latent cache. Expected to hold write-once fake-quantized
-            values; consumed as-is for both BMM1-K and BMM2-V.
+            paged latent cache holding raw (unquantized) values.
         block_table: ``[batch, max_blocks_per_seq]`` page table.
         b_seq_len: ``[batch]`` KV sequence lengths.
         softmax_scale: Softmax scale (required; MLA layers fold in mscale).
         kv_lora_rank: Latent width (V/output width).
         qk_rope_head_dim: RoPE feature width appended to the latent.
         page_size: Tokens per page; defaults to ``latent_cache.shape[1]``.
-        num_kv_splits: Fixed split count. P QDQ numerics follow the
-            split-local schedule, so this stays fixed by default for
-            reproducibility across batch shapes and devices.
+        num_kv_splits: Fixed split count. P/V QDQ numerics follow the
+            split-local schedule; kept fixed by default for reproducibility
+            across batch shapes and devices.
+        k_qdq: K fake quant-dequant: ``None``, ``"fp8"``, ``"nvfp4"`` (feature
+            axis, block-16 for NVFP4). Covers both the NOPE and RoPE slices.
+        k_qdq_amax: Per-tensor K amax (``None`` = scale 1.0).
+        v_qdq: V fake quant-dequant, same modes; token/contraction axis. The
+            open 16-token tail block re-quantizes as the sequence grows.
+        v_qdq_amax: Per-tensor V amax (``None`` = scale 1.0).
         p_qdq: Softmax-P fake quant-dequant: ``None``, ``"fp8"``, ``"nvfp4"``.
         p_qdq_amax: Per-tensor P amax (default 1.0, the theoretical bound).
         return_lse: Also return the natural-log LSE ``[batch, num_heads]``.
@@ -327,12 +361,19 @@ def mla_attention_decode(
         raise ValueError(f"page_size {page_size} must match latent_cache.shape[1]")
     if not 1 <= num_kv_splits <= _MAX_KV_SPLITS:
         raise ValueError(f"num_kv_splits must be in [1, {_MAX_KV_SPLITS}], got {num_kv_splits}")
-    if p_qdq == "nvfp4" and (kv_lora_rank % 16 or qk_rope_head_dim % 16):
+    nvfp4_active = "nvfp4" in (k_qdq, v_qdq, p_qdq)
+    if nvfp4_active and (kv_lora_rank % 16 or qk_rope_head_dim % 16):
         raise ValueError("NVFP4 decode requires dimensions divisible by 16")
+    if v_qdq == "nvfp4" and _BLOCK_N % 16:
+        raise ValueError("NVFP4 V decode requires the KV tile (BLOCK_N) divisible by 16")
     batch, num_heads = q.shape[0], q.shape[1]
     if b_seq_len.shape != (batch,) or block_table.shape[0] != batch:
         raise ValueError("decode metadata batch dimension must match q")
 
+    # Operand "p" permits None|fp8|nvfp4 with the standard amax/448 (fp8) and
+    # amax/(6*448) (nvfp4) scales — shared by K, V, and P here.
+    k_qdq_scale = _qdq_scale(k_qdq, k_qdq_amax, "p")
+    v_qdq_scale = _qdq_scale(v_qdq, v_qdq_amax, "p")
     p_qdq_scale = _qdq_scale(p_qdq, p_qdq_amax, "p")
     q = q.contiguous()
     if latent_cache.stride(-1) != 1:
@@ -376,6 +417,8 @@ def mla_attention_decode(
             acc_partial.stride(1),
             acc_partial.stride(2),
             p_qdq_scale,
+            k_qdq_scale,
+            v_qdq_scale,
             block_table.shape[1],
             H=num_heads,
             BLOCK_H=block_h,
@@ -386,6 +429,8 @@ def mla_attention_decode(
             QK_ROPE_DIM=qk_rope_head_dim,
             PAGE_SIZE=page_size,
             NUM_KV_SPLITS=num_kv_splits,
+            K_QDQ=_P_QDQ_MODES[k_qdq],
+            V_QDQ=_P_QDQ_MODES[v_qdq],
             P_QDQ=_P_QDQ_MODES[p_qdq],
             Q_IS_FP32=q.dtype == torch.float32,
             num_warps=4,

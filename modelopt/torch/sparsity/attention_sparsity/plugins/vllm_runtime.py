@@ -523,12 +523,6 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
             layer.new_impl.quant_kw = _load_mla_plugin().mla_quant_kw_from_layer(
                 layer.module, query_in_kernel=plan.q_format != "fp8"
             )
-            # Move the latent (kv_c/k_pe) QDQ off the module forward and into the
-            # impl's cache-write hook, so prefill projects bf16 latent and the
-            # projected K/V are single-quant. Stash the quantizer refs the
-            # override needs; the module-side flag is set below with the others.
-            layer.new_impl._kv_c_quantizer = layer.module.kv_c_bmm_quantizer
-            layer.new_impl._k_pe_quantizer = layer.module.k_pe_bmm_quantizer
         elif plan.quantize:
             # Pass cfg only for non-default formats: keeps the default call
             # signature stable for callers/fakes that predate the cfg parameter.
@@ -569,7 +563,7 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
         missing = object()
         old_query_flag = getattr(layer.module, "_query_quant_in_kernel", missing)
         old_value_flag = getattr(layer.module, "_value_quant_in_kernel", missing)
-        old_kv_flag = getattr(layer.module, "_kv_quant_in_cache_write", missing)
+        old_kv_flag = getattr(layer.module, "_skip_module_kv_quant", missing)
         if plan.quantize:
             # fp8 Q is module-level (bf16 losslessly carries E4M3 QDQ values);
             # the kernel then runs a plain bf16 BMM1 with no Q transform.
@@ -579,9 +573,10 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                 # write-once quantized cache (decode) — no module-level flag.
                 layer.module._value_quant_in_kernel = plan.v_format != "fp8"
             else:
-                # Latent QDQ moves to the impl's cache-write hook (single-quant
-                # prefill); paired with the do_kv_cache_update override.
-                layer.module._kv_quant_in_cache_write = True
+                # Quantized-BMM model: keep the latent cache RAW by skipping the
+                # module-level kv_c/k_pe QDQ. Prefill projects bf16 latent and
+                # decode quantizes K/V on read; both quantize operands in-kernel.
+                layer.module._skip_module_kv_quant = True
         try:
             # Publish the adapter last so a native impl never runs with in-kernel
             # quantization flags that only the ModelOpt adapter understands.
@@ -591,7 +586,7 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                 for name, value in (
                     ("_query_quant_in_kernel", old_query_flag),
                     ("_value_quant_in_kernel", old_value_flag),
-                    ("_kv_quant_in_cache_write", old_kv_flag),
+                    ("_skip_module_kv_quant", old_kv_flag),
                 ):
                     if value is missing:
                         if hasattr(layer.module, name):

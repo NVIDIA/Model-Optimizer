@@ -292,6 +292,10 @@ def mla_decode_reference(
     softmax_scale: float,
     kv_lora_rank: int,
     *,
+    k_mode: str | None = None,
+    k_amax: float | None = None,
+    v_mode: str | None = None,
+    v_amax: float | None = None,
     p_mode: str | None = None,
     p_amax: float = 1.0,
     num_kv_splits: int = 32,
@@ -300,9 +304,10 @@ def mla_decode_reference(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Eager split-local oracle for :func:`mla_attention_decode`.
 
-    ``latent`` is the dense (unpaged) cache ``[batch, max_seq, head_dim]``;
-    ``q`` is the absorbed query ``[batch, num_heads, head_dim]``. Replicates
-    the fixed-split, tile-aligned stage-1 schedule and the stage-2 merge.
+    ``latent`` is the dense (unpaged) RAW cache ``[batch, max_seq, head_dim]``;
+    ``q`` is the absorbed query ``[batch, num_heads, head_dim]``. Replicates the
+    fixed-split, tile-aligned stage-1 schedule and stage-2 merge, with on-read
+    K (feature axis) and V (token axis) quant applied independently per tile.
     """
     batch, num_heads, head_dim = q.shape
     carrier_dtype = latent.dtype
@@ -328,15 +333,23 @@ def mla_decode_reference(
             acc = torch.zeros(num_heads, kv_lora_rank, device=q.device)
             for kv_start in range(kv_lo, kv_hi, block_n):
                 kv_end = min(kv_start + block_n, s)
-                kn = k_nope[kv_start:kv_end]
-                kp = k_pe[kv_start:kv_end]
-                scores = (q_nope[b] @ kn.T + q_pe[b] @ kp.T) * softmax_scale * LOG2E  # [H, tile]
-                if kv_end - kv_start < block_n:
-                    # Pad to block_n like the kernel: -inf scores -> p == 0,
-                    # zero V rows -> no BMM2 contribution.
-                    pad = block_n - (kv_end - kv_start)
-                    scores = torch.nn.functional.pad(scores, (0, pad), value=float("-inf"))
-                    kn = torch.nn.functional.pad(kn, (0, 0, 0, pad))
+                valid = kv_end - kv_start
+                kn_raw = k_nope[kv_start:kv_end]  # [valid, rank] raw
+                kp_raw = k_pe[kv_start:kv_end]  # [valid, rope] raw
+                if valid < block_n:
+                    # Pad to block_n like the kernel (masked -> 0); the padded
+                    # rows get -inf scores below so they never contribute.
+                    pad = block_n - valid
+                    kn_raw = torch.nn.functional.pad(kn_raw, (0, 0, 0, pad))
+                    kp_raw = torch.nn.functional.pad(kp_raw, (0, 0, 0, pad))
+                # Independent on-read operand quant from the raw latent:
+                # K along the feature axis, V along the token axis.
+                kn_k = apply_operand_quant(kn_raw, k_mode, k_amax, block_axis=1)
+                kp_k = apply_operand_quant(kp_raw, k_mode, k_amax, block_axis=1)
+                v_op = apply_operand_quant(kn_raw, v_mode, v_amax, block_axis=0)
+                scores = (q_nope[b] @ kn_k.T + q_pe[b] @ kp_k.T) * softmax_scale * LOG2E
+                if valid < block_n:
+                    scores[:, valid:] = float("-inf")
                 m_new = torch.maximum(m, scores.amax(dim=-1))
                 shifted = scores - m_new.unsqueeze(-1)
                 p = torch.where(
@@ -350,7 +363,7 @@ def mla_decode_reference(
                 p_q = _quantize_p_tile(p, p_mode, p_amax, carrier_dtype)
                 if p_mode != "nvfp4":
                     p_q = p_q.to(carrier_dtype).float()
-                acc = acc + p_q @ kn
+                acc = acc + p_q @ v_op
                 m = m_new
             split_m.append(m)
             split_l.append(lsum)

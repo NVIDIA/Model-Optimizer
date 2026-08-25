@@ -180,42 +180,12 @@ class TestMLADecodeQuant:
         torch.testing.assert_close(out.float(), ref, rtol=5e-3, atol=2e-2)
 
     @requires_native_e4m3
-    def test_full_nvfp4_recipe_cosine(self):
-        """Write-once cache QDQ + fp32-carrier Q QDQ + fused NVFP4 P."""
-        seq_lens = [96]
-        q, latent, cache, block_table, seq_t = _make_decode_inputs(
-            seq_lens, dtype=torch.bfloat16, seed=4
-        )
+    @pytest.mark.parametrize("mode", ["fp8", "nvfp4"])
+    def test_kv_qdq_matches_oracle(self, mode):
+        """On-read K (feature axis) + V (token axis) quant vs the split-local oracle."""
+        seq_lens = [150, 40]
+        q, latent, cache, block_table, seq_t = _make_decode_inputs(seq_lens, seed=6)
         scale = _DIM**-0.5
-        # Emulate the module-level write-once QDQ: quantize the cache rows
-        # along the feature axis (kv_c and k_pe global scales both 1.0, so a
-        # single 16-block pass over the full row is equivalent).
-        cache_q = nvfp4_fake_quant(cache.float(), block_axis=-1).to(cache.dtype)
-        q_carrier = nvfp4_fake_quant(q.float(), block_axis=-1)  # FP32 QDQ carrier
-        out, _ = mla_attention_decode(
-            q_carrier,
-            cache_q,
-            block_table,
-            seq_t,
-            softmax_scale=scale,
-            kv_lora_rank=_RANK,
-            qk_rope_head_dim=_ROPE,
-            p_qdq="nvfp4",
-        )
-        ref, _ = _dense_decode(q, latent, seq_t, scale)
-        assert torch.isfinite(out.float()).all()
-        assert _cos(out, ref) > 0.98
-
-    def test_quantized_cache_consumed_as_is(self):
-        """BMM2 reads the cache values unchanged (no on-read re-quant)."""
-        seq_lens = [64]
-        q, _, cache, block_table, seq_t = _make_decode_inputs(seq_lens, seed=5)
-        scale = 0.1
-        # Any cache contents must flow through V untouched: compare against
-        # the dense oracle computed from the exact same (arbitrary) cache.
-        latent_view = torch.zeros(1, 64, _DIM, device="cuda", dtype=cache.dtype)
-        for blk in range(64 // 16):
-            latent_view[0, blk * 16 : (blk + 1) * 16] = cache[int(block_table[0, blk])]
         out, _ = mla_attention_decode(
             q,
             cache,
@@ -224,9 +194,69 @@ class TestMLADecodeQuant:
             softmax_scale=scale,
             kv_lora_rank=_RANK,
             qk_rope_head_dim=_ROPE,
+            k_qdq=mode,
+            v_qdq=mode,
         )
-        ref, _ = _dense_decode(q, latent_view, seq_t, scale)
-        torch.testing.assert_close(out.float(), ref, rtol=5e-3, atol=5e-3)
+        dense_out, _ = mla_attention_decode(
+            q,
+            cache,
+            block_table,
+            seq_t,
+            softmax_scale=scale,
+            kv_lora_rank=_RANK,
+            qk_rope_head_dim=_ROPE,
+        )
+        assert not torch.equal(out, dense_out)  # K/V quant actually applied
+        ref = mla_decode_reference(
+            q, latent, seq_t, scale, _RANK, k_mode=mode, v_mode=mode, num_kv_splits=32, block_n=32
+        )
+        torch.testing.assert_close(out.float(), ref, rtol=5e-3, atol=2e-2)
+
+    @requires_native_e4m3
+    def test_v_format_honored_independently(self):
+        """Decode V is quantized independently along the token axis — toggling
+        v_qdq must change the output (the quantized-BMM contract), and it must
+        differ from the K-only quantization of the same latent."""
+        seq_lens = [96]
+        q, _, cache, block_table, seq_t = _make_decode_inputs(seq_lens, seed=7)
+        scale = _DIM**-0.5
+        common = {
+            "softmax_scale": scale,
+            "kv_lora_rank": _RANK,
+            "qk_rope_head_dim": _ROPE,
+            "num_kv_splits": 32,
+        }
+        k_only, _ = mla_attention_decode(q, cache, block_table, seq_t, k_qdq="nvfp4", **common)
+        kv_both, _ = mla_attention_decode(
+            q, cache, block_table, seq_t, k_qdq="nvfp4", v_qdq="nvfp4", **common
+        )
+        # v_qdq has an independent effect (V is not merely inheriting k_qdq).
+        assert not torch.equal(k_only, kv_both)
+
+    @requires_native_e4m3
+    def test_full_qkpv_nvfp4_cosine(self):
+        """fp32-carrier Q + on-read K/V + fused P, all NVFP4, from a RAW cache."""
+        seq_lens = [96]
+        q, latent, cache, block_table, seq_t = _make_decode_inputs(
+            seq_lens, dtype=torch.bfloat16, seed=8
+        )
+        scale = _DIM**-0.5
+        q_carrier = nvfp4_fake_quant(q.float(), block_axis=-1)  # caller-side Q QDQ (fp32)
+        out, _ = mla_attention_decode(
+            q_carrier,
+            cache,
+            block_table,
+            seq_t,
+            softmax_scale=scale,
+            kv_lora_rank=_RANK,
+            qk_rope_head_dim=_ROPE,
+            k_qdq="nvfp4",
+            v_qdq="nvfp4",
+            p_qdq="nvfp4",
+        )
+        ref, _ = _dense_decode(q, latent, seq_t, scale)
+        assert torch.isfinite(out.float()).all()
+        assert _cos(out, ref) > 0.98
 
 
 class TestMLADecodeErrors:

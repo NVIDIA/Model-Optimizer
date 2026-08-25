@@ -16,23 +16,27 @@
 """ModelOpt MLA attention adapter for vLLM's TRITON_MLA backend.
 
 Same integration philosophy as the regular-attention adapter in
-``plugins/vllm.py``: the ``MLAAttention`` module stays intact (its module-level
-``kv_c``/``k_pe`` quantizers provide the write-once latent-cache QDQ before the
-native cache write), and only ``layer.impl`` is reclassed. vLLM keeps owning
-projections, RoPE, cache writes, metadata, chunked-context gathering, state
-merging, and the V up-projection:
+``plugins/vllm.py``: the ``MLAAttention`` module stays intact and only
+``layer.impl`` is reclassed. vLLM keeps owning projections, RoPE, cache writes,
+metadata, chunked-context gathering, state merging, and the V up-projection.
+
+Quantized-BMM model (aligned with the MNI reference and the dense Q/K/P/V
+path): the latent cache stays RAW, and every BMM operand is fake-quantized
+once, in-kernel, along its own contraction axis. The module sets
+``_skip_module_kv_quant`` so the module-level ``kv_c``/``k_pe`` quantizers do
+not touch the cache.
 
 - ``forward_mha`` (all prefill) temporarily swaps the per-layer ModelOpt
   prefill backend into the prefill metadata and delegates to the inherited
   implementation, so the ``kv_b_proj`` projection and chunked-context plumbing
   are reused rather than forked. The backend routes the two attention calls
   (causal new tokens; non-causal context chunks with LSE) to
-  :func:`mla_prefill_attention` with fused Q/K/P/V QDQ and optional 2:4
-  score sparsity (prefill only).
+  :func:`mla_prefill_attention`, which quantizes the projected Q/K/P/V operands
+  once (from the bf16 latent) with optional 2:4 score sparsity (prefill only).
 - ``forward_mqa`` (decode) fake-quantizes the absorbed query (FP32 QDQ
-  carrier) and calls :func:`mla_attention_decode`, which fuses the P QDQ.
-  BMM1-K and BMM2-V both consume the write-once quantized latent cache as-is
-  (single stored representation; no on-read re-quantization).
+  carrier) and calls :func:`mla_attention_decode`, which reads the raw latent
+  and quantizes K (feature axis), V (token axis), and P independently in the
+  kernel — so decode honors ``k_format`` and ``v_format`` separately.
 """
 
 from dataclasses import dataclass
@@ -79,10 +83,13 @@ class _MLAQuantKw:
 def mla_quant_kw_from_layer(layer, *, query_in_kernel: bool) -> _MLAQuantKw:
     """Resolve the MLA kernels' quantization kwargs from the layer's quantizers.
 
-    ``kv_c``/``k_pe`` quantizers are module-level (write-once latent-cache QDQ)
-    and therefore never appear here. With ``query_in_kernel`` False (FP8 Q),
-    the module-level quantizer already QDQ'd the 192-d query, so neither
-    kernel applies a Q transform.
+    Quantized-BMM model: the latent cache is RAW, and ``k_format``/``v_format``
+    (the ``k_mha``/``v_mha`` quantizers) drive the in-kernel operand quant for
+    BOTH prefill (projected K/V) and decode (on-read latent K feature-axis / V
+    token-axis). The module-level ``kv_c``/``k_pe`` quantizers do not quantize
+    the cache on this path (see ``_skip_module_kv_quant``). With
+    ``query_in_kernel`` False (FP8 Q), the module already QDQ'd the query, so
+    neither kernel applies a Q transform.
     """
     q_qdq, q_amax = attention_plugin._bmm_qdq_from_layer(layer, "q_bmm_quantizer", None)
     k_qdq, k_amax = attention_plugin._bmm_qdq_from_layer(layer, "k_mha_bmm_quantizer", None)
@@ -99,7 +106,14 @@ def mla_quant_kw_from_layer(layer, *, query_in_kernel: bool) -> _MLAQuantKw:
             "v_quant": v_qdq,
             "v_amax": v_amax,
         },
-        decode={"p_qdq": p_qdq, "p_qdq_amax": p_amax},
+        decode={
+            "p_qdq": p_qdq,
+            "p_qdq_amax": p_amax,
+            "k_qdq": k_qdq,
+            "k_qdq_amax": k_amax,
+            "v_qdq": v_qdq,
+            "v_qdq_amax": v_amax,
+        },
     )
 
 
@@ -196,29 +210,10 @@ class ModelOptMLAImpl(TritonMLAImpl):
     quant_kw: _MLAQuantKw
     sparse_kw: dict[str, Any]
 
-    def do_kv_cache_update(self, kv_c_normed, k_pe, *args, **kwargs):
-        """Write-once latent QDQ, applied here (cache write) not in the module.
-
-        vLLM calls this before ``forward_impl`` and passes ``forward_impl`` the
-        same latent tensors. Quantizing here — **out of place**, so the caller's
-        tensors stay bf16 — writes a quantized cache (read by decode) while the
-        prefill ``kv_b_proj`` projection still consumes bf16 latent. That makes
-        the prefill K/V operands single-quant (quantized once in the prefill
-        kernel) instead of double-quant. Quantizer refs are stashed by the
-        installer; absent/disabled quantizers pass through unchanged.
-
-        Note: cached-context prefill chunks gather from this quantized cache and
-        re-quantize the projected operands, so they remain double-quant — that
-        is inherent to reading a stored quantized latent and is not addressed
-        here.
-        """
-        kv_q = getattr(self, "_kv_c_quantizer", None)
-        kpe_q = getattr(self, "_k_pe_quantizer", None)
-        if kv_q is not None and getattr(kv_q, "is_enabled", False):
-            kv_c_normed = kv_q(kv_c_normed)
-        if kpe_q is not None and getattr(kpe_q, "is_enabled", False):
-            k_pe = kpe_q(k_pe)
-        return super().do_kv_cache_update(kv_c_normed, k_pe, *args, **kwargs)
+    # do_kv_cache_update is intentionally NOT overridden: the latent cache stays
+    # RAW (bf16). Decode quantizes K/V on read and prefill quantizes the
+    # projected operands in-kernel — the quantized-BMM model — so nothing
+    # quantizes the stored latent.
 
     def _get_prefill_backend(self, prefill_metadata) -> _ModelOptMLAPrefillBackend:
         backend = self.__dict__.get("_modelopt_prefill_backend")
@@ -277,7 +272,13 @@ class ModelOptMLAImpl(TritonMLAImpl):
     def forward_mqa(self, q, kv_c_and_k_pe_cache, attn_metadata, layer):
         """Run absorbed-MLA decode through the ModelOpt split-K kernel."""
         query_in_kernel = getattr(layer, "_query_quant_in_kernel", False)
-        if self.quant_kw.decode["p_qdq"] is None and not query_in_kernel:
+        dec = self.quant_kw.decode
+        if (
+            dec["p_qdq"] is None
+            and dec["k_qdq"] is None
+            and dec["v_qdq"] is None
+            and not query_in_kernel
+        ):
             return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
