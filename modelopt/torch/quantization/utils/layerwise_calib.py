@@ -52,24 +52,19 @@ class _EarlyStopForwardError(Exception):
 
 
 def _is_kv_cache(obj: Any) -> bool:
-    """Duck-typed ``transformers.Cache``, so a core util need not import transformers."""
+    """Duck-typed ``transformers.Cache``, avoiding a transformers import here.
+
+    Matched by shape, not name: the keyword is ``past_key_values`` on HF-native layers
+    but ``past_key_value`` on older remote-code ones (Kimi-K2), and may be positional.
+    """
     return hasattr(obj, "update") and hasattr(obj, "get_seq_length")
 
 
 def _with_empty_kv_cache(args: tuple, kwargs_input: dict) -> tuple[tuple, dict]:
-    """Drop the attention cache from a captured layer input.
+    """Strip the attention cache, so a replay cannot attend over its own earlier writes.
 
-    Layer inputs are replayed many times -- by ``calib_func``, once per calibration pass,
-    and by the ``run`` branch below -- so a retained cache would let a layer attend over
-    the keys and values its own earlier replay wrote. Cleared where inputs enter stored
-    state (capture, and restore from a checkpoint), so every consumer can trust it.
-
-    Matched by shape rather than by name: the cache reaches a layer as ``past_key_values``
-    on HF-native models but as ``past_key_value`` on remote-code models written against
-    older transformers (Kimi-K2, for one), and a custom parent may pass it positionally.
-
-    Not ``Cache.reset()``: that zeroes the key/value tensors but keeps them at full
-    length, leaving the replay attending over an all-zero cache instead of none.
+    Not ``Cache.reset()``: it zeroes the keys and values but keeps them at full length,
+    so the replay attends over an all-zero cache instead of none.
     """
     return (
         tuple(None if _is_kv_cache(a) else a for a in args),
@@ -461,8 +456,7 @@ class LayerActivationCollector:
             for i in range(start_layer):
                 self._swap_to_dummy(i)
             layer = self._decoder_layers[start_layer]
-            # Second entry point into stored inputs, and the only one not fed by capture:
-            # a checkpoint written before the cache was cleared still carries a live one.
+            # Not fed by capture: an older checkpoint can still carry a live cache.
             resumed_inputs = [_with_empty_kv_cache(a, kw) for a, kw in resumed_inputs]
             layer._layerwise_calib.collected_inputs = resumed_inputs
             layer._layerwise_calib.mode = "original"

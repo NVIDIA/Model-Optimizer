@@ -838,15 +838,11 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
 
 
 def test_layerwise_replay_does_not_attend_over_its_own_kv_cache():
-    """A layer replayed during calibration must not see the keys and values its
-    own earlier run wrote.
+    """Same equivalence as above, on a model that actually has a KV cache.
 
-    The equivalence test above uses a model with no attention cache, so it cannot
-    reach this: only the captured ``past_key_values`` makes a replay stateful.
-    With the cache left in place, ``o_proj`` saw an all-zero attention output on
-    every layer but the last (the one with no preceding capture pass) and its
-    input amax collapsed to exactly 0.0, while ``down_proj`` picked up a
-    plausible but wrong value from the residual alone.
+    The toy model used above has none, so it cannot go stale -- which is why a
+    replay attending over its own writes shipped, collapsing ``o_proj``'s input
+    amax to 0.0 on every layer but the last.
     """
     calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
 
@@ -1087,11 +1083,11 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
 
 
 def test_capture_stores_no_kv_cache():
-    """Captured layer inputs must carry no cache, so every replay of them is independent.
+    """Captured inputs must carry no cache.
 
-    Pins the clear at its call site. The equivalence test above cannot: an unsanitized
-    cache merely *accumulates* across replays, which max-calibration's max reduction
-    absorbs on a small model, so amaxes can still match while the invariant is broken.
+    Asserted structurally because the amax comparison cannot see it: a retained cache
+    only accumulates across replays, and max calibration's max absorbs that on a small
+    model, so amaxes match while the invariant is broken.
     """
     model = get_tiny_llama(num_hidden_layers=3).eval()
     collector = LayerActivationCollector(model)
@@ -1116,10 +1112,9 @@ def test_capture_stores_no_kv_cache():
 def test_with_empty_kv_cache_matches_by_shape_not_by_name():
     """The cache must be cleared however it reaches the layer.
 
-    HF-native layers take it as ``past_key_values``, but remote-code models written
-    against older transformers use ``past_key_value`` (Kimi-K2 -- see
-    ``modelopt/torch/speculative/utils.py``), and a custom parent may pass it
-    positionally. Name-matching only the plural form would silently no-op on those.
+    Kimi-K2's remote code passes it as ``past_key_value`` (see
+    ``modelopt/torch/speculative/utils.py``), so matching only the plural keyword
+    would silently no-op on a model layerwise calibration exists for.
     """
     cache = DynamicCache()
     hidden = torch.randn(1, 4)
