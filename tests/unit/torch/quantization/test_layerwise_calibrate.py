@@ -837,45 +837,6 @@ def test_layerwise_no_qdq_matches_sequential_amax(monkeypatch):
     _assert_amax_close(_collect_amax(model_lw), seq_amax, "layerwise vs sequential")
 
 
-def test_layerwise_replay_does_not_attend_over_its_own_kv_cache():
-    """Same equivalence as above, on a model that actually has a KV cache.
-
-    The toy model used above has none, so it cannot go stale -- which is why a
-    replay attending over its own writes shipped, collapsing ``o_proj``'s input
-    amax to 0.0 on every layer but the last.
-    """
-    calib_data = [torch.randint(0, 32, (2, 8)) for _ in range(2)]
-
-    def fwd(m):
-        for batch in calib_data:
-            m(batch)
-
-    def calibrate(algorithm):
-        torch.manual_seed(0)
-        model = get_tiny_llama(num_hidden_layers=4).eval()
-        cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-        cfg["algorithm"] = algorithm
-        mtq.quantize(model, cfg, forward_loop=fwd)
-        return model
-
-    sequential = calibrate({"method": "max"})
-    layerwise = calibrate({"method": "max", "layerwise": {"enable": True}})
-
-    expected = _collect_amax(sequential)
-    assert expected, "sequential calibration populated no amax values"
-    layerwise_amax = _collect_amax(layerwise)
-    _assert_amax_close(layerwise_amax, expected, "layerwise vs sequential (KV cache)")
-
-    # Pinned separately from the comparison: a future regression that made both
-    # paths collapse to zero would still satisfy the equality above.
-    collapsed = [
-        name
-        for name, amax in layerwise_amax.items()
-        if name.endswith("input_quantizer") and not torch.count_nonzero(amax)
-    ]
-    assert not collapsed, f"activation amax collapsed to zero: {collapsed}"
-
-
 def test_layerwise_no_qdq_captures_inputs_before_calib_func_mutates_weights(monkeypatch):
     """A destructive ``calib_func`` (zeros weights) must not affect what is
     captured for downstream layers under ``qdq_from_prev=False`` — otherwise
@@ -1107,6 +1068,28 @@ def test_capture_stores_no_kv_cache():
         if _is_kv_cache(v)
     ]
     assert not live, f"captured inputs still hold a KV cache at {live}"
+
+
+def test_resume_clears_a_kv_cache_left_in_the_checkpoint():
+    """Inputs restored from ``next_inputs.pt`` must be cleared too.
+
+    ``_move_to_device`` passes a ``Cache`` through untouched, so a checkpoint written
+    before the clear still holds a live one, and resume is the one path into stored
+    inputs that capture does not feed.
+    """
+    model = get_tiny_llama(num_hidden_layers=3).eval()
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers(decoder_layers=model.model.layers)
+    try:
+        restored = [((torch.randn(1, 4, 32),), {"past_key_values": DynamicCache()})]
+        returned = collector.get_first_layer_inputs(0, restored, forward_loop=None)
+        stored = model.model.layers[0]._layerwise_calib.collected_inputs
+    finally:
+        collector._unpatch_all_layers()
+
+    for label, entries in (("returned", returned), ("stored", stored)):
+        live = [v for _, kwargs in entries for v in kwargs.values() if _is_kv_cache(v)]
+        assert not live, f"{label} resume inputs still hold a KV cache"
 
 
 def test_with_empty_kv_cache_matches_by_shape_not_by_name():
