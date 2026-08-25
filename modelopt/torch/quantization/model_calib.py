@@ -34,7 +34,6 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
-    _with_empty_kv_cache,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
@@ -2126,7 +2125,7 @@ def layerwise_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
-                    m(*args, **_with_empty_kv_cache(kwargs_input))
+                    m(*args, **kwargs_input)
 
             is_last = layer_idx + 1 >= num_layers
 
