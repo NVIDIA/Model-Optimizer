@@ -967,17 +967,21 @@ def _test_data_parallel_moe_score_module(rank, size):
     assert isinstance(model.layers[0].mlp._hparams_for_scoring, list)
 
     recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
-    local_score = sum(
-        hparam._importance_dict[recipe][score_module].item()
-        for score_module in hparam.score_modules
-    )
+    local_score = sum(hparam._importance_dict[recipe][m] for m in hparam.score_modules)
     candidate = next(
         candidate
         for candidate in search_history["candidate_stats"].values()
         if "layers.0.mlp.experts.0.gate_proj" in candidate["module_names"]
     )
     recipe_idx = candidate["formats"].index(recipe)
-    assert candidate["scores"][recipe_idx] == pytest.approx(local_score * size)
+    torch.testing.assert_close(
+        local_score * size,
+        torch.tensor(
+            candidate["scores"][recipe_idx],
+            device=local_score.device,
+            dtype=local_score.dtype,
+        ),
+    )
 
     scores = {
         name: candidate["scores"] for name, candidate in search_history["candidate_stats"].items()
