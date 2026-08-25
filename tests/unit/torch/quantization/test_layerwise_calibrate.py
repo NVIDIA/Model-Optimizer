@@ -23,11 +23,17 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama
+from transformers.cache_utils import DynamicCache
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector, _SkipLayer
+from modelopt.torch.quantization.utils.layerwise_calib import (
+    LayerActivationCollector,
+    _is_kv_cache,
+    _SkipLayer,
+    _with_empty_kv_cache,
+)
 
 
 class _DecoderBlock(nn.Module):
@@ -1078,6 +1084,59 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
 
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
+
+
+def test_capture_stores_no_kv_cache():
+    """Captured layer inputs must carry no cache, so every replay of them is independent.
+
+    Pins the clear at its call site. The equivalence test above cannot: an unsanitized
+    cache merely *accumulates* across replays, which max-calibration's max reduction
+    absorbs on a small model, so amaxes can still match while the invariant is broken.
+    """
+    model = get_tiny_llama(num_hidden_layers=3).eval()
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers(decoder_layers=model.model.layers)
+    try:
+        captured = collector.get_input_activations(
+            model.model.layers[0], lambda m: m(torch.randint(0, 32, (2, 8)))
+        )
+    finally:
+        collector._unpatch_all_layers()
+
+    assert captured, "nothing was captured"
+    live = [
+        k
+        for args, kwargs in captured
+        for k, v in [*enumerate(args), *kwargs.items()]
+        if _is_kv_cache(v)
+    ]
+    assert not live, f"captured inputs still hold a KV cache at {live}"
+
+
+def test_with_empty_kv_cache_matches_by_shape_not_by_name():
+    """The cache must be cleared however it reaches the layer.
+
+    HF-native layers take it as ``past_key_values``, but remote-code models written
+    against older transformers use ``past_key_value`` (Kimi-K2 -- see
+    ``modelopt/torch/speculative/utils.py``), and a custom parent may pass it
+    positionally. Name-matching only the plural form would silently no-op on those.
+    """
+    cache = DynamicCache()
+    hidden = torch.randn(1, 4)
+
+    for args, kwargs in (
+        ((), {"past_key_values": cache}),
+        ((), {"past_key_value": cache}),
+        ((hidden, cache), {}),
+    ):
+        out_args, out_kwargs = _with_empty_kv_cache(args, kwargs)
+        assert not any(_is_kv_cache(a) for a in out_args)
+        assert not any(_is_kv_cache(v) for v in out_kwargs.values())
+
+    # Non-cache values pass through untouched.
+    out_args, out_kwargs = _with_empty_kv_cache((hidden,), {"attention_mask": None})
+    assert out_args[0] is hidden
+    assert out_kwargs == {"attention_mask": None}
 
 
 def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
