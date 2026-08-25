@@ -1821,7 +1821,8 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
         """Sanitize the search config dict."""
         config = config or {}
         if "score_func" in config:
-            warnings.warn("`score_func` is ignored for gradient based `auto_quantize`.")
+            if config["score_func"] is not None:
+                warnings.warn("`score_func` is ignored for gradient based `auto_quantize`.")
             config.pop("score_func")
         config = super().sanitize_search_config(config)
         if config["forward_backward_step"] is None:
