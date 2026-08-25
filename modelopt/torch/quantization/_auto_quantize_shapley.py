@@ -183,7 +183,12 @@ class _AumannShapleyScoringSession(_AutoQuantizeCandidateReplayScoringSession):
         shifted = base + self.path_position * diff_total
         if torch.is_grad_enabled() and shifted.requires_grad:
             self._register_candidate_score_hook(module, shifted, output_diffs)
-        return (shifted, *output[1:]) if isinstance(output, tuple) else shifted
+        if not isinstance(output, tuple):
+            return shifted
+        if hasattr(output, "_fields"):
+            # Keep namedtuple attributes that downstream modules may access.
+            return output._replace(**{output._fields[0]: shifted})
+        return (shifted, *output[1:])
 
     def _score_contribution(self, grad_output, output_diff):
         return (grad_output.float() * output_diff.float()).sum() / self.num_path_nodes
@@ -276,12 +281,12 @@ def _anchor_ceiling(as_by_key, f_corner, corner_mask_by_key, max_inflation=10.0)
         raise ValueError("corner damage and attributions must be finite")
     f_corner = max(float(f_corner), 1e-12)
     c = f_corner
-    # The exit conditions bound this well below the cap; the cap is a backstop only.
-    for _ in range(1 + math.ceil(math.log(max_inflation) / math.log(1.3))):
+    max_ceiling = max_inflation * f_corner
+    while True:
         inversions = {k: _as_seed_coverage(v, c=c) for k, v in as_by_key.items()}
-        if all(conv for _a, _b, conv in inversions.values()) or c > max_inflation * f_corner:
+        if all(conv for _a, _b, conv in inversions.values()) or c >= max_ceiling:
             break
-        c *= 1.3
+        c = min(c * 1.3, max_ceiling)
     converged = all(conv for _a, _b, conv in inversions.values())
     b_by_key = {k: inv[1] for k, inv in inversions.items()}
 
