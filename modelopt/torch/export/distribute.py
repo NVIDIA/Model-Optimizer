@@ -727,7 +727,6 @@ def _write_even_shards(
     written with ``safetensors.save_file``. Must run AFTER the reverse conversion -- the reverse
     renames keys and splits tensors, so the sizes and names bin-packed here have to be the final ones.
     """
-    import gc
     import json
     import math
 
@@ -770,7 +769,6 @@ def _write_even_shards(
             del local_sd[k]
         my_bytes += sum(_nbytes(t) for t in tensors.values())
         del tensors
-    gc.collect()
 
     # One collective, not two: at this point each rank has already finished writing, so the latency
     # of these round trips is pure overhead on the critical path.
@@ -821,7 +819,6 @@ def _distributed_save_hf_checkpoint_impl(
     those into the final ``model-XXXXX-of-NNNNN.safetensors`` with the output files partitioned across
     ranks (parallel); rank 0 writes only the index. No rank ever holds the full model in host RAM.
     """
-    import gc
     import shutil
 
     import torch.distributed as dist
@@ -978,8 +975,11 @@ def _distributed_save_hf_checkpoint_impl(
         dense_sd, maxbound, kv_cache_format, is_modelopt_qlora, tied_map=tied_map
     )
     local_sd.update(dense_sd)
+    # No explicit gc.collect() here: the del drops the last references and CPython frees acyclic
+    # objects immediately. Collecting a ~900-entry DTensor state dict measured 0.89s of the 0.89s
+    # this phase used to cost -- and because it ran at different speeds per rank, the next
+    # collective absorbed the skew and looked like gather cost.
     del sharded_sd, dense_sd
-    gc.collect()
 
     _tock("dense_postprocess", _t)
 
