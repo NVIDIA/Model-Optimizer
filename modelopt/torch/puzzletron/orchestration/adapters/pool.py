@@ -258,7 +258,7 @@ class PersistentPoolAdapter(WorkAdapter):
     ) -> AttemptSpec:
         repo = Path(runner.contract.repository)
         role = item.metadata.get("role", "worker")
-        log_dir = plan.puzzle_dir / "logs"
+        log_dir = plan.log_dir
         replacement_puzzle_dir = (
             _replacement_puzzle_dir(plan, item.metadata.get("width"))
             if node.stage_id == "replacement_scoring"

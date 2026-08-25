@@ -979,6 +979,67 @@ def test_guided_infrastructure_prompts_for_unresolved_worker_paths(tmp_path):
     assert backend.remaining == 0
 
 
+def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    resolver = DefaultsResolver(
+        file_defaults={
+            "infrastructure": {
+                "runner": {"slurm": {"partition": ["gpu-a", "gpu-b"]}},
+            }
+        }
+    )
+
+    class PartitionDefaultBackend(ScriptedBackend):
+        partition_default = None
+
+        def text(self, message: str, default: str) -> str:
+            if message.startswith("Eligible Slurm partitions"):
+                self.partition_default = default
+                return default
+            return super().text(message, default)
+
+    backend = PartitionDefaultBackend(
+        [
+            "customize",
+            "/worker/modelopt",
+            "/worker/venv",
+            "",
+            "",
+            "acct",
+            "4:00:00",
+            "8",
+            "",
+        ]
+    )
+
+    assert infrastructure_section(
+        WizardSession(state, backend),
+        resolver,
+        {},
+    )
+
+    assert backend.partition_default == "gpu-a,gpu-b"
+    assert state.get_field("infrastructure.runner.slurm.partition") == "gpu-a,gpu-b"
+    assert backend.remaining == 0
+
+
+def test_resume_preserves_legacy_partition_fields(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    legacy = {
+        "partition_batch": "batch",
+        "partition_interactive": "interactive",
+        "partition_cpu": "cpu",
+        "interactive_max_nodes": 2,
+    }
+    for field, value in legacy.items():
+        state.set_field(f"infrastructure.runner.slurm.{field}", value, source="user")
+
+    resumed = WizardState.resume(state.path)
+
+    for field, value in legacy.items():
+        assert resumed.get_field(f"infrastructure.runner.slurm.{field}") == value
+
+
 def test_full_section_keeps_the_existing_customize_prompt(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     backend = ScriptedBackend(["customize"])

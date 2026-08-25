@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -52,7 +52,8 @@ from .hf_datasets import (
 from .parallel_validation import validate_automodel_parallelism, validate_vllm_parallelism
 from .post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
 from .presets import QUICK_SETUP_PRESETS, get_setup_preset
-from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
+from .prompts import BACK as _BACK
+from .prompts import InteractiveBackend, PromptBackend, PromptChoice
 from .resources import (
     ParallelProfile,
     ResourceProfileRegistry,
@@ -82,6 +83,8 @@ from .wizard_common import _section_action as _section_action
 from .wizard_common import _text_field as _text_field
 from .wizard_common import _vllm_granularity_choices as _vllm_granularity_choices
 
+BACK: Any = _BACK
+
 __all__ = ["SECTION_BUILDERS", "run_wizard_v2"]
 
 _CUSTOM_MODEL_SOURCE = "__custom_model_source__"
@@ -94,6 +97,18 @@ _PUZZLE_KD_ADAPTER = "puzzle_kd_v2"
 _CREATE_SERVING_WORKLOAD = "/create-new-serving-workload"
 _NEMOTRON_VLM_ADAPTER = "nemotron_vlm_v2"
 _NEMOTRON_VLM_DEFAULT_SUBSETS = ("sparsetables", "plotqa_cot", "wiki_en")
+
+
+def _render_partition_default(value: Any) -> str:
+    """Render a scalar-or-list partition default for the text prompt."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Sequence):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
 
 SUPPORTED_MODEL_GROUPS = (
     (
@@ -564,6 +579,7 @@ def data_section(
         if selection is BACK:
             return False
         catalog, selected_subsets, weights = selection
+        assert selected_subsets is not None
         by_name = {item.name: item for item in catalog.subsets}
         subset_selection = {
             "source": catalog.source,
@@ -686,9 +702,7 @@ def infrastructure_section(
         ("infrastructure.execution_contract.container_mounts", None),
         ("infrastructure.runner.kind", "slurm"),
         ("infrastructure.runner.slurm.account", ""),
-        ("infrastructure.runner.slurm.partition_interactive", "interactive"),
-        ("infrastructure.runner.slurm.partition_batch", "batch"),
-        ("infrastructure.runner.slurm.partition_cpu", None),
+        ("infrastructure.runner.slurm.partition", None),
         ("infrastructure.runner.slurm.time_limit", "4:00:00"),
         ("infrastructure.runner.slurm.qos", None),
         ("infrastructure.runner.slurm.max_nodes", 64),
@@ -781,12 +795,10 @@ def infrastructure_section(
         ),
         ("infrastructure.runner.slurm.account", "Slurm account:", ""),
         (
-            "infrastructure.runner.slurm.partition_interactive",
-            "Interactive partition:",
-            "interactive",
+            "infrastructure.runner.slurm.partition",
+            "Eligible Slurm partitions (comma-separated; blank for site default):",
+            "",
         ),
-        ("infrastructure.runner.slurm.partition_batch", "Batch partition:", "batch"),
-        ("infrastructure.runner.slurm.partition_cpu", "CPU partition:", ""),
         ("infrastructure.runner.slurm.time_limit", "Default time limit:", "4:00:00"),
     ):
         value = _text_field(
@@ -796,6 +808,11 @@ def infrastructure_section(
             label,
             fallback,
             validate=validate_worker_path if path in worker_path_fields else None,
+            render_default=(
+                _render_partition_default
+                if path == "infrastructure.runner.slurm.partition"
+                else None
+            ),
         )
         if value is BACK:
             return False
@@ -1512,6 +1529,21 @@ def _axis_selection_validation(
     return True
 
 
+def _axis_selection_validator(
+    axis: Any,
+    *,
+    require_reduced: bool,
+) -> Callable[[Any], bool | str]:
+    def validate(raw_values: Any) -> bool | str:
+        return _axis_selection_validation(
+            axis,
+            raw_values,
+            require_reduced=require_reduced,
+        )
+
+    return validate
+
+
 def width_axes_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     pruning = _pruning_payload(session.state)
     inventory = context["model"].inventory
@@ -1564,12 +1596,9 @@ def width_axes_section(session: WizardSession, resolver: DefaultsResolver, conte
                 f"Values for {axis.label}:",
                 [(str(value), value) for value in axis.values],
                 defaults=selected,
-                validate=lambda values, axis=axis, require_reduced=require_reduced: (
-                    _axis_selection_validation(
-                        axis,
-                        values,
-                        require_reduced=require_reduced,
-                    )
+                validate=_axis_selection_validator(
+                    axis,
+                    require_reduced=require_reduced,
                 ),
             )
             if selected is BACK:
@@ -4033,15 +4062,13 @@ def _configure_dynamic_resources(
     )
     resources = _mapping_copy(session.state.collection("stage_resources"))
     gpus_per_node = int(session.state.get_field("infrastructure.gpus_per_node", 8))
-    cpu_partition = session.state.get_field("infrastructure.runner.slurm.partition_cpu", None)
     for node_id, node in tuple(editor.flow(flow_id).nodes.items()):
         stage_id = f"post.{flow_id}.{node_id}"
         if node.node_type in {"filter", "manual_filter", "materialize"}:
             resources[stage_id] = {
                 "strategy": "single",
                 "instances": 1,
-                "resource": "cpu" if cpu_partition else "gpu",
-                "partition": cpu_partition,
+                "resource": "cpu",
                 "gpus_per_node": gpus_per_node,
             }
             continue
@@ -4385,12 +4412,7 @@ def output_review_section(
                 "venv": session.state.get_field("infrastructure.execution_contract.venv"),
                 "container": session.state.get_field("infrastructure.execution_contract.container"),
                 "slurm_account": session.state.get_field("infrastructure.runner.slurm.account"),
-                "interactive_partition": session.state.get_field(
-                    "infrastructure.runner.slurm.partition_interactive"
-                ),
-                "batch_partition": session.state.get_field(
-                    "infrastructure.runner.slurm.partition_batch"
-                ),
+                "partition": session.state.get_field("infrastructure.runner.slurm.partition"),
                 "gpus_per_node": session.state.get_field("infrastructure.gpus_per_node"),
             },
             "results": session.state.get_field("output.result_root"),

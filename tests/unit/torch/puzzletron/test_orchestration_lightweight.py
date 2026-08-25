@@ -235,7 +235,7 @@ quoted: \"1e-4\"
 """
     )
 
-    config = load_experiment_config(experiment, overrides=["+threshold=1e-4"])
+    config = load_experiment_config(experiment, overrides=["++threshold=1e-4"])
 
     assert config["bypass"]["best_val_loss"] == 1e9
     assert config["bypass"]["training"] == {
@@ -274,19 +274,136 @@ def test_load_experiment_config_distinguishes_hydra_addition_modes(
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text("value: 1\n")
 
-    added = load_experiment_config(experiment, overrides=["+added.value=2"])
-    with pytest.raises(ValueError, match="^Addition override already exists"):
-        load_experiment_config(experiment, overrides=["+value=2"])
-    with pytest.raises(ValueError, match="^Override key does not exist"):
-        load_experiment_config(experiment, overrides=["missing=2"])
-    with pytest.raises(ValueError, match="^Override path does not exist"):
-        load_experiment_config(experiment, overrides=["missing.value=2"])
+    added = load_experiment_config(experiment, overrides=["added.value=2"])
     replaced = load_experiment_config(experiment, overrides=["++value=2"])
     created = load_experiment_config(experiment, overrides=["++created.value=3"])
 
     assert added["added"] == {"value": 2}
     assert replaced["value"] == 2
     assert created["created"] == {"value": 3}
+
+
+@pytest.mark.parametrize("override", ["+experiment.dir=other", "~experiment.dir"])
+def test_load_experiment_config_rejects_unsupported_hydra_operators(
+    tmp_path: Path,
+    override: str,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("experiment:\n  dir: run\n")
+
+    with pytest.raises(ValueError, match="not supported by the dependency-light controller"):
+        load_experiment_config(experiment, overrides=[override])
+
+
+def test_load_experiment_config_rejects_unknown_interpolation(tmp_path: Path) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("experiment:\n  dir: ${missing.value}\n")
+
+    with pytest.raises(ValueError, match="Unknown config interpolation 'missing.value'"):
+        load_experiment_config(experiment)
+
+
+def test_orchestrator_cli_reports_config_errors_without_traceback(tmp_path: Path) -> None:
+    runner = tmp_path / "runner.yaml"
+    runner.write_text(
+        yaml.safe_dump(
+            {
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {"account": "test", "partition_name": "gpu"},
+                }
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/puzzletron/orchestrate.py",
+            "--experiment",
+            str(tmp_path / "experiment.yaml"),
+            "--runner",
+            str(runner),
+            "--execution",
+            str(tmp_path / "execution.yaml"),
+            "--dry-run",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "cannot build campaign plan" in result.stderr
+    assert "partition" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_orchestrator_cli_reports_dry_run_adapter_errors_without_traceback(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    runner = tmp_path / "runner.yaml"
+    execution = tmp_path / "execution.yaml"
+    experiment.write_text(
+        yaml.safe_dump(
+            {
+                "experiment": {"dir": str(tmp_path / "run")},
+                "embedding_pruning": {"enabled": True, "widths": []},
+                "replacement_scoring": {"enabled": True},
+            }
+        )
+    )
+    runner.write_text(
+        yaml.safe_dump(
+            {
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {"account": "test", "partition": "gpu"},
+                }
+            }
+        )
+    )
+    execution.write_text(
+        yaml.safe_dump(
+            {
+                "execution": {
+                    "defaults": {"gpus_per_node": 1},
+                    "stages": {
+                        "replacement_scoring": {
+                            "strategy": "persistent_pool",
+                            "instances": 1,
+                        }
+                    },
+                }
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/puzzletron/orchestrate.py",
+            "--experiment",
+            str(experiment),
+            "--runner",
+            str(runner),
+            "--execution",
+            str(execution),
+            "--stage",
+            "replacement_scoring",
+            "--dry-run",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "embedding replacement scoring requires at least one width" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_convert_completeness_requires_runtime_subblock_library(

@@ -17,12 +17,31 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Mapping
+from pathlib import Path
+from typing import Any, Mapping, cast
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+def normalize_slurm_partition(value: Any, *, path: str) -> str | None:
+    """Normalize one or more eligible Slurm partitions for ``--partition``."""
+
+    if value is None:
+        return None
+    values = value.split(",") if isinstance(value, str) else value
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise TypeError(f"{path} must be a partition name or a sequence of names")
+    if any(not isinstance(item, str) for item in values):
+        raise TypeError(f"{path} must contain only partition names")
+    partitions = [item.strip() for item in values]
+    if not partitions or any(not item for item in partitions):
+        raise ValueError(f"{path} must contain at least one non-empty partition name")
+    if any("," in item or any(character.isspace() for character in item) for item in partitions):
+        raise ValueError(f"{path} contains an invalid partition name")
+    if len(set(partitions)) != len(partitions):
+        raise ValueError(f"{path} contains duplicate partition names")
+    return ",".join(partitions)
 
 
 class ExecutionStrategy(str, Enum):
@@ -135,28 +154,46 @@ class SlurmRunnerConfig:
     """Slurm-specific runner facts."""
 
     account: str
-    partition: str = "batch"
-    partition_interactive: str | None = None
-    partition_batch: str | None = None
-    partition_cpu: str | None = None
+    partition: str | Sequence[str] | None = None
+    partition_interactive: str | Sequence[str] | None = None
+    partition_batch: str | Sequence[str] | None = None
+    partition_cpu: str | Sequence[str] | None = None
     interactive_max_nodes: int = 2
     max_nodes: int | None = None
     time_limit: str = "4:00:00"
     qos: str | None = None
     log_dir: str | None = None
 
-    def partition_for_nodes(self, nodes: int) -> str:
-        """Pick interactive for short/small jobs and batch otherwise."""
+    def __post_init__(self) -> None:
+        for field_name in (
+            "partition",
+            "partition_interactive",
+            "partition_batch",
+            "partition_cpu",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                normalize_slurm_partition(
+                    getattr(self, field_name), path=f"runner.slurm.{field_name}"
+                ),
+            )
+        if self.interactive_max_nodes <= 0:
+            raise ValueError("runner.slurm.interactive_max_nodes must be positive")
 
-        interactive = self.partition_interactive or (
-            self.partition if self.partition == "interactive" else None
-        )
-        batch = self.partition_batch or (
-            self.partition if self.partition != "interactive" else "batch"
-        )
+    def partition_for_nodes(self, nodes: int) -> str | None:
+        """Resolve the canonical partition or a deprecated role-based fallback."""
+
+        partition = cast("str | None", self.partition)
+        partition_interactive = cast("str | None", self.partition_interactive)
+        partition_batch = cast("str | None", self.partition_batch)
+        if self.partition_interactive is None and self.partition_batch is None:
+            return partition
+        interactive = partition_interactive or (partition if partition == "interactive" else None)
+        batch = partition_batch or (partition if partition != "interactive" else "batch")
         if interactive and nodes <= self.interactive_max_nodes:
             return interactive
-        return batch or self.partition
+        return batch or partition
 
 
 @dataclass(frozen=True)
@@ -184,7 +221,6 @@ class RunnerEnvironment:
     contract: ExecutionContract
     slurm: SlurmRunnerConfig | None = None
     baremetal: BareMetalRunnerConfig | None = None
-    defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -219,6 +255,15 @@ class CampaignPlan:
     stages: tuple[StagePlanNode, ...]
     contract_hash: str
     overrides: tuple[str, ...] = ()
+    final_report_partition: str | None = None
+
+    @property
+    def log_dir(self) -> Path:
+        """Return the configured shared log directory for every campaign attempt."""
+
+        if self.runner.slurm is not None and self.runner.slurm.log_dir:
+            return Path(self.runner.slurm.log_dir).expanduser()
+        return self.puzzle_dir / "logs"
 
 
 @dataclass(frozen=True)

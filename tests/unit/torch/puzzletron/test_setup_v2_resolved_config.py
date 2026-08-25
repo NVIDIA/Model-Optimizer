@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import shlex
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -87,8 +88,7 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "infrastructure.execution_contract.venv": ".venv",
         "infrastructure.runner.kind": "slurm",
         "infrastructure.runner.slurm.account": "account",
-        "infrastructure.runner.slurm.partition_batch": "batch",
-        "infrastructure.runner.slurm.partition_cpu": "cpu",
+        "infrastructure.runner.slurm.partition": "cluster-default",
         "infrastructure.gpus_per_node": 8,
         "output.result_root": "/results",
     }
@@ -190,7 +190,7 @@ def _campaign_state(tmp_path: Path) -> WizardState:
                 "automodel": {"parallel": {"tp": 99}},
             },
         },
-        "runner_overrides": {"runner": {"slurm": {"partition": "late-override"}}},
+        "runner_overrides": {"runner": {"slurm": {"partition": ["late-a", "late-b"]}}},
         "default_resolutions": {
             "pruning.depth_remove": {"value": 0, "source": "preset"},
             "mip.num_solutions": {"value": 8, "source": "defaults_file"},
@@ -370,8 +370,67 @@ def test_runner_compatibility_override_is_applied_to_resolved_runner(tmp_path: P
 
     runner = render_runner_v2(state, "production")
 
-    assert runner["runner"]["slurm"]["partition"] == "late-override"
+    assert runner["runner"]["slurm"]["partition"] == ["late-a", "late-b"]
     assert runner["runner"]["slurm"]["account"] == "account"
+
+
+def test_runner_compatibility_override_accepts_scalar_partition(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    state.set_collection(
+        "runner_overrides",
+        {
+            "runner": {
+                "slurm": {
+                    "partition": "cluster-c",
+                }
+            }
+        },
+    )
+
+    runner = render_runner_v2(state, "production")
+
+    assert runner["runner"]["slurm"]["partition"] == "cluster-c"
+
+
+def test_stage_resource_accepts_multiple_eligible_partitions(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    resources = deepcopy(state.collection("stage_resources"))
+    resources["width_importance"]["partition"] = ["gpu-a", "gpu-b"]
+    state.set_collection("stage_resources", resources)
+
+    execution = render_execution_v2(state, "production")
+
+    assert execution["execution"]["stages"]["width_importance"]["partition"] == "gpu-a,gpu-b"
+
+
+def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) -> None:
+    campaign_dir = tmp_path / "campaign with spaces"
+    repository = "/worker checkout"
+    readme = bundle_module._bundle_readme(campaign_dir, repository)
+
+    commands = [shlex.split(line) for line in readme.splitlines() if line.startswith("python ")]
+    orchestrator_commands = [
+        command for command in commands if command[1].endswith("/orchestrate.py")
+    ]
+    inspection_commands = [command for command in orchestrator_commands if "--dry-run" in command]
+    launch_commands = [command for command in orchestrator_commands if "--dry-run" not in command]
+
+    assert len(inspection_commands) == len(launch_commands) == 2
+    assert {command[command.index("--experiment") + 1] for command in orchestrator_commands} == {
+        str(campaign_dir / "smoke" / "experiment.yaml"),
+        str(campaign_dir / "production" / "experiment.yaml"),
+    }
+    assert all(
+        command[1] == f"{repository}/examples/puzzletron/orchestrate.py"
+        for command in orchestrator_commands
+    )
+    resume_command = next(command for command in commands if "--resume" in command)
+    assert resume_command == [
+        "python",
+        f"{repository}/examples/puzzletron/puzzletron_setup_v2.py",
+        "--resume",
+        str(campaign_dir),
+    ]
 
 
 def test_execution_uses_resolved_stage_resource_and_parallel_profile(tmp_path: Path) -> None:
@@ -391,8 +450,34 @@ def test_execution_uses_resolved_stage_resource_and_parallel_profile(tmp_path: P
             "ep": 1,
             "dp_shard": 1,
             "dp_replicate": 1,
-            "sequence_parallel": True,
         },
+    }
+
+
+def test_execution_strips_model_runtime_fields_from_inline_parallel_mesh(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    resources = deepcopy(state.collection("stage_resources"))
+    resources["width_importance"].pop("profile_name")
+    resources["width_importance"]["parallel"] = {
+        "tp": 2,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
+        "sequence_parallel": True,
+    }
+    state.set_collection("stage_resources", resources)
+
+    execution = render_execution_v2(state, "production")
+
+    assert execution["execution"]["stages"]["width_importance"]["parallel"] == {
+        "tp": 2,
+        "cp": 1,
+        "pp": 1,
+        "ep": 1,
+        "dp_shard": 1,
+        "dp_replicate": 1,
     }
 
 
@@ -510,7 +595,7 @@ def test_build_freezes_one_snapshot_before_rendering_both_budgets(
         assert "mutated" not in experiment
         assert execution["execution"]["stages"]["width_importance"]["instances"] == 1
         assert execution["execution"]["stages"]["width_importance"]["parallel"]["tp"] == 2
-        assert runner["runner"]["slurm"]["partition"] == "late-override"
+        assert runner["runner"]["slurm"]["partition"] == ["late-a", "late-b"]
     provenance = yaml.safe_load((state.campaign_dir / "resolved_defaults.yaml").read_text())
     assert provenance["stages.width_importance.batch"] == {
         "value": 4,

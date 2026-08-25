@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import asdict
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -40,16 +42,19 @@ from .schema import (
     ExecutionContract,
     ExecutionStrategy,
     FailurePolicy,
+    HaltPolicy,
     ParallelMeshOverride,
     RunnerEnvironment,
     SlurmRunnerConfig,
     StageExecutionSpec,
     StagePlanNode,
+    normalize_slurm_partition,
 )
 from .stages import (
     configured_parent_stage_ids,
     configured_stage_ids,
     distributed_stage_ids,
+    stage_ids,
     topological_mapping_items,
 )
 from .vllm_measurements import normalize_vllm_measurements
@@ -64,6 +69,63 @@ __all__ = [
 
 _CONTROLLER_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_ARTIFACT_SETTLING_TIMEOUT_SECONDS = 300.0
+
+_RUNNER_FIELDS = {"kind", "execution_contract", "slurm", "inventory"}
+_EXECUTION_CONTRACT_FIELDS = {
+    "repository",
+    "venv",
+    "container",
+    "container_mounts",
+    "mounts",
+    "setup_env",
+    "prerun_commands",
+    "prerun",
+    "postrun_commands",
+    "postrun",
+}
+_SLURM_FIELDS = {
+    "account",
+    "partition",
+    "partition_interactive",
+    "partition_batch",
+    "partition_cpu",
+    "interactive_max_nodes",
+    "max_nodes",
+    "time_limit",
+    "qos",
+    "log_dir",
+}
+_INVENTORY_FIELDS = {"hosts", "rendezvous_host", "rendezvous_port_base"}
+_HOST_FIELDS = {"hostname", "gpus"}
+_EXECUTION_FIELDS = {"defaults", "stages"}
+_EXECUTION_DEFAULT_FIELDS = {
+    "artifact_settling_timeout_seconds",
+    "failure_policy",
+    "halt_policy",
+    "gpus_per_node",
+    "partition",
+    "resource",
+}
+_STAGE_EXECUTION_FIELDS = {
+    "strategy",
+    "instances",
+    "num_jobs",
+    "failure_policy",
+    "gpus_per_node",
+    "partition",
+    "resource",
+    "parallel",
+}
+_FINAL_REPORT_FIELDS = {"partition"}
+_PARALLEL_FIELDS = {
+    "tp",
+    "cp",
+    "pp",
+    "ep",
+    "dp",
+    "dp_shard",
+    "dp_replicate",
+}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -162,14 +224,14 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
                 )
             global_node_ids.add(str(node_id))
             node_type = str(node_value.get("type") or "")
-            metadata = _POST_MIP_NODE_METADATA.get(node_type)
-            if metadata is None:
+            node_metadata = _POST_MIP_NODE_METADATA.get(node_type)
+            if node_metadata is None:
                 raise ValueError(f"unknown post-MIP node type {node_type!r}")
-            if not metadata.get("implemented", True):
+            if not node_metadata.get("implemented", True):
                 raise NotImplementedError(
                     f"post-MIP node type {node_type!r} is declared but not implemented"
                 )
-            prepared_nodes[str(node_id)] = (dict(node_value), metadata)
+            prepared_nodes[str(node_id)] = (dict(node_value), dict(node_metadata))
 
         def dependency_ids(
             _node_id: str,
@@ -265,6 +327,121 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
     return tuple(compiled)
 
 
+def _required_mapping(value: Any, *, path: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{path} must be a mapping")
+    return dict(value)
+
+
+def _reject_unknown_fields(
+    payload: Mapping[str, Any],
+    allowed: set[str],
+    *,
+    path: str,
+) -> None:
+    for field in payload:
+        if not isinstance(field, str):
+            raise TypeError(f"{path} field names must be strings; got {field!r}")
+        if field in allowed:
+            continue
+        suggestion = get_close_matches(field, sorted(allowed), n=1)
+        suffix = f"; did you mean {suggestion[0]!r}?" if suggestion else ""
+        raise ValueError(f"Unknown config field {path}.{field}{suffix}")
+
+
+def _positive_int(value: Any, *, path: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{path} must be a positive integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value)
+    else:
+        raise TypeError(f"{path} must be a positive integer")
+    if parsed < 1:
+        raise ValueError(f"{path} must be at least 1")
+    return parsed
+
+
+def _command_sequence(value: Any, *, path: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if not isinstance(value, Sequence) or any(not isinstance(item, str) for item in value):
+        raise TypeError(f"{path} must be a string or a sequence of strings")
+    return tuple(value)
+
+
+def _validate_execution_payload(execution: Mapping[str, Any]) -> None:
+    _reject_unknown_fields(execution, _EXECUTION_FIELDS, path="execution")
+    defaults = _required_mapping(execution.get("defaults", {}), path="execution.defaults")
+    _reject_unknown_fields(defaults, _EXECUTION_DEFAULT_FIELDS, path="execution.defaults")
+    if "failure_policy" in defaults:
+        FailurePolicy(str(defaults["failure_policy"]))
+    if "halt_policy" in defaults:
+        HaltPolicy(str(defaults["halt_policy"]))
+    if "gpus_per_node" in defaults:
+        _positive_int(defaults["gpus_per_node"], path="execution.defaults.gpus_per_node")
+    if "partition" in defaults:
+        normalize_slurm_partition(defaults["partition"], path="execution.defaults.partition")
+    if "resource" in defaults and str(defaults["resource"]) not in {"cpu", "gpu"}:
+        raise ValueError("execution.defaults.resource must be 'cpu' or 'gpu'")
+
+    stages = _required_mapping(execution.get("stages", {}), path="execution.stages")
+    for stage_id, raw_stage in stages.items():
+        if not isinstance(stage_id, str) or not stage_id:
+            raise TypeError(f"execution.stages keys must be non-empty strings; got {stage_id!r}")
+        stage_path = f"execution.stages.{stage_id}"
+        stage = _required_mapping(raw_stage, path=stage_path)
+        allowed_fields = (
+            _FINAL_REPORT_FIELDS if stage_id == "final_report" else _STAGE_EXECUTION_FIELDS
+        )
+        _reject_unknown_fields(stage, allowed_fields, path=stage_path)
+        if stage_id == "final_report":
+            if "partition" in stage:
+                normalize_slurm_partition(stage["partition"], path=f"{stage_path}.partition")
+            continue
+        if "instances" in stage and "num_jobs" in stage:
+            raise ValueError(f"{stage_path} cannot set both instances and legacy num_jobs")
+        if "strategy" in stage:
+            ExecutionStrategy(str(stage["strategy"]))
+        if "failure_policy" in stage:
+            FailurePolicy(str(stage["failure_policy"]))
+        if "instances" in stage:
+            _positive_int(stage["instances"], path=f"{stage_path}.instances")
+        if "num_jobs" in stage:
+            _positive_int(stage["num_jobs"], path=f"{stage_path}.num_jobs")
+        if "gpus_per_node" in stage:
+            _positive_int(stage["gpus_per_node"], path=f"{stage_path}.gpus_per_node")
+        if "partition" in stage:
+            normalize_slurm_partition(stage["partition"], path=f"{stage_path}.partition")
+        if "resource" in stage and str(stage["resource"]) not in {"cpu", "gpu"}:
+            raise ValueError(f"{stage_path}.resource must be 'cpu' or 'gpu'")
+        if "parallel" in stage:
+            parallel = _required_mapping(stage["parallel"], path=f"{stage_path}.parallel")
+            if "sequence_parallel" in parallel:
+                raise ValueError(
+                    f"{stage_path}.parallel.sequence_parallel belongs in the experiment "
+                    "model-parallel profile; it does not affect scheduler allocation"
+                )
+            _reject_unknown_fields(parallel, _PARALLEL_FIELDS, path=f"{stage_path}.parallel")
+            if "dp" in parallel and "dp_replicate" in parallel:
+                raise ValueError(f"{stage_path}.parallel cannot set both dp and dp_replicate")
+            for field, value in parallel.items():
+                _positive_int(value, path=f"{stage_path}.parallel.{field}")
+
+
+def _validate_execution_stage_ids(
+    execution: Mapping[str, Any],
+    *,
+    dynamic_stage_ids: Sequence[str],
+) -> None:
+    stages = _required_mapping(execution.get("stages", {}), path="execution.stages")
+    allowed = {*stage_ids(), *dynamic_stage_ids, "final_report"}
+    _reject_unknown_fields(stages, allowed, path="execution.stages")
+
+
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     payload = yaml.safe_load(Path(path).read_text())
     if payload is None:
@@ -291,59 +468,109 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
     """Load a runner environment YAML file."""
 
     payload = _load_yaml(path)
-    runner = _mapping(payload.get("runner"))
+    _reject_unknown_fields(payload, {"runner"}, path="config")
+    runner = _required_mapping(payload.get("runner"), path="runner")
+    _reject_unknown_fields(runner, _RUNNER_FIELDS, path="runner")
     kind = str(runner.get("kind", "slurm"))
-    contract_payload = _mapping(runner.get("execution_contract"))
-    prerun = contract_payload.get("prerun_commands") or contract_payload.get("prerun") or ()
-    postrun = contract_payload.get("postrun_commands") or contract_payload.get("postrun") or ()
-    if isinstance(prerun, str):
-        prerun = (prerun,)
-    if isinstance(postrun, str):
-        postrun = (postrun,)
+    contract_payload = _required_mapping(
+        runner.get("execution_contract", {}), path="runner.execution_contract"
+    )
+    _reject_unknown_fields(
+        contract_payload,
+        _EXECUTION_CONTRACT_FIELDS,
+        path="runner.execution_contract",
+    )
+    for canonical, alias in (
+        ("container_mounts", "mounts"),
+        ("prerun_commands", "prerun"),
+        ("postrun_commands", "postrun"),
+    ):
+        if canonical in contract_payload and alias in contract_payload:
+            raise ValueError(
+                f"runner.execution_contract cannot set both {canonical} and legacy {alias}"
+            )
+    prerun = _command_sequence(
+        contract_payload.get("prerun_commands", contract_payload.get("prerun")),
+        path="runner.execution_contract.prerun_commands",
+    )
+    postrun = _command_sequence(
+        contract_payload.get("postrun_commands", contract_payload.get("postrun")),
+        path="runner.execution_contract.postrun_commands",
+    )
     contract = ExecutionContract(
         repository=str(contract_payload.get("repository", ".")),
         venv=str(contract_payload.get("venv", ".venv")),
         container=contract_payload.get("container"),
         container_mounts=contract_payload.get("container_mounts") or contract_payload.get("mounts"),
         setup_env=contract_payload.get("setup_env"),
-        prerun_commands=tuple(str(item) for item in prerun),
-        postrun_commands=tuple(str(item) for item in postrun),
+        prerun_commands=prerun,
+        postrun_commands=postrun,
     )
     slurm = None
     baremetal = None
     if kind == "slurm":
-        slurm_payload = _mapping(runner.get("slurm"))
+        if "inventory" in runner:
+            raise ValueError("runner.inventory is only valid when runner.kind is 'baremetal'")
+        slurm_payload = _required_mapping(runner.get("slurm", {}), path="runner.slurm")
+        _reject_unknown_fields(slurm_payload, _SLURM_FIELDS, path="runner.slurm")
+        max_nodes = (
+            _positive_int(slurm_payload["max_nodes"], path="runner.slurm.max_nodes")
+            if slurm_payload.get("max_nodes") is not None
+            else None
+        )
         slurm = SlurmRunnerConfig(
             account=str(slurm_payload.get("account", "")),
-            partition=str(
-                slurm_payload.get(
-                    "partition",
-                    slurm_payload.get("partition_batch", "batch"),
-                )
-            ),
+            partition=slurm_payload.get("partition"),
             partition_interactive=slurm_payload.get("partition_interactive"),
             partition_batch=slurm_payload.get("partition_batch"),
             partition_cpu=slurm_payload.get("partition_cpu"),
-            interactive_max_nodes=int(slurm_payload.get("interactive_max_nodes", 2)),
-            max_nodes=(
-                int(slurm_payload["max_nodes"])
-                if slurm_payload.get("max_nodes") is not None
-                else None
+            interactive_max_nodes=_positive_int(
+                slurm_payload.get("interactive_max_nodes", 2),
+                path="runner.slurm.interactive_max_nodes",
             ),
+            max_nodes=max_nodes,
             time_limit=str(slurm_payload.get("time_limit", "4:00:00")),
             qos=slurm_payload.get("qos"),
             log_dir=slurm_payload.get("log_dir"),
         )
     elif kind == "baremetal":
-        inventory = _mapping(runner.get("inventory"))
-        hosts = tuple(
-            BareMetalHost(hostname=str(item["hostname"]), gpus=int(item.get("gpus", 8)))
-            for item in inventory.get("hosts", [])
-        )
+        if "slurm" in runner:
+            raise ValueError("runner.slurm is only valid when runner.kind is 'slurm'")
+        inventory = _required_mapping(runner.get("inventory", {}), path="runner.inventory")
+        _reject_unknown_fields(inventory, _INVENTORY_FIELDS, path="runner.inventory")
+        raw_hosts = inventory.get("hosts", ())
+        if isinstance(raw_hosts, (str, bytes)) or not isinstance(raw_hosts, Sequence):
+            raise TypeError("runner.inventory.hosts must be a sequence of host mappings")
+        hosts_list = []
+        for index, raw_host in enumerate(raw_hosts):
+            host_path = f"runner.inventory.hosts[{index}]"
+            host = _required_mapping(raw_host, path=host_path)
+            _reject_unknown_fields(host, _HOST_FIELDS, path=host_path)
+            hostname = str(host.get("hostname", "")).strip()
+            if not hostname:
+                raise ValueError(f"{host_path}.hostname must be non-empty")
+            hosts_list.append(
+                BareMetalHost(
+                    hostname=hostname,
+                    gpus=_positive_int(host.get("gpus", 8), path=f"{host_path}.gpus"),
+                )
+            )
+        hosts = tuple(hosts_list)
+        if not hosts:
+            raise ValueError("runner.inventory.hosts must contain at least one host")
+        hostnames = [host.hostname for host in hosts]
+        if len(hostnames) != len(set(hostnames)):
+            raise ValueError("runner.inventory.hosts contains duplicate hostnames")
+        rendezvous_host = inventory.get("rendezvous_host")
+        if rendezvous_host is not None and str(rendezvous_host) not in hostnames:
+            raise ValueError("runner.inventory.rendezvous_host must name an inventory host")
         baremetal = BareMetalRunnerConfig(
             hosts=hosts,
-            rendezvous_host=inventory.get("rendezvous_host"),
-            rendezvous_port_base=int(inventory.get("rendezvous_port_base", 29500)),
+            rendezvous_host=str(rendezvous_host) if rendezvous_host is not None else None,
+            rendezvous_port_base=_positive_int(
+                inventory.get("rendezvous_port_base", 29500),
+                path="runner.inventory.rendezvous_port_base",
+            ),
         )
     else:
         raise ValueError(f"Unsupported runner kind: {kind}")
@@ -353,7 +580,6 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
         contract=contract,
         slurm=slurm,
         baremetal=baremetal,
-        defaults=_mapping(runner.get("defaults")),
     )
     updated_contract = with_contract_hash(environment)
     return RunnerEnvironment(
@@ -361,7 +587,6 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
         contract=updated_contract,
         slurm=environment.slurm,
         baremetal=environment.baremetal,
-        defaults=environment.defaults,
     )
 
 
@@ -369,7 +594,10 @@ def load_execution_config(path: str | Path) -> dict[str, Any]:
     """Load execution semantics YAML."""
 
     payload = _load_yaml(path)
-    return _mapping(payload.get("execution"))
+    _reject_unknown_fields(payload, {"execution"}, path="config")
+    execution = _required_mapping(payload.get("execution"), path="execution")
+    _validate_execution_payload(execution)
+    return execution
 
 
 def _resolve_artifact_settling_timeout_seconds(
@@ -434,7 +662,9 @@ def resolve_stage_execution_specs(
 
     defaults = _mapping(execution.get("defaults"))
     _resolve_artifact_settling_timeout_seconds(defaults)
-    default_gpus_per_node = int(defaults.get("gpus_per_node", 8))
+    default_gpus_per_node = _positive_int(
+        defaults.get("gpus_per_node", 8), path="execution.defaults.gpus_per_node"
+    )
     default_policy = FailurePolicy(str(defaults.get("failure_policy", FailurePolicy.STRICT.value)))
     stage_payload = _mapping(execution.get("stages"))
     dynamic_defaults = dict(dynamic_defaults or {})
@@ -450,12 +680,24 @@ def resolve_stage_execution_specs(
             )
         else:
             strategy = ExecutionStrategy(str(strategy_name))
-        instances = int(payload.get("instances", 1))
-        if strategy is ExecutionStrategy.SHARDED and instances == 1:
-            instances = int(payload.get("instances", payload.get("num_jobs", 1)))
+        instances = _positive_int(
+            payload.get("instances", payload.get("num_jobs", 1)),
+            path=f"execution.stages.{stage_id}.instances",
+        )
+        if strategy is ExecutionStrategy.SINGLE and instances != 1:
+            raise ValueError(
+                f"execution.stages.{stage_id}.instances must be 1 for strategy 'single'"
+            )
         policy = FailurePolicy(str(payload.get("failure_policy", default_policy.value)))
         gpus_per_node = payload.get("gpus_per_node", defaults.get("gpus_per_node"))
-        partition = payload.get("partition", defaults.get("partition"))
+        partition_path = (
+            f"execution.stages.{stage_id}.partition"
+            if "partition" in payload
+            else "execution.defaults.partition"
+        )
+        partition = normalize_slurm_partition(
+            payload.get("partition", defaults.get("partition")), path=partition_path
+        )
         resource = str(payload.get("resource", defaults.get("resource", "gpu")))
         if resource not in {"cpu", "gpu"}:
             raise ValueError(
@@ -464,13 +706,13 @@ def resolve_stage_execution_specs(
         resolved[stage_id] = StageExecutionSpec(
             stage_id=stage_id,
             strategy=strategy,
-            instances=max(1, instances),
+            instances=instances,
             failure_policy=policy,
             mesh_override=_parse_mesh_override(payload.get("parallel")),
             gpus_per_node=(
                 int(gpus_per_node) if gpus_per_node is not None else default_gpus_per_node
             ),
-            partition=str(partition) if partition is not None else None,
+            partition=partition,
             resource=resource,
         )
     return resolved
@@ -486,6 +728,7 @@ def compile_campaign_plan(
 ) -> CampaignPlan:
     """Compile one campaign plan from experiment + runner + execution configs."""
 
+    _validate_execution_payload(execution)
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
     puzzle_dir = Path(
@@ -494,6 +737,10 @@ def compile_campaign_plan(
         or "."
     )
     post_mip_stages = _post_mip_stage_metadata(experiment_config)
+    _validate_execution_stage_ids(
+        execution,
+        dynamic_stage_ids=tuple(row["stage_id"] for row in post_mip_stages),
+    )
     enabled = configured_stage_ids(
         experiment_config,
         dynamic_post_mip_stage_ids=(row["stage_id"] for row in post_mip_stages),
@@ -510,6 +757,19 @@ def compile_campaign_plan(
         enabled,
         dynamic_defaults=dynamic_execution_defaults,
     )
+    execution_defaults = _mapping(execution.get("defaults"))
+    final_report = _mapping(_mapping(execution.get("stages")).get("final_report"))
+    final_report_partition_path = (
+        "execution.stages.final_report.partition"
+        if "partition" in final_report
+        else "execution.defaults.partition"
+    )
+    final_report_partition = normalize_slurm_partition(
+        final_report.get("partition", execution_defaults.get("partition")),
+        path=final_report_partition_path,
+    )
+    if final_report_partition is None and runner.slurm is not None:
+        final_report_partition = runner.slurm.partition_cpu
     distributed = set(distributed_stage_ids())
     nodes: list[StagePlanNode] = []
     post_mip_by_stage = {row["stage_id"]: row for row in post_mip_stages}
@@ -619,10 +879,11 @@ def compile_campaign_plan(
         puzzle_dir=puzzle_dir,
         experiment_config=experiment_config,
         runner=runner,
-        execution_defaults=_mapping(execution.get("defaults")),
+        execution_defaults=execution_defaults,
         stages=tuple(nodes),
         contract_hash=contract_hash,
         overrides=tuple(overrides or ()),
+        final_report_partition=final_report_partition,
     )
 
 
@@ -636,6 +897,10 @@ def plan_to_dict(plan: CampaignPlan) -> dict[str, Any]:
         "overrides": list(plan.overrides),
         "runner_kind": plan.runner.kind,
         "execution_defaults": dict(plan.execution_defaults),
+        "final_report": {
+            "resource": "cpu",
+            "partition": plan.final_report_partition,
+        },
         "stages": [
             {
                 "stage_id": node.stage_id,

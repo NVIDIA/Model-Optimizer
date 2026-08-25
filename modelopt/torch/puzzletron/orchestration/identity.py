@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Execution-contract identity hashing for orchestration attempts."""
 
@@ -72,13 +84,9 @@ def mip_input_artifact_paths(
             {
                 f"width/{width}/stats": base / "subblock_stats.json",
                 f"width/{width}/scores": base / score_name,
-                f"width/{width}/canonical": base
-                / "single_sequence_replacement_solutions.json",
+                f"width/{width}/canonical": base / "single_sequence_replacement_solutions.json",
                 f"width/{width}/library": base / "replacement_library.json",
-                f"width/{width}/teacher_config": base
-                / "ckpts"
-                / "sorted_teacher"
-                / "config.json",
+                f"width/{width}/teacher_config": base / "ckpts" / "sorted_teacher" / "config.json",
                 f"width/{width}/teacher_index": base
                 / "ckpts"
                 / "sorted_teacher"
@@ -95,9 +103,7 @@ def artifact_snapshot_identity(paths: Mapping[str, str | Path]) -> str:
     for label, raw_path in sorted(paths.items()):
         path = Path(raw_path)
         members = (
-            sorted(item for item in path.rglob("*") if item.is_file())
-            if path.is_dir()
-            else [path]
+            sorted(item for item in path.rglob("*") if item.is_file()) if path.is_dir() else [path]
         )
         if not path.exists():
             rows.append({"label": label, "missing": True})
@@ -142,6 +148,7 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
             "max_nodes": runner.slurm.max_nodes,
             "time_limit": runner.slurm.time_limit,
             "qos": runner.slurm.qos,
+            "log_dir": runner.slurm.log_dir,
         }
     if runner.baremetal is not None:
         payload["baremetal"] = {

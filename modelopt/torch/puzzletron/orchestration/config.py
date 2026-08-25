@@ -25,6 +25,11 @@ from typing import Any, Mapping
 
 import yaml
 
+if __package__.startswith("puzzletron_orchestrator"):
+    from puzzletron_orchestrator._config_aliases import _validate_compatibility_aliases
+else:
+    from .._config_aliases import _validate_compatibility_aliases
+
 __all__ = ["load_experiment_config"]
 
 _INTERPOLATION = re.compile(r"\$\{([^${}]*)\}")
@@ -139,8 +144,8 @@ def _resolve_expression(expression: str, config: Mapping[str, Any]) -> Any:
         return {"__type__": expression.removeprefix("get_object:")}
     try:
         return deepcopy(_lookup(config, expression))
-    except KeyError:
-        return "${" + expression + "}"
+    except KeyError as error:
+        raise ValueError(f"Unknown config interpolation {expression!r}") from error
 
 
 def _resolve_string(value: str, config: Mapping[str, Any]) -> Any:
@@ -177,36 +182,36 @@ def _resolve(value: Any, config: Mapping[str, Any]) -> Any:
 
 def _apply_override(config: dict[str, Any], override: str) -> None:
     if override.startswith("~"):
-        raise ValueError(f"Deletion overrides are not supported: {override!r}")
+        raise ValueError(
+            f"Deletion overrides are not supported by the dependency-light controller: {override!r}"
+        )
     key, separator, raw_value = override.partition("=")
+    key = key.strip()
+    if key.startswith("~"):
+        raise ValueError(
+            f"Deletion overrides are not supported by the dependency-light controller: {override!r}"
+        )
     if not separator:
         raise ValueError(f"Override must have KEY=VALUE form: {override!r}")
-    addition_only = False
-    allow_missing = False
-    if key.startswith("++"):
-        key = key[2:]
-        allow_missing = True
-    elif key.startswith("+"):
-        key = key[1:]
-        addition_only = True
-        allow_missing = True
-    if not key or key.startswith(("+", "~")):
-        raise ValueError(f"Unsupported Hydra override form: {override!r}")
+    if key.startswith("+") and not key.startswith("++"):
+        raise ValueError(
+            "Single-plus Hydra overrides are not supported by the dependency-light "
+            f"controller; use KEY=VALUE or ++KEY=VALUE: {override!r}"
+        )
+    key = key.removeprefix("++")
     keys = key.split(".")
+    if (
+        not key
+        or any(not part for part in keys)
+        or any(part.startswith(("+", "~")) for part in keys)
+    ):
+        raise ValueError(f"Override has an invalid dotted key: {override!r}")
     target = config
     for part in keys[:-1]:
-        if part not in target:
-            if not allow_missing:
-                raise ValueError(f"Override path does not exist: {override!r}")
-            target[part] = {}
-        child = target[part]
+        child = target.setdefault(part, {})
         if not isinstance(child, dict):
             raise ValueError(f"Override path crosses a scalar: {override!r}")
         target = child
-    if addition_only and keys[-1] in target:
-        raise ValueError(f"Addition override already exists: {override!r}")
-    if not allow_missing and keys[-1] not in target:
-        raise ValueError(f"Override key does not exist: {override!r}")
     target[keys[-1]] = _load_yaml(raw_value)
 
 
@@ -234,6 +239,8 @@ def load_experiment_config(
         config = resolved
     else:
         raise ValueError(f"Config interpolation did not converge: {config_path}")
+
+    _validate_compatibility_aliases(config)
 
     config["_runtime"] = {
         "config_path": str(config_path),

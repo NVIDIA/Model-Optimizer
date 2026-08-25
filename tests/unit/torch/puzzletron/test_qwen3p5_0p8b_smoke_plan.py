@@ -151,7 +151,6 @@ def test_qwen3p5_0p8b_runner_requires_an_explicit_site_contract() -> None:
     assert runner.slurm.time_limit == "1:00:00"
     assert runner.slurm.account.startswith("REPLACE_WITH_")
     assert runner.slurm.partition.startswith("REPLACE_WITH_")
-    assert runner.slurm.partition_batch.startswith("REPLACE_WITH_")
     assert runner.contract.repository.startswith("REPLACE_WITH_")
     assert runner.contract.venv.startswith("REPLACE_WITH_")
     assert runner.contract.container is not None

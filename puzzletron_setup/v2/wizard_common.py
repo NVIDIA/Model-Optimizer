@@ -259,12 +259,16 @@ def _text_field(
     fallback: str = "",
     *,
     validate: Callable[[Any], bool | str] | None = None,
+    render_default: Callable[[Any], str] | None = None,
 ) -> Any:
     resolved = _resolved(session.state, resolver, path, fallback)
+    default = (
+        render_default(resolved.value) if render_default is not None else str(resolved.value or "")
+    )
     value = session.text(
         path,
         label,
-        default=str(resolved.value or ""),
+        default=default,
         validate=validate,
     )
     if value is not BACK:

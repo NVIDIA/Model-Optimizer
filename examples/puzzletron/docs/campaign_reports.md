@@ -1,10 +1,30 @@
 # Puzzletron Campaign Reports
 
-This page catalogs retained Puzzletron campaign reports and the status of their
-evidence. The compact [campaign report index](../reports/campaign_report_index.yaml)
+The orchestrator generates a cumulative HTML report after a campaign. Regenerate
+it without rerunning model work:
+
+```bash
+python examples/puzzletron/generate_campaign_progress_report.py \
+  --puzzle-dir /shared/puzzle_runs/my_campaign \
+  --model-name 'My model'
+```
+
+The output is
+`<puzzle-dir>/artifacts/campaign_report/campaign_report.html`. Section inputs
+and configuration fingerprints are cached under
+`<puzzle-dir>/artifacts/campaign_report/section_cache`. Use
+`--rebuild-section aiperf` to rebuild one section, or `--no-cache` to rebuild
+the whole report.
+
+This page also catalogs retained Puzzletron campaign reports and the status of
+their evidence. The compact [campaign report index](../reports/campaign_report_index.yaml)
 records each report's producer state, reproduction and support status, metadata
 origin, current-configuration relationship, and known limitations. Detailed
 run facts remain in the reports.
+
+Retained reports are self-contained HTML files and may be hundreds of MB.
+Download them and open them locally. Interpret their results together with the
+reproduction status and unresolved findings below.
 
 ## Report status
 

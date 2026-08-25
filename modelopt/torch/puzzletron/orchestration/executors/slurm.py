@@ -20,11 +20,11 @@ from __future__ import annotations
 import math
 import os
 import shlex
-import subprocess
 import time
 from pathlib import Path
 from typing import Sequence
 
+from ..process import ProcessResult, run_argv
 from ..schema import AttemptSpec, JobHandle, JobState, JobStatus, RunnerEnvironment
 from ..task_launcher import TASK_IDENTITY_ENV_KEYS
 from ..task_topology import resolve_task_topology
@@ -33,8 +33,8 @@ from .base import Executor
 __all__ = ["SlurmExecutor", "render_hook_lines", "render_sbatch_script"]
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(argv), capture_output=True, text=True, check=False)
+def _run_command(argv: Sequence[str]) -> ProcessResult:
+    return run_argv(argv)
 
 
 def _slurm_job_id(handle: JobHandle) -> str | None:
@@ -61,7 +61,7 @@ _CANCEL_POLL_ATTEMPTS = 60
 _CANCEL_POLL_SECONDS = 1.0
 
 
-def _is_transient_submit_error(result: subprocess.CompletedProcess[str]) -> bool:
+def _is_transient_submit_error(result: ProcessResult) -> bool:
     detail = f"{result.stderr}\n{result.stdout}".lower()
     return any(marker in detail for marker in _TRANSIENT_SUBMIT_ERRORS)
 
@@ -106,7 +106,7 @@ def render_sbatch_script(
     *,
     attempt: AttemptSpec,
     runner: RunnerEnvironment,
-    partition: str,
+    partition: str | None,
     account: str,
     time_limit: str,
     qos: str | None,
@@ -173,10 +173,11 @@ def render_sbatch_script(
     header_lines = [
         "#!/bin/bash",
         f"#SBATCH --job-name={job_name}",
-        f"#SBATCH --partition={partition}",
         f"#SBATCH --account={account}",
         f"#SBATCH --time={time_limit}",
     ]
+    if partition:
+        header_lines.insert(2, f"#SBATCH --partition={partition}")
     if qos:
         header_lines.append(f"#SBATCH --qos={qos}")
     header_lines.extend(
@@ -258,10 +259,13 @@ class SlurmExecutor(Executor):
 
     def submit(self, attempt: AttemptSpec) -> JobHandle:
         slurm = self.runner.slurm
-        assert slurm is not None
-        partition = str(
-            attempt.metadata.get("partition") or slurm.partition_for_nodes(attempt.allocation_nodes)
+        if slurm is None:
+            raise RuntimeError("Slurm executor lost its runner configuration")
+        partition = attempt.metadata.get("partition") or slurm.partition_for_nodes(
+            attempt.allocation_nodes
         )
+        if partition is not None:
+            partition = str(partition)
         job_name = f"pt-{attempt.stage_id[:18]}-{attempt.attempt_id[:8]}"
         script_path = self.scripts_dir / f"{attempt.stage_id}_{attempt.attempt_id}.sh"
         script_path.write_text(

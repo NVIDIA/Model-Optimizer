@@ -200,7 +200,7 @@ class CampaignController:
     ) -> None:
         self.plan = plan
         self.store = CampaignStateStore(plan.puzzle_dir)
-        (plan.puzzle_dir / "logs").mkdir(parents=True, exist_ok=True)
+        plan.log_dir.mkdir(parents=True, exist_ok=True)
         self.executor = executor or create_executor(plan, local=local)
         self.poll_interval_seconds = poll_interval_seconds
         self.logger = logger or OrchestratorLogger()

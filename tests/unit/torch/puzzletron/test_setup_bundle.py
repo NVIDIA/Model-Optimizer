@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
 import pytest
@@ -37,6 +34,36 @@ from puzzletron_setup.wizard import (
     _downstream_evaluation_metric_suggestions,
     _resource_rows,
 )
+
+
+def test_resume_preserves_legacy_partition_routing(tmp_path) -> None:
+    state = AnswerState.start(tmp_path / "campaign", detailed=False)
+    state.record_many(
+        "infrastructure",
+        {
+            "runner": {
+                "kind": "slurm",
+                "slurm": {
+                    "partition_interactive": "interactive",
+                    "partition_batch": "batch",
+                    "partition_cpu": "cpu",
+                    "interactive_max_nodes": 2,
+                },
+            },
+            "execution_contract": {"repository": "/repo", "venv": "/repo/.venv"},
+            "gpus_per_node": 8,
+            "workers": {"pool": 1, "sharded": 1},
+            "meshes": {"common": {}, "bypass": {}, "global_kd": {}},
+        },
+    )
+
+    resumed = AnswerState.resume(state.path)
+    runner = render_runner(resumed.payload, "production")
+    execution = render_execution(resumed.payload, {}, "production")
+
+    assert runner["runner"]["slurm"]["partition_interactive"] == "interactive"
+    assert runner["runner"]["slurm"]["partition_batch"] == "batch"
+    assert execution["execution"]["stages"]["convert"]["partition"] == "cpu"
 
 
 class _NormalMipPrompts:
@@ -114,7 +141,6 @@ def test_serving_parallel_treats_vllm_expert_parallelism_as_boolean_mode() -> No
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 4,
-        "sequence_parallel": False,
     }
 
     topology["expert_parallel_size"] = 4
@@ -460,7 +486,6 @@ def test_render_execution_uses_vllm_runtime_topology() -> None:
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 2,
-        "sequence_parallel": False,
     }
     assert execution["execution"]["stages"]["bypass"]["strategy"] == "single"
     assert execution["execution"]["stages"]["bypass"]["instances"] == 1
@@ -472,7 +497,6 @@ def test_render_execution_uses_vllm_runtime_topology() -> None:
             "ep": 1,
             "dp_shard": 1,
             "dp_replicate": 1,
-            "sequence_parallel": False,
         }
 
 
@@ -525,10 +549,7 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
 
     execution = render_execution(state, experiment, "production")["execution"]["stages"]
 
-    assert execution["post.run.eval"]["parallel"] == {
-        **common,
-        "sequence_parallel": False,
-    }
+    assert execution["post.run.eval"]["parallel"] == common
     assert execution["post.run.serve"]["parallel"] == {
         "tp": 2,
         "cp": 1,
@@ -536,7 +557,6 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 1,
-        "sequence_parallel": False,
     }
     assert execution["post.run.materialized"]["parallel"] == {
         "tp": 1,
@@ -545,7 +565,6 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 1,
-        "sequence_parallel": False,
     }
     assert execution["post.run.materialized"]["instances"] == 1
 
@@ -622,7 +641,6 @@ def test_render_execution_uses_vllm_mesh_for_post_mip_downstream_evaluation() ->
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 1,
-        "sequence_parallel": False,
     }
 
 
@@ -778,7 +796,7 @@ def test_render_execution_ignores_legacy_aiperf_worker_override() -> None:
     assert stages["post.run.serving"]["instances"] == 4
 
 
-def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
+def test_render_execution_marks_io_bound_stages_as_cpu_resources() -> None:
     state = {
         "answers": {
             "infrastructure": {
@@ -786,8 +804,7 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
                     "kind": "slurm",
                     "slurm": {
                         "account": "acct",
-                        "partition_batch": "batch",
-                        "partition_cpu": "cpu",
+                        "partition": ["cluster-a", "cluster-b"],
                     },
                 },
                 "execution_contract": {"repository": "/repo", "venv": "/repo/.venv"},
@@ -816,7 +833,7 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
     runner = render_runner(state, "production")
     stages = render_execution(state, experiment, "production")["execution"]["stages"]
 
-    assert runner["runner"]["slurm"]["partition_cpu"] == "cpu"
+    assert runner["runner"]["slurm"]["partition"] == ["cluster-a", "cluster-b"]
     for stage_id in (
         "convert",
         "tokenize_data",
@@ -826,7 +843,7 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
         "post.run.materialized",
     ):
         assert stages[stage_id]["resource"] == "cpu"
-        assert stages[stage_id]["partition"] == "cpu"
+        assert "partition" not in stages[stage_id]
         assert stages[stage_id]["instances"] == 1
     assert "resource" not in stages["sort"]
     assert "partition" not in stages["sort"]
@@ -838,14 +855,13 @@ def test_render_execution_uses_cpu_partition_for_io_bound_stages() -> None:
         "ep": 1,
         "dp_shard": 1,
         "dp_replicate": 1,
-        "sequence_parallel": False,
     }
     assert stages["post.run.eval"]["instances"] == 8
     assert stages["post.run.serving"]["instances"] == 8
     assert stages["post.run.short_kd"]["instances"] == 8
 
 
-def test_render_execution_falls_back_to_one_gpu_for_cpu_stages() -> None:
+def test_render_execution_uses_cpu_resources_without_partition_taxonomy() -> None:
     state = {
         "answers": {
             "infrastructure": {
@@ -853,8 +869,7 @@ def test_render_execution_falls_back_to_one_gpu_for_cpu_stages() -> None:
                     "kind": "slurm",
                     "slurm": {
                         "account": "acct",
-                        "partition_batch": "batch",
-                        "partition_cpu": None,
+                        "partition": None,
                     },
                 },
                 "gpus_per_node": 8,
@@ -877,8 +892,8 @@ def test_render_execution_falls_back_to_one_gpu_for_cpu_stages() -> None:
 
     stages = render_execution(state, experiment, "production")["execution"]["stages"]
 
-    assert stages["mip"].get("resource", "gpu") == "gpu"
-    assert stages["post.run.materialized"].get("resource", "gpu") == "gpu"
+    assert stages["mip"]["resource"] == "cpu"
+    assert stages["post.run.materialized"]["resource"] == "cpu"
     assert stages["post.run.materialized"]["instances"] == 1
 
 

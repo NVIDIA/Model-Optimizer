@@ -25,6 +25,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from puzzletron_orchestrator.schema import normalize_slurm_partition
 from puzzletron_setup import SetupError
 
 from .defaults import BUILTIN_DEFAULTS
@@ -591,7 +592,9 @@ def _stage_resource(stage_id: str, raw: Mapping[str, Any]) -> ResolvedStageResou
         instances=int(raw.get("instances", 1)),
         resource=str(raw.get("resource", "gpu")),
         gpus_per_node=(int(raw["gpus_per_node"]) if raw.get("gpus_per_node") is not None else None),
-        partition=(str(raw["partition"]) if raw.get("partition") else None),
+        partition=normalize_slurm_partition(
+            raw.get("partition"), path=f"stages.{stage_id}.partition"
+        ),
         profile_name=(str(raw["profile_name"]) if raw.get("profile_name") else None),
         parallel=_mapping(parallel) if isinstance(parallel, Mapping) else None,
         extra={key: value for key, value in raw.items() if key not in known},
@@ -638,12 +641,19 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
         runner_kind=str(effective("infrastructure.runner.kind")),
         slurm={
             "account": effective("infrastructure.runner.slurm.account"),
-            "partition_interactive": effective("infrastructure.runner.slurm.partition_interactive"),
-            "partition_batch": effective("infrastructure.runner.slurm.partition_batch"),
-            "partition_cpu": effective("infrastructure.runner.slurm.partition_cpu"),
+            "partition": effective("infrastructure.runner.slurm.partition"),
+            "partition_interactive": effective(
+                "infrastructure.runner.slurm.partition_interactive", None
+            ),
+            "partition_batch": effective("infrastructure.runner.slurm.partition_batch", None),
+            "partition_cpu": effective("infrastructure.runner.slurm.partition_cpu", None),
+            "interactive_max_nodes": effective(
+                "infrastructure.runner.slurm.interactive_max_nodes", 2
+            ),
             "time_limit": effective("infrastructure.runner.slurm.time_limit"),
             "qos": effective("infrastructure.runner.slurm.qos"),
             "max_nodes": effective("infrastructure.runner.slurm.max_nodes"),
+            "log_dir": effective("infrastructure.runner.slurm.log_dir", None),
         },
         execution_contract={
             "repository": effective("infrastructure.execution_contract.repository"),

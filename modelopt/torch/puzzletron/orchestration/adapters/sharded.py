@@ -1,17 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Sharded stage adapter for independent worker instances."""
 
 from __future__ import annotations
 
-import subprocess
 import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
 
 from ..executors.slurm import SlurmExecutor
+from ..process import run_argv
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -32,7 +44,7 @@ from .stage_compat import stage_is_complete, stage_output_patterns
 
 __all__ = ["ShardedStageAdapter"]
 
-_SHARDED_ENTRYPOINTS = {
+_SHARDED_ENTRYPOINTS: dict[str, tuple[str, list[str]]] = {
     "vllm_stats": ("examples/puzzletron/run_runtime_stats_shard.py", []),
     "zero_shot_evaluation": (
         "examples/puzzletron/run_profile_online_evaluation.py",
@@ -63,7 +75,8 @@ def _run_slurm_aggregate(
     if slurm is None:
         raise ValueError("Slurm aggregation requires runner.slurm")
     attempt_id = str(uuid.uuid4())
-    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    partition = node.partition or slurm.partition_cpu
+    log_path = plan.log_dir / f"{node.stage_id}_merge_{attempt_id}.log"
     attempt = AttemptSpec(
         attempt_id=attempt_id,
         work_id=f"{node.stage_id}:aggregate",
@@ -78,7 +91,7 @@ def _run_slurm_aggregate(
         contract_hash=plan.contract_hash,
         metadata={
             "gpus_per_node": 0,
-            "partition": slurm.partition_cpu or slurm.partition_for_nodes(1),
+            **({"partition": partition} if partition else {}),
         },
         task_topology=TaskTopology(task_count=1, gpus_per_task=0),
     )
@@ -207,7 +220,7 @@ class ShardedStageAdapter(WorkAdapter):
         overrides: list[str] | None = None,
     ) -> AttemptSpec:
         repo = Path(runner.contract.repository)
-        log_dir = plan.puzzle_dir / "logs"
+        log_dir = plan.log_dir
         logical_count = int(item.metadata.get("logical_shard_count", node.instances))
         script, extra_args = _SHARDED_ENTRYPOINTS.get(
             node.stage_id,
@@ -217,8 +230,7 @@ class ShardedStageAdapter(WorkAdapter):
         measurement_id = item.metadata.get("measurement_id")
         name_suffix = f"_{measurement_id}" if measurement_id else ""
         log_path = str(
-            log_dir
-            / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
+            log_dir / f"{node.stage_id}{name_suffix}_shard{item.shard_index}_{attempt_id}.log"
         )
         if node.stage_id == "aiperf":
             aiperf = plan.experiment_config.get("aiperf") or {}
@@ -353,12 +365,9 @@ class ShardedStageAdapter(WorkAdapter):
                     command=command,
                 )
             else:
-                result = subprocess.run(
+                result = run_argv(
                     command,
                     cwd=plan.runner.contract.repository,
-                    capture_output=True,
-                    text=True,
-                    check=False,
                 )
                 if result.returncode:
                     raise RuntimeError(

@@ -244,7 +244,7 @@ class PostMIPAdapter(WorkAdapter):
             )
         for override in overrides or ():
             argv.extend(["--override", override])
-        log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
+        log_path = plan.log_dir / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
         # evaluation/global_kd always call torch.distributed, so even 1-GPU
         # workers need torchrun to export RANK/WORLD_SIZE.
         distributed_worker = node_type in {"evaluation", "global_kd"}
