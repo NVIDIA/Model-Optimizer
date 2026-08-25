@@ -1019,7 +1019,7 @@ def test_score_hparam_registration_preserves_order():
 
 
 def test_gradient_scoring_tracks_reused_module_invocations():
-    """Each use of a shared score module must retain its own replay difference."""
+    """Each autograd use of a shared score module retains its own replay difference."""
     no_quant_recipe = QuantRecipe(quant_cfg=None)
     quant_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
 
@@ -1041,6 +1041,8 @@ def test_gradient_scoring_tracks_reused_module_invocations():
         def forward(self, x):
             first = self.shared(x)
             second = self.shared(3.0 * x)
+            # This use has no autograd edge and therefore no matching backward hook.
+            self.shared(5.0 * x.detach())
             return first.sum() + 2.0 * second.sum()
 
     model = ReusedScoreModule()
@@ -1054,7 +1056,13 @@ def test_gradient_scoring_tracks_reused_module_invocations():
         model(inputs).backward()
 
     # First use: sum(x**2) = 5. Second use: sum((2 * 3x)**2) = 180.
-    assert hparam._importance_dict[quant_recipe][score_module].item() == pytest.approx(185.0)
+    importance = hparam._importance_dict[quant_recipe][score_module]
+    torch.testing.assert_close(
+        importance,
+        torch.tensor(185.0, device=importance.device),
+        rtol=0,
+        atol=1e-6,
+    )
 
 
 def test_gradient_scoring_restores_model_after_failure():

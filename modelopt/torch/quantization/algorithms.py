@@ -1552,7 +1552,8 @@ class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
         output = self.original_forward(module)(*args, **kwargs)
 
         # Checkpointed modules recompute with gradients enabled during backward.
-        if not torch.is_grad_enabled():
+        base_output = output[0] if isinstance(output, tuple) else output
+        if not torch.is_grad_enabled() or not base_output.requires_grad:
             return output
 
         output_diffs = {hparam: {} for hparam in module._hparams_for_scoring}
