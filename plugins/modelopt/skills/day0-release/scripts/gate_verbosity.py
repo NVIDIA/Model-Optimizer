@@ -59,6 +59,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "failure_class": "USER_CONFIG_ERROR",
             "detail": f"no metrics harvested (baseline={len(baseline)}, candidate={len(candidate)})",
             "per_task": {},
+            "not_comparable": [],
             "max_abs_delta": None,
         }
 
@@ -89,8 +90,10 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
         b_mean, c_mean = statistics.mean(b), statistics.mean(c)
         delta = (c_mean - b_mean) / b_mean
         within = abs(delta) <= threshold
+        best = max(n for _, n in b_runs + c_runs)
         entry = {
             "status": "compared",
+            "sample_count": full,
             "baseline_tokens": round(b_mean, 1),
             "candidate_tokens": round(c_mean, 1),
             "delta": round(delta, 4),
@@ -98,6 +101,12 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "runs": [len(b), len(c)],
             "dropped_partial_runs": dropped,
         }
+        if full < best:
+            # Both sides truncated to the same n. Same bias applied twice, but it is not
+            # the matched-complete answer -- say so rather than implying a full comparison.
+            entry["truncated_comparison"] = (
+                f"compared at n={full}; a run at n={best} exists but not on both sides"
+            )
         if min(b_mean, c_mean) < _SHORT_OUTPUT_TOKENS:
             entry["short_output_warning"] = (
                 f"mean under {_SHORT_OUTPUT_TOKENS} tokens; ratio unstable, read absolute counts"
@@ -113,6 +122,9 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "failure_class": "VERBOSITY_EXCEEDED",
             "detail": f"tasks exceeding threshold ({threshold}): {exceeded}",
             "per_task": per_task,
+            "not_comparable": [
+                t for t, v in per_task.items() if v.get("status") == "not_comparable"
+            ],
             "max_abs_delta": round(worst, 4),
         }
     if not any(v.get("status") == "compared" for v in per_task.values()):
@@ -121,6 +133,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "failure_class": "SAMPLE_ACCOUNTING_FAILED",
             "detail": "no task had comparable runs on both sides",
             "per_task": per_task,
+            "not_comparable": sorted(per_task) if per_task else [],
             "max_abs_delta": None,
         }
     n_cmp = sum(1 for v in per_task.values() if v.get("status") == "compared")

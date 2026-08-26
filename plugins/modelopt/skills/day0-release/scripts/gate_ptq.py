@@ -16,7 +16,8 @@
 """Day-0 post-quantization checkpoint gate.
 
 Mirrors the required checks in ptq/references/checkpoint-validation.md:
-  1. Output smaller than source (size ratio < 1 for a compression recipe).
+  1. Output size vs source. Growth up to ``_INHERENT_GROWTH_MAX`` is a non-blocking
+     note (an already-4-bit source cannot shrink); beyond that it is a failure.
   2. Quantized-weight coverage matches the requested recipe (no intended layer
      group left unquantized).
   3. No unexpected metadata diffs vs the source.
@@ -58,14 +59,23 @@ _RECIPE_EXPECTED_PRECISION = {
 }
 
 
+# Largest source->output growth an already-4-bit source can explain. NVFP4 over MXFP4
+# keeps the E2M1 nibbles but swaps an E8M0 scale per 32 elements for an E4M3 per 16, so
+# scale bytes double; published checkpoints land near 1.06x. Beyond this, suspect a real
+# problem rather than an inherent one.
+_INHERENT_GROWTH_MAX = 1.10
+
+
 def evaluate_checkpoint(summary):
     """Validate an exported quantized checkpoint summary.
 
-    Returns dict ``{pass, failure_class, detail, checks}``.
+    Returns dict ``{pass, failure_class, detail, checks, notes}``, where ``notes``
+    holds non-blocking observations and is present on every path.
     """
     if not summary:
         return {
             "pass": False,
+            "notes": [],
             "failure_class": "USER_CONFIG_ERROR",
             "detail": "empty validation summary",
             "checks": {},
@@ -88,8 +98,17 @@ def evaluate_checkpoint(summary):
     else:
         ratio = out / src
         checks["size"] = f"{out}/{src} = {ratio:.3f}x"
-        if ratio >= 1.0:
-            # Warning, not a failure. Growth can be inherent: a source whose weights are
+        if ratio > _INHERENT_GROWTH_MAX:
+            # Too large to be the already-4-bit effect; treat as a real problem.
+            failures.append(
+                (
+                    "SIZE_NOT_REDUCED",
+                    f"output {ratio:.3f}x source, beyond the {_INHERENT_GROWTH_MAX}x that an "
+                    "already-4-bit source can explain",
+                )
+            )
+        elif ratio >= 1.0:
+            # Small growth only. Can be inherent: a source whose weights are
             # already 4-bit (e.g. MXFP4 experts) cannot shrink under NVFP4 -- same E2M1
             # nibbles, but an E4M3 scale per 16 elements replaces an E8M0 per 32, so scale
             # bytes double. Published NVFP4 checkpoints exist that are ~1.06x their source.

@@ -61,11 +61,13 @@ When the amax dumped here is later consumed by ``quantize_to_nvfp4.py
 --cast_mxfp4_to_nvfp4``, the expert weights are a lossless bit-cast, so the
 activation amax (``input_scale``) is the only calibrated quantity that survives:
 
-  * ``--calib_seq`` matters more than ``--calib_size``: it raises the tokenizer
-    truncation cap, so long documents survive intact instead of being cut at the
-    512 default. It is a *cap*, not a target -- rows shorter than it are not
-    extended, and ``calibrate_loop`` passes only ``input_ids``, so padding tokens
-    do participate in calibration.
+  * ``--calib_seq`` sets the tokenizer truncation cap, which decides how much of a
+    long document survives. Raising it is **not** free on this path: the whole
+    corpus is tokenized in one ``padding=True`` call, so every row is padded to
+    the longest surviving sample, and ``calibrate_loop`` passes only ``input_ids``
+    -- so those pad tokens participate in calibration. Choose it from the context
+    length the activations must cover, and re-validate rather than assuming
+    higher is better.
 
   * ModelOpt's ``mse_calibrate`` has no effect on this path — it tunes weight
     quantizers only, and the MXFP4->NVFP4 cast overwrites ``weight_scale``
@@ -466,8 +468,9 @@ def main():
         type=int,
         default=512,
         help=(
-            "calibration sequence truncation cap (max_sample_length). Documents longer than this "
-            "are truncated, so a short value cannot cover long-context activation ranges."
+            "calibration sequence truncation cap (max_sample_length). Longer documents are "
+            "truncated to this; because the corpus is tokenized in one padded call, shorter "
+            "ones are padded up to it. Re-validate when changing it."
         ),
     )
     p.add_argument(

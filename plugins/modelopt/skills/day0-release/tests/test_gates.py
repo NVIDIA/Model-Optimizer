@@ -21,6 +21,7 @@ decision functions that the gates rest on. Run with:
     python -m pytest "$SKILL_DIR/tests/test_gates.py"
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
 from gate_run import evaluate_run
-from gate_verbosity import evaluate_verbosity
+from gate_verbosity import evaluate_verbosity, harvest
 
 # ── gate_compare ──────────────────────────────────────────────────────
 
@@ -338,6 +339,52 @@ def test_verbosity_not_comparable_is_surfaced_not_masked():
     )
     assert r["pass"] and r["not_comparable"] == ["skip"]
     assert "NOT MEASURED" in r["detail"]
+
+
+def test_verbosity_reports_the_sample_count_compared():
+    """A reader must be able to tell n=294 from n=200."""
+    r = evaluate_verbosity({"t": [(1000.0, 294)]}, {"t": [(1010.0, 294)]})
+    assert r["per_task"]["t"]["sample_count"] == 294
+    assert "truncated_comparison" not in r["per_task"]["t"]
+
+
+def test_verbosity_flags_a_truncated_comparison():
+    """Comparing at a shared-but-smaller n is not the matched-complete answer."""
+    r = evaluate_verbosity({"t": [(1000.0, 294), (1000.0, 200)]}, {"t": [(1010.0, 200)]})
+    t = r["per_task"]["t"]
+    assert t["sample_count"] == 200 and "n=294" in t["truncated_comparison"]
+
+
+def test_verbosity_schema_is_uniform_across_paths():
+    """Callers read not_comparable on every verdict, including failures."""
+    for r in (
+        evaluate_verbosity({"t": [(1000.0, 10)]}, {"t": [(1500.0, 10)]}),  # fail
+        evaluate_verbosity({"t": [(1000.0, 10)]}, {"t": [(1000.0, 10)]}),  # pass
+        evaluate_verbosity({}, {}),  # config error
+    ):
+        assert "not_comparable" in r and "max_abs_delta" in r
+
+
+def test_ptq_schema_has_notes_on_every_path():
+    assert "notes" in evaluate_checkpoint({})
+    assert "notes" in evaluate_checkpoint(_ckpt())
+
+
+def test_ptq_large_growth_is_still_a_failure():
+    """A note covers the already-4-bit case, not an arbitrarily oversized output."""
+    r = evaluate_checkpoint(_ckpt(source_bytes=10_000_000_000, output_bytes=20_000_000_000))
+    assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
+
+
+def test_harvest_keys_by_task_not_harness(tmp_path):
+    """Regression: the old parser collapsed every task under a harness into one key."""
+    for name in ("simple_evals.gpqa_diamond", "simple_evals.aime.1", "ifbench"):
+        d = tmp_path / "eval_run" / "inv123" / name / "artifacts"
+        d.mkdir(parents=True)
+        (d / "eval_factory_metrics.json").write_text(
+            json.dumps({"response_stats": {"avg_completion_tokens": 100.0, "successful_count": 10}})
+        )
+    assert set(harvest(str(tmp_path))) == {"gpqa_diamond", "aime", "ifbench"}
 
 
 if __name__ == "__main__":

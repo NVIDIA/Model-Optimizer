@@ -266,9 +266,10 @@ Map a gate's `failure_class` to the next action:
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
 | `UNKNOWN` | Investigate with the owning domain skill; if unresolved, return `ANOMALOUS` with the evidence and next automated retry or patch action. |
 
-`gate_ptq.py` also emits non-blocking `notes`. `SIZE_NOT_REDUCED` is one: a source whose
-weights are already 4-bit cannot shrink, and the release criteria measure reduction against
-BF16, not the source checkpoint. Confirm coverage passed and judge on that denominator.
+`gate_ptq.py` also emits non-blocking `notes` (present on every result). Small size growth is
+one: a source whose weights are already 4-bit cannot shrink, and the release criteria measure
+reduction against BF16, not the source checkpoint. Growth beyond what that explains is still a
+`SIZE_NOT_REDUCED` **failure** — confirm coverage passed and judge on the BF16 denominator.
 
 `SYSTEMIC` (cluster down, dataset unavailable) aborts the whole run.
 `POINT_INFEASIBLE` means this (model, recipe) can't work as configured.
