@@ -16,8 +16,8 @@
 """Day-0 post-quantization checkpoint gate.
 
 Mirrors the required checks in ptq/references/checkpoint-validation.md:
-  1. Output size vs source. Growth up to ``_INHERENT_GROWTH_MAX`` is a non-blocking
-     note (an already-4-bit source cannot shrink); beyond that it is a failure.
+  1. Output smaller than source. Growth blocks unless the summary declares an
+     already-sub-8-bit source, which cannot shrink further under a 4-bit recipe.
   2. Quantized-weight coverage matches the requested recipe (no intended layer
      group left unquantized).
   3. No unexpected metadata diffs vs the source.
@@ -65,6 +65,10 @@ _RECIPE_EXPECTED_PRECISION = {
 # problem rather than an inherent one.
 _INHERENT_GROWTH_MAX = 1.10
 
+# Source precisions that cannot shrink further under a 4-bit recipe. Growth is only
+# excused when the summary declares one of these (or sets accept_size_growth).
+_SUB8_SOURCE_PRECISIONS = ("mxfp4", "nvfp4", "fp4", "int4", "w4a16", "awq", "4bit")
+
 
 def evaluate_checkpoint(summary):
     """Validate an exported quantized checkpoint summary.
@@ -84,6 +88,10 @@ def evaluate_checkpoint(summary):
     src = summary.get("source_bytes")
     out = summary.get("output_bytes")
     recipe = (summary.get("recipe") or "").lower()
+    source_precision = str(summary.get("source_precision") or "").lower()
+    already_sub8 = bool(summary.get("accept_size_growth")) or any(
+        p in source_precision for p in _SUB8_SOURCE_PRECISIONS
+    )
     counts = summary.get("layer_precision_counts") or {}
     metadata_diffs = summary.get("metadata_diffs") or []
 
@@ -98,26 +106,26 @@ def evaluate_checkpoint(summary):
     else:
         ratio = out / src
         checks["size"] = f"{out}/{src} = {ratio:.3f}x"
-        if ratio > _INHERENT_GROWTH_MAX:
-            # Too large to be the already-4-bit effect; treat as a real problem.
-            failures.append(
-                (
-                    "SIZE_NOT_REDUCED",
-                    f"output {ratio:.3f}x source, beyond the {_INHERENT_GROWTH_MAX}x that an "
-                    "already-4-bit source can explain",
+        if ratio >= 1.0:
+            # Blocking by default (ptq/references/checkpoint-validation.md: a ratio >= 1.0 for
+            # a compression recipe blocks "unless the user explicitly accepts the explanation").
+            # The one explanation we can check is an already-sub-8-bit source: NVFP4 over MXFP4
+            # keeps the E2M1 nibbles but swaps an E8M0 scale per 32 for an E4M3 per 16, so scale
+            # bytes double and the output cannot shrink. Downgrade to a note ONLY when the
+            # summary states that, and only within the growth it explains -- otherwise a
+            # BF16 source that never actually compressed would pass.
+            if already_sub8 and ratio <= _INHERENT_GROWTH_MAX:
+                notes.append(
+                    f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth is inherent for the declared "
+                    f"{source_precision!r} source; judge reduction against BF16"
                 )
-            )
-        elif ratio >= 1.0:
-            # Small growth only. Can be inherent: a source whose weights are
-            # already 4-bit (e.g. MXFP4 experts) cannot shrink under NVFP4 -- same E2M1
-            # nibbles, but an E4M3 scale per 16 elements replaces an E8M0 per 32, so scale
-            # bytes double. Published NVFP4 checkpoints exist that are ~1.06x their source.
-            # Release criteria measure reduction vs BF16, not vs the source checkpoint, so
-            # blocking here would stop a valid release with no defined path forward.
-            notes.append(
-                f"SIZE_NOT_REDUCED: output not smaller than source (ratio {ratio:.3f}); "
-                "confirm coverage passed and judge against the BF16 denominator"
-            )
+            else:
+                why = (
+                    f"beyond the {_INHERENT_GROWTH_MAX}x an already-4-bit source explains"
+                    if already_sub8
+                    else "source precision not declared sub-8-bit, so growth is not explained"
+                )
+                failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
 
     # Check 2 — coverage.
     expected_bucket = _RECIPE_EXPECTED_PRECISION.get(recipe)

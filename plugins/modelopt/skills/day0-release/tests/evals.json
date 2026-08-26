@@ -49,7 +49,7 @@
     "files": [],
     "expected_behavior": [
       "Runs gate_ptq.py on the exported checkpoint before evaluating",
-      "Treats zero quantized-layer coverage as a gate failure, and a size ratio at or above 1.0 as a non-blocking note unless the growth exceeds what an already-4-bit source explains",
+      "Treats zero quantized-layer coverage and a size ratio at or above 1.0 as gate failures, waiving the size failure only when the summary declares an already-sub-8-bit source that cannot compress further",
       "Does not evaluate a checkpoint that failed the PTQ gate",
       "Branches on the failure_class (e.g. MODEL_UNSUPPORTED or QUANT_COVERAGE_FAILURE) rather than silently continuing"
     ]

@@ -187,11 +187,17 @@ def test_ptq_pass():
     assert evaluate_checkpoint(_ckpt())["pass"]
 
 
-def test_ptq_not_smaller_is_a_note_not_a_failure():
-    """An already-4-bit source cannot shrink; warn without blocking the release."""
+def test_ptq_growth_blocks_when_source_precision_is_undeclared():
+    """Default is blocking: for a BF16 source, 'not smaller' is the failure this catches."""
     r = evaluate_checkpoint(_ckpt(output_bytes=16_000_000_000))
+    assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
+
+
+def test_ptq_growth_waived_only_for_a_declared_sub8_source():
+    """An already-4-bit source cannot shrink; waive it, but only on that declaration."""
+    r = evaluate_checkpoint(_ckpt(output_bytes=16_000_000_000, source_precision="mxfp4"))
     assert r["pass"]
-    assert any("SIZE_NOT_REDUCED" in n for n in r["notes"])
+    assert any("SIZE_NOT_REDUCED waived" in n for n in r["notes"])
 
 
 def test_ptq_coverage_failure_outranks_size():
@@ -292,7 +298,7 @@ def test_verbosity_partial_runs_dropped():
         {"ifbench": [(5674.0, 294)]},
     )
     task = r["per_task"]["ifbench"]
-    assert task["baseline_tokens"] == 5630.2 and task["dropped_partial_runs"] == 1
+    assert task["baseline_tokens"] == 5630.2 and task["dropped_mismatched_runs"] == 1
     assert r["pass"]
 
 
@@ -370,9 +376,15 @@ def test_ptq_schema_has_notes_on_every_path():
     assert "notes" in evaluate_checkpoint(_ckpt())
 
 
-def test_ptq_large_growth_is_still_a_failure():
-    """A note covers the already-4-bit case, not an arbitrarily oversized output."""
-    r = evaluate_checkpoint(_ckpt(source_bytes=10_000_000_000, output_bytes=20_000_000_000))
+def test_ptq_large_growth_fails_even_for_a_declared_sub8_source():
+    """The waiver covers inherent growth, not an arbitrarily oversized output."""
+    r = evaluate_checkpoint(
+        _ckpt(
+            source_bytes=10_000_000_000,
+            output_bytes=20_000_000_000,
+            source_precision="mxfp4",
+        )
+    )
     assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
 
 
@@ -384,7 +396,37 @@ def test_harvest_keys_by_task_not_harness(tmp_path):
         (d / "eval_factory_metrics.json").write_text(
             json.dumps({"response_stats": {"avg_completion_tokens": 100.0, "successful_count": 10}})
         )
-    assert set(harvest(str(tmp_path))) == {"gpqa_diamond", "aime", "ifbench"}
+    # Harness is kept: two harnesses can expose the same task name, and pooling them
+    # would average different generation conditions together.
+    assert set(harvest(str(tmp_path))) == {
+        "simple_evals.gpqa_diamond",
+        "simple_evals.aime",
+        "ifbench",
+    }
+
+
+def test_harvest_reports_what_it_dropped(tmp_path):
+    """A run silently vanishing makes the remaining pass look more complete than it is."""
+    good = tmp_path / "eval_run" / "inv" / "h.good" / "artifacts"
+    good.mkdir(parents=True)
+    good.joinpath("eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+    )
+    bad = tmp_path / "eval_run" / "inv" / "h.notok" / "artifacts"
+    bad.mkdir(parents=True)
+    bad.joinpath("eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"successful_count": 2}})  # no token count
+    )
+    skipped = tmp_path / "eval_high" / "inv" / "h.excl" / "artifacts"
+    skipped.mkdir(parents=True)
+    skipped.joinpath("eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+    )
+    diag = {}
+    out = harvest(str(tmp_path), diagnostics=diag)
+    assert set(out) == {"h.good"}
+    assert diag["excluded_run_dirs"] == ["eval_high"]
+    assert any("h.notok" in m for m in diag["metrics_without_tokens"])
 
 
 if __name__ == "__main__":

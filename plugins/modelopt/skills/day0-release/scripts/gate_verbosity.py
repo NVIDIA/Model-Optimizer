@@ -23,6 +23,9 @@ Read ``response_stats.avg_completion_tokens``. The ``reasoning.*_tokens`` fields
 are always 0 (only the reasoning/content split is missing, not the total) and the
 ``*_words`` siblings are a proxy that can disagree with the gate.
 
+``main`` also attaches ``harvest_diagnostics`` recording anything dropped before the
+comparison (excluded run dirs, unreadable artifacts, metrics missing token counts).
+
 Two filters run before averaging: skip run dirs matching ``--exclude`` (mismatched
 reasoning effort) and keep only runs at a task's max ``successful_count``. Tasks
 with no common sample count are reported ``not_comparable``.
@@ -99,7 +102,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "delta": round(delta, 4),
             "within_threshold": within,
             "runs": [len(b), len(c)],
-            "dropped_partial_runs": dropped,
+            "dropped_mismatched_runs": dropped,
         }
         if full < best:
             # Both sides truncated to the same n. Same bias applied twice, but it is not
@@ -154,9 +157,9 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
     }
 
 
-def harvest(side, glob="eval_*", exclude="_high"):
+def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
-    out, unreadable, excluded = {}, [], []
+    out, unreadable, excluded, no_metric = {}, [], [], []
     pattern = os.path.join(side, glob, "*", "*", "artifacts", "eval_factory_metrics.json")
     for path in globmod.glob(pattern):
         parts = path.split(os.sep)
@@ -166,11 +169,14 @@ def harvest(side, glob="eval_*", exclude="_high"):
         # Dir is "<harness>.<task>[.<run_index>]" -- the run index is optional, so strip it
         # only when the trailing segment is numeric. Splitting blindly returns the harness
         # for the index-less form, pooling every task under it into one mean.
+        # Dir is "<harness>.<task>[.<run_index>]". Strip the run index only when the
+        # trailing segment is numeric, and KEEP the harness: two harnesses can expose the
+        # same task name, and pooling them would average different generation conditions
+        # into one number. Both sides run the same harness (Step 4 config parity), so the
+        # fuller key still matches across baseline and candidate.
         name = parts[-3]
         head, _, tail = name.rpartition(".")
-        if head and re.fullmatch(r"\d+", tail):
-            name = head
-        task = name.split(".", 1)[1] if "." in name else name
+        task = head if head and re.fullmatch(r"\d+", tail) else name
         try:
             with open(path) as f:
                 stats = json.load(f).get("response_stats", {})
@@ -180,6 +186,14 @@ def harvest(side, glob="eval_*", exclude="_high"):
         tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
         if tokens and count:
             out.setdefault(task, []).append((tokens, count))
+        else:
+            # Missing/zero avg_completion_tokens -- e.g. a schema rename. Record it:
+            # a silently vanished run makes the remaining pass look more complete than it is.
+            no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
+    if diagnostics is not None:
+        diagnostics["excluded_run_dirs"] = sorted(set(excluded))
+        diagnostics["unreadable_metrics"] = unreadable
+        diagnostics["metrics_without_tokens"] = no_metric
     if excluded:
         print(
             f"note: excluded {len(excluded)} run dir(s) matching {exclude!r}: "
@@ -209,9 +223,14 @@ def main(argv=None):
     )
     args = p.parse_args(argv)
 
-    baseline = harvest(args.baseline, args.glob, args.exclude)
-    candidate = harvest(args.candidate, args.glob, args.exclude)
+    diag = {"baseline": {}, "candidate": {}}
+    baseline = harvest(args.baseline, args.glob, args.exclude, diag["baseline"])
+    candidate = harvest(args.candidate, args.glob, args.exclude, diag["candidate"])
     result = evaluate_verbosity(baseline, candidate, args.threshold)
+    # Anything harvest dropped belongs in the JSON, not only on stderr: a task whose runs
+    # were all excluded never reaches per_task, so the verdict would otherwise look
+    # complete for a task set smaller than the eval set.
+    result["harvest_diagnostics"] = diag
     print(json.dumps(result, indent=2))
     return 0 if result["pass"] else 1
 
