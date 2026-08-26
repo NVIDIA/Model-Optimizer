@@ -200,9 +200,10 @@ override inference if a task's scores happen to fall in an ambiguous range.
 `gate_compare.py` checks only the candidate delta; it cannot override a failed
 external baseline check. Combined decision:
 
-- **ACCEPT** — no external check failed and every task is within the candidate
-  threshold → go to Step 6. A missing comparable external score is not a
-  failure; report it as externally unverified.
+- **ACCEPT (accuracy only)** — no external check failed and every task is within
+  the candidate threshold → continue to **Step 5b**. This verdict covers accuracy
+  alone; advance to Step 6 only once the verbosity gate also passes. A missing
+  comparable external score is not a failure; report it as externally unverified.
 - **REGRESSION** — one or more tasks exceed threshold. **v1 stops here and
   reports** which tasks regressed by how much. (Picking the next recipe and
   re-running is deferred — see Scope.)
@@ -213,7 +214,7 @@ external baseline check. Combined decision:
 #### Step 5b — Verbosity gate (MANDATORY; independent of accuracy)
 
 `gate_compare.py` does not measure verbosity, so stopping after Step 5 leaves a
-hard gate unmeasured.
+hard gate unmeasured. Step 5's ACCEPT is accuracy-only — Step 6 requires both.
 
 ```bash
 python "$SKILL_DIR/scripts/gate_verbosity.py" \

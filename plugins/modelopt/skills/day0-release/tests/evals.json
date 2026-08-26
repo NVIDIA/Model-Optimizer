@@ -9,7 +9,8 @@
     "expected_behavior": [
       "Selects the day0-release skill for the full goal-driven release",
       "Resolves model, recipe/qformat, cluster, eval set, and threshold before starting",
-      "Runs stages in fixed order: setup, PTQ, baseline eval, quantized eval, compare, closeout",
+      "Runs stages in fixed order: setup, PTQ, serving canary, baseline eval, quantized eval, compare, verbosity gate, closeout",
+      "Does not treat the accuracy compare as the final verdict: runs gate_verbosity.py before the closeout and reports both gates",
       "Runs the gate after each stage and does not advance past a failed gate",
       "Returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE), not just raw scores"
     ]
