@@ -64,6 +64,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
@@ -76,6 +77,7 @@ from modelopt.torch.quantization.plugins.megatron import (
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
 )
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -1798,15 +1800,17 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
 def test_output_layer_extra_state_empty_when_nothing_quantized():
     """``GPTModel.sharded_state_dict`` asserts a disabled output_layer carries no extra state.
 
-    The e2e coverage (``test_homogeneous_compressed_sharded_state_dict``) is Blackwell-skipped, so
-    assert the contract directly -- including after ``mtq.compress``, which converts the disabled
-    output_layer to a ``RealQuantLinear`` but leaves its weight uncompressed.
+    The subject is a ``RealQuantLinear`` with an uncompressed weight, which is what ``mtq.compress``
+    leaves behind for a disabled output_layer, and the e2e coverage
+    (``test_homogeneous_compressed_sharded_state_dict``) is Blackwell-skipped.
     """
-    module = torch.nn.Linear(4, 4)
+    module = RealQuantLinear.convert(QuantModuleRegistry.convert(torch.nn.Linear(4, 4)))
     module._modelopt_output_layer = True
-    module.weight_quantizer = mtq.nn.TensorQuantizer()
+    assert not isinstance(module.weight, QTensorWrapper)  # disabled quantizers are not compressed
 
-    module.weight_quantizer.disable()
+    for quantizer in module.modules():
+        if isinstance(quantizer, mtq.nn.TensorQuantizer):
+            quantizer.disable()
     assert quant_module_get_extra_state(module) == {}
 
     module.weight_quantizer.enable()

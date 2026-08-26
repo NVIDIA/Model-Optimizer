@@ -22,7 +22,7 @@
 # Optional env:
 #   OUTPUT_DIR     Parent dir for the MCore checkpoint (default: cwd).
 #   TORCH_DTYPE    Model dtype for HF load (default: bfloat16).
-#   GPUS_PER_NODE  GPUs to convert on (default: all visible GPUs).
+#   GPUS_PER_NODE  GPUs to convert on (default: every GPU on the node).
 #   TP / PP / EP   Import parallelism (default: 1 each; large MoE models need EP > 1 to fit).
 #
 # Writes MCore checkpoint to ${OUTPUT_DIR}/<basename(HF_MODEL_ID)>-MCore
@@ -38,7 +38,14 @@ OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)}"
 MODEL_NAME="$(basename "${HF_MODEL_ID}")"
 MEGATRON_PATH="${OUTPUT_DIR}/${MODEL_NAME}-MCore"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
-GPUS_PER_NODE="${GPUS_PER_NODE:-$(nvidia-smi -L | wc -l)}"
+if [[ -z "${GPUS_PER_NODE}" ]]; then
+    # `wc -l` swallows a failing nvidia-smi, so check the count rather than relying on `set -e`.
+    GPUS_PER_NODE="$(nvidia-smi -L | wc -l)"
+    if [[ "${GPUS_PER_NODE}" -lt 1 ]]; then
+        echo "[ERROR] No GPU detected; set GPUS_PER_NODE explicitly" >&2
+        exit 1
+    fi
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 
