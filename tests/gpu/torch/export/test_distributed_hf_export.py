@@ -39,6 +39,7 @@ ignored.
 Run with >=2 GPUs so the expert axis and the FSDP2 shard axis are both actually split.
 """
 
+import copy
 import json
 import shutil
 from functools import partial
@@ -46,6 +47,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import load_file
 from _test_utils.torch.transformers_models import (
     create_tiny_qwen3_dir,
     create_tiny_qwen3_moe_dir,
@@ -140,7 +142,7 @@ def _expected_weights(src: dict[str, tuple[str, tuple[int, ...]]]) -> dict[str, 
     return expected
 
 
-def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg):
+def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg, **export_kwargs):
     """Load the tiny model on every rank, FSDP2-shard it, PTQ it, and export."""
     from transformers import AutoModelForCausalLM
 
@@ -160,7 +162,9 @@ def _ptq_and_export(rank, size, *, src_dir, export_dir, quant_cfg):
         mtq.quantize(model, quant_cfg, lambda m: m(input_ids))
         torch.distributed.barrier()
 
-        export_hf_checkpoint(model, export_dir=export_dir, max_shard_size=MAX_SHARD_SIZE)
+        export_hf_checkpoint(
+            model, export_dir=export_dir, max_shard_size=MAX_SHARD_SIZE, **export_kwargs
+        )
         torch.distributed.barrier()
 
 
@@ -279,20 +283,19 @@ def _export_with(rank, size, *, src_dir, export_dir, **export_kwargs):
 @pytest.mark.parametrize(
     ("kwargs", "needle"),
     [
-        ({"extra_state_dict": {"extra.tensor": torch.zeros(1)}}, "extra_state_dict"),
         ({"save_modelopt_state": True}, "save_modelopt_state"),
     ],
-    ids=["extra_state_dict", "save_modelopt_state"],
+    ids=["save_modelopt_state"],
 )
 def test_fsdp2_distributed_export_rejects_unsupported_options(
     dist_workers, tmp_path, kwargs, needle
 ):
     """Options the no-gather path cannot honour must raise, not be silently ignored.
 
-    Both are handled by the gather path (``extra_state_dict`` is merged into the exported state
-    dict, ``save_modelopt_state`` is forwarded to ``save_pretrained``). The distributed path writes
-    the checkpoint itself and returns before either, so a caller passing them would otherwise get a
-    checkpoint quietly missing what they asked for.
+    ``save_modelopt_state`` is forwarded to ``save_pretrained`` on the gather path; the distributed
+    path writes the checkpoint itself and never calls it, so a caller passing it would otherwise get
+    a checkpoint quietly missing the ModelOpt state. (``extra_state_dict`` used to be rejected here
+    too and is now supported -- see the MTP test below.)
     """
     if torch.cuda.device_count() < 2:
         pytest.skip("needs >=2 GPUs")
@@ -339,3 +342,106 @@ def test_fsdp2_distributed_export_dedups_tied_weights(dist_workers, tmp_path):
         "tied alias 'lm_head.weight' was written alongside its canonical -- "
         "name-based dedup did not run in the distributed writer"
     )
+
+
+@pytest.mark.timeout(600)
+def test_fsdp2_distributed_export_writes_extra_state_dict(dist_workers, tmp_path):
+    """Tensors handed in via ``extra_state_dict`` must reach the checkpoint.
+
+    This is how MTP weights arrive: the FSDP2 loader drops them, so ``hf_ptq`` reads them straight
+    off the source checkpoint (``load_mtp_weights``) and passes them here. They belong to no rank's
+    shard and no rank's model, so unless the writer deliberately merges them in, a model with MTP
+    exports silently incomplete -- valid-looking, right size, missing the MTP layer.
+
+    They must also keep their original names: they were never part of the transformers conversion,
+    so the reverse conversion must not touch them.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    src_dir = Path(create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **TINY_KWARGS))
+    export_dir = tmp_path / "export_extra"
+    # Shaped and named like an inlined MTP tail (DeepSeek-V3 / GLM-5.1 put it at layers.<N>).
+    extra = {
+        "model.layers.99.mtp.weight": torch.arange(64, dtype=torch.bfloat16).reshape(8, 8),
+        "model.layers.99.mtp.bias": torch.full((8,), 3.0, dtype=torch.bfloat16),
+    }
+    dist_workers.run(
+        partial(
+            _ptq_and_export,
+            src_dir=src_dir,
+            export_dir=export_dir,
+            quant_cfg=mtq.FP8_DEFAULT_CFG,
+            extra_state_dict=extra,
+        )
+    )
+
+    exported = _safetensors_meta(export_dir)
+    assert exported, "nothing exported"
+    for name, want in extra.items():
+        assert name in exported, f"extra_state_dict tensor '{name}' never reached the checkpoint"
+        assert exported[name][1] == tuple(want.shape), f"{name}: shape {exported[name][1]}"
+
+    index = json.loads((export_dir / "model.safetensors.index.json").read_text())
+    for name in extra:
+        assert name in index["weight_map"], f"'{name}' written but missing from the weight index"
+
+    # Values must survive intact, not just the names.
+    merged: dict = {}
+    for shard in sorted(export_dir.glob("*.safetensors")):
+        merged.update(load_file(str(shard)))
+    for name, want in extra.items():
+        assert torch.equal(merged[name].cpu(), want), f"{name}: value changed on the way out"
+
+
+@pytest.mark.timeout(600)
+def test_fsdp2_distributed_export_keeps_unquantized_submodule(dist_workers, tmp_path):
+    """A submodule left unquantized must still be exported, in full and unquantized.
+
+    PTQ is routinely applied to part of a model -- the language model of a VLM, or a layer range
+    excluded by the recipe -- and the checkpoint is expected to be the COMPLETE model, with the
+    untouched part carried through at its original precision. The writer builds its state dict from
+    the whole model, so the risk is not that it drops those tensors but that it mangles them: the
+    expert split, the scale postprocess and the reverse conversion all walk keys that have no
+    quantizer state here.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    # Disable every quantizer under layer 0; layer 1 stays quantized as the control.
+    quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    quant_cfg["quant_cfg"].append({"quantizer_name": "*layers.0*", "enable": False})
+
+    src_dir = Path(create_tiny_qwen3_dir(tmp_path, with_tokenizer=True, **TINY_KWARGS))
+    export_dir = tmp_path / "export_partial"
+    dist_workers.run(
+        partial(
+            _ptq_and_export, src_dir=src_dir, export_dir=export_dir, quant_cfg=quant_cfg
+        )
+    )
+
+    exported = _safetensors_meta(export_dir)
+    assert exported, "nothing exported"
+
+    src_meta = _safetensors_meta(src_dir)
+    layer0_src = {k for k in src_meta if k.startswith("model.layers.0.")}
+    assert layer0_src, "fixture has no layer 0 weights to check"
+
+    for name in sorted(layer0_src):
+        assert name in exported, f"unquantized '{name}' missing from the checkpoint"
+        dtype, shape = exported[name]
+        assert dtype not in _QUANTIZED_DTYPES, (
+            f"'{name}' was excluded from quantization but exported as {dtype}"
+        )
+        assert shape == src_meta[name][1], (
+            f"'{name}': shape {shape}, source {src_meta[name][1]}"
+        )
+
+    # No scale companions should exist for the excluded layer...
+    stray = sorted(k for k in exported if k.startswith("model.layers.0.") and _is_scale(k))
+    assert not stray, f"excluded layer 0 carries quantization scales: {stray}"
+    # ...while the control layer must actually be quantized, or the test proves nothing.
+    quantized_l1 = [
+        k for k, (d, _) in exported.items() if k.startswith("model.layers.1.") and d in _QUANTIZED_DTYPES
+    ]
+    assert quantized_l1, "layer 1 was not quantized -- the exclusion pattern disabled everything"

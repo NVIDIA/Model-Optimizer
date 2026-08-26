@@ -1600,16 +1600,10 @@ def export_hf_checkpoint(
 
     # An offloaded model takes the streaming path below; otherwise a distributed FSDP2 model takes
     # the no-gather path, which writes weights and config itself instead of going through
-    # save_pretrained and returns before the gather path's extra_state_dict merge. Neither option
-    # can be honoured there, so reject explicitly rather than dropping them silently (the streaming
-    # path declines save_modelopt_state the same way).
+    # save_pretrained. extra_state_dict IS honoured there (one rank adds those tensors to its write
+    # set); save_modelopt_state is not, so reject it explicitly rather than dropping it silently
+    # (the streaming path declines it the same way).
     if is_distributed and not _offloaded:
-        if extra_state_dict:
-            raise NotImplementedError(
-                "extra_state_dict is not supported by the no-gather FSDP2 distributed export: "
-                "each rank writes its own shards, so the extra tensors are never merged in. "
-                "Export without it, or outside torch.distributed to take the gather path."
-            )
         if save_modelopt_state:
             raise NotImplementedError(
                 "save_modelopt_state=True is not supported by the no-gather FSDP2 distributed "
@@ -1665,11 +1659,11 @@ def export_hf_checkpoint(
             # rank-0 host-RAM gather. Rank 0 then writes config.json + the deployment quant config,
             # mirroring the gather path's tail below.
             #
-            # NOTE: unlike the gather path, this does NOT run revert_weight_conversion_quant_aware on
-            # the weights. The fused->per-expert un-fusing is handled inside the writer's expert
-            # split; any *other* transformers>=5 key renames are not reverted here. Validate on a model
-            # that triggers those renames before relying on it. extra_state_dict is likewise not merged
-            # into the distributed write yet.
+            # The writer runs revert_weight_conversion_quant_aware per-rank (_revert_whole_sd), once
+            # _materialize_owned has made every tensor whole -- the conversion ops are written against
+            # whole tensors and cannot express a placement, so it cannot run while they are sharded.
+            # The fused->per-expert un-fusing is handled separately, inside the writer's expert split.
+            # extra_state_dict is merged in after that reverse, matching the gather path below.
             from .distribute import distributed_save_hf_checkpoint
 
             kv_cache_format = (hf_quant_config or {}).get("quantization", {}).get(
@@ -1681,6 +1675,7 @@ def export_hf_checkpoint(
                 maxbound=448,
                 kv_cache_format=kv_cache_format,
                 max_shard_size=max_shard_size,
+                extra_state_dict=extra_state_dict,
             )
             if not (is_distributed and torch.distributed.get_rank() != 0):
                 _write_base_config(model, export_dir)

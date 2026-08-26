@@ -320,6 +320,7 @@ def distributed_save_hf_checkpoint(
     kv_cache_format: "str | None",
     max_shard_size: "str | int" = "10GB",
     is_modelopt_qlora: bool = False,
+    extra_state_dict: "dict[str, torch.Tensor] | None" = None,
 ) -> None:
     """No-gather distributed HF export. Thin wrapper: hf_ptq exports under ``torch.inference_mode()``,
     so run the entire write with inference mode DISABLED via a nested ``inference_mode(False)`` context
@@ -332,7 +333,13 @@ def distributed_save_hf_checkpoint(
     because inference mode is off."""
     with torch.inference_mode(False), torch.no_grad():
         _distributed_save_hf_checkpoint_impl(
-            model, export_dir, maxbound, kv_cache_format, max_shard_size, is_modelopt_qlora
+            model,
+            export_dir,
+            maxbound,
+            kv_cache_format,
+            max_shard_size,
+            is_modelopt_qlora,
+            extra_state_dict,
         )
 
 
@@ -726,6 +733,7 @@ def _distributed_save_hf_checkpoint_impl(
     kv_cache_format: "str | None",
     max_shard_size: "str | int" = "10GB",
     is_modelopt_qlora: bool = False,
+    extra_state_dict: "dict[str, torch.Tensor] | None" = None,
 ) -> None:
     """Distributed HF safetensors export -- no rank-0 full-model host-RAM gather.
 
@@ -901,4 +909,22 @@ def _distributed_save_hf_checkpoint_impl(
     # The reverse must precede the shard layout, since it renames keys and splits tensors.
     _materialize_owned(local_sd, expert_key_set, rank, world)
     _revert_whole_sd(model, local_sd)
+
+    # Tensors the model does not own -- MTP weights read straight off the source checkpoint by
+    # hf_ptq's load_mtp_weights, which the FSDP2 loader drops. They are plain CPU tensors, already
+    # whole and identical on every rank, so ONE rank adds them to its write set; the index union and
+    # the cross-rank duplicate check below then treat them like any other owned key. Rank 0 takes
+    # them wholesale: they are small next to the model, and spreading them would cost a collective
+    # to agree on the split. They go in AFTER the reverse conversion because they carry their
+    # original hub names and were never converted -- reverting them would rename them wrongly. This
+    # mirrors the gather path, which merges extra_state_dict into the already-reverted dict.
+    if extra_state_dict and rank == 0:
+        collisions = sorted(set(extra_state_dict) & set(local_sd))
+        if collisions:
+            raise RuntimeError(
+                f"extra_state_dict overlaps the exported model weights on {len(collisions)} key(s), "
+                f"so the checkpoint would be ambiguous; first few: {collisions[:5]}"
+            )
+        local_sd.update(extra_state_dict)
+
     _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
