@@ -40,9 +40,13 @@ Validation summary shape:
       },
       "metadata_diffs": [str, ...],  # unexpected diffs only; [] if clean
 
-      # Optional. Precision of the SOURCE checkpoint's weights, e.g. "bf16", "mxfp4".
-      # Required to waive the size check: a source already at 4 bits cannot shrink
-      # further under a 4-bit recipe. Absent, size growth blocks.
+      # Optional. Precision of the SOURCE checkpoint's weights. Required to waive the
+      # size check: a source already at 4 bits cannot shrink further under a 4-bit
+      # recipe. Matched against a CLOSED vocabulary (_SUB8_SOURCE_PRECISIONS) -- any
+      # other value, including a free-form description, blocks like an absent field.
+      # Mixed-precision sources: record the precision of the DOMINANT weight mass, since
+      # that is what decides whether the checkpoint can shrink (e.g. a model with MXFP4
+      # experts at ~96% of bytes and BF16 attention is "mxfp4", not "mixed").
       "source_precision": str,
       # Optional, last resort. Must be the literal boolean true. Waives the size check
       # unconditionally (no growth bound) and records no reason; prefer source_precision,
@@ -139,7 +143,10 @@ def evaluate_checkpoint(summary):
                 why = (
                     f"declared {source_precision!r} source explains at most {_INHERENT_GROWTH_MAX}x"
                     if source_is_sub8
-                    else "source precision not declared sub-8-bit, so growth is not explained"
+                    else (
+                        f"source_precision={source_precision or None!r} is not one of "
+                        f"{sorted(_SUB8_SOURCE_PRECISIONS)}, so growth is not explained"
+                    )
                 )
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
 

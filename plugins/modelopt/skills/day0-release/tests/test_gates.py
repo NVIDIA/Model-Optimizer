@@ -473,5 +473,16 @@ def test_ptq_declared_source_is_capped():
     assert not r["pass"] and "explains at most" in r["detail"]
 
 
+def test_ptq_rejected_source_precision_is_self_diagnosing():
+    """An operator who wrote a rejected value must be able to tell that from writing none."""
+    grew = {"output_bytes": 16_800_000_000}
+    bad = evaluate_checkpoint(_ckpt(**grew, source_precision="mxfp4 experts / bf16 attention"))
+    absent = evaluate_checkpoint(_ckpt(**grew))
+    assert "mxfp4 experts / bf16 attention" in bad["detail"]  # echoes what it read
+    assert "None" in absent["detail"]
+    for r in (bad, absent):
+        assert "mxfp4" in r["detail"] and "int4" in r["detail"]  # lists the vocabulary
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))
