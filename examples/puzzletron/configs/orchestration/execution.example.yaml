@@ -10,12 +10,24 @@ execution:
     artifact_settling_timeout_seconds: 300
     gpus_per_node: 8
   stages:
+    # CPU-only stages request no GPUs and can override the runner partition.
+    # A list lets Slurm select any eligible CPU partition.
     convert:
       strategy: single
       instances: 1
+      resource: cpu
+      partition:
+        - REPLACE_WITH_PRIMARY_CPU_SLURM_PARTITION
+        - REPLACE_WITH_ALTERNATE_CPU_SLURM_PARTITION
     tokenize_data:
       strategy: single
       instances: 1
+      resource: cpu
+      partition: REPLACE_WITH_PRIMARY_CPU_SLURM_PARTITION
+    # Final report generation is always CPU-only and accepts a partition
+    # override without resource or strategy fields.
+    final_report:
+      partition: REPLACE_WITH_PRIMARY_CPU_SLURM_PARTITION
     vllm_stats:
       strategy: sharded
       instances: 16

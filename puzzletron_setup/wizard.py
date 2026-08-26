@@ -44,7 +44,7 @@ from .prompts import PromptSession
 from .state import AnswerState
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 __all__ = ["run_wizard"]
 
@@ -349,7 +349,7 @@ def _ask_pruning(prompts: PromptSession, state: AnswerState, model: InspectedMod
             "and additional GPU cost."
         ),
     )
-    bypass = {"enabled": bypass_enabled, "sanity": bypass_sanity}
+    bypass: dict[str, Any] = {"enabled": bypass_enabled, "sanity": bypass_sanity}
     data = state.section("data")
     if bypass_enabled:
         bypass.update(
@@ -859,8 +859,10 @@ def _downstream_evaluation_metric_suggestions(node_id: str, config: Mapping[str,
         tasks = [item.strip() for item in tasks.split(",") if item.strip()]
     for task in tasks:
         task_name = str(task).strip()
-        for metric in _DOWNSTREAM_EVALUATION_METRICS_BY_TASK.get(task_name, ()):
-            suggestions.append(f"{node_id}.{task_name}.{metric}")
+        suggestions.extend(
+            f"{node_id}.{task_name}.{metric}"
+            for metric in _DOWNSTREAM_EVALUATION_METRICS_BY_TASK.get(task_name, ())
+        )
     return suggestions
 
 
@@ -891,6 +893,7 @@ def _default_flow(
     best = node_id("best")
     if objective is None:
         objective = next(iter(run.get("objectives") or ()), {})
+    assert objective is not None
     objective_metric = str(objective.get("metric", "metrics.lm_loss"))
     objective_direction = str(objective.get("direction", "minimize"))
     nodes: OrderedDict[str, Any] = OrderedDict()
@@ -1338,7 +1341,7 @@ def _resource_rows(
     return rows
 
 
-def _print_resource_rows(rows: list[Mapping[str, Any]]) -> None:
+def _print_resource_rows(rows: Sequence[Mapping[str, Any]]) -> None:
     print("\nDerived resource plan:")
     print(f"{'Stage':30} {'Instances':>10} {'GPU/instance':>14} {'Nodes':>8}")
     for row in rows:
@@ -1432,20 +1435,17 @@ def _ask_infrastructure(
     }
     runner: dict[str, Any] = {"kind": runner_kind}
     if runner_kind == "slurm":
-        cpu_partition = prompts.text(
-            "CPU partition (blank to use one GPU node for CPU/IO stages):",
+        partition = prompts.text(
+            "Eligible Slurm partitions (comma-separated; blank for site default):",
             default="",
             description=(
-                "Used for conversion, tokenization, sorting, block-library construction, "
-                "MIP, filters, and materialization. Leave blank when the cluster has no "
-                "CPU-only partition."
+                "Slurm may start the job in any listed partition. Configure a stage-level "
+                "partition only when that stage needs a different eligible set."
             ),
         ).strip()
         runner["slurm"] = {
             "account": prompts.text("Slurm account:", default=""),
-            "partition_interactive": prompts.text("Interactive partition:", default="interactive"),
-            "partition_batch": prompts.text("Batch partition:", default="batch"),
-            "partition_cpu": cpu_partition or None,
+            "partition": partition or None,
             "time_limit": prompts.text("Default time limit:", default="4:00:00"),
             "qos": prompts.text("QoS (blank for none):", default="").strip() or None,
             "max_nodes": prompts.integer("Maximum simultaneous nodes:", default=64),

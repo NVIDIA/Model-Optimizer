@@ -18,6 +18,7 @@
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from puzzletron_orchestrator.compiler import load_execution_config, load_runner_config
@@ -25,6 +26,12 @@ from puzzletron_setup import WORKER_REPOSITORY_PLACEHOLDER, WORKER_VENV_PLACEHOL
 from puzzletron_setup.v2.defaults import load_defaults
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+SLURM_RUNNER_CONFIGS = (
+    "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml",
+    "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
+    "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml",
+)
+NAMED_SLURM_RUNNER_CONFIGS = SLURM_RUNNER_CONFIGS[1:]
 NEMOTRON3_NANO_30B_MODEL_CONFIG = (
     "examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/model.yaml"
 )
@@ -36,9 +43,8 @@ QWEN3P6_35B_A3B_MODEL_CONFIG = (
 
 
 def test_slurm_runner_example_is_portable() -> None:
-    slurm = load_runner_config(
-        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
-    )
+    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
+    slurm = load_runner_config(path)
     assert slurm.contract.repository == WORKER_REPOSITORY_PLACEHOLDER
     assert slurm.contract.venv == WORKER_VENV_PLACEHOLDER
     assert slurm.contract.container is None
@@ -46,7 +52,10 @@ def test_slurm_runner_example_is_portable() -> None:
     assert not slurm.contract.prerun_commands
     assert slurm.slurm is not None
     assert slurm.slurm.account.startswith("REPLACE_WITH_")
-    assert slurm.slurm.partition_cpu is None
+    assert slurm.slurm.partition == (
+        "REPLACE_WITH_PRIMARY_SLURM_PARTITION,REPLACE_WITH_ALTERNATE_SLURM_PARTITION"
+    )
+    assert slurm.slurm.log_dir == "logs"
 
 
 def test_baremetal_runner_example_is_portable() -> None:
@@ -64,9 +73,8 @@ def test_baremetal_runner_example_is_portable() -> None:
 
 
 def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
-    runner = load_runner_config(
-        REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml"
-    )
+    path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml"
+    runner = load_runner_config(path)
 
     contract_values = (
         runner.contract.repository,
@@ -83,7 +91,24 @@ def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
     assert all("REPLACE_WITH_" in command for command in runner.contract.prerun_commands)
     assert runner.slurm is not None
     assert runner.slurm.account.startswith("REPLACE_WITH_")
-    assert runner.slurm.partition_cpu is None
+    assert runner.slurm.partition.startswith("REPLACE_WITH_")
+
+
+@pytest.mark.parametrize("relative_path", SLURM_RUNNER_CONFIGS)
+def test_checked_in_slurm_runners_only_emit_generic_partition(
+    relative_path: str,
+) -> None:
+    payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
+
+    assert "partition" in payload["runner"]["slurm"]
+    assert not any(key.startswith("partition_") for key in payload["runner"]["slurm"])
+
+
+@pytest.mark.parametrize("relative_path", NAMED_SLURM_RUNNER_CONFIGS)
+def test_named_slurm_runners_keep_logs_below_the_campaign_root(relative_path: str) -> None:
+    payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
+
+    assert "log_dir" not in payload["runner"]["slurm"]
 
 
 def test_execution_example_is_loadable() -> None:
@@ -108,7 +133,7 @@ def test_setup_defaults_example_is_portable() -> None:
 
     slurm = defaults["infrastructure"]["runner"]["slurm"]
     assert "account" not in slurm
-    assert slurm["partition_cpu"] is None
+    assert slurm["partition"] is None
 
 
 def test_model_examples_use_public_hugging_face_identities() -> None:

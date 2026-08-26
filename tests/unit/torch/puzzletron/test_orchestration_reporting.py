@@ -1,12 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for the runner-backed orchestration report finalizer."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
@@ -27,7 +42,13 @@ from puzzletron_orchestrator.schema import (
 )
 
 
-def _plan(tmp_path: Path, *, partition_cpu: str | None = "cpu") -> CampaignPlan:
+def _plan(
+    tmp_path: Path,
+    *,
+    partition: str | None = "shared",
+    final_report_partition: str | None = None,
+    log_dir: Path | None = None,
+) -> CampaignPlan:
     return CampaignPlan(
         experiment_config_path=str(tmp_path / "experiment.yaml"),
         puzzle_dir=tmp_path / "run",
@@ -43,19 +64,19 @@ def _plan(tmp_path: Path, *, partition_cpu: str | None = "cpu") -> CampaignPlan:
             ),
             slurm=SlurmRunnerConfig(
                 account="test",
-                partition_interactive="interactive",
-                partition_batch="batch",
-                partition_cpu=partition_cpu,
+                partition=partition,
+                log_dir=str(log_dir) if log_dir is not None else None,
             ),
         ),
         execution_defaults={},
         stages=(),
         contract_hash="contract",
+        final_report_partition=final_report_partition,
     )
 
 
-def test_build_final_report_attempt_uses_runner_cpu_task(tmp_path: Path):
-    plan = _plan(tmp_path)
+def test_build_final_report_attempt_uses_configured_cpu_partition(tmp_path: Path):
+    plan = _plan(tmp_path, final_report_partition="cpu-a,cpu-b")
 
     attempt = build_final_report_attempt(plan, attempt_id="report-attempt")
 
@@ -77,18 +98,27 @@ def test_build_final_report_attempt_uses_runner_cpu_task(tmp_path: Path):
     assert attempt.allocation_nodes == 1
     assert attempt.allocation_gpus == 0
     assert attempt.exclusive is False
-    assert attempt.metadata == {"gpus_per_node": 0, "partition": "cpu"}
+    assert attempt.metadata == {"gpus_per_node": 0, "partition": "cpu-a,cpu-b"}
     assert attempt.task_topology.task_count == 1
     assert attempt.task_topology.gpus_per_task == 0
     assert attempt.task_topology.launcher is TaskLauncher.DIRECT
 
 
-def test_build_final_report_attempt_uses_normal_partition_fallback(tmp_path: Path):
-    plan = _plan(tmp_path, partition_cpu=None)
-
-    attempt = build_final_report_attempt(plan, attempt_id="report-attempt")
+def test_build_final_report_attempt_uses_runner_default_when_unconfigured(tmp_path: Path):
+    attempt = build_final_report_attempt(_plan(tmp_path), attempt_id="report-attempt")
 
     assert attempt.metadata == {"gpus_per_node": 0}
+
+
+def test_build_final_report_attempt_uses_configured_log_directory(tmp_path: Path):
+    log_dir = tmp_path / "shared-logs"
+
+    attempt = build_final_report_attempt(
+        _plan(tmp_path, log_dir=log_dir),
+        attempt_id="report-attempt",
+    )
+
+    assert attempt.command.log_path == str(log_dir / "final_report_report-attempt.log")
 
 
 class _ReportExecutor(Executor):

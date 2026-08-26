@@ -9,16 +9,16 @@ execution:
   stages:
     convert: {strategy: single, instances: 1}
     tokenize_data: {strategy: single, instances: 1}
-    # One interactive node (8 GPUs): pack 8 vLLM shards onto that single node.
-    vllm_stats: {strategy: sharded, instances: 8, partition: interactive}
-    width_importance: {strategy: single, instances: 1, partition: interactive}
+    # One node (8 GPUs): pack 8 vLLM shards onto that single node.
+    vllm_stats: {strategy: sharded, instances: 8}
+    width_importance: {strategy: single, instances: 1}
     # One gang-scheduled allocation: four 8-GPU workers, coordinator on node 0.
-    depth_importance: {strategy: persistent_pool, instances: 4, partition: batch}
-    sort: {strategy: single, instances: 1, partition: interactive}
-    sort_sanity: {strategy: single, instances: 1, partition: interactive}
-    width_sanity: {strategy: single, instances: 1, partition: interactive}
-    slicing_sanity: {strategy: single, instances: 1, partition: interactive}
-    bypass_sanity: {strategy: single, instances: 1, partition: interactive}
+    depth_importance: {strategy: persistent_pool, instances: 4}
+    sort: {strategy: single, instances: 1}
+    sort_sanity: {strategy: single, instances: 1}
+    width_sanity: {strategy: single, instances: 1}
+    slicing_sanity: {strategy: single, instances: 1}
+    bypass_sanity: {strategy: single, instances: 1}
     bypass: {strategy: single, instances: 1}
     build_library:
       strategy: single
@@ -32,7 +32,7 @@ execution:
         dp_shard: 1
         dp_replicate: 1
     # One gang-scheduled allocation: two 8-GPU workers, coordinator on node 0.
-    replacement_scoring: {strategy: persistent_pool, instances: 2, partition: interactive}
+    replacement_scoring: {strategy: persistent_pool, instances: 2}
     mip: {strategy: single, instances: 1}
     zero_shot_evaluation: {strategy: sharded, instances: 8}
     aiperf: {strategy: sharded, instances: 8}

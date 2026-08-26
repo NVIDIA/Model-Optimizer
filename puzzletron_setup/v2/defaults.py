@@ -51,9 +51,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
             "kind": "slurm",
             "slurm": {
                 "account": "",
-                "partition_interactive": "interactive",
-                "partition_batch": "batch",
-                "partition_cpu": None,
+                "partition": None,
                 "time_limit": "4:00:00",
                 "qos": None,
                 "max_nodes": 64,
@@ -121,7 +119,6 @@ _INTEGER_MINIMUMS = {
     "data.acquisition.num_samples": 1,
     "data.acquisition.max_shards_per_subset": 1,
     "infrastructure.gpus_per_node": 1,
-    "infrastructure.runner.slurm.interactive_max_nodes": 1,
     "infrastructure.runner.slurm.max_nodes": 1,
     "pruning.depth_remove": 0,
     "pruning.depth_importance_samples": 1,
@@ -165,7 +162,11 @@ _SEQUENCE_PATHS = {
     "infrastructure.execution_contract.prerun_commands",
     "infrastructure.execution_contract.postrun_commands",
 }
-_STRING_OR_SEQUENCE_PATHS = {"data.subsets", "data.acquisition.subsets"}
+_STRING_OR_SEQUENCE_PATHS = {
+    "data.subsets",
+    "data.acquisition.subsets",
+    "infrastructure.runner.slurm.partition",
+}
 _SCHEMA = {
     "schema_version": None,
     "campaign": {
@@ -208,10 +209,7 @@ _SCHEMA = {
             "kind": None,
             "slurm": {
                 "account": None,
-                "partition_interactive": None,
-                "partition_batch": None,
-                "partition_cpu": None,
-                "interactive_max_nodes": None,
+                "partition": None,
                 "max_nodes": None,
                 "time_limit": None,
                 "qos": None,

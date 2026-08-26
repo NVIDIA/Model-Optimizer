@@ -181,7 +181,7 @@ def test_loaded_stage_run_publishes_distinct_authored_and_effective_config(tmp_p
         )
         + "\n"
     )
-    override = "+slicing_sanity.tolerance=0.25"
+    override = "++slicing_sanity.tolerance=0.25"
     config = pipeline_config_from_path(config_path, overrides=[override])
     manifest_path = tmp_path / "manifests" / "slicing_sanity.json"
 

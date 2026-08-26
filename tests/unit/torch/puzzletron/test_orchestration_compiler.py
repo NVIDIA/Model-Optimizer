@@ -25,10 +25,18 @@ from modelopt.torch.puzzletron.orchestration.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
+    plan_to_dict,
     resolve_stage_execution_specs,
 )
 from modelopt.torch.puzzletron.orchestration.controller import CampaignController
-from modelopt.torch.puzzletron.orchestration.schema import ExecutionStrategy, HaltPolicy
+from modelopt.torch.puzzletron.orchestration.identity import execution_contract_hash, hash_payload
+from modelopt.torch.puzzletron.orchestration.schema import (
+    ExecutionContract,
+    ExecutionStrategy,
+    HaltPolicy,
+    RunnerEnvironment,
+    SlurmRunnerConfig,
+)
 
 
 @pytest.fixture
@@ -122,6 +130,269 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
     assert configured["vllm_stats"].instances == 16
 
 
+def test_runner_config_rejects_unknown_field_with_suggestion(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"]["partition_name"] = "gpu"
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="runner.slurm.partition_name; did you mean 'partition'",
+    ):
+        load_runner_config(runner_path)
+
+
+def test_runner_config_rejects_unused_defaults_mapping(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["defaults"] = {"partition": "ignored"}
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match=r"Unknown config field runner\.defaults"):
+        load_runner_config(runner_path)
+
+
+def test_runner_config_preserves_legacy_partition_routing(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"].update(
+        {
+            "partition_interactive": "interactive",
+            "partition_batch": "batch",
+            "partition_cpu": "cpu",
+            "interactive_max_nodes": 2,
+        }
+    )
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    runner = load_runner_config(runner_path)
+
+    assert runner.slurm is not None
+    assert runner.slurm.partition_for_nodes(1) == "interactive"
+    assert runner.slurm.partition_for_nodes(3) == "batch"
+    assert runner.slurm.partition_cpu == "cpu"
+
+
+def test_runner_config_normalizes_multiple_eligible_partitions(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"]["partition"] = ["gpu-a", "gpu-b"]
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    runner = load_runner_config(runner_path)
+
+    assert runner.slurm is not None
+    assert runner.slurm.partition == "gpu-a,gpu-b"
+
+
+def test_partition_set_changes_slurm_execution_contract_identity() -> None:
+    first = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", partition=["gpu-a", "gpu-b"]),
+    )
+    second = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", partition=["gpu-a", "gpu-c"]),
+    )
+
+    assert execution_contract_hash(first) != execution_contract_hash(second)
+
+
+def test_partition_schema_migration_changes_slurm_execution_contract_identity() -> None:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
+    )
+    legacy_identity = hash_payload(
+        {
+            "repository": "/repo",
+            "venv": "/venv",
+            "container": None,
+            "container_mounts": None,
+            "setup_env": None,
+            "prerun_commands": [],
+            "postrun_commands": [],
+            "runner_kind": "slurm",
+            "task_topology_contract": 1,
+            "slurm": {
+                "account": "acct",
+                "partition_interactive": None,
+                "partition_batch": "batch",
+                "partition_cpu": None,
+                "interactive_max_nodes": 2,
+                "max_nodes": None,
+                "time_limit": "4:00:00",
+                "qos": None,
+            },
+        }
+    )
+
+    assert execution_contract_hash(runner) != legacy_identity
+
+
+def test_runner_config_rejects_duplicate_partitions(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"]["partition"] = ["gpu", "gpu"]
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match=r"runner\.slurm\.partition contains duplicate partition names",
+    ):
+        load_runner_config(runner_path)
+
+
+def test_runner_config_rejects_partition_directive_injection(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"]["partition"] = "gpu\n#SBATCH --qos=unexpected"
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match=r"runner\.slurm\.partition contains an invalid partition name",
+    ):
+        load_runner_config(runner_path)
+
+
+@pytest.mark.parametrize("scope", ["defaults", "stage"])
+def test_execution_config_rejects_partition_directive_injection(tmp_configs, scope: str) -> None:
+    _, _, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    if scope == "defaults":
+        payload["execution"]["defaults"]["partition"] = "gpu\n#SBATCH --qos=unexpected"
+        error_path = r"execution\.defaults\.partition"
+    else:
+        payload["execution"]["stages"]["vllm_stats"]["partition"] = "gpu\n#SBATCH --qos=unexpected"
+        error_path = r"execution\.stages\.vllm_stats\.partition"
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match=rf"{error_path} contains an invalid partition name"):
+        load_execution_config(execution_path)
+
+
+def test_runner_config_rejects_invalid_command_sequence(tmp_configs) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["execution_contract"]["prerun_commands"] = ["module load cuda", 7]
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(TypeError, match="prerun_commands must be a string or a sequence"):
+        load_runner_config(runner_path)
+
+
+@pytest.mark.parametrize(
+    ("canonical", "legacy", "value"),
+    [
+        ("container_mounts", "mounts", ["/host:/container"]),
+        ("prerun_commands", "prerun", ["module load cuda"]),
+        ("postrun_commands", "postrun", ["echo done"]),
+    ],
+)
+def test_runner_config_rejects_canonical_and_legacy_contract_fields(
+    tmp_configs, canonical: str, legacy: str, value: list[str]
+) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    contract = payload["runner"]["execution_contract"]
+    contract[canonical] = value
+    contract[legacy] = value
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match=rf"cannot set both {canonical} and legacy {legacy}",
+    ):
+        load_runner_config(runner_path)
+
+
+def test_execution_config_rejects_unknown_nested_field(tmp_configs) -> None:
+    _, _, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["stages"]["width_importance"]["instance_count"] = 2
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="width_importance.instance_count; did you mean 'instances'",
+    ):
+        load_execution_config(execution_path)
+
+
+def test_execution_config_rejects_non_partition_final_report_fields(tmp_configs) -> None:
+    _, _, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["stages"]["final_report"] = {"resource": "cpu"}
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown config field execution\.stages\.final_report\.resource",
+    ):
+        load_execution_config(execution_path)
+
+
+def test_execution_config_rejects_fractional_instance_count(tmp_configs) -> None:
+    _, _, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["stages"]["width_importance"]["instances"] = 1.5
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(TypeError, match="width_importance.instances must be a positive integer"):
+        load_execution_config(execution_path)
+
+
+def test_execution_config_rejects_model_runtime_field_in_allocation_mesh(
+    tmp_configs,
+) -> None:
+    _, _, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["stages"]["width_importance"]["parallel"] = {
+        "tp": 1,
+        "sequence_parallel": True,
+    }
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(
+        ValueError,
+        match="sequence_parallel belongs in the experiment model-parallel profile",
+    ):
+        load_execution_config(execution_path)
+
+
+def test_compile_campaign_plan_rejects_unknown_execution_stage(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution = load_execution_config(execution_path)
+    execution["stages"]["width_importnace"] = {"strategy": "single", "instances": 1}
+
+    with pytest.raises(ValueError, match="width_importnace; did you mean 'width_importance'"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+        )
+
+
+def test_execution_config_rejects_single_strategy_with_multiple_instances(
+    tmp_configs,
+) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution = load_execution_config(execution_path)
+    execution["stages"]["width_importance"]["instances"] = 2
+
+    with pytest.raises(ValueError, match="must be 1 for strategy 'single'"):
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+        )
+
+
 def test_compile_campaign_plan_packs_vllm_stats_instances(tmp_configs):
     experiment_path, runner_path, execution_path = tmp_configs
     runner = load_runner_config(runner_path)
@@ -212,7 +483,31 @@ def test_compile_campaign_plan_rejects_invalid_artifact_settling_timeout(
         )
 
 
-def test_compile_campaign_plan_uses_cpu_partition_without_gpus(tmp_configs):
+def test_compile_campaign_plan_uses_stage_partition_list_without_gpus(tmp_configs):
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution_payload = yaml.safe_load(execution_path.read_text())
+    execution_payload["execution"]["stages"]["convert"] = {
+        "strategy": "single",
+        "resource": "cpu",
+        "partition": ["cpu-a", "cpu-b"],
+    }
+    execution_path.write_text(yaml.safe_dump(execution_payload))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+    convert = next(node for node in plan.stages if node.stage_id == "convert")
+
+    assert convert.resource == "cpu"
+    assert convert.partition == "cpu-a,cpu-b"
+    assert convert.gpus_per_instance == 0
+    assert convert.total_gpus == 0
+    assert convert.nodes == 1
+
+
+def test_compile_campaign_plan_migrates_legacy_cpu_partition(tmp_configs):
     experiment_path, runner_path, execution_path = tmp_configs
     runner_payload = yaml.safe_load(runner_path.read_text())
     runner_payload["runner"]["slurm"]["partition_cpu"] = "cpu"
@@ -231,11 +526,27 @@ def test_compile_campaign_plan_uses_cpu_partition_without_gpus(tmp_configs):
     )
     convert = next(node for node in plan.stages if node.stage_id == "convert")
 
-    assert convert.resource == "cpu"
     assert convert.partition == "cpu"
-    assert convert.gpus_per_instance == 0
-    assert convert.total_gpus == 0
-    assert convert.nodes == 1
+    assert plan.final_report_partition == "cpu"
+
+
+def test_compile_campaign_plan_routes_final_report_to_eligible_cpu_partitions(tmp_configs):
+    experiment_path, runner_path, execution_path = tmp_configs
+    execution_payload = yaml.safe_load(execution_path.read_text())
+    execution_payload["execution"]["stages"]["final_report"] = {"partition": ["cpu-a", "cpu-b"]}
+    execution_path.write_text(yaml.safe_dump(execution_payload))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+
+    assert plan.final_report_partition == "cpu-a,cpu-b"
+    assert plan_to_dict(plan)["final_report"] == {
+        "resource": "cpu",
+        "partition": "cpu-a,cpu-b",
+    }
 
 
 def test_post_mip_compiler_topologically_orders_serialized_nodes() -> None:

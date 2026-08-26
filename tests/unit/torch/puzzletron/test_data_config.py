@@ -1,5 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for Puzzletron data and experiment configuration normalization."""
+
+from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
@@ -8,7 +24,9 @@ from modelopt.torch.puzzletron.dataset.config import PuzzletronDataSpec
 from modelopt.torch.puzzletron.pipeline_config import (
     adapt_runtime_hydra_config,
     normalize_pipeline_config,
+    pipeline_config_from_path,
 )
+from puzzletron_orchestrator.config import load_experiment_config
 
 
 def test_canonical_packed_multimodal_data_spec():
@@ -80,11 +98,83 @@ def test_pipeline_defaults_sort_sanity_to_include_reverse():
 
 
 def test_pipeline_preserves_explicit_reverse_sort_opt_out():
-    canonical = normalize_pipeline_config(
-        {"sort_sanity": {"include_reverse": False}}
-    )
+    canonical = normalize_pipeline_config({"sort_sanity": {"include_reverse": False}})
 
     assert canonical["sort_sanity"]["include_reverse"] is False
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [pipeline_config_from_path, load_experiment_config],
+    ids=["pipeline", "controller"],
+)
+@pytest.mark.parametrize(
+    ("legacy_path", "canonical_section", "canonical_key", "legacy", "canonical", "preferred"),
+    [
+        ("puzzle_dir", "experiment", "dir", "first", "second", "puzzle_dir"),
+        (
+            "input_hf_model_path",
+            "model",
+            "source",
+            "model-a",
+            "model-b",
+            "input_hf_model_path",
+        ),
+        ("teacher_dir", "convert", "teacher_dir", "first", "second", "teacher_dir"),
+        ("dataset_path", "data", "path", "first", "second", "dataset_path"),
+        (
+            "trust_remote_code",
+            "model",
+            "trust_remote_code",
+            False,
+            True,
+            "model.trust_remote_code",
+        ),
+    ],
+)
+def test_pipeline_and_controller_loaders_reject_conflicting_compatibility_aliases(
+    tmp_path: Path,
+    loader,
+    legacy_path: str,
+    canonical_section: str,
+    canonical_key: str,
+    legacy,
+    canonical,
+    preferred: str,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text(
+        OmegaConf.to_yaml(
+            OmegaConf.create(
+                {
+                    legacy_path: legacy,
+                    canonical_section: {canonical_key: canonical},
+                }
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match=rf"override '{preferred}'.*stay synchronized"):
+        loader(experiment)
+
+
+@pytest.mark.parametrize(
+    "override",
+    ["runtime_annotations.reason=ad-hoc", "++runtime_annotations.reason=ad-hoc"],
+)
+def test_pipeline_and_controller_loaders_apply_overrides_with_parity(
+    tmp_path: Path,
+    override: str,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text("experiment:\n  dir: run\n")
+
+    pipeline = pipeline_config_from_path(experiment, overrides=[override])
+    controller = load_experiment_config(experiment, overrides=[override])
+
+    assert (
+        pipeline["runtime_annotations"] == controller["runtime_annotations"] == {"reason": "ad-hoc"}
+    )
 
 
 def test_runtime_adapter_derives_legacy_loader_fields_from_canonical_data():

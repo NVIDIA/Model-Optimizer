@@ -179,9 +179,7 @@ class PostMIPAdapter(WorkAdapter):
             available = _available_evaluation_candidates(plan, node.stage_id)
             if available is not None:
                 if available < 1:
-                    raise RuntimeError(
-                        f"{node.stage_id} has no candidate architectures to evaluate"
-                    )
+                    raise ValueError(f"{node.stage_id} has no candidate architectures to evaluate")
                 count = min(count, available)
             count = _full_node_instance_count(node, count)
         if count == 1:
@@ -244,7 +242,7 @@ class PostMIPAdapter(WorkAdapter):
             )
         for override in overrides or ():
             argv.extend(["--override", override])
-        log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
+        log_path = plan.log_dir / f"{node.stage_id}_{item.shard_index}_{attempt_id}.log"
         # evaluation/global_kd always call torch.distributed, so even 1-GPU
         # workers need torchrun to export RANK/WORLD_SIZE.
         distributed_worker = node_type in {"evaluation", "global_kd"}

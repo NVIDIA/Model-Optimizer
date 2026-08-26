@@ -49,6 +49,7 @@ from puzzletron_orchestrator.schema import (
     SlurmRunnerConfig,
     StagePlanNode,
     TaskTopology,
+    WorkItem,
     WorkPlan,
 )
 
@@ -148,9 +149,7 @@ def test_render_sbatch_script_requests_gpus_per_node():
         ),
         slurm=SlurmRunnerConfig(
             account="acct",
-            partition="batch",
-            partition_interactive="interactive",
-            partition_batch="batch",
+            partition=["gpu-a", "gpu-b"],
         ),
     )
     attempt = AttemptSpec(
@@ -166,7 +165,7 @@ def test_render_sbatch_script_requests_gpus_per_node():
     script = render_sbatch_script(
         attempt=attempt,
         runner=runner,
-        partition=runner.slurm.partition_for_nodes(attempt.allocation_nodes),
+        partition=runner.slurm.partition,
         account="acct",
         time_limit="4:00:00",
         qos=None,
@@ -174,7 +173,7 @@ def test_render_sbatch_script_requests_gpus_per_node():
     )
     assert "#SBATCH --gpus-per-node=8" in script
     assert "#SBATCH --nodes=2" in script
-    assert "#SBATCH --partition=interactive" in script
+    assert "#SBATCH --partition=gpu-a,gpu-b" in script
     assert "source /site/setup-envs.sh" in script
     assert script.startswith("#!/bin/bash\n")
 
@@ -183,7 +182,7 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository="/repo", venv="/repo/.venv"),
-        slurm=SlurmRunnerConfig(account="acct", partition_cpu="cpu"),
+        slurm=SlurmRunnerConfig(account="acct", partition="cpu"),
     )
     attempt = AttemptSpec(
         attempt_id="a1",
@@ -211,6 +210,110 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     srun = next(line for line in script.splitlines() if line.startswith("srun "))
     assert "--gpus-per-task" not in srun
     assert "--gpu-bind" not in srun
+
+
+@pytest.mark.parametrize("configured_log_dir", [False, True], ids=("fallback", "configured"))
+def test_work_adapters_use_effective_campaign_log_dir(tmp_path: Path, configured_log_dir: bool):
+    """Every adapter must use the plan's effective shared log directory."""
+
+    custom_log_dir = tmp_path / "shared-logs" if configured_log_dir else None
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(
+            account="acct",
+            partition="batch",
+            log_dir=str(custom_log_dir) if custom_log_dir else None,
+        ),
+    )
+
+    def stage(stage_id: str, strategy: ExecutionStrategy) -> StagePlanNode:
+        return StagePlanNode(
+            stage_id=stage_id,
+            strategy=strategy,
+            instances=1,
+            failure_policy=FailurePolicy.STRICT,
+            mesh={},
+            gpus_per_instance=1,
+            gpus_per_node=8,
+            nodes=1,
+            total_gpus=1,
+            exclusive=False,
+            parents=(),
+            distributed=False,
+            partition="batch",
+        )
+
+    nodes = (
+        stage("convert", ExecutionStrategy.SINGLE),
+        stage("depth_importance", ExecutionStrategy.PERSISTENT_POOL),
+        stage("vllm_stats", ExecutionStrategy.SHARDED),
+        stage("post.profile.online_eval", ExecutionStrategy.SHARDED),
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={
+            "puzzle_dir": str(tmp_path / "run"),
+            "depth_importance": {"output_dir": str(tmp_path / "depth")},
+            "post_mip": {"flows": {"profile": {"nodes": {"online_eval": {"type": "evaluation"}}}}},
+        },
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=nodes,
+        contract_hash="contract",
+    )
+    items = (
+        WorkItem("convert:0", "convert", 0, 1, 1),
+        WorkItem(
+            "depth_importance:gang",
+            "depth_importance",
+            0,
+            1,
+            1,
+            metadata={"role": "gang", "worker_count": 1},
+        ),
+        WorkItem("vllm_stats:0", "vllm_stats", 0, 1, 1),
+        WorkItem(
+            "post.profile.online_eval:0",
+            "post.profile.online_eval",
+            0,
+            1,
+            1,
+            metadata={"logical_shard_count": 1},
+        ),
+    )
+    expected_log_dir = custom_log_dir or plan.puzzle_dir / "logs"
+
+    for node, item in zip(nodes, items, strict=True):
+        attempt = adapter_for_stage(node).command(
+            plan=plan,
+            node=node,
+            item=item,
+            attempt_id="a1",
+            runner=runner,
+        )
+        assert attempt.command.log_path is not None
+        assert Path(attempt.command.log_path).parent == expected_log_dir
+
+
+def test_campaign_plan_anchors_relative_log_dir_to_puzzle_dir(tmp_path: Path) -> None:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", log_dir="shared-logs"),
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={},
+        stages=(),
+        contract_hash="contract",
+    )
+
+    assert plan.log_dir == tmp_path / "run" / "shared-logs"
 
 
 @pytest.mark.parametrize(
@@ -253,9 +356,52 @@ def test_sharded_aiperf_command_rejects_non_boolean_security_policy(tmp_path, ex
         _aiperf_attempt(tmp_path, experiment_config)
 
 
-def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(
+    ("slurm_kwargs", "node_partition", "expected_partition", "configured_log_dir"),
+    [
+        ({"partition": "runner-a"}, "reserved-a,reserved-b", "reserved-a,reserved-b", False),
+        ({"partition": "runner-a"}, "reserved-a,reserved-b", "reserved-a,reserved-b", True),
+        (
+            {
+                "partition_interactive": "interactive",
+                "partition_batch": "batch",
+                "partition_cpu": "cpu",
+            },
+            None,
+            "cpu",
+            False,
+        ),
+        (
+            {
+                "partition_interactive": "interactive",
+                "partition_batch": "batch",
+                "partition_cpu": "cpu",
+            },
+            None,
+            "cpu",
+            True,
+        ),
+    ],
+    ids=(
+        "stage-override-fallback-log",
+        "stage-override-configured-log",
+        "legacy-cpu-fallback-log",
+        "legacy-cpu-configured-log",
+    ),
+)
+def test_vllm_aggregation_uses_slurm_execution_contract(
+    tmp_path: Path,
+    monkeypatch,
+    slurm_kwargs,
+    node_partition,
+    expected_partition,
+    configured_log_dir,
+):
     """Controller-side merges must run in the same container/venv as workers."""
 
+    slurm_kwargs = dict(slurm_kwargs)
+    if configured_log_dir:
+        slurm_kwargs["log_dir"] = str(tmp_path / "shared-logs")
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(
@@ -263,10 +409,7 @@ def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypa
             venv=".venv-worker",
             container="/images/pytorch.sqsh",
         ),
-        slurm=SlurmRunnerConfig(
-            account="acct",
-            partition_cpu="cpu",
-        ),
+        slurm=SlurmRunnerConfig(account="acct", **slurm_kwargs),
     )
     node = StagePlanNode(
         stage_id="vllm_stats",
@@ -281,6 +424,7 @@ def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypa
         exclusive=False,
         parents=("convert",),
         distributed=False,
+        partition=node_partition,
     )
     plan = CampaignPlan(
         experiment_config_path=str(tmp_path / "experiment.yaml"),
@@ -342,7 +486,10 @@ def test_vllm_aggregation_uses_slurm_execution_contract(tmp_path: Path, monkeypa
     attempt = submitted[0]
     assert attempt.allocation_gpus == 0
     assert attempt.metadata["gpus_per_node"] == 0
-    assert attempt.metadata["partition"] == "cpu"
+    assert attempt.metadata["partition"] == expected_partition
+    expected_log_dir = tmp_path / ("shared-logs" if configured_log_dir else "run/logs")
+    assert attempt.command.log_path is not None
+    assert Path(attempt.command.log_path).parent == expected_log_dir
     assert attempt.command.argv[-1] == "--merge"
     assert result.summary["merge_handle"] == "slurm-123"
 
@@ -351,6 +498,7 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     runner = RunnerEnvironment(
         kind="local",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="test", log_dir="shared-logs"),
     )
     node = StagePlanNode(
         stage_id="aiperf",
@@ -418,6 +566,8 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     attempt = submitted[0]
     assert attempt.allocation_gpus == 0
     assert attempt.command.cwd == str(tmp_path)
+    assert attempt.command.log_path is not None
+    assert Path(attempt.command.log_path).parent == tmp_path / "run" / "shared-logs"
     assert attempt.command.argv[-1] == "--merge"
 
 
@@ -435,9 +585,7 @@ def test_render_sbatch_script_never_requests_exclusive():
         ),
         slurm=SlurmRunnerConfig(
             account="acct",
-            partition="batch",
-            partition_interactive="interactive",
-            partition_batch="batch",
+            partition="gpu",
         ),
     )
     attempt = AttemptSpec(
@@ -468,15 +616,45 @@ def test_render_sbatch_script_never_requests_exclusive():
     assert "tee -a" not in script
 
 
-def test_partition_for_nodes_prefers_batch_above_interactive_cap():
-    slurm = SlurmRunnerConfig(
-        account="acct",
-        partition_interactive="interactive",
-        partition_batch="batch",
-        interactive_max_nodes=2,
+@pytest.mark.parametrize(
+    ("runner_partition", "metadata", "expected_directive"),
+    [
+        (["runner-a", "runner-b"], {}, "#SBATCH --partition=runner-a,runner-b"),
+        (["runner-a"], {"partition": "stage-a,stage-b"}, "#SBATCH --partition=stage-a,stage-b"),
+        (None, {}, None),
+    ],
+)
+def test_slurm_submit_resolves_partition_precedence(
+    tmp_path: Path,
+    monkeypatch,
+    runner_partition,
+    metadata,
+    expected_directive,
+):
+    monkeypatch.setattr(
+        "puzzletron_orchestrator.executors.slurm._run_command",
+        lambda argv: subprocess.CompletedProcess(argv, 0, stdout="12345\n", stderr=""),
     )
-    assert slurm.partition_for_nodes(2) == "interactive"
-    assert slurm.partition_for_nodes(3) == "batch"
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition=runner_partition),
+    )
+    attempt = AttemptSpec(
+        attempt_id="a1",
+        work_id="mip:0",
+        stage_id="mip",
+        command=CommandSpec(argv=("python", "worker.py")),
+        metadata=metadata,
+    )
+
+    SlurmExecutor(runner, scripts_dir=tmp_path / "sbatch").submit(attempt)
+
+    script = (tmp_path / "sbatch" / "mip_a1.sh").read_text()
+    if expected_directive is None:
+        assert "#SBATCH --partition=" not in script
+    else:
+        assert expected_directive in script
 
 
 def test_slurm_submit_retries_transient_controller_timeout(tmp_path: Path, monkeypatch):
@@ -511,7 +689,7 @@ def test_slurm_submit_retries_transient_controller_timeout(tmp_path: Path, monke
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition="interactive"),
+        slurm=SlurmRunnerConfig(account="acct", partition="gpu"),
     )
     attempt = AttemptSpec(
         attempt_id="abcdef12-3456",
@@ -567,7 +745,7 @@ def test_slurm_submit_recovers_job_after_ambiguous_timeout(tmp_path: Path, monke
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition="interactive"),
+        slurm=SlurmRunnerConfig(account="acct", partition="gpu"),
     )
     attempt = AttemptSpec(
         attempt_id="abcdef12-3456",
@@ -679,7 +857,7 @@ def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
     )
     node = StagePlanNode(
         stage_id="depth_importance",
@@ -741,7 +919,7 @@ def test_depth_pool_packs_four_two_gpu_workers_per_node(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
     )
     node = StagePlanNode(
         stage_id="depth_importance",
@@ -850,7 +1028,7 @@ def test_post_mip_workers_share_one_packed_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
     )
     node = StagePlanNode(
         stage_id="post.profile.online_eval",
@@ -903,7 +1081,7 @@ def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+        slurm=SlurmRunnerConfig(account="acct", partition="batch"),
     )
     node = StagePlanNode(
         stage_id="replacement_scoring",
@@ -965,8 +1143,8 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert [attempt.task_topology.gpus_per_task for attempt in attempts] == [4, 4]
     assert [attempt.command.env["WORKER_COUNT"] for attempt in attempts] == ["4", "4"]
     assert [attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts] == [
-        "+replacement_scoring.automodel.lm_head_backend=streaming",
-        "+replacement_scoring.automodel.lm_head_backend=streaming",
+        "++replacement_scoring.automodel.lm_head_backend=streaming",
+        "++replacement_scoring.automodel.lm_head_backend=streaming",
     ]
     assert all(
         "puzzle_dir=" not in attempt.command.env["FINALIZE_OVERRIDES"] for attempt in attempts
@@ -1008,7 +1186,7 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
         item=changed_work_plan.items[0],
         attempt_id="changed",
         runner=runner,
-        overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+        overrides=["++replacement_scoring.automodel.lm_head_backend=streaming"],
     )
     assert (
         changed_attempt.command.env["FINALIZE_COMPLETION_DIR"]
@@ -1060,7 +1238,7 @@ def test_replacement_pool_completion_identity_changes_with_embedding_widths(tmp_
     ] == ["4", "4", "4", "4"]
 
 
-def test_stage_partition_override_forces_batch(tmp_path: Path):
+def test_stage_partition_override_uses_eligible_partition_list(tmp_path: Path):
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text(
         yaml.safe_dump(
@@ -1088,9 +1266,7 @@ def test_stage_partition_override_forces_batch(tmp_path: Path):
                     "kind": "slurm",
                     "slurm": {
                         "account": "test",
-                        "partition_interactive": "interactive",
-                        "partition_batch": "batch",
-                        "interactive_max_nodes": 2,
+                        "partition": ["gpu-a", "gpu-b"],
                     },
                     "execution_contract": {
                         "repository": str(tmp_path),
@@ -1110,7 +1286,7 @@ def test_stage_partition_override_forces_batch(tmp_path: Path):
                         "vllm_stats": {
                             "strategy": "sharded",
                             "instances": 4,
-                            "partition": "batch",
+                            "partition": ["reserved-a", "reserved-b"],
                         },
                     },
                 }
@@ -1123,8 +1299,8 @@ def test_stage_partition_override_forces_batch(tmp_path: Path):
         execution=load_execution_config(execution),
     )
     node = next(item for item in plan.stages if item.stage_id == "vllm_stats")
-    assert node.partition == "batch"
-    assert plan.runner.slurm.partition_for_nodes(1) == "interactive"
+    assert node.partition == "reserved-a,reserved-b"
+    assert plan.runner.slurm.partition == "gpu-a,gpu-b"
     adapter = adapter_for_stage(node)
     attempt = adapter.command(
         plan=plan,
@@ -1133,7 +1309,7 @@ def test_stage_partition_override_forces_batch(tmp_path: Path):
         attempt_id="a1",
         runner=plan.runner,
     )
-    assert attempt.metadata["partition"] == "batch"
+    assert attempt.metadata["partition"] == "reserved-a,reserved-b"
 
 
 def _baremetal_runner() -> RunnerEnvironment:
@@ -1249,7 +1425,7 @@ def _replacement_width_attempts(
             item=item,
             attempt_id=f"a{index}",
             runner=runner,
-            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+            overrides=["++replacement_scoring.automodel.lm_head_backend=streaming"],
         )
         for index, item in enumerate(work_plan.items)
     ]

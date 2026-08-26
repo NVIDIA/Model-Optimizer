@@ -8,13 +8,8 @@ runner:
   slurm:
     account: REPLACE_WITH_SLURM_ACCOUNT
     partition: REPLACE_WITH_SLURM_PARTITION
-    partition_batch: REPLACE_WITH_SLURM_PARTITION
-    partition_interactive:
-    partition_cpu:
-    interactive_max_nodes: 1
     max_nodes: 1
     time_limit: "1:00:00"
-    log_dir: puzzle_runs/qwen3p5_0p8b_smoke/logs
   execution_contract:
     repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
     venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV

@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """CLI entrypoint for the Puzzletron v2 campaign orchestrator."""
 
@@ -10,6 +22,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -29,9 +43,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment", required=True, help="Path to the experiment YAML.")
     parser.add_argument("--runner", required=True, help="Path to the runner environment YAML.")
     parser.add_argument("--execution", required=True, help="Path to the execution semantics YAML.")
-    parser.add_argument("--stage", default="full", help="Stage id or 'full' for all enabled stages.")
-    parser.add_argument("--override", action="append", default=[], help="Hydra-style config override.")
-    parser.add_argument("--dry-run", action="store_true", help="Print packed submissions without submitting.")
+    parser.add_argument(
+        "--stage", default="full", help="Stage id or 'full' for all enabled stages."
+    )
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Repeatable config override; KEY=VALUE and ++KEY=VALUE are supported.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print packed submissions without submitting."
+    )
     parser.add_argument("--local", action="store_true", help="Use the local subprocess executor.")
     parser.add_argument("--once", action="store_true", help="Run one controller iteration.")
     parser.add_argument("--max-iterations", type=int, default=None)
@@ -53,21 +77,25 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     logger = OrchestratorLogger(color=args.color)
-    runner = load_runner_config(args.runner)
-    execution = load_execution_config(args.execution)
-    plan = compile_campaign_plan(
-        experiment_config_path=args.experiment,
-        runner=runner,
-        execution=execution,
-        overrides=args.override,
-        stage_filter=args.stage,
-    )
+    try:
+        runner = load_runner_config(args.runner)
+        execution = load_execution_config(args.execution)
+        plan = compile_campaign_plan(
+            experiment_config_path=args.experiment,
+            runner=runner,
+            execution=execution,
+            overrides=args.override,
+            stage_filter=args.stage,
+        )
+        submissions = dry_run_plan(plan, overrides=args.override) if args.dry_run else None
+    except (KeyError, OSError, TypeError, ValueError, yaml.YAMLError) as error:
+        logger.error(f"cannot build campaign plan: {error}")
+        return 2
     if args.dry_run:
-        submissions = dry_run_plan(plan, overrides=args.override)
+        assert submissions is not None
         logger.banner("dry-run only; no jobs will be submitted")
         logger.plan(
-            f"{len(plan.stages)} stage(s), {len(submissions)} submission(s), "
-            f"root={plan.puzzle_dir}"
+            f"{len(plan.stages)} stage(s), {len(submissions)} submission(s), root={plan.puzzle_dir}"
         )
         for node in plan.stages:
             count = sum(item.stage_id == node.stage_id for item in submissions)

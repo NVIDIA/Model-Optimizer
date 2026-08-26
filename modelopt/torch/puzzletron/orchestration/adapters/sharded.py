@@ -83,7 +83,8 @@ def _run_slurm_aggregate(
     if slurm is None:
         raise ValueError("Slurm aggregation requires runner.slurm")
     attempt_id = str(uuid.uuid4())
-    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    partition = node.partition or slurm.partition_cpu
+    log_path = plan.log_dir / f"{node.stage_id}_merge_{attempt_id}.log"
     attempt = AttemptSpec(
         attempt_id=attempt_id,
         work_id=f"{node.stage_id}:aggregate",
@@ -98,7 +99,7 @@ def _run_slurm_aggregate(
         contract_hash=plan.contract_hash,
         metadata={
             "gpus_per_node": 0,
-            "partition": slurm.partition_cpu or slurm.partition_for_nodes(1),
+            **({"partition": partition} if partition else {}),
         },
         task_topology=TaskTopology(task_count=1, gpus_per_task=0),
     )
@@ -138,7 +139,7 @@ def _run_local_aggregate(
     """Run a controller-side merge through the reviewed local executor."""
 
     attempt_id = str(uuid.uuid4())
-    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    log_path = plan.log_dir / f"{node.stage_id}_merge_{attempt_id}.log"
     attempt = AttemptSpec(
         attempt_id=attempt_id,
         work_id=f"{node.stage_id}:aggregate",
@@ -267,7 +268,7 @@ class ShardedStageAdapter(WorkAdapter):
         overrides: list[str] | None = None,
     ) -> AttemptSpec:
         repo = Path(runner.contract.repository)
-        log_dir = plan.puzzle_dir / "logs"
+        log_dir = plan.log_dir
         logical_count = int(item.metadata.get("logical_shard_count", node.instances))
         script, extra_args = _SHARDED_ENTRYPOINTS.get(
             node.stage_id,

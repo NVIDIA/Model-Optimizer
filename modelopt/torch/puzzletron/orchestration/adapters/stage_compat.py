@@ -671,7 +671,7 @@ class StageCompatAdapter(WorkAdapter):
     ) -> AttemptSpec:
         repo = Path(runner.contract.repository)
         main_py = repo / "examples" / "puzzletron" / "main.py"
-        log_dir = plan.puzzle_dir / "logs"
+        log_dir = plan.log_dir
         log_path = str(log_dir / f"{node.stage_id}_{attempt_id}.log")
         argv: list[str] = [
             "python",

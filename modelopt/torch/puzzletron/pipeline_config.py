@@ -22,6 +22,7 @@ from typing import Any, cast
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
+from ._config_aliases import _validate_compatibility_aliases
 from .dataset.config import PuzzletronDataSpec
 from .granularity import resolve_granularity
 from .tools.hydra_utils import initialize_hydra_config_for_dir, register_hydra_resolvers
@@ -174,6 +175,7 @@ def normalize_pipeline_config(config: DictConfig | dict[str, Any]) -> dict[str, 
     dictionary.
     """
     cfg = _to_plain(config)
+    _validate_compatibility_aliases(cfg)
     if "parallel" in cfg:
         raise ValueError(
             "top-level parallel was removed; configure automodel.parallel on each "

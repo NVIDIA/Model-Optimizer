@@ -19,5 +19,6 @@ infrastructure:
     slurm:
       # Add the required Slurm account for your site before using this file.
       # account: REPLACE_WITH_SLURM_ACCOUNT
-      # Optional. CPU/IO stages use the regular partition when unset.
-      partition_cpu:
+      # Optional. Use one partition name or a list of eligible names. When
+      # omitted, Slurm uses the site's default partition.
+      partition:

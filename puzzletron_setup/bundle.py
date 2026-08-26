@@ -145,7 +145,6 @@ def _parallel(mesh: Mapping[str, Any]) -> dict[str, Any]:
         "ep": int(mesh.get("ep", 1)),
         "dp_shard": int(mesh.get("dp_shard", 1)),
         "dp_replicate": int(mesh.get("dp_replicate", 1)),
-        "sequence_parallel": False,
     }
 
 
@@ -155,7 +154,7 @@ def _serving_parallel(topology: Mapping[str, Any]) -> dict[str, Any]:
         mesh = vllm_topology_to_mesh(topology)
     except (TypeError, ValueError) as error:
         raise SetupError(str(error)) from error
-    return {**mesh.as_dict(), "sequence_parallel": False}
+    return mesh.as_dict()
 
 
 def _aligned_batch_size(mesh: Mapping[str, Any], requested: int = 1) -> int:
@@ -723,9 +722,7 @@ def render_runner(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         "execution_contract": deepcopy(infrastructure["execution_contract"]),
     }
     if runner["kind"] == "slurm":
-        slurm = deepcopy(_mapping(runner_answers.get("slurm")))
-        slurm["partition"] = slurm.get("partition_batch", "batch")
-        runner["slurm"] = slurm
+        runner["slurm"] = deepcopy(_mapping(runner_answers.get("slurm")))
     elif runner["kind"] == "baremetal":
         runner["inventory"] = deepcopy(_mapping(runner_answers.get("inventory")))
     else:
@@ -820,8 +817,10 @@ def _dynamic_stage_entries(
                 "instances": 1 if cpu_stage else max(1, instances),
                 "gpus_per_node": gpus_per_node,
             }
-            if cpu_stage and cpu_partition:
-                entry.update(resource="cpu", partition=cpu_partition)
+            if cpu_stage:
+                entry["resource"] = "cpu"
+                if cpu_partition:
+                    entry["partition"] = cpu_partition
             if node_type == "evaluation":
                 entry["parallel"] = dict(common)
             elif node_type in {"aiperf", "downstream_evaluation"}:
@@ -903,9 +902,10 @@ def render_execution(
         )
     )
     cpu_stage_ids = {"convert", "tokenize_data", "build_library", "mip"}
-    if cpu_partition:
-        for stage_id in cpu_stage_ids:
-            stages[stage_id].update(resource="cpu", partition=cpu_partition)
+    for stage_id in cpu_stage_ids:
+        stages[stage_id]["resource"] = "cpu"
+        if cpu_partition:
+            stages[stage_id]["partition"] = cpu_partition
     for stage_id, stage in stages.items():
         stage.setdefault("gpus_per_node", gpus_per_node)
         if "short_kd" in stage_id or "global_kd" in stage_id:

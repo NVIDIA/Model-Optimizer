@@ -276,7 +276,8 @@ def render_experiment_v2(state: WizardState, budget: str) -> dict[str, Any]:
 
 def _render_runner_v2(config: ResolvedCampaignConfig, budget: str) -> dict[str, Any]:
     rendered = render_runner(_legacy_state_from_resolved(config), budget)
-    return _deep_merge(rendered, _plain(config.compatibility.runner))
+    compatibility = _plain(config.compatibility.runner)
+    return _deep_merge(rendered, compatibility)
 
 
 def render_runner_v2(state: WizardState, budget: str) -> dict[str, Any]:
@@ -307,9 +308,16 @@ def _render_execution_v2(
             entry["partition"] = resource.partition
         if resource.profile_name:
             profile = config.parallel_profiles.get(resource.profile_name)
-            entry["parallel"] = profile._parallel() if profile is not None else {}
+            parallel = profile._parallel() if profile is not None else {}
+            entry["parallel"] = {
+                key: value for key, value in parallel.items() if key != "sequence_parallel"
+            }
         elif resource.parallel is not None:
-            entry["parallel"] = _plain(resource.parallel)
+            entry["parallel"] = {
+                key: value
+                for key, value in _plain(resource.parallel).items()
+                if key != "sequence_parallel"
+            }
         stages[str(stage_id)] = entry
     return rendered
 
@@ -386,25 +394,41 @@ def _bundle_readme(
                 "The command is idempotent only when the existing manifest matches these answers.",
                 "",
                 "```bash",
-                " ".join(shlex.quote(part) for part in acquisition_command),
+                shlex.join(acquisition_command),
                 "```",
             )
         )
     for budget in ("smoke", "production"):
         bundle = campaign_dir / budget
-        orchestrator_command = (
-            f"python {orchestrator} --experiment {bundle / 'experiment.yaml'} "
-            f"--runner {bundle / 'runner.yaml'} --execution {bundle / 'execution.yaml'} "
-            "--stage full"
-        )
+        orchestrator_args = [
+            "python",
+            str(orchestrator),
+            "--experiment",
+            str(bundle / "experiment.yaml"),
+            "--runner",
+            str(bundle / "runner.yaml"),
+            "--execution",
+            str(bundle / "execution.yaml"),
+            "--stage",
+            "full",
+        ]
+        inspect_command = shlex.join([*orchestrator_args, "--dry-run"])
+        launch_command = shlex.join(orchestrator_args)
         lines.extend(
             [
                 "",
                 f"## {budget.title()}",
                 "",
+                "Inspect the complete plan without submitting jobs:",
+                "",
                 "```bash",
-                f"{orchestrator_command} --dry-run",
-                orchestrator_command,
+                inspect_command,
+                "```",
+                "",
+                "After reviewing the plan and worker paths, launch the campaign:",
+                "",
+                "```bash",
+                launch_command,
                 "```",
             ]
         )
@@ -414,8 +438,14 @@ def _bundle_readme(
             "## Resume setup",
             "",
             "```bash",
-            f"python {Path(repository) / 'examples/puzzletron/puzzletron_setup_v2.py'} "
-            f"--resume {campaign_dir}",
+            shlex.join(
+                [
+                    "python",
+                    str(Path(repository) / "examples/puzzletron/puzzletron_setup_v2.py"),
+                    "--resume",
+                    str(campaign_dir),
+                ]
+            ),
             "```",
             "",
         ]
