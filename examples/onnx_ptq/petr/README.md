@@ -53,6 +53,8 @@ docker run --rm -it --gpus=all --shm-size=64G \
   petr-modelopt
 ```
 
+The image builds MMDetection3D v1.0.0rc6 from its verified upstream commit and applies the included nuScenes-only patch. The patch removes the unused Lyft integration and its runtime dependencies while preserving the nuScenes dataset and evaluation path used here.
+
 Use the isolated Python 3.8 environment for PETR export, calibration preparation, and evaluation. Keep its site-packages first so the installed MMDetection3D 1.0.0rc6 package takes precedence over the v0.17.1 source tree used by the configs:
 
 ```bash

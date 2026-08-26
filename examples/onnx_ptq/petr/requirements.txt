@@ -3,7 +3,6 @@
 
 einops==0.8.1
 ipython==8.12.3
-lyft-dataset-sdk==0.0.8
 mmcv-full==1.7.0
 mmdet==2.28.2
 mmsegmentation==0.30.0
@@ -16,7 +15,6 @@ onnx-graphsurgeon==0.6.1
 onnxruntime==1.19.2
 onnxsim==0.5.0
 opencv-python==4.8.1.78
-plyfile==1.0.3
 pycuda==2026.1
 scikit-image==0.19.3
 setuptools==75.3.4
