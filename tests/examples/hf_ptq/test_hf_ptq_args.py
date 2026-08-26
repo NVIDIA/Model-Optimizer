@@ -252,6 +252,27 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
     assert attention.v_bmm_quantizer.is_enabled
 
 
+def test_composed_kv_autoquantize_rejects_enabled_actual_kv_quantizers(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    hf_ptq.mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {
+                    "quantizer_name": "*[kv]_bmm_quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                }
+            ],
+            "algorithm": None,
+        },
+    )
+
+    with pytest.raises(ValueError, match="preceding weight/activation stage left K/V"):
+        hf_ptq._assert_kv_autoquantize_input_is_clean(model)
+    assert model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
+
+
 def test_kv_autoquant_names_asymmetric_export_format(monkeypatch):
     """The supported FP8-K/NVFP4-V candidate has a stable semantic name."""
     hf_ptq = _import_hf_ptq(monkeypatch)

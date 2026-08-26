@@ -1953,13 +1953,37 @@ def test_load_recipe_kv_autoquantize_contract():
     assert aq.auto_quantize_method == "kl_div"
     assert "*mtp*" in aq.disabled_layers
     assert aq.cost_excluded_layers == []
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert all(candidate.quant_cfg[0].cfg.use_constant_amax for candidate in aq.candidate_formats)
     assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
             assert entry.quantizer_name == "*[kv]_bmm_quantizer"
-            assert not entry.cfg.use_constant_amax
+            assert entry.cfg.use_constant_amax
             assert entry.cfg.constant_amax is None
-        assert fmt.algorithm == "max"
+        assert fmt.algorithm is None
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "kv_stage"),
+    [
+        (
+            "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "auto_quantize",
+        ),
+        (
+            "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "kv_auto_quantize",
+        ),
+    ],
+)
+def test_builtin_kv_autoquantize_recipes_use_calibration_free_cast_candidates(
+    recipe_path, kv_stage
+):
+    aq = getattr(load_recipe(recipe_path), kv_stage)
+
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert all(candidate.quant_cfg[0].cfg.use_constant_amax for candidate in aq.candidate_formats)
 
 
 def test_load_recipe_fixed_ptq_then_kv_autoquantize(tmp_path):
@@ -2024,13 +2048,18 @@ def test_composed_kv_autoquantize_rejects_preconfigured_kv_quantizers(tmp_path):
         load_recipe(recipe_file)
 
 
-def test_followup_kv_autoquantize_rejects_kv_weight_search_candidate():
+@pytest.mark.parametrize(
+    "quantizer_name",
+    ["*[kv]_bmm_quantizer", "model.layers.*.self_attn.*_bmm_quantizer"],
+)
+def test_followup_kv_autoquantize_rejects_kv_weight_search_candidate(quantizer_name):
     kv_candidate = qcfg.QuantizeConfig(
         quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
             {
-                "quantizer_name": "*[kv]_bmm_quantizer",
+                "quantizer_name": quantizer_name,
                 "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-            }
+            },
         ],
         effective_bits=8.0,
     )

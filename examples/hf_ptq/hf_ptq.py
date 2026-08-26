@@ -454,6 +454,22 @@ def _mtq_inputs_from_auto_quantize_config(
     }
 
 
+def _assert_kv_autoquantize_input_is_clean(model: torch.nn.Module) -> None:
+    """Fail closed if an upstream stage left actual K/V quantizers enabled."""
+    enabled = [
+        name
+        for name, module in model.named_modules(remove_duplicate=False)
+        if name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+        and getattr(module, "is_enabled", False)
+    ]
+    if enabled:
+        raise ValueError(
+            "The preceding weight/activation stage left K/V quantizers enabled on the converted "
+            f"model: {enabled}. Disable them in that stage before running mixed-KV AutoQuant; "
+            "clearing them now would not undo its calibration or sensitivity measurements."
+        )
+
+
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -487,6 +503,8 @@ def auto_quantize(
         fixed_quantize_config=fixed_quantize_config,
         allow_uniform_kv=allow_uniform_kv,
     )
+    if inputs["search_domain"] == "kv_cache":
+        _assert_kv_autoquantize_input_is_clean(language_model)
     checkpoint = getattr(args, checkpoint_attr, None)
 
     # base-model lm_head handling (mirrors the CLI helper)
@@ -1666,8 +1684,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to the independent KV-cache search checkpoint when a recipe runs weight "
-            "AutoQuantize followed by kv_auto_quantize."
+            "Path for saving/restoring the KV-cache search checkpoint in a composed recipe. "
+            "Use a new path whenever the preceding weight/activation quantization stage changes."
         ),
     )
     parser.add_argument(

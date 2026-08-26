@@ -327,12 +327,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
 
 
 def _quantize_config_enables_kv(config: QuantizeConfig) -> bool:
-    """Return whether ordered quantizer rules leave either K/V quantizer enabled."""
-    probe_names = ("layer.k_bmm_quantizer", "layer.v_bmm_quantizer")
+    """Return whether ordered quantizer rules leave either K/V quantizer enabled.
+
+    Match the pattern basename so a rule rooted at the real model, such as
+    ``model.layers.*.self_attn.*_bmm_quantizer``, cannot bypass composition validation.
+    """
+    probe_names = ("k_bmm_quantizer", "v_bmm_quantizer")
     enabled = dict.fromkeys(probe_names, False)
     for entry in config.quant_cfg:
+        pattern = entry.quantizer_name.rsplit(".", 1)[-1]
         for name in probe_names:
-            if fnmatch(name, entry.quantizer_name):
+            if fnmatch(name, pattern):
                 enabled[name] = entry.enable
     return any(enabled.values())
 
