@@ -1874,6 +1874,30 @@ def test_load_recipe_autoquantize_module_search_spaces():
     assert searched.allow_no_quant is False
 
 
+def test_load_recipe_autoquantize_muse_glimmer():
+    """Muse Glimmer searches only text projections and permits BF16 fallback."""
+    recipe = load_recipe(
+        "huggingface/muse_glimmer/auto_quantize/w4a16_nvfp4_4o6_fp8_at_5p5bits-allow_bf16"
+    )
+    aq = recipe.auto_quantize
+
+    assert recipe.quantize is not None
+    assert aq.constraints.effective_bits == 5.5
+    assert aq.constraints.cost_model == "weight"
+    assert aq.candidate_formats == []
+    assert len(aq.module_search_spaces) == 1
+    (searched,) = aq.module_search_spaces
+    assert searched.module_name_patterns == [
+        "*language_model.layers.*.mlp*",
+        "*language_model.layers.*.self_attn.*_proj",
+        "*lm_head*",
+    ]
+    assert len(searched.candidate_formats) == 2
+    assert searched.candidate_formats[0].effective_bits == 4.5
+    assert searched.allow_no_quant is True
+    assert aq.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
 def test_load_recipe_autoquantize_fixed_baseline_rejects_global_fallback(tmp_path):
     recipe_file = tmp_path / "fixed-and-global.yml"
     recipe_file.write_text(
