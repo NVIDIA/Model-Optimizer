@@ -36,15 +36,21 @@ Resolve these before starting (ask the user for anything missing):
 ## The chain
 
 ```text
-setup ─▶ PTQ ─▶ baseline-eval ─▶ quantized-eval ─▶ compare ─▶ closeout
-          │          │                │               │
-       gate_ptq   gate_run         gate_run       gate_compare
+setup ─▶ PTQ ─▶ canary ─▶ baseline-eval ─▶ quantized-eval ─▶ compare ─▶ verbosity ─▶ closeout
+          │        │           │                │              │           │
+       gate_ptq  /health    gate_run         gate_run    gate_compare  gate_verbosity
+                 + 1 gen
 ```
 
 The **evaluation** skill deploys the model it evaluates (it stands up its own
-endpoint per run), so there is no separate deploy stage — a serving failure
-surfaces through the eval stage's gate (`DEPLOYMENT_HEALTH_FAILED`) and triages
-to the **deployment** skill to debug serving in isolation (see Step 4).
+endpoint per run), so there is no separate deploy *stage* — a serving failure
+during evaluation surfaces through the eval gate (`DEPLOYMENT_HEALTH_FAILED`) and
+triages to the **deployment** skill (see Step 4). The Step 2b **canary** is not
+that: it runs *before* any evaluation precisely so an unservable checkpoint is
+caught in ~15 min rather than after a multi-hour eval.
+
+Accuracy (Step 5) and verbosity (Step 5b) are **independent gates**; closeout
+requires both.
 
 Run each stage by invoking the domain skill, then run its gate before
 proceeding. **Do not advance past a failed gate.** Copy this checklist and track

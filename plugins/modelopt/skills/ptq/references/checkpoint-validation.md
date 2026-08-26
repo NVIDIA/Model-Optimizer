@@ -16,7 +16,7 @@ Before moving to deployment/evaluation, report a table in this shape:
 | Check | Result |
 | --- | --- |
 | Size vs source | `<output> GB / <source> GB = <ratio>x`; PASS only if the ratio matches the recipe's compression intent |
-| Source precision | dtype of the **source** weights. A source already at 4 bits cannot shrink further under a 4-bit recipe, so this is what distinguishes inherent growth from a failed compression. Record it as `source_precision` in the validation summary, using one of the exact tokens `bf16` / `fp16` / `fp8` / `mxfp4` / `nvfp4` / `fp4` / `int4` / `w4a16` / `awq` / `4bit` — a free-form value is treated as undeclared and blocks. For a **mixed** source, record the precision of the dominant weight mass (a model with MXFP4 experts at ~96% of bytes and BF16 attention is `mxfp4`) |
+| Source precision | dtype of the **source** weights. A source already at 4 bits cannot shrink further under a 4-bit recipe, so this is what distinguishes inherent growth from a failed compression. Record it as `source_precision` in the validation summary, using one of the exact tokens `bf16` / `fp16` / `fp32` / `fp8` / `int8` / `mxfp4` / `nvfp4` / `fp4` / `int4` / `w4a16` / `awq` / `4bit` — a free-form value is treated as undeclared and blocks. For a **mixed** source, record the precision of the dominant weight mass (a model with MXFP4 experts at ~96% of bytes and BF16 attention is `mxfp4`) |
 | Layer precision counts | `<count> NVFP4 / <count> FP8 / <count> INT4 / <count> BF16-or-excluded / <count> unexpected / <count> declaration mismatches` |
 | Metadata | `no unexpected diffs` or list exact diffs |
 | Checkpoint workspace/path | `<exact workspace>` / `<exact checkpoint path>`; these exact locations must be inherited by deployment and evaluation |

@@ -510,8 +510,10 @@ def test_verbosity_exit_codes_match_sibling_gates(tmp_path, capsys):
     capsys.readouterr()
 
 
-# Emitted by a gate script but deliberately absent from the triage table.
-_NOT_TRIAGED = {"USER_CONFIG_ERROR"}  # generic; documented separately in SKILL.md
+# Emitted by a gate script but deliberately absent from the triage table. Empty today:
+# every emitted class has a row, including USER_CONFIG_ERROR. Exempting a class that
+# HAS a row would silently un-pin that row.
+_NOT_TRIAGED: set[str] = set()
 
 
 def test_verbosity_tolerates_small_sample_count_drift():
@@ -576,6 +578,46 @@ def test_verbosity_anchors_on_the_largest_matchable_count_not_min_of_maxes():
     t = r["per_task"]["t"]
     assert t["status"] == "compared" and t["sample_counts"] == [200]
     assert "n=294" in t["truncated_comparison"]
+
+
+def test_harvest_prefers_the_task_name_from_metadata(tmp_path):
+    """<invocation>.<job_index> layouts collapse every task onto one key without this."""
+    for job, name in ((0, "simple_evals.gpqa"), (1, "tau2.telecom")):
+        d = tmp_path / "eval_run" / f"inv123.{job}" / "artifacts"
+        d.mkdir(parents=True)
+        (d / "metadata.yaml").write_text(f"evaluation:\n  tasks:\n    - name: {name}\n")
+        (d / "eval_factory_metrics.json").write_text(
+            json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+        )
+    assert set(harvest(str(tmp_path))) == {"simple_evals.gpqa", "tau2.telecom"}
+
+
+def test_harvest_flags_collapsed_task_keys(tmp_path):
+    """Without metadata, distinct dirs mapping to one key must be reported, not pooled silently."""
+    for job in (0, 1):
+        d = tmp_path / "eval_run" / f"inv123.{job}" / "artifacts"
+        d.mkdir(parents=True)
+        (d / "eval_factory_metrics.json").write_text(
+            json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+        )
+    diag = {}
+    harvest(str(tmp_path), diagnostics=diag)
+    assert "collapsed_keys" in diag and diag["collapsed_keys"]["inv123"] == [
+        "inv123.0",
+        "inv123.1",
+    ]
+
+
+def test_dropped_tasks_covers_the_excluded_channel(tmp_path):
+    """A task whose runs are all excluded must still be nameable in the verdict."""
+    d = tmp_path / "eval_high" / "inv" / "h.only_high" / "artifacts"
+    d.mkdir(parents=True)
+    (d / "eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+    )
+    diag = {}
+    assert harvest(str(tmp_path), diagnostics=diag) == {}
+    assert diag["excluded_tasks"] == ["h.only_high"]
 
 
 if __name__ == "__main__":

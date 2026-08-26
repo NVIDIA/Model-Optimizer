@@ -58,9 +58,11 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
         baseline: ``{task: [(avg_completion_tokens, successful_count), ...]}``
         candidate: same shape as ``baseline``
         threshold: max allowed |delta| as a fraction of baseline (default 0.05)
-        dropped_tasks: task names harvest discarded before comparison (excluded run dirs,
-            metrics without token counts). They never reach ``per_task``, so without this
-            the verdict reads as full coverage over a silently smaller task set.
+        dropped_tasks: task names harvest discarded before comparison -- every run
+            excluded by ``--exclude``, or no run with a usable token count. They never
+            reach ``per_task``, so without this the verdict reads as full coverage over a
+            silently smaller task set. Artifacts that failed to parse are reported by path
+            in ``harvest_diagnostics.unreadable_metrics``, since no task name exists yet.
 
     Returns:
         dict ``{pass, failure_class, detail, per_task, not_comparable, max_abs_delta}``.
@@ -185,9 +187,23 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
     }
 
 
+def _task_from_metadata(artifacts_dir):
+    """Task name from NEL's ``metadata.yaml`` (``evaluation.tasks[].name``), or None.
+
+    Read with a narrow regex rather than a YAML parser to keep these gates stdlib-only.
+    """
+    try:
+        with open(os.path.join(artifacts_dir, "metadata.yaml")) as f:
+            m = re.search(r"^\s*-?\s*name:\s*(\S+)\s*$", f.read(), re.MULTILINE)
+    except OSError:
+        return None
+    return m.group(1).strip("\"'") if m else None
+
+
 def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
     out, unreadable, excluded, no_metric = {}, [], [], []
+    source_dirs, excluded_tasks = {}, set()
     # Depth-agnostic: repo-documented trees put <harness>.<task>/artifacts/ directly under the
     # run dir, while NEL invocations add an invocation level. Hard-coding either one silently
     # harvests nothing (or, worse, only the subset at the matching depth).
@@ -198,16 +214,29 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
         run_dir = rel[0]
         if exclude and exclude in run_dir:
             excluded.append(run_dir)
+            # Name the task too: a task whose runs are ALL excluded never reaches
+            # per_task, so without this it is invisible to the verdict's detail line.
+            t = _task_from_metadata(os.path.dirname(path))
+            if t is None:
+                n = path.split(os.sep)[-3]
+                h, _, tl = n.rpartition(".")
+                t = h if h and re.fullmatch(r"\d+", tl) else n
+            excluded_tasks.add(t)
             continue
         parts = path.split(os.sep)
-        # Dir is "<harness>.<task>[.<run_index>]". Strip the run index only when the
-        # trailing segment is numeric, and KEEP the harness: two harnesses can expose the
-        # same task name, and pooling them would average different generation conditions
-        # into one number. Both sides run the same harness (Step 4 config parity), so the
-        # fuller key still matches across baseline and candidate.
-        name = parts[-3]
-        head, _, tail = name.rpartition(".")
-        task = head if head and re.fullmatch(r"\d+", tail) else name
+        # Prefer the task name NEL records next to the artifacts. The directory name
+        # alone is not sufficient: some layouts are "<invocation_id>.<job_index>" where
+        # the trailing number enumerates TASKS, not repeats, so stripping it collapses
+        # every task in an invocation onto one key and pools unrelated means.
+        task = _task_from_metadata(os.path.dirname(path))
+        if task is None:
+            # Fall back to "<harness>.<task>[.<run_index>]": strip the run index only
+            # when the trailing segment is numeric, and KEEP the harness, since two
+            # harnesses can expose the same task name.
+            name = parts[-3]
+            head, _, tail = name.rpartition(".")
+            task = head if head and re.fullmatch(r"\d+", tail) else name
+        source_dirs.setdefault(task, set()).add(parts[-3])
         try:
             with open(path) as f:
                 stats = json.load(f).get("response_stats", {})
@@ -222,12 +251,22 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             # otherwise a schema rename. Record it either way -- a silently vanished run
             # makes the remaining pass look more complete than it is.
             no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
+    collapsed = {k: sorted(v) for k, v in source_dirs.items() if len(v) > 1}
     if diagnostics is not None:
+        if collapsed:
+            diagnostics["collapsed_keys"] = collapsed
         if not matches:
             diagnostics["no_files_matched"] = pattern
         diagnostics["excluded_run_dirs"] = sorted(set(excluded))
+        diagnostics["excluded_tasks"] = sorted(excluded_tasks)
         diagnostics["unreadable_metrics"] = unreadable
         diagnostics["metrics_without_tokens"] = no_metric
+    if collapsed:
+        print(
+            f"warning: {len(collapsed)} task key(s) came from multiple artifact dirs, so "
+            f"unrelated tasks may be pooled: {collapsed}",
+            file=sys.stderr,
+        )
     if excluded:
         print(
             f"note: excluded {len(excluded)} run dir(s) matching {exclude!r}: "
@@ -260,9 +299,12 @@ def main(argv=None):
     diag = {"baseline": {}, "candidate": {}}
     baseline = harvest(args.baseline, args.glob, args.exclude, diag["baseline"])
     candidate = harvest(args.candidate, args.glob, args.exclude, diag["candidate"])
-    # Tasks present on neither side because harvest dropped every run for them.
+    # Tasks present on neither side because harvest dropped every run for them --
+    # via --exclude, or because no run had a usable token count. (unreadable_metrics
+    # is keyed by path, so a task name is not recoverable from it.)
     dropped = set()
     for side_diag in diag.values():
+        dropped |= set(side_diag.get("excluded_tasks", []))
         for entry in side_diag.get("metrics_without_tokens", []):
             dropped.add(entry.split(":", 1)[0])
     dropped -= set(baseline) | set(candidate)
