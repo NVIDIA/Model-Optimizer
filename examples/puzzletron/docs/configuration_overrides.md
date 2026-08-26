@@ -1,4 +1,30 @@
-# Experiment overrides
+# Configuration and experiment overrides
+
+Checked-in experiment configs use Hydra composition:
+
+```text
+examples/puzzletron/configs/
+├── base.yaml                         # pipeline-wide defaults
+└── families/
+    └── <family>/
+        ├── family.yaml               # descriptors, hooks, and family axes
+        └── <model>/
+            ├── model.yaml            # checkpoint metadata and legal domains
+            └── runs/<run>.yaml       # exact named campaign run
+```
+
+Set a site-specific artifact root without editing a checked-in config:
+
+```bash
+export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
+```
+
+Checked-in experiment YAMLs use `PUZZLETRON_RUN_ROOT` to resolve `puzzle_dir`.
+Generated bundles write their selected `puzzle_dir` directly. In both cases,
+`puzzle_dir` is the canonical location for artifacts, manifests, controller
+state, and logs unless `runner.slurm.log_dir` relocates attempt logs.
+
+## Command-line overrides
 
 Use command-line overrides for temporary experiment value changes. Append a
 repeatable `--override KEY=VALUE` to the orchestrator command and inspect the

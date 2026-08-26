@@ -13,9 +13,22 @@ python examples/puzzletron/orchestrate.py \
   --stage width_importance
 ```
 
+`--stage <stage_id>` runs only that stage and requires its parent artifacts to
+be complete; it does not run missing prerequisites. Use `--stage full` for the
+normal dependency-ordered campaign and whole-campaign resume.
+
 The launch command runs a foreground controller. It submits every
 dependency-ready branch concurrently, polls scheduler state, and exits when the
 selected plan completes or fails.
+
+`--once` recovers and polls existing attempts, submits currently ready work,
+and exits after one scheduling iteration. Submitted jobs keep running. Invoke
+the same `--once` command again for the next recovery and scheduling iteration.
+
+Remote model code and AIPerf v0.11 online tokenizer resolution are disabled by
+default. Enable remote code only for a trusted model source. The tokenizer
+compatibility option permits the AIPerf child process to resolve its tokenizer
+online even when the surrounding campaign is configured for offline loading.
 
 ## Progress and interruption
 

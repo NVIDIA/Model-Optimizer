@@ -1,7 +1,10 @@
 # Puzzletron Campaign Reports
 
-The orchestrator generates a cumulative HTML report after a campaign. Regenerate
-it without rerunning model work:
+After a campaign completes cleanly, the orchestrator attempts to generate a
+cumulative HTML report through the configured runner. A report submission,
+polling, or artifact failure is recorded in the controller result but does not
+fail the completed campaign. Inspect the controller logs, then regenerate the
+report without rerunning model work:
 
 ```bash
 python examples/puzzletron/generate_campaign_progress_report.py \
