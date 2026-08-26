@@ -1,7 +1,0 @@
-# GitHub Teams defined at https://github.com/orgs/NVIDIA/teams/modelopt-devs/teams
-
-# Library
-modelopt/torch/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
-
-# Examples
-/examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
