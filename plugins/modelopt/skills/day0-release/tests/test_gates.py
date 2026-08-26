@@ -438,5 +438,40 @@ def test_ptq_waiver_requires_canonical_values():
     assert evaluate_checkpoint(_ckpt(**grew, source_precision=" MXFP4 "))["pass"]
 
 
+def _write_metrics(d, tokens=100.0, count=10):
+    d.mkdir(parents=True)
+    d.joinpath("eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"avg_completion_tokens": tokens, "successful_count": count}})
+    )
+
+
+def test_harvest_handles_both_documented_depths(tmp_path):
+    """Repo docs put <harness>.<task>/artifacts one level under the run dir; NEL adds one."""
+    _write_metrics(tmp_path / "eval_shallow" / "h.taskA" / "artifacts")
+    _write_metrics(tmp_path / "eval_deep" / "invocation123" / "h.taskB" / "artifacts")
+    assert set(harvest(str(tmp_path))) == {"h.taskA", "h.taskB"}
+
+
+def test_harvest_reports_a_glob_miss(tmp_path):
+    """A pattern that matches nothing was the one drop with no diagnostic."""
+    diag = {}
+    assert harvest(str(tmp_path), diagnostics=diag) == {}
+    assert "no_files_matched" in diag
+
+
+def test_ptq_explicit_acceptance_is_not_capped():
+    """accept_size_growth is a human override; the docs state it without a bound."""
+    r = evaluate_checkpoint(_ckpt(output_bytes=32_000_000_000, accept_size_growth=True))
+    assert r["pass"]
+    assert "accepted explicitly" in r["notes"][0]
+    assert "''" not in r["notes"][0]  # must not claim an undeclared precision
+
+
+def test_ptq_declared_source_is_capped():
+    """A checkable claim stays bounded by the growth it explains."""
+    r = evaluate_checkpoint(_ckpt(output_bytes=32_000_000_000, source_precision="mxfp4"))
+    assert not r["pass"] and "explains at most" in r["detail"]
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

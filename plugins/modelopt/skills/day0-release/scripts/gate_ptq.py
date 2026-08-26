@@ -44,8 +44,9 @@ Validation summary shape:
       # Required to waive the size check: a source already at 4 bits cannot shrink
       # further under a 4-bit recipe. Absent, size growth blocks.
       "source_precision": str,
-      # Optional, last resort. Waives the size check without declaring a precision;
-      # prefer source_precision, which states *why* the growth is expected.
+      # Optional, last resort. Must be the literal boolean true. Waives the size check
+      # unconditionally (no growth bound) and records no reason; prefer source_precision,
+      # whose claim we can actually check.
       "accept_size_growth": bool
     }
 """
@@ -99,9 +100,8 @@ def evaluate_checkpoint(summary):
     source_precision = str(summary.get("source_precision") or "").strip().lower()
     # Exact membership, not substring: "not_mxfp4" must not match. And require a real
     # boolean, since a JSON string "false" is truthy and would silently waive the gate.
-    already_sub8 = (
-        summary.get("accept_size_growth") is True or source_precision in _SUB8_SOURCE_PRECISIONS
-    )
+    accept_growth = summary.get("accept_size_growth") is True
+    source_is_sub8 = source_precision in _SUB8_SOURCE_PRECISIONS
     counts = summary.get("layer_precision_counts") or {}
     metadata_diffs = summary.get("metadata_diffs") or []
 
@@ -119,20 +119,26 @@ def evaluate_checkpoint(summary):
         if ratio >= 1.0:
             # Blocking by default (ptq/references/checkpoint-validation.md: a ratio >= 1.0 for
             # a compression recipe blocks "unless the user explicitly accepts the explanation").
-            # The one explanation we can check is an already-sub-8-bit source: NVFP4 over MXFP4
-            # keeps the E2M1 nibbles but swaps an E8M0 scale per 32 for an E4M3 per 16, so scale
-            # bytes double and the output cannot shrink. Downgrade to a note ONLY when the
-            # summary states that, and only within the growth it explains -- otherwise a
-            # BF16 source that never actually compressed would pass.
-            if already_sub8 and ratio <= _INHERENT_GROWTH_MAX:
+            # Two distinct waivers, deliberately not conflated:
+            #   source_precision -- we can check the claim, so it is bounded by the growth an
+            #     already-4-bit source explains (NVFP4 over MXFP4 keeps the E2M1 nibbles but
+            #     swaps an E8M0 scale per 32 for an E4M3 per 16, so scale bytes double).
+            #   accept_size_growth -- an explicit human override. We cannot check the reason,
+            #     and the reference states it without a bound, so neither do we.
+            if accept_growth:
+                notes.append(
+                    f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth accepted explicitly via "
+                    "accept_size_growth (no source precision declared)"
+                )
+            elif source_is_sub8 and ratio <= _INHERENT_GROWTH_MAX:
                 notes.append(
                     f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth is inherent for the declared "
                     f"{source_precision!r} source; judge reduction against BF16"
                 )
             else:
                 why = (
-                    f"beyond the {_INHERENT_GROWTH_MAX}x an already-4-bit source explains"
-                    if already_sub8
+                    f"declared {source_precision!r} source explains at most {_INHERENT_GROWTH_MAX}x"
+                    if source_is_sub8
                     else "source precision not declared sub-8-bit, so growth is not explained"
                 )
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))

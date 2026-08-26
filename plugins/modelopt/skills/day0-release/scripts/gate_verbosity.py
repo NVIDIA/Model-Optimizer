@@ -161,12 +161,18 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
 def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
     out, unreadable, excluded, no_metric = {}, [], [], []
-    pattern = os.path.join(side, glob, "*", "*", "artifacts", "eval_factory_metrics.json")
-    for path in globmod.glob(pattern):
-        parts = path.split(os.sep)
-        if exclude and exclude in parts[-5]:
-            excluded.append(parts[-5])
+    # Depth-agnostic: repo-documented trees put <harness>.<task>/artifacts/ directly under the
+    # run dir, while NEL invocations add an invocation level. Hard-coding either one silently
+    # harvests nothing (or, worse, only the subset at the matching depth).
+    pattern = os.path.join(side, glob, "**", "artifacts", "eval_factory_metrics.json")
+    matches = globmod.glob(pattern, recursive=True)
+    for path in matches:
+        rel = os.path.relpath(path, side).split(os.sep)
+        run_dir = rel[0]
+        if exclude and exclude in run_dir:
+            excluded.append(run_dir)
             continue
+        parts = path.split(os.sep)
         # Dir is "<harness>.<task>[.<run_index>]". Strip the run index only when the
         # trailing segment is numeric, and KEEP the harness: two harnesses can expose the
         # same task name, and pooling them would average different generation conditions
@@ -190,6 +196,8 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             # makes the remaining pass look more complete than it is.
             no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
     if diagnostics is not None:
+        if not matches:
+            diagnostics["no_files_matched"] = pattern
         diagnostics["excluded_run_dirs"] = sorted(set(excluded))
         diagnostics["unreadable_metrics"] = unreadable
         diagnostics["metrics_without_tokens"] = no_metric
