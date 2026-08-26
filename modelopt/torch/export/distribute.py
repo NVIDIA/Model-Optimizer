@@ -308,7 +308,6 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
 # ----- No-gather distributed HF export (FSDP2): per-rank owner gather + parallel write -----
 import torch.nn as nn  # noqa: E402  (distributed_save_hf_checkpoint's signature uses nn.Module)
 
-from ._export_common import _size_to_bytes
 from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 
 @contextmanager
@@ -335,6 +334,24 @@ def distributed_save_hf_checkpoint(
         _distributed_save_hf_checkpoint_impl(
             model, export_dir, maxbound, kv_cache_format, max_shard_size, is_modelopt_qlora
         )
+
+
+def _size_to_bytes(size: "str | int") -> int:
+    """Parse an HF-style shard-size string (``"5GB"``, ``"500MB"``, ``"1GiB"``) to bytes.
+
+    Matches transformers' decimal convention (GB == 10**9). Bare ints pass through.
+    """
+    if isinstance(size, int):
+        return size
+    s = str(size).strip().upper()
+    units = {
+        "KIB": 2**10, "MIB": 2**20, "GIB": 2**30, "TIB": 2**40,
+        "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12,
+    }  # fmt: skip
+    for unit in ("KIB", "MIB", "GIB", "TIB", "KB", "MB", "GB", "TB"):
+        if s.endswith(unit):
+            return int(float(s[: -len(unit)]) * units[unit])
+    return int(float(s))
 
 
 def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
