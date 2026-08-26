@@ -51,9 +51,9 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
+from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
@@ -62,7 +62,9 @@ from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_sca
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.distributed import gather_owned_units, is_fsdp2_model
+
+from .moe_utils import _split_packed_fused_experts
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -92,7 +94,12 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
+from .model_utils import (
+    TiedWeightMap,
+    get_export_units,
+    get_language_model_from_vl,
+    is_multimodal_model,
+)
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -925,31 +932,12 @@ def _process_quantized_modules(
         _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _export_transformers_checkpoint(
-    model: nn.Module,
-    dtype: torch.dtype | None = None,
-    is_modelopt_qlora: bool = False,
-    **kwargs,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Exports the torch model to the packed checkpoint with original HF naming.
+def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
+    """Run the model-level export prep and pack every module's weights in place.
 
-    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
-
-    Builds the whole quantized state dict in memory, so it requires every weight to be
-    resident. Models with accelerate CPU/disk offload are rejected here and handled by
-    :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
-    time; :func:`export_hf_checkpoint` picks between the two.
-
-    Args:
-        model: the full torch model to export. The actual quantized model may be a submodule.
-        dtype: the weights data type to export the unquantized layers or the default model data type if None.
-
-    Returns:
-        post_state_dict: Dict containing quantized weights
-        quant_config: config information to export hf_quant_cfg.json
-
-    Raises:
-        NotImplementedError: if the model has accelerate offload hooks.
+    Shared by the resident path and the FSDP2 streaming path so they cannot drift. Under FSDP2
+    the packing runs shard-local on every rank, so afterwards each rank holds its shard of the
+    already-packed weights. Returns the resolved dtype, the tied-weight map and the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
@@ -997,13 +985,41 @@ def _export_transformers_checkpoint(
 
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
     _reconstruct_fused_moe_linear(model)
+    return dtype, tied_map, quant_config
+
+
+def _export_transformers_checkpoint(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    **kwargs,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Exports the torch model to the packed checkpoint with original HF naming.
+
+    The packed checkpoint will be consumed by the TensorRT-LLM unified converter.
+
+    Builds the whole quantized state dict in memory, so it requires every weight to be
+    resident. Models with accelerate CPU/disk offload are rejected here and handled by
+    :func:`_export_transformers_checkpoint_streaming`, which materializes one layer at a
+    time; :func:`export_hf_checkpoint` picks between the two.
+
+    Args:
+        model: the full torch model to export. The actual quantized model may be a submodule.
+        dtype: the weights data type to export the unquantized layers or the default model data type if None.
+
+    Returns:
+        post_state_dict: Dict containing quantized weights
+        quant_config: config information to export hf_quant_cfg.json
+
+    Raises:
+        NotImplementedError: if the model has accelerate offload hooks.
+    """
+    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
 
     if is_fsdp2_model(model):
-        # FSDP2: gather the full (unsharded) state_dict to CPU on rank 0.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
+        # Each rank gathers only its owned layers to CPU (bounded memory; parallel per-rank write).
+        quantized_state_dict = gather_owned_units(model, get_export_units(model))
+        _split_packed_fused_experts(quantized_state_dict, model)
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
         quantized_state_dict = model.state_dict()
@@ -1545,6 +1561,8 @@ def export_hf_checkpoint(
         and torch.distributed.is_initialized()
         and is_fsdp2_model(model)
     )
+    # Not the global rank: a non-FSDP2 export writes the whole checkpoint from every process.
+    rank = torch.distributed.get_rank() if is_distributed else 0
     # Offloaded models take the streaming path: it materializes one layer at a time and
     # writes each straight to a shard file, so peak memory is one layer plus one shard
     # buffer instead of the whole quantized state dict.
@@ -1583,13 +1601,49 @@ def export_hf_checkpoint(
             _write_hf_export_config(model, hf_quant_config, export_dir)
             return
 
+        if is_distributed:
+            # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
+            # a rank holds one unit at a time rather than its whole share of the model, and the
+            # writes run concurrently. Every rank must call this -- it unshards collectively.
+            from .unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
+
+            _, hf_quant_config = _export_fsdp2_checkpoint_streaming(
+                model,
+                dtype,
+                export_dir=export_dir,
+                max_shard_size=max_shard_size,
+                extra_state_dict=extra_state_dict,
+                **kwargs,
+            )
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
+            if rank == 0:
+                if save_modelopt_state and ModeloptStateManager.is_converted(model):
+                    torch.save(modelopt_state(model), export_dir / "modelopt_state.pth")
+                try:
+                    name_mapper = build_reverse_name_mapper(model)
+                    if name_mapper is not None and hf_quant_config:
+                        revert_quant_config_names(
+                            hf_quant_config.get("quantization", {}), name_mapper
+                        )
+                except Exception as exc:
+                    warnings.warn(
+                        f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+                        "names may not match the original HF hub checkpoint."
+                    )
+                _write_hf_export_config(model, hf_quant_config, export_dir)
+            return
+
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
 
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
-        export_state_dict = {**post_state_dict, **(extra_state_dict or {})}
+        # extra_state_dict (e.g. MTP) is not part of any rank's shard, so rank 0 carries it.
+        export_state_dict = dict(post_state_dict)
+        if extra_state_dict and rank == 0:
+            export_state_dict.update(extra_state_dict)
 
         # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
         # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
@@ -1599,9 +1653,8 @@ def export_hf_checkpoint(
         # do it here. The same rename is applied to the quant-config module references
         # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
         # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
-        # and fails). Best-effort and atomic: any failure (an op we cannot reverse yet,
-        # transformers API drift, unexpected shapes) falls back to the in-memory names for BOTH
-        # weights and config so they stay mutually consistent.
+        # and fails). Best-effort: any failure (an op we cannot reverse yet, transformers API
+        # drift, unexpected shapes) falls back to the in-memory names.
         try:
             name_mapper = build_reverse_name_mapper(model)
             export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
@@ -1613,19 +1666,13 @@ def export_hf_checkpoint(
                 "names may not match the original HF hub checkpoint."
             )
 
-        # Under torch.distributed only rank 0 writes; others sync at the finally barrier.
-        if is_distributed and torch.distributed.get_rank() != 0:
-            return
+        _sanitize_generation_config_for_save(model)
 
         # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
         # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
         # scale tensors). Patch both the source and importing module since modeling_utils does
         # `from core_model_loading import revert_weight_conversion`.
         _patches = _patch_revert_weight_conversion()
-
-        _sanitize_generation_config_for_save(model)
-
-        # TODO: parallelize the disk write across ranks (avoid single-process speed + rank-0 OOM).
         try:
             model.save_pretrained(
                 export_dir,

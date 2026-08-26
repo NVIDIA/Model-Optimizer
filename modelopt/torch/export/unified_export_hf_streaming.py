@@ -33,6 +33,11 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
+from modelopt.torch.utils import distributed as _dist
+from modelopt.torch.utils.distributed import gather_unit
+
+from .model_utils import get_export_units
+from .moe_utils import _split_packed_fused_experts
 from .quant_aware_conversion import build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
@@ -40,6 +45,7 @@ from .unified_export_hf import (
     _add_mtp_exclusions,
     _dispatch_export_handler,
     _patch_revert_weight_conversion,
+    _prepare_model_for_export,
     _prepare_moe_inputs,
     _resolve_export_dtype,
     _sanitize_generation_config_for_save,
@@ -48,7 +54,7 @@ from .unified_export_hf import (
     requantize_resmooth_fused_llm_layers,
 )
 
-__all__ = ["_export_transformers_checkpoint_streaming"]
+__all__ = ["_export_fsdp2_checkpoint_streaming", "_export_transformers_checkpoint_streaming"]
 
 
 class _StreamingShardWriter:
@@ -61,8 +67,10 @@ class _StreamingShardWriter:
     Peak memory = 1 layer (being materialized) + 1 shard buffer, not the full checkpoint.
     """
 
-    def __init__(self, export_dir: Path | str, max_shard_size: int) -> None:
+    def __init__(self, export_dir: Path | str, max_shard_size: int, part_tag: str = "") -> None:
         self._export_dir = Path(export_dir)
+        # Distinguishes one writer's part files from another's when several ranks write here.
+        self._part_tag = part_tag
         self._max_shard_size = max_shard_size
         self._buffer: dict[str, torch.Tensor] = {}
         self._buffer_bytes: int = 0
@@ -77,7 +85,7 @@ class _StreamingShardWriter:
         if not self._buffer:
             return
         part_idx = len(self._part_files)
-        part_path = self._export_dir / f"__shard_part_{part_idx:05d}.safetensors"
+        part_path = self._export_dir / f"__shard_part_{self._part_tag}{part_idx:05d}.safetensors"
         save_file(self._buffer, str(part_path))
         for key in self._buffer:
             self._key_to_part[key] = part_idx
@@ -106,34 +114,62 @@ class _StreamingShardWriter:
         if self._buffer_bytes >= self._max_shard_size:
             self._flush()
 
+    def close(self) -> tuple[list[str], dict[str, int], int]:
+        """Flush the buffer and stop writing, leaving the part files on disk.
+
+        Returns ``(part filenames, {key: part index}, total bytes)``. The caller turns those into
+        canonical shard names -- which it can only do once it knows how many parts exist in
+        total, and with several ranks writing that is not known until they have all closed.
+        """
+        self._flush()
+        return [p.name for p in self._part_files], self._key_to_part, self._total_bytes
+
     def finalize(self) -> dict[str, str]:
         """Flush remaining buffer, rename part files, write model.safetensors.index.json.
 
         Returns the weight_map ``{key: shard_filename}`` written to the index.
         Single-shard exports use ``model.safetensors`` without an index file.
         """
-        self._flush()
-        n_shards = len(self._part_files)
-        if n_shards == 0:
-            return {}
+        return name_shards_and_write_index(self._export_dir, [self.close()])
 
-        if n_shards == 1:
-            final_name = "model.safetensors"
-            self._part_files[0].rename(self._export_dir / final_name)
-            return dict.fromkeys(self._key_to_part, final_name)
 
-        for i, part_path in enumerate(self._part_files):
-            part_path.rename(self._export_dir / f"model-{i + 1:05d}-of-{n_shards:05d}.safetensors")
+def name_shards_and_write_index(
+    export_dir: Path | str, closed_writers: list[tuple[list[str], dict[str, int], int]]
+) -> dict[str, str]:
+    """Rename part files to canonical shard names and write model.safetensors.index.json.
 
-        weight_map = {
-            key: f"model-{part_idx + 1:05d}-of-{n_shards:05d}.safetensors"
-            for key, part_idx in self._key_to_part.items()
-        }
-        total_size = self._total_bytes
-        index_path = self._export_dir / "model.safetensors.index.json"
-        with open(index_path, "w") as f:
-            json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
-        return weight_map
+    ``closed_writers`` holds one :meth:`_StreamingShardWriter.close` result per writer, in a
+    fixed order (rank order when several ranks wrote). Returns the weight_map. A single shard
+    is named ``model.safetensors`` and gets no index file.
+    """
+    export_dir = Path(export_dir)
+    part_names: list[str] = []
+    key_to_part: dict[str, int] = {}
+    total_size = 0
+    for names, keys, nbytes in closed_writers:
+        offset = len(part_names)
+        part_names.extend(names)
+        for key, part_idx in keys.items():
+            key_to_part[key] = offset + part_idx
+        total_size += nbytes
+
+    n_shards = len(part_names)
+    if n_shards == 0:
+        return {}
+
+    if n_shards == 1:
+        (export_dir / part_names[0]).rename(export_dir / "model.safetensors")
+        return dict.fromkeys(key_to_part, "model.safetensors")
+
+    shard_names = [f"model-{i + 1:05d}-of-{n_shards:05d}.safetensors" for i in range(n_shards)]
+    for part_name, shard_name in zip(part_names, shard_names):
+        (export_dir / part_name).rename(export_dir / shard_name)
+
+    weight_map = {key: shard_names[part_idx] for key, part_idx in key_to_part.items()}
+    index_path = export_dir / "model.safetensors.index.json"
+    with open(index_path, "w") as f:
+        json.dump({"metadata": {"total_size": total_size}, "weight_map": weight_map}, f)
+    return weight_map
 
 
 def _parse_shard_size(size: int | str) -> int:
@@ -445,5 +481,120 @@ def _export_transformers_checkpoint_streaming(
             _dst = export_dir / _py.name
             if not _dst.exists():
                 shutil.copy2(_py, _dst)
+
+    return None, quant_config
+
+
+def _export_fsdp2_checkpoint_streaming(
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    export_dir: Path | str = ".",
+    max_shard_size: int | str = "10GB",
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
+    **kwargs: Any,
+) -> tuple[None, dict[str, Any]]:
+    """Export an FSDP2-sharded model by streaming each rank's owned units to shard files.
+
+    Every rank walks every unit in the same order, because unsharding a unit is a collective and
+    needs all of them. Only the rank that owns a unit keeps it, writes it, and drops it, so a rank
+    holds one unit at a time instead of its whole share of the model. Rank 0 names the shards and
+    writes the index at the end, once the total shard count is known.
+
+    Must be called by every rank. Returns ``(None, quant_config)``; the caller writes
+    ``hf_quant_config.json`` and merges ``quantization_config`` into ``config.json`` on rank 0.
+    """
+    export_dir = Path(export_dir)
+    my_rank, world = _dist.rank(), _dist.size()
+
+    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+
+    kv_cache_max_bound = 448
+    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
+
+    # Tied weights are dropped by name: with one unit in hand at a time there is no whole-dict
+    # view to compare storage against. tied_map covers dict-style and MoE ties.
+    tied_alias_keys = set(tied_map.alias_to_canonical)
+
+    # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
+    # so refuse rather than write fused tensors under unfused hub names.
+    _assert_no_split_rules(model)
+    name_mapper = None
+    try:
+        name_mapper = build_reverse_name_mapper(model)
+    except Exception as exc:
+        warnings.warn(
+            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
+            "the original HF hub checkpoint."
+        )
+    if name_mapper is not None:
+        tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
+
+    writer = _StreamingShardWriter(
+        export_dir, _parse_shard_size(max_shard_size), part_tag=f"r{my_rank:02d}_"
+    )
+    seen_keys: set[str] = set()
+
+    def _stream(full_key: str, tensor: torch.Tensor) -> None:
+        new_key, new_value = _postprocess_single_tensor(
+            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
+        )
+        if new_key is None or new_value is None:
+            return
+        if name_mapper is not None:
+            new_key = name_mapper(new_key)
+        if new_key in tied_alias_keys:
+            return
+        writer.add(new_key, new_value.detach().contiguous().cpu())
+
+    id_to_name = {id(m): n for n, m in model.named_modules()}
+    for index, unit in enumerate(get_export_units(model)):
+        # gather_unit all-gathers the unit on every rank and hands it to the owner as plain CPU
+        # tensors. Every rank must call it for every unit; gating around it instead of inside it
+        # leaves the non-owners out of the collective and hangs the owner.
+        unit_sd = gather_unit(unit, id_to_name, is_owner=(index % world == my_rank))
+        if unit_sd is None:
+            continue
+        _split_packed_fused_experts(unit_sd, model)
+        for full_key, tensor in unit_sd.items():
+            if full_key in seen_keys:
+                continue
+            seen_keys.add(full_key)
+            _stream(full_key, tensor)
+
+    # Tensors the model never held (e.g. MTP weights). Rank 0 owns that slot, and they are already
+    # materialized, so they skip the per-tensor postprocessing -- only the hub-name reversal applies.
+    if my_rank == 0:
+        for name, tensor in (extra_state_dict or {}).items():
+            if name in seen_keys:
+                continue
+            seen_keys.add(name)
+            writer.add(
+                name_mapper(name) if name_mapper is not None else name,
+                tensor.detach().contiguous().cpu(),
+            )
+
+    # Rank 0 can only name the shards once every rank has finished writing its parts.
+    closed = writer.close()
+    _dist.barrier()
+    gathered: list[Any]
+    if world > 1:
+        # gather_object wants the receive list on the destination rank and None everywhere else.
+        recv: list[Any] | None = [None] * world if my_rank == 0 else None
+        torch.distributed.gather_object(closed, recv, dst=0)
+        gathered = recv or []
+    else:
+        gathered = [closed]
+    if my_rank == 0:
+        name_shards_and_write_index(export_dir, gathered)
+        _sanitize_generation_config_for_save(model)
+        _patches = _patch_revert_weight_conversion()
+        try:
+            model.config.save_pretrained(str(export_dir))
+        finally:
+            _unpatch_revert_weight_conversion(_patches)
+        if getattr(model, "generation_config", None) is not None:
+            with contextlib.suppress(Exception):
+                model.generation_config.save_pretrained(str(export_dir))
 
     return None, quant_config
