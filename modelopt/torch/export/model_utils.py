@@ -109,8 +109,9 @@ def is_multimodal_model(model):
     """
     config = model.config
 
-    # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
+    # Check for Nemotron-Parse encoder-decoder architecture. `or []` because a model built with
+    # from_config has the attribute set to None rather than absent, so the default never applies.
+    architectures = getattr(config, "architectures", None) or []
     is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
     return (
@@ -157,11 +158,10 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
 
 def get_export_units(model):
-    """Split the model into the module groups that can be exported independently.
+    """Split the model into groups that can be exported independently.
 
-    One group per decoder layer, plus a final group of the weight-owning modules outside any layer
-    (embeddings, lm_head, norm). Every rank builds the same list in the same order, so ranks can
-    divide the groups between them without communicating.
+    One group per decoder layer, plus one for everything else holding weights (embeddings, lm_head,
+    norm). Every rank builds the same list, so they can divide it up without talking to each other.
     """
     decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
     in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
