@@ -1,5 +1,5 @@
 aiohttp>=3.9,<4
-lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@15c32bfec165df13c269ddd3cda03b2ed9137825
+lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@88b23e2bfa16a1edbc16e9e238ed82130b3a4f56
 math-verify
 ray
 # Transformers comes from nvidia-modelopt[hf]; CPU CI overlays the exact

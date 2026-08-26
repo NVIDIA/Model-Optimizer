@@ -70,6 +70,10 @@ _RESERVED_TOPOLOGY_MODEL_ARG_FIELDS = frozenset(
         "ep",
     }
 )
+_BACKEND_CHECKPOINT_ARGS = {
+    "qwen3_5": "pretrained",
+    "vllm": "model",
+}
 _RESERVED_EXTRA_ARG_FLAGS = frozenset(
     {
         "--batch-size",
@@ -214,15 +218,37 @@ def _model_arg_string(values: Mapping[str, Any]) -> str:
     return ",".join(parts)
 
 
-def _merge_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
+def _backend_contract(settings: Mapping[str, Any]) -> tuple[str, str]:
+    backend = str(settings.get("model", "vllm"))
+    if backend not in _BACKEND_CHECKPOINT_ARGS:
+        supported = ", ".join(sorted(_BACKEND_CHECKPOINT_ARGS))
+        raise ValueError(f"evaluation settings.model must be one of: {supported}")
+    expected_checkpoint_arg = _BACKEND_CHECKPOINT_ARGS[backend]
+    checkpoint_arg = str(settings.get("checkpoint_arg", expected_checkpoint_arg))
+    if checkpoint_arg != expected_checkpoint_arg:
+        raise ValueError(
+            f"evaluation settings.checkpoint_arg for {backend} must be {expected_checkpoint_arg!r}"
+        )
+    return backend, checkpoint_arg
+
+
+def _merge_model_args(
+    settings: Mapping[str, Any],
+    checkpoint: str,
+    *,
+    backend: str,
+    checkpoint_arg: str,
+) -> str:
     raw = settings.get("model_args")
-    checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
-    if checkpoint_arg != "model":
-        raise ValueError("evaluation settings.checkpoint_arg must be 'model'")
     topology = dict(settings.get("topology") or {})
+    if topology and backend != "vllm":
+        raise ValueError("evaluation settings.topology is supported only for vllm")
     canonical_topology = normalize_vllm_topology(topology) if topology else {}
     reserved_fields = frozenset(
-        key for key in (checkpoint_arg, *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS) if key
+        (
+            *_BACKEND_CHECKPOINT_ARGS.values(),
+            *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS,
+        )
     )
     derived: dict[str, Any] = {checkpoint_arg: checkpoint}
     if canonical_topology:
@@ -235,9 +261,10 @@ def _merge_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
                 "distributed_executor_backend": canonical_topology["distributed_executor_backend"],
             }
         )
-    for key in sorted(_MODEL_ARG_FIELDS):
-        if key in settings:
-            derived[key] = settings[key]
+    if backend == "vllm":
+        for key in sorted(_MODEL_ARG_FIELDS):
+            if key in settings:
+                derived[key] = settings[key]
 
     if isinstance(raw, str):
         _reject_reserved_model_args(_model_arg_keys(raw), reserved_fields)
@@ -302,15 +329,18 @@ def _build_command(
 ) -> tuple[list[str], dict[str, str], float]:
     """Build a deterministic lmms-eval CLI invocation for one local checkpoint."""
 
-    model = str(settings.get("model", "vllm"))
-    if model != "vllm":
-        raise ValueError("evaluation settings.model must be 'vllm'")
+    model, checkpoint_arg = _backend_contract(settings)
     argv = [
         *_command_prefix(settings),
         "--model",
         model,
         "--model_args",
-        _merge_model_args(settings, checkpoint),
+        _merge_model_args(
+            settings,
+            checkpoint,
+            backend=model,
+            checkpoint_arg=checkpoint_arg,
+        ),
         "--tasks",
         ",".join(_configured_tasks(settings)),
         "--batch_size",
@@ -641,17 +671,17 @@ def run_lmms_eval_checkpoint(
     Args:
         checkpoint: Local Hugging Face checkpoint directory.
         output_root: Root under which a unique attempt directory is created.
-        settings: lmms-eval tasks, vLLM model arguments, topology, and runtime controls.
+        settings: lmms-eval tasks, backend model arguments, topology, and runtime controls.
 
     Returns:
         Flattened metrics and paths to the normalized summary, raw result, command,
         stdout, and stderr artifacts.
     """
 
-    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    checkpoint_path = Path(checkpoint).expanduser().absolute()
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"checkpoint is not a local directory: {checkpoint_path}")
-    output = Path(output_root).expanduser().resolve() / f"attempt_{uuid.uuid4().hex}"
+    output = Path(output_root).expanduser().absolute() / f"attempt_{uuid.uuid4().hex}"
     settings = dict(settings)
     argv, env, timeout = _build_command(
         settings,
