@@ -21,8 +21,9 @@ from pathlib import Path
 import pytest
 import torch
 
+from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.security_policy import require_boolean_policy
-from modelopt.torch.puzzletron.stages.future import evaluation_stage
+from modelopt.torch.puzzletron.stages.future import distillation_stage, evaluation_stage
 
 
 def test_security_policy_rejects_non_boolean_values():
@@ -66,6 +67,28 @@ def test_distillation_sanity_requires_raw_dataset_or_packed_cache():
 
     with pytest.raises(ValueError, match="dataset_path or packed_token_cache_path"):
         _distillation_dataset_source({}, {})
+
+
+def test_distillation_tournament_publishes_mapping_result(tmp_path, monkeypatch):
+    outputs = {"summary_path": str(tmp_path / "summary.json"), "finalists": []}
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.tournament.run_global_kd_tournament",
+        lambda *_args, **_kwargs: outputs,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.pipeline_config.load_runtime_hydra_config",
+        lambda _config: object(),
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "global_distillation": {"tournament": {"enabled": True}},
+    }
+    manifest = StageManifest(stage="global_distillation", config=config)
+
+    result = distillation_stage(config, manifest)
+
+    assert result.status == "success"
+    assert json.loads(result.manifest_path.read_text())["outputs"] == outputs
 
 
 def test_distributed_barrier_propagates_failure_with_stage_context(monkeypatch):

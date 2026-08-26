@@ -746,12 +746,12 @@ def distillation_stage(config: dict[str, Any], manifest: StageManifest):
         from ..pipeline_config import load_runtime_hydra_config
 
         hydra_cfg = load_runtime_hydra_config(config)
-        result = run_global_kd_tournament(
+        tournament_result = run_global_kd_tournament(
             config,
             hydra_cfg,
             recipe_runner=config.get("_global_kd_runner"),
         )
-        return complete_stage(config, manifest, outputs=result.to_dict())
+        return complete_stage(config, manifest, outputs=tournament_result)
     kd_config = build_global_kd_config(config)
     result = run_global_kd(kd_config, recipe_runner=config.get("_global_kd_runner"))
     summary_path = kd_config.output_dir / "global_distillation_summary.json"
