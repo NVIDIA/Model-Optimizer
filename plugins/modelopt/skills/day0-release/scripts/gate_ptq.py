@@ -38,7 +38,15 @@ Validation summary shape:
           "unexpected_unquantized": int,
           "declaration_mismatch": int
       },
-      "metadata_diffs": [str, ...]   # unexpected diffs only; [] if clean
+      "metadata_diffs": [str, ...],  # unexpected diffs only; [] if clean
+
+      # Optional. Precision of the SOURCE checkpoint's weights, e.g. "bf16", "mxfp4".
+      # Required to waive the size check: a source already at 4 bits cannot shrink
+      # further under a 4-bit recipe. Absent, size growth blocks.
+      "source_precision": str,
+      # Optional, last resort. Waives the size check without declaring a precision;
+      # prefer source_precision, which states *why* the growth is expected.
+      "accept_size_growth": bool
     }
 """
 

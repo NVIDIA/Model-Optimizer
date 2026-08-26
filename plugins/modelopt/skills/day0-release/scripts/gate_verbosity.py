@@ -27,8 +27,9 @@ are always 0 (only the reasoning/content split is missing, not the total) and th
 comparison (excluded run dirs, unreadable artifacts, metrics missing token counts).
 
 Two filters run before averaging: skip run dirs matching ``--exclude`` (mismatched
-reasoning effort) and keep only runs at a task's max ``successful_count``. Tasks
-with no common sample count are reported ``not_comparable``.
+reasoning effort) and keep only runs at the largest ``successful_count`` present on
+*both* sides. Tasks with no common sample count are reported ``not_comparable``;
+when that shared count is below a run one side has, ``truncated_comparison`` says so.
 """
 
 from __future__ import annotations
@@ -166,9 +167,6 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
         if exclude and exclude in parts[-5]:
             excluded.append(parts[-5])
             continue
-        # Dir is "<harness>.<task>[.<run_index>]" -- the run index is optional, so strip it
-        # only when the trailing segment is numeric. Splitting blindly returns the harness
-        # for the index-less form, pooling every task under it into one mean.
         # Dir is "<harness>.<task>[.<run_index>]". Strip the run index only when the
         # trailing segment is numeric, and KEEP the harness: two harnesses can expose the
         # same task name, and pooling them would average different generation conditions
@@ -187,8 +185,9 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
         if tokens and count:
             out.setdefault(task, []).append((tokens, count))
         else:
-            # Missing/zero avg_completion_tokens -- e.g. a schema rename. Record it:
-            # a silently vanished run makes the remaining pass look more complete than it is.
+            # No usable token count: usually a run that produced no successful samples,
+            # otherwise a schema rename. Record it either way -- a silently vanished run
+            # makes the remaining pass look more complete than it is.
             no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
     if diagnostics is not None:
         diagnostics["excluded_run_dirs"] = sorted(set(excluded))
