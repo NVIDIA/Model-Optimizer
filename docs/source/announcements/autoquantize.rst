@@ -96,14 +96,14 @@ Results
 
 **Figure 1. MMLU accuracy vs. effective bits under AutoQuantize, Qwen3.5-2B/9B.**
 
-Figure 1 sweeps the AutoQuantize effective-bits budget and evaluates each resulting assignment on MMLU: more budget buys accuracy, so the curve is the memory-vs-accuracy trade you get to pick a point on. The trend is upward but not strictly monotonic, likely a mix of evaluation noise and the ILP solver selecting different assignments at neighboring budgets. Dashed lines are BF16; the NVFP4 default markers quantize every layer except ``lm_head``.
+Figure 1 sweeps the AutoQuantize effective-bits budget and evaluates each resulting assignment on MMLU: more budget buys accuracy, so the curve is the memory-vs-accuracy trade you get to pick a point on. The trend is upward but not strictly monotonic, likely a mix of evaluation noise and the ILP solver selecting different assignments at neighboring budgets. The dotted horizontal lines are the BF16 references. Effective bits are parameter-count weighted across formats (NVFP4: 4.5 [4]_, FP8: 8, BF16: 16). The NVFP4 defaults exceed 4.5 because ``lm_head`` remains BF16.
 
 Adding FP8 to the format menu helps across both reported sweeps: at every plotted budget, searching over NVFP4, FP8, and BF16 matches or beats NVFP4 and BF16 alone. A sensitive layer doesn't need to fall back all the way to BF16 — FP8 is a good middle ground, protecting moderately sensitive layers at a fraction of the cost.
 
 AutoQuantize gradient is fast!
 ==============================
 
-Direct sensitivity measurement evaluates the full model for every layer-format pair. For instance, KL-divergence-based mixed-precision assignment algorithms, including AutoQuantize KL-divergence scoring, quantize one layer at a time and compare the output distributions of the quantized and unquantized models. Because each layer requires a full-model pass, scoring scales as :math:`O(N_{\mathrm{layers}}^2)`. In contrast, for each scoring batch, AutoQuantize gradient scoring uses one backward pass and locally replays every candidate format at each scored module. Hence, its scoring complexity is :math:`O(N_{\mathrm{layers}})`, resulting in a ~52× speedup on Qwen3.6-35B-A3B (Table 1).
+Direct sensitivity measurement evaluates the full model for every layer-format pair. For instance, KL-divergence-based mixed-precision assignment algorithms, including AutoQuantize KL-divergence scoring, quantize one layer at a time and compare the output distributions of the quantized and unquantized models. Because each layer requires a full-model pass, scoring scales as :math:`O(N_{\mathrm{layers}}^2)`. In contrast, for each scoring batch, AutoQuantize gradient scoring uses one backward pass and locally replays every candidate format at each scored module. Hence, its scoring work scales as :math:`O(N_{\mathrm{layers}} \times N_{\mathrm{formats}})`, resulting in a ~52× speedup on Qwen3.6-35B-A3B (Table 1).
 
 **Table 1. Scoring cost: gradient vs. KL divergence (lower is better).**
 
@@ -115,11 +115,11 @@ Direct sensitivity measurement evaluates the full model for every layer-format p
      - Time taken for sensitivity estimation
      - Peak GPU memory
    * - Gradient
-     - :math:`O(N_{\mathrm{layers}}) \times O(N_{\mathrm{formats}})`
+     - :math:`O(N_{\mathrm{layers}} \times N_{\mathrm{formats}})`
      - ~16 minutes
      - 29 GB
    * - KL divergence
-     - :math:`O(N_{\mathrm{layers}}^2) \times O(N_{\mathrm{formats}})`
+     - :math:`O(N_{\mathrm{layers}}^2 \times N_{\mathrm{formats}})`
      - ~14 hours
      - 23 GB
 
@@ -170,3 +170,4 @@ References
 .. [1] B\. Hassibi and D. G. Stork. `Second Order Derivatives for Network Pruning: Optimal Brain Surgeon <https://proceedings.neurips.cc/paper/1992/hash/303ed4c69846ab36c2904d3ba8573050-Abstract.html>`_. *NeurIPS*, 1992.
 .. [2] S\. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang. `LLM-MQ: Mixed-Precision Quantization for Efficient LLM Deployment <https://nicsefc.ee.tsinghua.edu.cn/nics_file/pdf/5c805adc-b555-499f-9882-5ca35ce674b5.pdf>`_. *NeurIPS Workshop on Efficient Natural Language and Speech Processing (ENLSP)*, 2023.
 .. [3] S\. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer. `SqueezeLLM: Dense-and-Sparse Quantization <https://arxiv.org/abs/2306.07629>`_. *ICML*, 2024.
+.. [4] E\. Alvarez, O. Almog, E. Chung, S. Layton, D. Stosic, R. Krashinsky, and K. Aubrey. `Introducing NVFP4 for Efficient and Accurate Low-Precision Inference <https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/>`_. *NVIDIA Technical Blog*, 2025.
