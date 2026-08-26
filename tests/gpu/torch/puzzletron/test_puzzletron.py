@@ -51,7 +51,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
 
     campaign = build_tiny_qwen_campaign(project_root_path, tmp_path)
     _assert_compiled_route(campaign)
-    completed = campaign.run()
+    completed = campaign.run(timeout=2100)
     result = campaign.require_success(completed)
 
     stage_ids = tuple(node.stage_id for node in campaign.compiled_plan.stages)
@@ -70,7 +70,7 @@ def test_tiny_qwen_campaign_uses_current_public_route(
     durable_paths = [*manifest_paths, *pruning_paths, *post_paths]
     before_resume = _artifact_digests(durable_paths)
 
-    resumed = campaign.run()
+    resumed = campaign.run(timeout=120)
     resumed_result = campaign.require_success(resumed)
 
     _assert_completed_campaign(campaign, resumed_result, stage_ids)
@@ -153,7 +153,7 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
     score_tensors = [
         tensor
         for score_file in score_files
-        for tensor in _tensor_values(torch.load(score_file, map_location="cpu", weights_only=False))
+        for tensor in _tensor_values(torch.load(score_file, map_location="cpu", weights_only=True))
     ]
     assert score_tensors
     assert all(tensor.numel() and torch.isfinite(tensor).all() for tensor in score_tensors)

@@ -260,6 +260,7 @@ def gpu_puzzletron(session):
             "tests/gpu/torch/puzzletron/test_puzzletron.py::"
             "test_tiny_qwen_campaign_uses_current_public_route"
         ),
+        *_cov_args(),
     )
 
 
