@@ -933,11 +933,10 @@ def _process_quantized_modules(
 
 
 def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
-    """Run the model-level export prep and pack every module's weights in place.
+    """Run the shared export setup and quantize every module's weights in place.
 
-    Shared by the resident path and the FSDP2 streaming path so they cannot drift. Under FSDP2
-    the packing runs shard-local on every rank, so afterwards each rank holds its shard of the
-    already-packed weights. Returns the resolved dtype, the tied-weight map and the quant config.
+    Both export paths call this so they cannot drift. Under FSDP2 each rank quantizes its own slice.
+    Returns the dtype, the tied-weight map and the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
@@ -1505,10 +1504,9 @@ def _write_hf_export_config(
 
 
 def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: dict | None) -> None:
-    """Rename the quant config's module references back to their original checkpoint names.
+    """Rename the quant config's modules back to their original checkpoint names.
 
-    Best-effort: on failure the config keeps the in-memory names and export continues, matching
-    what the weights do.
+    On failure it warns and keeps the current names, so the config still matches the weights.
     """
     try:
         name_mapper = build_reverse_name_mapper(model)

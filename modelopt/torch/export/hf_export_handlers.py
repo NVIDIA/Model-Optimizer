@@ -17,7 +17,6 @@
 
 import collections.abc
 import warnings
-from contextlib import nullcontext
 
 import torch.nn as nn
 
@@ -154,7 +153,7 @@ def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> No
     """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
-    cm = fsdp2_shard_local_pack(ctx.model, module) if is_fsdp2_model(ctx.model) else nullcontext()
+    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
     try:
         with cm:
             _export_weight(module, ctx)
@@ -187,7 +186,7 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
         )
         return
     # fsdp2_shard_local_pack reshards the unsharded root embedding to Shard(0); no-op for non-FSDP.
-    cm = fsdp2_shard_local_pack(ctx.model, module) if is_fsdp2_model(ctx.model) else nullcontext()
+    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
     try:
         with cm:
             _export_weight(module, ctx)
@@ -215,7 +214,7 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
         modules=module,
         quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
     )
-    cm = fsdp2_shard_local_pack(ctx.model, module) if is_fsdp2_model(ctx.model) else nullcontext()
+    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
     with cm:
         for weight_name in ["gate_up_proj", "down_proj"]:
             _export_weight(module, ctx, weight_name)

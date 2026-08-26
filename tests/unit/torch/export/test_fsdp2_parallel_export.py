@@ -33,12 +33,7 @@ from safetensors.torch import load_file
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
-from modelopt.torch.export.unified_export_hf_streaming import (
-    _export_fsdp2_checkpoint_streaming,
-    _parse_shard_size,
-    _StreamingShardWriter,
-    name_shards_and_write_index,
-)
+from modelopt.torch.export.unified_export_hf_streaming import _export_fsdp2_checkpoint_streaming
 
 transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, LlamaConfig
@@ -71,94 +66,6 @@ def _load_all(export_dir: Path) -> dict:
             out.update(load_file(str(export_dir / fname)))
         return out
     return load_file(str(export_dir / "model.safetensors"))
-
-
-# --------------------------------------------------------------------------- #
-# Writer layer (no model, no distributed)
-# --------------------------------------------------------------------------- #
-def test_parse_shard_size():
-    assert _parse_shard_size("10GB") == 10_000_000_000
-    assert _parse_shard_size("512MiB") == 512 * 1024**2
-    assert _parse_shard_size(4096) == 4096
-
-
-def test_writer_never_splits_a_tensor():
-    """A tensor larger than the shard cap still lands whole in one file."""
-    d = Path(tempfile.mkdtemp())
-    writer = _StreamingShardWriter(d, max_shard_size=900)
-    big = torch.zeros(1000, dtype=torch.float32)  # 4000 B, over the cap
-    writer.add("big", big)
-    for i in range(3):
-        writer.add(f"small{i}", torch.zeros(100, dtype=torch.float32))
-    weight_map = writer.finalize()
-
-    assert set(weight_map) == {"big", "small0", "small1", "small2"}
-    loaded = _load_all(d)
-    assert loaded["big"].shape == big.shape
-
-
-def test_single_shard_needs_no_index():
-    d = Path(tempfile.mkdtemp())
-    writer = _StreamingShardWriter(d, max_shard_size=10_000_000)
-    writer.add("w", torch.randn(4, 4))
-    weight_map = writer.finalize()
-
-    assert weight_map == {"w": "model.safetensors"}
-    assert (d / "model.safetensors").exists()
-    assert not (d / "model.safetensors.index.json").exists()
-
-
-def test_part_tag_keeps_ranks_from_colliding():
-    """Two writers in one directory must not write to the same part filename."""
-    d = Path(tempfile.mkdtemp())
-    w0 = _StreamingShardWriter(d, max_shard_size=16, part_tag="r00_")
-    w1 = _StreamingShardWriter(d, max_shard_size=16, part_tag="r01_")
-    w0.add("a", torch.randn(8))
-    w1.add("b", torch.randn(8))
-    names0, _, _ = w0.close()
-    names1, _, _ = w1.close()
-
-    assert names0 and names1
-    assert not set(names0) & set(names1)
-    assert all((d / n).exists() for n in names0 + names1)
-
-
-def test_disjoint_writers_merge_to_standard_index():
-    """Merging every rank's closed writer yields one index over the union of their keys."""
-    d = Path(tempfile.mkdtemp())
-    ref = {
-        "model.layers.0.w": torch.randn(8, 8),
-        "model.layers.0.b": torch.randn(8),
-        "model.layers.1.w": torch.randn(8, 8),
-        "model.embed.weight": torch.randn(16, 8),
-    }
-    owned = [
-        {k: ref[k] for k in ("model.layers.0.w", "model.layers.0.b", "model.embed.weight")},
-        {k: ref[k] for k in ("model.layers.1.w",)},
-    ]
-    closed = []
-    for rank_id, keys in enumerate(owned):
-        writer = _StreamingShardWriter(d, max_shard_size=64, part_tag=f"r{rank_id:02d}_")
-        for key, tensor in keys.items():
-            writer.add(key, tensor)
-        closed.append(writer.close())
-
-    weight_map = name_shards_and_write_index(d, closed)
-
-    index = json.loads((d / "model.safetensors.index.json").read_text())
-    assert set(index["weight_map"]) == set(ref)
-    assert weight_map == index["weight_map"]
-    assert not list(d.glob("__shard_part*"))  # every part renamed
-    loaded = _load_all(d)
-    assert set(loaded) == set(ref)
-    for key in ref:
-        assert torch.equal(loaded[key], ref[key])
-
-
-def test_merge_of_nothing_written():
-    d = Path(tempfile.mkdtemp())
-    assert name_shards_and_write_index(d, [([], {}, 0)]) == {}
-    assert not (d / "model.safetensors.index.json").exists()
 
 
 # --------------------------------------------------------------------------- #

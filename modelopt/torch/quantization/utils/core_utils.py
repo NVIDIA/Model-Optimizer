@@ -1049,7 +1049,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 _ShardInfo = namedtuple("_ShardInfo", ["name", "old", "mesh", "placements"])
 
 
-def _shard_start(param):
+def _get_shard_start(param):
     """Global row offset of this rank's ``Shard(0)`` slice (0 for a non-DTensor param).
 
     Sharding is always even here (``fsdp2_shard_local_pack`` rejects uneven), so it is just
@@ -1063,25 +1063,17 @@ def _shard_start(param):
 
 
 def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
-    """Re-register a PACKED weight as an FSDPParam from full shape + this rank's packed shard.
+    """Re-register a packed weight as an FSDPParam without materializing the full weight.
 
-    Does so WITHOUT materializing the full weight.
-
-    The obvious route -- ``DTensor.from_local(shard)`` then ``FSDPParam(dtensor, ...)`` -- crashes:
-    ``_init_sharded_param`` takes a DTensor down its tensor-parallel branch
-    (``DeviceMesh._concatenate([dp_mesh, tp_mesh])``) which has no ``tp_mesh`` on a plain 1-D FSDP
-    mesh. Instead build the FSDPParam from a ``meta``-device full-shape tensor (a plain tensor ->
-    non-DTensor path; ``meta`` is explicitly allowed by ``_init_sharded_param``), which computes every
-    size/stride/spec field with no real full data and no crash, then overwrite only the two
-    data-holding fields (``_sharded_param_data``, ``sharded_param``) with this rank's packed shard.
-    Only dim-0 (the ``Shard(0)`` axis) differs between shard and full; inner dims are identical.
-    Validated by ``spike_inplace_pack.py`` (world=2, NVFP4).
+    Built from a ``meta`` full-shape tensor so FSDP computes its size/stride fields off a plain
+    tensor -- passing a DTensor sends it down a tensor-parallel branch that a 1-D mesh cannot take.
+    Only ``_sharded_param_data`` and ``sharded_param`` then get the real packed shard.
     """
     from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
     full_shape = (old_fp._orig_size[0], *packed_local.shape[1:])
-    is_qtw = isinstance(packed_local, QTensorWrapper)
-    param_class = QFSDPParam if is_qtw else FSDPParam
+    is_quantized_wrapper = isinstance(packed_local, QTensorWrapper)
+    param_class = QFSDPParam if is_quantized_wrapper else FSDPParam
     mp = MixedPrecisionPolicy(
         param_dtype=packed_local.dtype,
         reduce_dtype=None,
@@ -1091,7 +1083,7 @@ def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
 
     # (a) meta full-shape skeleton -> computes sharded_size / padded_sharded_param_size / specs
     skeleton = torch.empty(full_shape, dtype=packed_local.dtype, device="meta")
-    if is_qtw:
+    if is_quantized_wrapper:
         skeleton = QTensorWrapper(skeleton, metadata={**packed_local.metadata, "shape": full_shape})
     new_fp = param_class(
         nn.Parameter(skeleton, requires_grad=False),
@@ -1107,7 +1099,9 @@ def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
         new_fp.init_dtype_attrs(mp)
 
     # (b) overwrite the two data fields with the real packed shard (pad the 0th shard as FSDP does)
-    local = (packed_local.data if is_qtw else packed_local).contiguous().to(old_fp.device)
+    local = (
+        (packed_local.data if is_quantized_wrapper else packed_local).contiguous().to(old_fp.device)
+    )
     padded = local.new_zeros(new_fp.padded_sharded_param_size)
     padded.narrow(0, 0, new_fp.sharded_size[0]).copy_(local)
     new_fp._sharded_param_data = padded.view(-1)
@@ -1119,16 +1113,10 @@ def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
 
 
 def _rewrap_scale_buffers_shard0(module, captured, local_dim0):
-    """Re-wrap packed per-shard scale buffers as ``Shard(0)`` DTensors.
+    """Re-wrap packed per-shard scale buffers as ``Shard(0)`` DTensors so a later gather rebuilds them.
 
-    A later ``full_tensor()`` gather then reconstructs the full scale.
-
-    Scale buffers are ordinary registered buffers (not FSDP params), so they can use
-    ``DTensor.from_local`` directly (the FSDPParam-constructor crash does not apply). A buffer is
-    treated as sharded iff its dim-0 matches the local shard row/expert count (``local_dim0``):
-    ``weight_scale [rows/world, ...]`` and per-expert ``weight_scale_2 [E/world]`` -> ``Shard(0)``;
-    per-tensor scalars (``weight_scale_2`` for a plain linear, ``input_scale``) stay replicated.
-    Validated by ``spike_scale_gather.py`` (world=2, NVFP4).
+    A buffer counts as sharded iff its dim-0 matches this rank's row/expert count; per-tensor
+    scalars stay replicated.
     """
     info = next(iter(captured.values()))
     mesh, placements = info.mesh, info.placements
@@ -1141,35 +1129,72 @@ def _rewrap_scale_buffers_shard0(module, captured, local_dim0):
             module._buffers[bname] = DTensor.from_local(buf.contiguous(), mesh, placements)
 
 
+def _narrow_weight_amax_to_shard(module, pname, start, local_rows, global_rows):
+    """Cut the quantizer's saved max values down to this rank's rows.
+
+    The weight has already been replaced by this rank's slice, but the saved maxes still cover the
+    whole weight, so the scales would come out the wrong size. Returns the original quantizer to put
+    back afterwards, or None if nothing needed changing.
+    """
+    attr = quantizer_attr_names(pname).weight_quantizer
+    quantizer = getattr(module, attr, None)
+    if quantizer is None:
+        return None
+    # A per-tensor max is the same on every rank, so leave it alone.
+    amax = getattr(quantizer, "_amax", None)
+    if amax is None or amax.dim() == 0:
+        return None
+    if amax.shape[0] != global_rows:
+        # Per-block maxes can arrive flattened; put the row axis back so they can be cut, the same
+        # way _export_fused_experts does. Anything else is a layout we cannot cut safely.
+        if amax.numel() % global_rows != 0:
+            return None
+        amax = amax.contiguous().reshape(global_rows, -1)
+
+    narrowed = copy.deepcopy(quantizer)
+    if hasattr(narrowed, "_amax"):
+        delattr(narrowed, "_amax")  # the amax setter refuses shape changes
+    narrowed.amax = amax[start : start + local_rows].contiguous()
+    setattr(module, attr, narrowed)
+    return quantizer
+
+
 @contextmanager
 def fsdp2_shard_local_pack(root_model, module):
-    """Pack a module's ``Shard(0)`` weights on the LOCAL shard, in place, keeping them sharded.
+    """Pack a module's ``Shard(0)`` weights on the local shard, in place, without unsharding.
 
-    Works for plain quant-linears (``Shard(0)`` on ``out``) and keep-fused experts (``Shard(0)`` on
-    ``E``). No unshard, no reshard, no collective -> leaves a valid packed FSDP module. No-ops for
-    non-FSDP models (so the same handler code covers the single-process/standard path).
-
-    Enter: ``to_local`` each weight param (recording its old FSDPParam + mesh/placements and this
-    rank's global shard offset in ``module._shard_local_start``); the wrapped handler packs the plain
-    local block in place. Exit: re-register each packed weight via :func:`_rebuild_fsdp_param_from_shard`
-    and re-wrap the packed scale buffers via :func:`_rewrap_scale_buffers_shard0`; no reshard.
+    On enter each weight param is replaced by its local block (recording this rank's expert/row
+    offset in ``module._shard_local_start``) so the wrapped handler packs plain tensors; on exit the
+    packed weights and scale buffers are re-registered as sharded. No collectives, and a no-op for
+    non-FSDP models, so the same handler covers the single-process path.
     """
-    if not isinstance(root_model, FSDPModule):
+    # Key off this module's own enclosing FSDP unit rather than the root: fully_shard is often
+    # applied to the decoder layers only (fsdp2_wrap(shard_root=False)), which leaves the root a
+    # plain Module while this module is still sharded. Testing the root there would skip the
+    # to_local step and hand DTensors to a packer that expects plain tensors.
+    fsdp_module = _get_enclosing_fsdp_module(module, root_model)
+    if fsdp_module is None:
         yield
         return
 
-    root_module = _get_enclosing_fsdp_module(module, root_model)
-    group = fully_shard.state(root_module)._fsdp_param_group
+    group = fully_shard.state(fsdp_module)._fsdp_param_group
+    if group is None:
+        # FSDP module with no managed params of its own: nothing to pack shard-local, so let the
+        # handler pack in place exactly as it would for a non-FSDP module.
+        yield
+        return
+
     # The root FSDP module keeps reshard_after_forward=False, so a prior forward (e.g. the export
     # resmooth) can leave its own params (embed/lm_head/norm) UNSHARDED (full, non-DTensor). Reshard so
     # every shardable param is Shard(0) and gets captured + FSDPParam-rebuilt below -- otherwise an
     # in-place pack of an unsharded param is silently discarded when state_dict re-materializes from the
     # (stale) FSDPParam. Idempotent: a no-op for already-sharded decoder layers.
-    if group is not None and not group.is_sharded:
-        root_module.reshard()
+    if not group.is_sharded:
+        fsdp_module.reshard()
     mapping = create_fsdp_param_mapping(group.fsdp_params, root_model)
 
     captured = {}
+    saved_quantizers = {}
     module._shard_local_start = {}
     for pname, param in list(module.named_parameters(recurse=False)):
         name = f"{_get_module_name(module, root_model)}.{pname}"
@@ -1180,6 +1205,15 @@ def fsdp2_shard_local_pack(root_model, module):
         # handler to pack in place. Only Shard(0) DTensors get the shard-local path.
         if not isinstance(param, DTensor):
             continue
+        # A multi-dim mesh (HSDP, FSDP+TP) has to be rejected BEFORE the divisibility check below:
+        # device_mesh.size() is the product of every mesh dim, so it would inflate world and report
+        # a valid config as unevenly sharded. get_local_rank() would then raise a bare DeviceMesh
+        # error anyway. Symmetric across ranks, so neither raise can hang.
+        if param.device_mesh.ndim != 1:
+            raise NotImplementedError(
+                f"fsdp2_shard_local_pack supports only a 1-D FSDP mesh, but '{name}' is on a mesh "
+                f"with ndim={param.device_mesh.ndim} (HSDP / FSDP+TP are not handled)."
+            )
         # Fail fast + clear on uneven sharding rather than deadlocking the gather later. Symmetric
         # (global shape + world are identical on every rank) so this raise can't itself hang.
         world = param.device_mesh.size()
@@ -1190,8 +1224,13 @@ def fsdp2_shard_local_pack(root_model, module):
                 f"divides every sharded dim-0."
             )
         captured[pname] = _ShardInfo(name, mapping[name], param.device_mesh, param.placements)
-        module._shard_local_start[pname] = _shard_start(param)
-        module._parameters[pname] = nn.Parameter(param.to_local(), requires_grad=False)
+        start = _get_shard_start(param)
+        module._shard_local_start[pname] = start
+        local = param.to_local()
+        saved = _narrow_weight_amax_to_shard(module, pname, start, local.shape[0], param.shape[0])
+        if saved is not None:
+            saved_quantizers[pname] = saved
+        module._parameters[pname] = nn.Parameter(local, requires_grad=False)
     try:
         yield
     finally:
@@ -1206,6 +1245,9 @@ def fsdp2_shard_local_pack(root_model, module):
         if captured:
             _rewrap_scale_buffers_shard0(module, captured, local_dim0)
             group.fsdp_params = list(mapping.values())
+        # Put the calibrated quantizers back; only the packing needed the narrowed amax.
+        for pname, quantizer in saved_quantizers.items():
+            setattr(module, quantizer_attr_names(pname).weight_quantizer, quantizer)
         module.__dict__.pop("_shard_local_start", None)
 
 

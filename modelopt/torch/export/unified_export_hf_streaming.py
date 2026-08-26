@@ -115,11 +115,10 @@ class _StreamingShardWriter:
             self._flush()
 
     def close(self) -> tuple[list[str], dict[str, int], int]:
-        """Flush the buffer and stop writing, leaving the part files on disk.
+        """Flush the buffer and stop writing, leaving the temporary files on disk.
 
-        Returns ``(part filenames, {key: part index}, total bytes)``. The caller turns those into
-        canonical shard names -- which it can only do once it knows how many parts exist in
-        total, and with several ranks writing that is not known until they have all closed.
+        Reports what this writer produced: its filenames, which key went into which file, and the
+        total bytes. Final names depend on how many files all writers made, so the caller does that.
         """
         self._flush()
         return [p.name for p in self._part_files], self._key_to_part, self._total_bytes
@@ -136,11 +135,10 @@ class _StreamingShardWriter:
 def name_shards_and_write_index(
     export_dir: Path | str, closed_writers: list[tuple[list[str], dict[str, int], int]]
 ) -> dict[str, str]:
-    """Rename part files to canonical shard names and write model.safetensors.index.json.
+    """Rename the temporary files to proper shard names and write the index.
 
-    ``closed_writers`` holds one :meth:`_StreamingShardWriter.close` result per writer, in a
-    fixed order (rank order when several ranks wrote). Returns the weight_map. A single shard
-    is named ``model.safetensors`` and gets no index file.
+    Takes one :meth:`_StreamingShardWriter.close` result per writer, in rank order. A single shard
+    is named ``model.safetensors`` and gets no index.
     """
     export_dir = Path(export_dir)
     part_names: list[str] = []
@@ -216,6 +214,50 @@ def _assert_no_split_rules(model: nn.Module) -> None:
             "model's transformers conversion mapping: the streaming path reverses names "
             "per tensor, while splits need the full state dict. Export without offloading."
         )
+
+
+def _build_reverse_name_mapper_or_none(model):
+    """Build the map from current tensor names back to checkpoint names, or None if unavailable.
+
+    Refuses models whose renaming has to regroup tensors, which is impossible one tensor at a time.
+    """
+    _assert_no_split_rules(model)
+    try:
+        return build_reverse_name_mapper(model)
+    except Exception as exc:
+        warnings.warn(
+            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
+            "the original HF hub checkpoint."
+        )
+        return None
+
+
+def _make_tensor_sink(
+    writer: "_StreamingShardWriter",
+    name_mapper,
+    tied_alias_keys: set[str],
+    kv_cache_max_bound: float,
+    kv_cache_format: str | None,
+    is_modelopt_qlora: bool,
+):
+    """Build the per-tensor step both streaming exporters use.
+
+    It fixes up one tensor, renames it, skips it if it duplicates another, and writes it out on CPU.
+    """
+
+    def sink(full_key: str, tensor: torch.Tensor) -> None:
+        new_key, new_value = _postprocess_single_tensor(
+            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
+        )
+        if new_key is None or new_value is None:
+            return
+        if name_mapper is not None:
+            new_key = name_mapper(new_key)
+        if new_key in tied_alias_keys:
+            return
+        writer.add(new_key, new_value.detach().contiguous().cpu())
+
+    return sink
 
 
 def _export_transformers_checkpoint_streaming(
@@ -312,15 +354,7 @@ def _export_transformers_checkpoint_streaming(
     # revert_weight_conversion_quant_aware() for split rules, which need the whole state
     # dict to regroup tensors, so refuse rather than emit fused tensors under unfused
     # hub keys.
-    _assert_no_split_rules(model)
-    name_mapper = None
-    try:
-        name_mapper = build_reverse_name_mapper(model)
-    except Exception as exc:
-        warnings.warn(
-            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
-            "the original HF hub checkpoint."
-        )
+    name_mapper = _build_reverse_name_mapper_or_none(model)
 
     tied_alias_keys: set[str] = (
         {name_mapper(k) for k in raw_tied_keys} if name_mapper is not None else raw_tied_keys
@@ -353,17 +387,14 @@ def _export_transformers_checkpoint_streaming(
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     seen_keys: set[str] = set()
 
-    def _stream_tensor(full_key: str, tensor: torch.Tensor) -> None:
-        new_key, new_value = _postprocess_single_tensor(
-            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
-        )
-        if new_key is None or new_value is None:
-            return
-        if name_mapper is not None:
-            new_key = name_mapper(new_key)
-        if new_key in tied_alias_keys:
-            return
-        writer.add(new_key, new_value.detach().contiguous().cpu())
+    _stream_tensor = _make_tensor_sink(
+        writer,
+        name_mapper,
+        tied_alias_keys,
+        kv_cache_max_bound,
+        kv_cache_format,
+        is_modelopt_qlora,
+    )
 
     # Decoder layers: materialize one at a time
     for layer_name, layer_module in model.named_modules():
@@ -494,15 +525,12 @@ def _export_fsdp2_checkpoint_streaming(
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     **kwargs: Any,
 ) -> tuple[None, dict[str, Any]]:
-    """Export an FSDP2-sharded model by streaming each rank's owned units to shard files.
+    """Export an FSDP2 model by writing each rank's own layers straight to its own files.
 
-    Every rank walks every unit in the same order, because unsharding a unit is a collective and
-    needs all of them. Only the rank that owns a unit keeps it, writes it, and drops it, so a rank
-    holds one unit at a time instead of its whole share of the model. Rank 0 names the shards and
-    writes the index at the end, once the total shard count is known.
-
-    Must be called by every rank. Returns ``(None, quant_config)``; the caller writes
-    ``hf_quant_config.json`` and merges ``quantization_config`` into ``config.json`` on rank 0.
+    Every rank must call this and walks every layer, since rebuilding a layer needs all of them;
+    only its owner keeps and writes it, so a rank holds one layer at a time. Rank 0 names the shards
+    and writes the index at the end. Returns ``(None, quant_config)`` -- no state dict is built, and
+    the caller writes ``hf_quant_config.json``.
     """
     export_dir = Path(export_dir)
     my_rank, world = _dist.rank(), _dist.size()
@@ -518,15 +546,7 @@ def _export_fsdp2_checkpoint_streaming(
 
     # A split rule regroups tensors across the whole state dict, which a per-unit pass cannot do,
     # so refuse rather than write fused tensors under unfused hub names.
-    _assert_no_split_rules(model)
-    name_mapper = None
-    try:
-        name_mapper = build_reverse_name_mapper(model)
-    except Exception as exc:
-        warnings.warn(
-            f"Reverse name mapper unavailable ({exc}); exported tensor names may not match "
-            "the original HF hub checkpoint."
-        )
+    name_mapper = _build_reverse_name_mapper_or_none(model)
     if name_mapper is not None:
         tied_alias_keys = {name_mapper(k) for k in tied_alias_keys}
 
@@ -535,17 +555,14 @@ def _export_fsdp2_checkpoint_streaming(
     )
     seen_keys: set[str] = set()
 
-    def _stream(full_key: str, tensor: torch.Tensor) -> None:
-        new_key, new_value = _postprocess_single_tensor(
-            full_key, tensor, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
-        )
-        if new_key is None or new_value is None:
-            return
-        if name_mapper is not None:
-            new_key = name_mapper(new_key)
-        if new_key in tied_alias_keys:
-            return
-        writer.add(new_key, new_value.detach().contiguous().cpu())
+    _stream = _make_tensor_sink(
+        writer,
+        name_mapper,
+        tied_alias_keys,
+        kv_cache_max_bound,
+        kv_cache_format,
+        is_modelopt_qlora,
+    )
 
     id_to_name = {id(m): n for n, m in model.named_modules()}
     for index, unit in enumerate(get_export_units(model)):

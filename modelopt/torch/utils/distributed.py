@@ -264,10 +264,9 @@ def materialize_cpu(v: torch.Tensor) -> torch.Tensor:
 
 
 def gather_unit(modules, id_to_name, is_owner):
-    """Collect one group's weights onto the owner rank.
+    """Rebuild one group's weights and hand them to the rank that owns the group.
 
-    Every rank takes part in the all-gather (it is a collective, so skipping it on the non-owners
-    would hang); only the owner keeps the result.
+    Every rank must call it, since rebuilding needs a piece from each; only the owner keeps them.
     """
     unit_sd: dict[str, torch.Tensor] = {}
     for m in modules:
@@ -281,10 +280,10 @@ def gather_unit(modules, id_to_name, is_owner):
 
 
 def gather_owned_units(model, units):
-    """Gather the module groups this rank owns onto it, as CPU tensors.
+    """Rebuild the groups this rank owns, as plain CPU tensors.
 
-    ``units`` is a list of module groups, handed out round-robin, so each rank keeps roughly its
-    share of them. Every rank must pass the same ``units`` -- the gather inside is a collective.
+    Groups are dealt out round-robin, so each rank keeps roughly its share. Every rank must pass the
+    same list, since each rebuild needs all of them.
     """
     my_rank, world = rank(), size()
     id_to_name = {id(m): n for n, m in model.named_modules()}

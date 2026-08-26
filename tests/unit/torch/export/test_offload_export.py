@@ -43,6 +43,7 @@ from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
+    name_shards_and_write_index,
 )
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
@@ -274,6 +275,62 @@ def test_streaming_shard_writer_accepts_extra_tensors():
         assert "mtp.fc.weight" in weight_map
         with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
             assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
+
+
+def test_streaming_shard_writer_part_tag_keeps_writers_apart():
+    """Two writers sharing a directory must not write to the same part filename."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        w0 = _StreamingShardWriter(tmpdir, max_shard_size=16, part_tag="r00_")
+        w1 = _StreamingShardWriter(tmpdir, max_shard_size=16, part_tag="r01_")
+        w0.add("a", torch.randn(8))
+        w1.add("b", torch.randn(8))
+        names0, _, _ = w0.close()
+        names1, _, _ = w1.close()
+
+        assert names0 and names1
+        assert not set(names0) & set(names1)
+        assert all((Path(tmpdir) / n).exists() for n in names0 + names1)
+
+
+def test_name_shards_and_write_index_merges_disjoint_writers():
+    """Merging every writer's close() result yields one index over the union of their keys.
+
+    This is what rank 0 does after gathering the other ranks' results: only then is the total
+    shard count known, so only then can the parts get canonical ``model-i-of-N`` names.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ref = {
+            "model.layers.0.w": torch.randn(8, 8),
+            "model.layers.0.b": torch.randn(8),
+            "model.layers.1.w": torch.randn(8, 8),
+            "model.embed.weight": torch.randn(16, 8),
+        }
+        owned = [
+            {k: ref[k] for k in ("model.layers.0.w", "model.layers.0.b", "model.embed.weight")},
+            {k: ref[k] for k in ("model.layers.1.w",)},
+        ]
+        closed = []
+        for rank_id, keys in enumerate(owned):
+            writer = _StreamingShardWriter(tmpdir, max_shard_size=64, part_tag=f"r{rank_id:02d}_")
+            for key, tensor in keys.items():
+                writer.add(key, tensor)
+            closed.append(writer.close())
+
+        weight_map = name_shards_and_write_index(tmpdir, closed)
+
+        index = json.loads((Path(tmpdir) / "model.safetensors.index.json").read_text())
+        assert set(index["weight_map"]) == set(ref)
+        assert weight_map == index["weight_map"]
+        assert not list(Path(tmpdir).glob("__shard_part*")), "every part should be renamed"
+        for key, shard in weight_map.items():
+            with safe_open(str(Path(tmpdir) / shard), framework="pt") as f:
+                assert torch.equal(f.get_tensor(key), ref[key])
+
+
+def test_name_shards_and_write_index_with_nothing_written():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        assert name_shards_and_write_index(tmpdir, [([], {}, 0)]) == {}
+        assert not (Path(tmpdir) / "model.safetensors.index.json").exists()
 
 
 # ---------------------------------------------------------------------------
