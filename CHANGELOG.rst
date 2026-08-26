@@ -43,7 +43,6 @@ Changelog
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
-- Fix layerwise calibration miscalibrating every module downstream of attention within a decoder layer when the calibration forward loop left KV caching enabled; models using an explicit sliding-window mask raised a shape mismatch instead. ``create_forward_loop`` already disabled caching, so ``examples/hf_ptq`` and the shipped recipes were unaffected — re-run calibration from a fresh ``layerwise.checkpoint_dir`` only if you passed your own ``forward_loop`` to ``mtq.quantize``, where ``gptq``, ``awq_lite``, ``awq_clip``, ``local_hessian`` and ``smoothquant`` change exported weights too, not just activation scales.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
