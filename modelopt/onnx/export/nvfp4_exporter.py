@@ -30,7 +30,6 @@ from modelopt.onnx.quantization.quant_utils import (
     quantize,
 )
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
-from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 
 from .base_exporter import ONNXQuantExporter
 
@@ -58,16 +57,6 @@ def _cast_fp4(array: np.ndarray) -> np.ndarray:
     return array_f4
 
 
-def _cast_fp8(array: np.ndarray) -> np.ndarray:
-    """Cast a numpy array to FLOAT8E4M3FN using PyTorch."""
-    array_f32_t = torch.from_numpy(array)
-    if torch.cuda.is_available():
-        array_f32_t = array_f32_t.cuda()
-    array_f8_t = array_f32_t.clamp(min=-448, max=448).to(torch.float8_e4m3fn).view(torch.uint8)
-    array_f8 = array_f8_t.cpu().numpy().astype(np.uint8)
-    return array_f8
-
-
 def _encode_nvfp4_block_scale(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Return FP8-rounded block scales as FP32 values and encoded bytes."""
     if not np.all(np.isfinite(array)) or np.any(array < 0):
@@ -76,12 +65,10 @@ def _encode_nvfp4_block_scale(array: np.ndarray) -> tuple[np.ndarray, np.ndarray
     array_f32_t = torch.from_numpy(array)
     if torch.cuda.is_available():
         array_f32_t = array_f32_t.cuda()
-    array_f8_t = _cast_per_block_scale_to_fp8(array_f32_t)
+    array_f8_t = NVFP4QTensor._cast_per_block_scale_to_fp8(array_f32_t)
     array_f32 = array_f8_t.float().cpu().numpy()
     array_f8 = array_f8_t.view(torch.uint8).cpu().numpy().astype(np.uint8)
 
-    if not np.all(np.isfinite(array_f32)) or np.any(array_f32 <= 0):
-        raise ValueError("NVFP4 block scales are not representable in FLOAT8E4M3FN.")
     return array_f32, array_f8
 
 
@@ -312,9 +299,6 @@ class NVFP4QuantExporter(ONNXQuantExporter):
             )
 
             sw_f32_per_block = sw_f32_per_block.reshape(sw_per_block_shape)
-
-            if not np.all(np.isfinite(sw_f32_per_tensor)) or np.any(sw_f32_per_tensor <= 0):
-                raise ValueError("NVFP4 per-tensor scales must be finite and positive.")
 
             sw_f32_per_block, sw_f8_per_block = _encode_nvfp4_block_scale(sw_f32_per_block)
             w_f32 = quantize(w32, block_size, sw_f32_per_block, sw_f32_per_tensor)

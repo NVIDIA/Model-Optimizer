@@ -55,6 +55,7 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
     e2m1_values_on_device = {}
     e2m1_bounds_on_device = {}
+    _cast_per_block_scale_to_fp8 = staticmethod(_cast_per_block_scale_to_fp8)
 
     @classmethod
     def get_e2m1_values(cls, device):
