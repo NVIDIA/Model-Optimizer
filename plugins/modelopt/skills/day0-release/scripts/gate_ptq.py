@@ -134,9 +134,17 @@ def evaluate_checkpoint(summary):
             #   accept_size_growth -- an explicit human override. We cannot check the reason,
             #     and the reference states it without a bound, so neither do we.
             if accept_growth:
+                # Both fields can be set. Say which one won, and that the bounded,
+                # checkable waiver was discarded in favour of the unbounded override.
+                extra = (
+                    f"; source_precision={source_precision!r} was also declared, but the "
+                    "explicit override takes precedence (unbounded)"
+                    if source_precision
+                    else " (no source precision declared)"
+                )
                 notes.append(
                     f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth accepted explicitly via "
-                    "accept_size_growth (no source precision declared)"
+                    f"accept_size_growth{extra}"
                 )
             elif source_is_sub8 and ratio <= _INHERENT_GROWTH_MAX:
                 notes.append(
@@ -206,8 +214,14 @@ def evaluate_checkpoint(summary):
         }
 
     # Surface the most actionable failure_class first: MODEL_UNSUPPORTED >
-    # QUANT_COVERAGE_FAILURE > USER_CONFIG_ERROR.
-    order = ["MODEL_UNSUPPORTED", "QUANT_COVERAGE_FAILURE", "USER_CONFIG_ERROR"]
+    # QUANT_COVERAGE_FAILURE > SIZE_NOT_REDUCED > USER_CONFIG_ERROR. Anything unranked
+    # sorts last via the len(order) fallback, so new classes must be added here.
+    order = [
+        "MODEL_UNSUPPORTED",
+        "QUANT_COVERAGE_FAILURE",
+        "SIZE_NOT_REDUCED",
+        "USER_CONFIG_ERROR",
+    ]
     failures.sort(key=lambda f: order.index(f[0]) if f[0] in order else len(order))
     return {
         "pass": False,

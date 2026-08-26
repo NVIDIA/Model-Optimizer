@@ -51,13 +51,16 @@ _SHORT_OUTPUT_TOKENS = 1000
 _SAMPLE_COUNT_TOL = 0.01
 
 
-def evaluate_verbosity(baseline, candidate, threshold=0.05):
+def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
     """Decide the verbosity gate from harvested per-run token counts.
 
     Args:
         baseline: ``{task: [(avg_completion_tokens, successful_count), ...]}``
         candidate: same shape as ``baseline``
         threshold: max allowed |delta| as a fraction of baseline (default 0.05)
+        dropped_tasks: task names harvest discarded before comparison (excluded run dirs,
+            metrics without token counts). They never reach ``per_task``, so without this
+            the verdict reads as full coverage over a silently smaller task set.
 
     Returns:
         dict ``{pass, failure_class, detail, per_task, not_comparable, max_abs_delta}``.
@@ -108,7 +111,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
         compared_ns = sorted({n for _, n in b_runs + c_runs if near(n)})
         entry = {
             "status": "compared",
-            "sample_count": compared_ns[0] if len(compared_ns) == 1 else compared_ns,
+            "sample_counts": compared_ns,  # always a list, so consumers need no type-switch
             "baseline_tokens": round(b_mean, 1),
             "candidate_tokens": round(c_mean, 1),
             "delta": round(delta, 4),
@@ -120,7 +123,8 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             # Both sides truncated to the same n. Same bias applied twice, but it is not
             # the matched-complete answer -- say so rather than implying a full comparison.
             entry["truncated_comparison"] = (
-                f"compared at n={compared_ns}; a run at n={best} exists but not on both sides"
+                f"compared at n={compared_ns[0] if len(compared_ns) == 1 else compared_ns}; "
+                f"a run at n={best} exists but not on both sides"
             )
         if min(b_mean, c_mean) < _SHORT_OUTPUT_TOKENS:
             entry["short_output_warning"] = (
@@ -154,6 +158,10 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
     n_cmp = sum(1 for v in per_task.values() if v.get("status") == "compared")
     skipped = [t for t, v in per_task.items() if v.get("status") == "not_comparable"]
     detail = f"all {n_cmp} comparable task(s) within threshold {threshold}"
+    if dropped_tasks:
+        detail += (
+            f"; {len(dropped_tasks)} task(s) DROPPED BEFORE COMPARISON: {sorted(dropped_tasks)}"
+        )
     if skipped:
         # Not a failure -- a task can be legitimately incomparable (different sample sets).
         # But it must not be silently absorbed by a passing sibling: the gate is unmeasured
@@ -244,7 +252,13 @@ def main(argv=None):
     diag = {"baseline": {}, "candidate": {}}
     baseline = harvest(args.baseline, args.glob, args.exclude, diag["baseline"])
     candidate = harvest(args.candidate, args.glob, args.exclude, diag["candidate"])
-    result = evaluate_verbosity(baseline, candidate, args.threshold)
+    # Tasks present on neither side because harvest dropped every run for them.
+    dropped = set()
+    for side_diag in diag.values():
+        for entry in side_diag.get("metrics_without_tokens", []):
+            dropped.add(entry.split(":", 1)[0])
+    dropped -= set(baseline) | set(candidate)
+    result = evaluate_verbosity(baseline, candidate, args.threshold, sorted(dropped))
     # Anything harvest dropped belongs in the JSON, not only on stderr: a task whose runs
     # were all excluded never reaches per_task, so the verdict would otherwise look
     # complete for a task set smaller than the eval set.
