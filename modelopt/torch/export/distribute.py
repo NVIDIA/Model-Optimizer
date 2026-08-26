@@ -310,8 +310,6 @@ import torch.nn as nn  # noqa: E402  (distributed_save_hf_checkpoint's signature
 
 from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 
-@contextmanager
-
 
 def distributed_save_hf_checkpoint(
     model: nn.Module,
@@ -359,6 +357,63 @@ def _size_to_bytes(size: "str | int") -> int:
         if s.endswith(unit):
             return int(float(s[: -len(unit)]) * units[unit])
     return int(float(s))
+
+
+_PHASE_TIMES: dict = {}
+
+
+def _tick() -> float:
+    """TEMPORARY: start a phase timer, CUDA-synchronized so queued work counts against its issuer."""
+    import time
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
+def _tock(name: str, t0: float) -> None:
+    """TEMPORARY: close a _tick and accumulate under ``name``."""
+    import time
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    _PHASE_TIMES[name] = _PHASE_TIMES.get(name, 0.0) + (time.perf_counter() - t0)
+
+
+def _dump_phase_times(rank: int, world: int) -> None:
+    """TEMPORARY: gather per-rank phase times; rank 0 prints and optionally writes JSON.
+
+    Reports the MAX across ranks: the export is not finished until its slowest rank is, so the max
+    is the wall-clock contribution and the min/max spread shows how well the work balanced.
+    """
+    import os
+
+    import torch.distributed as dist
+
+    if not _PHASE_TIMES:
+        return
+    per_rank: list = [None] * world
+    dist.all_gather_object(per_rank, dict(_PHASE_TIMES))
+    if rank != 0:
+        return
+    order = ["state_dict", "amax_sync", "expert_split", "dense_postprocess", "materialize_owned",
+             "mat_classify", "mat_gather", "mat_p2p", "reverse_conversion", "extra_merge",
+             "write_shards", "TOTAL"]
+    names = [n for n in order if any(n in d for d in per_rank)]
+    names += sorted({n for d in per_rank for n in d} - set(names))
+    summary = {}
+    lines = ["[export] phase timings, seconds (max across ranks):"]
+    for n in names:
+        vals = [d.get(n, 0.0) for d in per_rank]
+        summary[n] = {"max": max(vals), "min": min(vals), "mean": sum(vals) / len(vals)}
+        lines.append(f"  {n:<20} max {max(vals):8.3f}   min {min(vals):8.3f}")
+    print("\n".join(lines), flush=True)
+    dest = os.environ.get("MODELOPT_EXPORT_TIMING_JSON")
+    if dest:
+        import json as _json
+
+        with open(dest, "w") as f:
+            _json.dump({"world": world, "phases": summary, "per_rank": per_rank}, f, indent=2)
 
 
 def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
@@ -526,6 +581,7 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
     import torch.distributed as dist
     from torch.distributed.tensor import DTensor
 
+    _t = _tick()
     expert_keys = sorted(k for k in local_sd if k in expert_key_set)
     dense_keys = sorted(k for k in local_sd if k not in expert_key_set)
     _mesh_memo: dict = {}
@@ -565,8 +621,12 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         {k: tuple(local_sd[k].to_local().shape) for k in shard0},
     )
 
+    _tock("mat_classify", _t)
+
+    _t = _tick()
     meta: list = [None] * world
     dist.all_gather_object(meta, my_meta)
+    _tock("mat_gather", _t)
 
     # Everything below is keyed on the dense key list, so a rank that disagreed about it would HANG
     # in a collective rather than fail. Check once, up front, and make that a diagnosable error.
@@ -621,8 +681,10 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
             f"returning padded chunks); first few: {untiled[:2]}"
         )
 
+    _t = _tick()
     if shard0:
         _gather_shard0_to_owners(local_sd, shard0, owner, all_shapes, rank, world)
+    _tock("mat_p2p", _t)
 
 
 def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
@@ -769,6 +831,9 @@ def _distributed_save_hf_checkpoint_impl(
     # identical on every rank, so the alias is dropped consistently; postprocess_state_dict skips a
     # group whose canonical is missing from this rank's slice rather than orphaning the alias.
 
+    _PHASE_TIMES.clear()
+    _t_total = _tick()
+
     tied_map = TiedWeightMap(model)
 
     export_dir = Path(export_dir)
@@ -806,6 +871,7 @@ def _distributed_save_hf_checkpoint_impl(
     # FSDP2 / EP-without-DP), so every such rank writes.
     write_experts = dp_idx == 0
 
+    _t = _tick()
     sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
 
     # Re-materialize every value as a NORMAL tensor UP FRONT. hf_ptq exports under torch.inference_mode(),
@@ -834,6 +900,7 @@ def _distributed_save_hf_checkpoint_impl(
     # value immediately, so peak stays ~1x. (Import of ep-dp's in-place/streaming write handling.)
     for _k in list(sharded_sd.keys()):
         sharded_sd[_k] = _to_normal(sharded_sd[_k])
+    _tock("state_dict", _t)
 
     prefixes = _fused_experts_prefixes(sharded_sd)
     prefix_set = set(prefixes)
@@ -853,6 +920,7 @@ def _distributed_save_hf_checkpoint_impl(
 
     # Sync the shared per-module activation (input) scales across ranks (global max), so every
     # expert of a module gets the same input_scale regardless of which rank owns it.
+    _t = _tick()
     in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
     if in_keys:
         stacked = torch.stack(
@@ -864,9 +932,11 @@ def _distributed_save_hf_checkpoint_impl(
         dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
+    _tock("amax_sync", _t)
 
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
     # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
+    _t = _tick()
     local_sd: dict = {}
     if write_experts:
         for pi, prefix in enumerate(prefixes):
@@ -881,6 +951,7 @@ def _distributed_save_hf_checkpoint_impl(
         # In place (see above): avoid a transient 2x copy of the per-expert split.
         for _k in list(local_sd.keys()):
             local_sd[_k] = local_sd[_k].detach().contiguous()
+    _tock("expert_split", _t)
 
     # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
     # set so _materialize_owned can tell disjoint experts from replicated dense.
@@ -890,6 +961,7 @@ def _distributed_save_hf_checkpoint_impl(
     # plain replicated tensors. Do NOT gather to rank 0; _materialize_owned below moves each tensor to
     # a single OWNER rank instead, so the set stays spread across ranks. postprocess runs on every rank
     # (dict-level key renaming + small scalar scale math -- safe on DTensors).
+    _t = _tick()
     nonexpert_keys = [k for k in sharded_sd if not _is_expert_key(k)]
     dense_sd = {k: sharded_sd[k] for k in nonexpert_keys}
     dense_sd = postprocess_state_dict(
@@ -901,14 +973,19 @@ def _distributed_save_hf_checkpoint_impl(
     # this phase used to cost -- and because it ran at different speeds per rank, the next
     # collective absorbed the skew and looked like gather cost.
     del sharded_sd, dense_sd
+    _tock("dense_postprocess", _t)
 
 
     # (3) Whole-tensor redistribution -> reverse conversion -> write. Each tensor ends up WHOLE on
     # exactly one rank (never gathered to a single rank), which is what lets the reverse run: the
     # transformers conversion ops are written against whole tensors and cannot express a placement.
     # The reverse must precede the shard layout, since it renames keys and splits tensors.
+    _t = _tick()
     _materialize_owned(local_sd, expert_key_set, rank, world)
+    _tock("materialize_owned", _t)
+    _t = _tick()
     _revert_whole_sd(model, local_sd)
+    _tock("reverse_conversion", _t)
 
     # Tensors the model does not own -- MTP weights read straight off the source checkpoint by
     # hf_ptq's load_mtp_weights, which the FSDP2 loader drops. They are plain CPU tensors, already
@@ -927,4 +1004,8 @@ def _distributed_save_hf_checkpoint_impl(
             )
         local_sd.update(extra_state_dict)
 
+    _t = _tick()
     _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
+    _tock("write_shards", _t)
+    _tock("TOTAL", _t_total)
+    _dump_phase_times(rank, world)
