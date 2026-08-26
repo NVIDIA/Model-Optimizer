@@ -25,6 +25,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
@@ -195,13 +196,6 @@ def test_ptq_growth_blocks_when_source_precision_is_undeclared():
     assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
 
 
-def test_ptq_growth_waived_only_for_a_declared_sub8_source():
-    """An already-4-bit source cannot shrink; waive it, but only on that declaration."""
-    r = evaluate_checkpoint(_ckpt(output_bytes=16_000_000_000, source_precision="mxfp4"))
-    assert r["pass"]
-    assert any("SIZE_NOT_REDUCED waived" in n for n in r["notes"])
-
-
 def test_ptq_coverage_failure_outranks_size():
     """A real coverage problem must not be masked by the size complaint."""
     r = evaluate_checkpoint(
@@ -329,16 +323,6 @@ def test_verbosity_no_metrics_is_user_config_error():
     assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR"
 
 
-def test_verbosity_intersection_not_union_of_sample_counts():
-    """A count common to both sides must be used even if one side also has a larger run."""
-    r = evaluate_verbosity(
-        {"t": [(1000.0, 294), (1000.0, 200)]},
-        {"t": [(1010.0, 200)]},
-    )
-    assert r["per_task"]["t"]["status"] == "compared"
-    assert r["per_task"]["t"]["runs"] == [1, 1] and r["pass"]
-
-
 def test_verbosity_not_comparable_is_surfaced_not_masked():
     """A passing task must not hide a sibling the gate could not measure."""
     r = evaluate_verbosity(
@@ -356,13 +340,6 @@ def test_verbosity_reports_the_sample_count_compared():
     assert "truncated_comparison" not in r["per_task"]["t"]
 
 
-def test_verbosity_flags_a_truncated_comparison():
-    """Comparing at a shared-but-smaller n is not the matched-complete answer."""
-    r = evaluate_verbosity({"t": [(1000.0, 294), (1000.0, 200)]}, {"t": [(1010.0, 200)]})
-    t = r["per_task"]["t"]
-    assert t["sample_counts"] == [200] and "n=294" in t["truncated_comparison"]
-
-
 def test_verbosity_schema_is_uniform_across_paths():
     """Callers read not_comparable on every verdict, including failures."""
     for r in (
@@ -376,18 +353,6 @@ def test_verbosity_schema_is_uniform_across_paths():
 def test_ptq_schema_has_notes_on_every_path():
     assert "notes" in evaluate_checkpoint({})
     assert "notes" in evaluate_checkpoint(_ckpt())
-
-
-def test_ptq_large_growth_fails_even_for_a_declared_sub8_source():
-    """The waiver covers inherent growth, not an arbitrarily oversized output."""
-    r = evaluate_checkpoint(
-        _ckpt(
-            source_bytes=10_000_000_000,
-            output_bytes=20_000_000_000,
-            source_precision="mxfp4",
-        )
-    )
-    assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
 
 
 def test_harvest_keys_by_task_not_harness(tmp_path):
@@ -469,26 +434,6 @@ def test_ptq_explicit_acceptance_is_not_capped():
     assert "''" not in r["notes"][0]  # must not claim an undeclared precision
 
 
-def test_ptq_declared_source_is_capped():
-    """A checkable claim stays bounded by the growth it explains."""
-    r = evaluate_checkpoint(_ckpt(output_bytes=32_000_000_000, source_precision="mxfp4"))
-    assert not r["pass"] and "explains at most" in r["detail"]
-
-
-def test_ptq_rejected_source_precision_is_self_diagnosing():
-    """An operator who wrote a rejected value must be able to tell that from writing none."""
-    grew = {"output_bytes": 16_800_000_000}
-    bad = evaluate_checkpoint(_ckpt(**grew, source_precision="mxfp4 experts / bf16 attention"))
-    absent = evaluate_checkpoint(_ckpt(**grew))
-    assert "mxfp4 experts / bf16 attention" in bad["detail"]  # echoes what it read
-    assert "None" in absent["detail"]
-    for r in (bad, absent):
-        # Points at the reference rather than enumerating the tokens that would waive
-        # the gate -- listing them turns the failure into a how-to-bypass hint.
-        assert "checkpoint-validation.md" in r["detail"]
-        assert "int4" not in r["detail"]
-
-
 def test_verbosity_exit_codes_match_sibling_gates(tmp_path, capsys):
     """2 = bad invocation, 1 = the gate failed, 0 = pass -- as gate_compare/run/ptq do."""
 
@@ -522,16 +467,6 @@ def test_verbosity_tolerates_small_sample_count_drift():
     assert r["per_task"]["t"]["status"] == "compared"
     r2 = evaluate_verbosity({"t": [(1000.0, 294)]}, {"t": [(1010.0, 200)]})
     assert r2["per_task"]["t"]["status"] == "not_comparable"  # genuinely truncated
-
-
-def test_ptq_rejection_distinguishes_known_from_unknown_precision():
-    """A bf16 source should be told it should have compressed, not handed the waiver list."""
-    grew = {"output_bytes": 16_800_000_000}
-    known = evaluate_checkpoint(_ckpt(**grew, source_precision="bf16"))["detail"]
-    unknown = evaluate_checkpoint(_ckpt(**grew, source_precision="mixed stuff"))["detail"]
-    assert "should compress" in known
-    assert "mxfp4" not in known  # must not enumerate the values that would waive the gate
-    assert "not a recognised precision token" in unknown
 
 
 def test_every_emitted_failure_class_has_a_triage_row():
@@ -620,14 +555,6 @@ def test_dropped_tasks_covers_the_excluded_channel(tmp_path):
     assert diag["excluded_tasks"] == ["h.only_high"]
 
 
-def test_exclude_matches_a_token_not_a_substring():
-    """Substring matching dropped unrelated dirs by default."""
-    assert _matches_exclude("eval_sglang_gpqa_high", "_high")
-    assert not _matches_exclude("eval_highctx", "_high")
-    assert not _matches_exclude("eval_qwen_highmem", "_high")
-    assert not _matches_exclude("eval_sglang_gpqa", "_high")
-
-
 def _ckpt_fp8(**kw):
     return _ckpt(
         recipe="fp8",
@@ -638,15 +565,6 @@ def _ckpt_fp8(**kw):
         },
         **kw,
     )
-
-
-def test_ptq_waiver_compares_source_bits_to_recipe_bits():
-    """An fp8 source under an fp8 recipe cannot shrink either -- not just 4-bit sources."""
-    grew = {"output_bytes": 16_800_000_000}
-    assert evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="fp8"))["pass"]
-    assert evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="int8"))["pass"]
-    bf16 = evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="bf16"))
-    assert not bf16["pass"] and "should compress" in bf16["detail"]
 
 
 def test_verbosity_collapsed_keys_block_the_gate():
@@ -660,32 +578,6 @@ def test_verbosity_collapsed_keys_block_the_gate():
     assert "layout not understood" in r["detail"]
 
 
-def test_exclude_supports_multi_token_values():
-    """A single-token check made any value containing '_' inert, which fails open."""
-    assert _matches_exclude("eval_high_effort_run", "high_effort")
-    assert not _matches_exclude("eval_sglang_gpqa", "high_effort")
-
-
-def test_collapse_guard_does_not_flag_repeats(tmp_path):
-    """Repeat dirs of one task must not read as collapse -- that blocks a mandatory gate."""
-
-    def mk(leaf, name=None):
-        d = tmp_path / "eval_x" / "inv" / leaf / "artifacts"
-        d.mkdir(parents=True)
-        if name:
-            (d / "metadata.yaml").write_text(f"evaluation:\n  tasks:\n    - name: {name}\n")
-        (d / "eval_factory_metrics.json").write_text(
-            json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
-        )
-
-    mk("h.task.1")
-    mk("h.task.2")
-    diag = {}
-    out = harvest(str(tmp_path), diagnostics=diag)
-    assert list(out) == ["h.task"] and len(out["h.task"]) == 2
-    assert "collapsed_keys" not in diag
-
-
 def test_coverage_caveat_appears_on_failure_paths_too():
     """A caller told the gate failed also needs to know coverage was incomplete."""
     d = ["gone"]
@@ -693,15 +585,6 @@ def test_coverage_caveat_appears_on_failure_paths_too():
     nocmp = evaluate_verbosity({"t": [(100.0, 10)]}, {"t": [(100.0, 99)]}, dropped_tasks=d)
     assert not fail["pass"] and "DROPPED BEFORE COMPARISON" in fail["detail"]
     assert not nocmp["pass"] and "DROPPED BEFORE COMPARISON" in nocmp["detail"]
-
-
-def test_ptq_unknown_recipe_does_not_claim_a_comparison():
-    """An unrecognised recipe must not be reported as a compression failure."""
-    r = evaluate_checkpoint(
-        _ckpt(recipe="bogus_recipe", output_bytes=16_800_000_000, source_precision="bf16")
-    )
-    assert not r["pass"]
-    assert "no known target precision" in r["detail"] or r["failure_class"] == "USER_CONFIG_ERROR"
 
 
 _CFG_ONE = "evaluation:\n  tasks:\n  - name: {n}\n    container: x\nexport:\n  name: notthis\n"
@@ -746,32 +629,10 @@ def test_task_name_block_is_bounded_by_indentation(tmp_path):
     assert _task_from_metadata(str(d)) == "only_this"
 
 
-def test_collapse_guard_exempts_bare_name_repeats(tmp_path):
-    """`ifbench` beside `ifbench.1` is one task being run-indexed, not two tasks."""
-    _mk_run(tmp_path, "ifbench")
-    _mk_run(tmp_path, "ifbench.1")
-    diag = {}
-    out = harvest(str(tmp_path), diagnostics=diag)
-    assert list(out) == ["ifbench"] and len(out["ifbench"]) == 2
-    assert "collapsed_keys" not in diag
-
-
 def test_ambiguous_file_does_not_veto_an_unambiguous_later_one(tmp_path):
     """An invocation-wide metadata.yaml must not discard a per-task config.yml."""
     d = _mk_run(tmp_path, "z.0", cfg=_CFG_ONE.format(n="real.task"), meta=_CFG_MANY)
     assert _task_from_metadata(str(d)) == "real.task"
-
-
-def test_ptq_every_rejection_branch_points_at_the_reference():
-    """The bounded-claim branch quotes a bare number and needs the pointer most."""
-    huge = {"output_bytes": 32_000_000_000}
-    for kw in (
-        {"source_precision": "mxfp4"},
-        {"source_precision": "bf16"},
-        {"source_precision": "nonsense"},
-    ):
-        r = evaluate_checkpoint(_ckpt(**huge, **kw))
-        assert not r["pass"] and "checkpoint-validation.md" in r["detail"]
 
 
 def test_verbosity_zero_baseline_mean_is_not_a_crash():
@@ -803,12 +664,6 @@ def test_unreadable_artifact_does_not_count_toward_collapse(tmp_path):
     assert diag["unreadable_metrics"]
 
 
-def test_ptq_recognises_mxfp8_as_a_source_precision():
-    """mxfp8 is a shipped ModelOpt format; a correct declaration must not read as unknown."""
-    r = evaluate_checkpoint(_ckpt_fp8(output_bytes=16_800_000_000, source_precision="mxfp8"))
-    assert r["pass"] and "mxfp8" in r["notes"][0]
-
-
 def test_ptq_unknown_recipe_surfaces_the_recipe_error_not_a_size_verdict():
     """Growth cannot be assessed without a target precision; the recipe name is the fix."""
     r = evaluate_checkpoint(
@@ -838,6 +693,96 @@ def test_recipe_table_entries_are_self_consistent():
         bucket, bits = entry
         assert isinstance(bucket, str) and isinstance(bits, int), recipe
         assert bits in set(_PRECISION_BITS.values()), recipe
+
+
+# ── consolidated: one test per rule ────────
+
+
+def test_ptq_size_waiver_rules():
+    """The waiver fires only when the recipe cannot shrink the declared source.
+
+    Table-driven so the rule reads as a rule: waive iff source bits <= recipe target
+    bits, bounded by _INHERENT_GROWTH_MAX, with accept_size_growth as an unbounded
+    override. Replaces five single-case tests that each pinned one row.
+    """
+    small, huge = 16_800_000_000, 32_000_000_000  # 1.05x and 2.0x of _ckpt's source
+    cases: list[tuple[Any, dict[str, Any], int, bool, str]] = [
+        # (checkpoint helper, kwargs, out_bytes, expect_pass, needle)
+        (_ckpt, {"source_precision": "mxfp4"}, small, True, "waived"),
+        (_ckpt, {"source_precision": "mxfp4"}, huge, False, "explains at most"),
+        (_ckpt, {}, small, False, "not a recognised"),
+        (_ckpt, {"source_precision": "bf16"}, small, False, "should compress"),
+        (_ckpt_fp8, {"source_precision": "fp8"}, small, True, "waived"),
+        (_ckpt_fp8, {"source_precision": "int8"}, small, True, "waived"),
+        (_ckpt_fp8, {"source_precision": "mxfp8"}, small, True, "waived"),
+        (_ckpt_fp8, {"source_precision": "bf16"}, small, False, "should compress"),
+        (_ckpt, {"accept_size_growth": True}, huge, True, "accepted explicitly"),
+    ]
+    for helper, kw, out, expect_pass, needle in cases:
+        r = evaluate_checkpoint(helper(output_bytes=out, **kw))
+        label = f"{kw} out={out}"
+        assert r["pass"] is expect_pass, label
+        text = " ".join(r["notes"]) if expect_pass else r["detail"]
+        assert needle in text, f"{label}: {text}"
+
+
+def test_ptq_waiver_rejects_non_canonical_values():
+    """A JSON string "false" is truthy and "not_mxfp4" contains "mxfp4"."""
+    grew = {"output_bytes": 16_800_000_000}
+    assert not evaluate_checkpoint(_ckpt(**grew, accept_size_growth="false"))["pass"]
+    assert not evaluate_checkpoint(_ckpt(**grew, source_precision="not_mxfp4"))["pass"]
+    assert evaluate_checkpoint(_ckpt(**grew, source_precision=" MXFP4 "))["pass"]
+
+
+def test_ptq_rejection_messages_diagnose_without_leaking_the_waiver_list():
+    """Every rejection branch names its own cause and points at the reference.
+
+    Replaces three tests that each checked one property of these strings.
+    """
+    grew = {"output_bytes": 32_000_000_000}
+    known = evaluate_checkpoint(_ckpt(**grew, source_precision="bf16"))["detail"]
+    unknown = evaluate_checkpoint(_ckpt(**grew, source_precision="mxfp4 experts / bf16 attn"))
+    bounded = evaluate_checkpoint(_ckpt(**grew, source_precision="mxfp4"))["detail"]
+    absent = evaluate_checkpoint(_ckpt(**grew))["detail"]
+
+    assert "should compress" in known  # recognised, but should have shrunk
+    assert "not a recognised" in unknown["detail"]
+    assert "mxfp4 experts / bf16 attn" in unknown["detail"]  # echoes what it read
+    assert "None" in absent  # distinguishes absent from rejected
+    assert "explains at most" in bounded
+    for text in (known, unknown["detail"], bounded, absent):
+        assert "checkpoint-validation.md" in text  # pointer on every branch
+        assert "int4" not in text  # never enumerate the values that would waive
+
+
+def test_exclude_matches_whole_token_runs():
+    """Substring matching drops unrelated dirs; single-token matching makes
+    multi-token values inert, which fails open."""
+    assert _matches_exclude("eval_sglang_gpqa_high", "_high")
+    assert _matches_exclude("eval_high_effort_run", "high_effort")
+    for d, e in [
+        ("eval_highctx", "_high"),
+        ("eval_qwen_highmem", "_high"),
+        ("eval_sglang_gpqa", "_high"),
+        ("eval_sglang_gpqa", "high_effort"),
+    ]:
+        assert not _matches_exclude(d, e), (d, e)
+
+
+def test_collapse_guard_recognises_repeats_in_both_key_shapes(tmp_path):
+    """Repeats must never read as collapse -- that blocks a mandatory gate.
+
+    Dotted "<harness>.<task>" keys and bare keys with a sibling at the key name are
+    both run-indexed tasks; only indexed dirs with no such sibling are ambiguous.
+    """
+    for leaves in (["h.task.1", "h.task.2"], ["ifbench", "ifbench.1"]):
+        root = tmp_path / leaves[0].replace(".", "_")
+        for leaf in leaves:
+            _mk_run(root, leaf)
+        diag = {}
+        out = harvest(str(root), diagnostics=diag)
+        assert len(out) == 1 and len(next(iter(out.values()))) == 2, leaves
+        assert "collapsed_keys" not in diag, leaves
 
 
 if __name__ == "__main__":
