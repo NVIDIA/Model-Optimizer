@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from gate_compare import evaluate_comparison
-from gate_ptq import evaluate_checkpoint
+from gate_ptq import _recipe_bits, evaluate_checkpoint
 from gate_run import evaluate_run
 from gate_verbosity import _matches_exclude, _task_from_metadata, evaluate_verbosity, harvest
 from gate_verbosity import main as verbosity_main
@@ -815,6 +815,29 @@ def test_ptq_unknown_recipe_surfaces_the_recipe_error_not_a_size_verdict():
         _ckpt(recipe="bogus_xyz", output_bytes=16_800_000_000, source_precision="bf16")
     )
     assert r["failure_class"] == "USER_CONFIG_ERROR" and "unknown recipe" in r["detail"]
+
+
+def test_recipe_bits_is_exact_not_substring():
+    """A name mentioning a KV/excluded precision must not resolve to that precision.
+
+    Substring matching made "fp8_bf16_kv" resolve to 16, which would waive the size
+    gate for a bf16 source -- a real failed compression reported as pass.
+    """
+    assert _recipe_bits("fp8") == 8
+    assert _recipe_bits("nvfp4_mlp_only") == 4
+    assert _recipe_bits("int4_awq") == 4
+    assert _recipe_bits("fp8_bf16_kv") is None
+    assert _recipe_bits("unknown_recipe") is None
+
+
+def test_recipe_table_entries_are_self_consistent():
+    """One table carries bucket and bits, so a new recipe cannot omit either."""
+    from gate_ptq import _PRECISION_BITS, _RECIPE_EXPECTED_PRECISION
+
+    for recipe, entry in _RECIPE_EXPECTED_PRECISION.items():
+        bucket, bits = entry
+        assert isinstance(bucket, str) and isinstance(bits, int), recipe
+        assert bits in set(_PRECISION_BITS.values()), recipe
 
 
 if __name__ == "__main__":

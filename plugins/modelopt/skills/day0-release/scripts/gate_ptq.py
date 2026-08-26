@@ -65,13 +65,19 @@ import json
 import sys
 
 # Which precision bucket each recipe is expected to populate with a nonzero count.
+# Which precision bucket each recipe is expected to populate, and its target bits per
+# weight. Both live here so adding a recipe cannot silently omit the bits: deriving them
+# by substring-scanning the recipe name is unsafe, since a name that mentions a
+# KV-cache or excluded-layer precision (e.g. "fp8_bf16_kv") would resolve to that
+# instead -- and a too-wide target makes the size waiver fire on a real failed
+# compression.
 _RECIPE_EXPECTED_PRECISION = {
-    "nvfp4": "NVFP4",
-    "nvfp4_mlp_only": "NVFP4",
-    "nvfp4_experts_only": "NVFP4",
-    "nvfp4_omlp_only": "NVFP4",
-    "fp8": "FP8",
-    "int4_awq": "INT4",
+    "nvfp4": ("NVFP4", 4),
+    "nvfp4_mlp_only": ("NVFP4", 4),
+    "nvfp4_experts_only": ("NVFP4", 4),
+    "nvfp4_omlp_only": ("NVFP4", 4),
+    "fp8": ("FP8", 8),
+    "int4_awq": ("INT4", 4),
 }
 
 
@@ -102,11 +108,12 @@ _PRECISION_BITS = {
 
 
 def _recipe_bits(recipe):
-    """Target bits per weight for a recipe name, or None if it is not recognised."""
-    for token, bits in sorted(_PRECISION_BITS.items(), key=lambda kv: -len(kv[0])):
-        if token in recipe:
-            return bits
-    return None
+    """Target bits per weight for a recipe, or None if the recipe is not recognised.
+
+    Exact lookup, not a substring scan: see the note on _RECIPE_EXPECTED_PRECISION.
+    """
+    entry = _RECIPE_EXPECTED_PRECISION.get(recipe)
+    return entry[1] if entry else None
 
 
 def evaluate_checkpoint(summary):
@@ -212,7 +219,8 @@ def evaluate_checkpoint(summary):
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
 
     # Check 2 — coverage.
-    expected_bucket = _RECIPE_EXPECTED_PRECISION.get(recipe)
+    entry = _RECIPE_EXPECTED_PRECISION.get(recipe)
+    expected_bucket = entry[0] if entry else None
     if expected_bucket is None:
         checks["coverage"] = f"unknown recipe {recipe!r}; cannot verify coverage"
         failures.append(("USER_CONFIG_ERROR", f"unknown recipe {recipe!r}"))
