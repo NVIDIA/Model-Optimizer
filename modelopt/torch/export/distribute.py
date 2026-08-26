@@ -305,56 +305,13 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
             shm_writer.close()
             shm_writer.unlink()
 
-# ----- No-gather distributed HF export (FSDP2): DCP per-rank shard write -----
+# ----- No-gather distributed HF export (FSDP2): per-rank owner gather + parallel write -----
 import torch.nn as nn  # noqa: E402  (distributed_save_hf_checkpoint's signature uses nn.Module)
 
 from ._export_common import _size_to_bytes
 from .moe_utils import _FUSED_PROJ, _fused_experts_prefixes, _split_local_fused_module
 
 @contextmanager
-def _finfo_accepts_int_dtypes():
-    """Work around a torch DCP consolidation bug on integer dtypes.
-
-    ``torch.distributed.checkpoint._consolidate_hf_safetensors._parse_input_metadata`` computes each
-    tensor's byte size as ``torch.finfo(dtype).bits // 8`` unconditionally, which raises ``TypeError``
-    for integer dtypes -- e.g. the ``uint8``-packed NVFP4 weights. ``torch.iinfo`` also exposes
-    ``.bits`` and consolidation only reads ``.bits``, so we temporarily shim ``torch.finfo`` to fall
-    back to ``torch.iinfo`` for non-floating dtypes. Present in torch 2.9-2.13 (the supported range);
-    remove once fixed upstream. Scoped to the ``dcp.save`` call.
-    """
-    _orig_finfo = torch.finfo
-
-    def _finfo_or_iinfo(dtype):
-        try:
-            return _orig_finfo(dtype)
-        except TypeError:
-            return torch.iinfo(dtype)
-
-    torch.finfo = _finfo_or_iinfo
-    try:
-        yield
-    finally:
-        torch.finfo = _orig_finfo
-
-
-def _bin_pack_fqn_to_index(sizes: dict, max_shard_size: "str | int") -> dict:
-    """Deterministically bin-pack tensor FQNs into ~``max_shard_size`` files -> ``{fqn: file_index}``.
-
-    file_index is 1..N; HuggingFaceStorageWriter turns it into ``model-<idx>-of-<N>.safetensors``. Keys
-    are sorted by name so every rank computes the SAME mapping from the same global size map. Each file
-    gets at least one tensor even if a single tensor exceeds ``max_shard_size``.
-    """
-    max_bytes = _size_to_bytes(max_shard_size)
-    mapping: dict = {}
-    file_idx, cur = 1, 0
-    for k in sorted(sizes):
-        sz = sizes[k]
-        if cur > 0 and cur + sz > max_bytes:
-            file_idx += 1
-            cur = 0
-        mapping[k] = file_idx
-        cur += sz
-    return mapping
 
 
 def distributed_save_hf_checkpoint(
@@ -367,7 +324,8 @@ def distributed_save_hf_checkpoint(
 ) -> None:
     """No-gather distributed HF export. Thin wrapper: hf_ptq exports under ``torch.inference_mode()``,
     so run the entire write with inference mode DISABLED via a nested ``inference_mode(False)`` context
-    -- the ``.detach()`` in ``get_model_state_dict`` and DCP's version-counter reads both reject inference
+    -- the ``.detach()`` in ``get_model_state_dict`` and the version-counted ops in the write path both
+    reject inference
     tensors. The context form reliably restores normal mode for this scope (a decorator did not, under the
     caller's already-active inference_mode). ``no_grad`` too: ``inference_mode(False)`` re-ENABLES autograd,
     so a bare ``clone()``/``detach()`` on an inference tensor would try to set up grad and read its
@@ -377,79 +335,6 @@ def distributed_save_hf_checkpoint(
         _distributed_save_hf_checkpoint_impl(
             model, export_dir, maxbound, kv_cache_format, max_shard_size, is_modelopt_qlora
         )
-
-
-def _xdbg(msg: str) -> None:
-    """Flushed per-rank export trace, gated on MODELOPT_EXPORT_DEBUG=1.
-
-    Defined locally rather than imported: this branch has no shared export-debug helper.
-    """
-    import os
-
-    if not os.environ.get("MODELOPT_EXPORT_DEBUG"):
-        return
-    import torch.distributed as _d
-
-    r = _d.get_rank() if _d.is_available() and _d.is_initialized() else 0
-    print(f"[export][rank{r}] {msg}", flush=True)
-
-
-_PHASE_TIMES: dict = {}
-
-
-def _tick() -> float:
-    """Start a phase timer. Synchronizes so queued CUDA work counts against the phase that issued it."""
-    import time
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    return time.perf_counter()
-
-
-def _tock(name: str, t0: float) -> None:
-    """Close a phase timer opened by :func:`_tick` and accumulate it under ``name``."""
-    import time
-
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    dt = time.perf_counter() - t0
-    _PHASE_TIMES[name] = _PHASE_TIMES.get(name, 0.0) + dt
-    _xdbg(f"phase {name}: {dt:.3f}s")
-
-
-def _dump_phase_times(rank: int, world: int) -> None:
-    """Gather per-rank phase times; rank 0 prints them and, if asked, writes them as JSON.
-
-    Reports the MAX across ranks per phase: the export only finishes when its slowest rank does, so
-    the max is the wall-clock contribution and the min/max spread shows how well the work balanced.
-    Set ``MODELOPT_EXPORT_TIMING_JSON=<path>`` to capture the breakdown for offline comparison.
-    """
-    import os
-
-    import torch.distributed as dist
-
-    if not _PHASE_TIMES:
-        return
-    per_rank: list = [None] * world
-    dist.all_gather_object(per_rank, dict(_PHASE_TIMES))
-    if rank != 0:
-        return
-    order = ["state_dict", "amax_sync", "expert_split", "dense_postprocess", "materialize_owned",
-             "mat_classify", "mat_gather", "mat_p2p", "mat_fallback",
-             "reverse_conversion", "write_shards", "dcp_save", "consolidate", "TOTAL"]
-    names = [n for n in order if any(n in d for d in per_rank)]
-    names += sorted({n for d in per_rank for n in d} - set(names))
-    summary = {}
-    lines = ["[export] phase timings, seconds (max across ranks; spread shows imbalance):"]
-    for n in names:
-        vals = [d.get(n, 0.0) for d in per_rank]
-        summary[n] = {"max": max(vals), "min": min(vals), "mean": sum(vals) / len(vals)}
-        lines.append(f"  {n:<20} max {max(vals):8.3f}   min {min(vals):8.3f}")
-    print("\n".join(lines), flush=True)
-    dest = os.environ.get("MODELOPT_EXPORT_TIMING_JSON")
-    if dest:
-        with open(dest, "w") as f:
-            json.dump({"world": world, "phases": summary, "per_rank": per_rank}, f, indent=2)
 
 
 def _even_bins(keys: list, sizes: dict, n: int, max_bytes: int) -> list:
@@ -484,7 +369,8 @@ def _is_full_world_shard0(v, world: int, _mesh_memo: dict | None = None) -> bool
 
     Restricting the point-to-point fast path to that case keeps the peer in ``P2POp`` unambiguous --
     a plain global rank on the default process group, with no mesh-local/global translation to get
-    wrong. Any other layout takes the ``full_tensor()`` fallback, which is slower but always correct.
+    wrong. Any other layout is rejected by :func:`_materialize_owned` rather than routed through a
+    slower path, so no untested transport can silently produce a mis-assembled tensor.
 
     ``_mesh_memo`` caches the mesh-layout answer by mesh identity. Reading ``mesh.mesh`` back to the
     host is a device sync, and FSDP2 gives every parameter the SAME mesh object, so without the memo
@@ -613,12 +499,9 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
     tensor is partial, so transformers' conversion ops see the whole tensors they were written for.
     It is NOT a gather to a single rank -- peak memory is this rank's owned set, not the model.
     """
-    import os
-
     import torch.distributed as dist
     from torch.distributed.tensor import DTensor
 
-    _t = _tick()
     expert_keys = sorted(k for k in local_sd if k in expert_key_set)
     dense_keys = sorted(k for k in local_sd if k not in expert_key_set)
     _mesh_memo: dict = {}
@@ -626,18 +509,28 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
     # Classify FIRST: placements are local DTensor metadata, so this needs no communication, and
     # doing it up front means the shard shapes can ride along in the single metadata collective
     # below. Every rank sees the same placements and so agrees on the buckets.
-    use_p2p = os.environ.get("MODELOPT_EXPORT_P2P", "1") != "0"
-    replicated, shard0, other, plain = [], [], [], []
+    replicated, shard0, unsupported, plain = [], [], [], []
     for k in dense_keys:
         v = local_sd[k]
         if not isinstance(v, DTensor):
             plain.append(k)
         elif all(p.is_replicate() for p in v.placements):
             replicated.append(k)
-        elif use_p2p and _is_full_world_shard0(v, world, _mesh_memo):
+        elif _is_full_world_shard0(v, world, _mesh_memo):
             shard0.append(k)
         else:
-            other.append(k)
+            unsupported.append((k, str(v.placements), v.device_mesh.ndim))
+
+    # Reject rather than silently taking a slower, untested route. The point-to-point transport
+    # covers replicated, plain, and dim-0 shards on a 1-D full-world mesh; anything else (2-D mesh,
+    # non-dim-0 shard, partial placement) has no correct handling here. Raising names the offending
+    # keys, which is recoverable; emitting a mis-assembled tensor would not be.
+    if unsupported:
+        raise RuntimeError(
+            f"rank {rank}: {len(unsupported)} tensor(s) have a placement the no-gather export "
+            f"cannot materialize; first few: "
+            f"{[(k, pl, f'mesh.ndim={nd}') for k, pl, nd in unsupported[:3]]}"
+        )
 
     # ONE collective for all the metadata: the key list (to catch divergence), this rank's expert
     # byte count (to seed load balancing), and its local dim-0 extents (to size receive buffers).
@@ -647,12 +540,9 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
         sum(_nbytes(local_sd[k]) for k in expert_keys),
         {k: tuple(local_sd[k].to_local().shape) for k in shard0},
     )
-    _tock("mat_classify", _t)
 
-    _t = _tick()
     meta: list = [None] * world
     dist.all_gather_object(meta, my_meta)
-    _tock("mat_gather", _t)
 
     # Everything below is keyed on the dense key list, so a rank that disagreed about it would HANG
     # in a collective rather than fail. Check once, up front, and make that a diagnosable error.
@@ -691,40 +581,24 @@ def _materialize_owned(local_sd: dict, expert_key_set: set, rank: int, world: in
     # to_local() returning a PADDED chunk, which would concatenate into a wrong (too large,
     # misaligned) tensor rather than failing -- so verify instead of assuming. Derived from the
     # same gathered shapes on every rank, so the split is agreed.
-    safe = []
+    untiled = []
     for k in shard0:
         gshape = tuple(local_sd[k].shape)
         shard_shapes = [all_shapes[r][k] for r in range(world)]
-        if sum(s[0] for s in shard_shapes) == gshape[0] and all(
-            tuple(s[1:]) == gshape[1:] for s in shard_shapes
+        if not (
+            sum(s[0] for s in shard_shapes) == gshape[0]
+            and all(tuple(s[1:]) == gshape[1:] for s in shard_shapes)
         ):
-            safe.append(k)
-        else:
-            other.append(k)
+            untiled.append((k, gshape, shard_shapes[:3]))
+    if untiled:
+        raise RuntimeError(
+            f"rank {rank}: {len(untiled)} dim-0 sharded tensor(s) do not tile their global shape, "
+            f"so concatenating the local shards would not reconstruct them (to_local() may be "
+            f"returning padded chunks); first few: {untiled[:2]}"
+        )
 
-    _t = _tick()
-    if safe:
-        _gather_shard0_to_owners(local_sd, safe, owner, all_shapes, rank, world)
-    _tock("mat_p2p", _t)
-
-    # Fallback for layouts the fast path does not cover (2-D mesh, non-dim-0 shard, partial sums,
-    # and shards that do not tile). Correct but world x the traffic, so the trace counts these.
-    _t = _tick()
-    for k in sorted(other):
-        full = local_sd[k].full_tensor()  # collective: every rank must call it for this key
-        if owner[k] == rank:
-            local_sd[k] = full
-        else:
-            del local_sd[k]
-        del full
-    _tock("mat_fallback", _t)
-
-    _xdbg(
-        f"nocons: materialized -- {len(expert_keys)} expert + "
-        f"{sum(1 for k in dense_keys if owner[k] == rank)} dense owned "
-        f"[{len(replicated)} replicated, {len(safe)} p2p, {len(other)} all-gather, "
-        f"{len(plain)} plain] ({expert_bytes[rank] / 1e9:.2f}G experts)"
-    )
+    if shard0:
+        _gather_shard0_to_owners(local_sd, shard0, owner, all_shapes, rank, world)
 
 
 def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
@@ -740,7 +614,6 @@ def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
     try:
         reverted = revert_weight_conversion_quant_aware(model, local_sd)
     except Exception as exc:
-        _xdbg(f"nocons: quant-aware reverse conversion skipped ({exc})")
         warnings.warn(
             f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
             "names may not match the original HF hub checkpoint."
@@ -752,7 +625,6 @@ def _revert_whole_sd(model: nn.Module, local_sd: dict) -> bool:
     if reverted is not local_sd:
         local_sd.clear()
         local_sd.update(reverted)
-    _xdbg(f"nocons: reverse conversion applied ({len(local_sd)} keys)")
     return True
 
 
@@ -790,10 +662,6 @@ def _write_even_shards(
             "before the write (state dict emptied upstream)"
         )
     base = sum(counts[:rank])
-    _xdbg(
-        f"nocons: this rank -> {n_local} shards (global {base + 1}..{base + n_local} of {n_total}), "
-        f"{len(write_keys)} keys, {total / 1e9:.1f}G"
-    )
 
     weight_map: dict = {}
     my_bytes = 0
@@ -831,7 +699,6 @@ def _write_even_shards(
         index = {"metadata": {"total_size": total_bytes}, "weight_map": full_map}
         with open(export_dir / "model.safetensors.index.json", "w") as f:
             json.dump(index, f, indent=2)
-        _xdbg(f"nocons: index written ({len(full_map)} keys, {n_total} shards)")
     dist.barrier()
 
 
@@ -843,29 +710,28 @@ def _distributed_save_hf_checkpoint_impl(
     max_shard_size: "str | int" = "10GB",
     is_modelopt_qlora: bool = False,
 ) -> None:
-    """Distributed HF safetensors export via torch DCP -- no rank-0 full-model host-RAM gather.
+    """Distributed HF safetensors export -- no rank-0 full-model host-RAM gather.
 
-    Writes an already-processed, FSDP2-sharded model to ``export_dir`` as
-    consolidated HF safetensors, entirely distributed:
-      - Fused expert weights (when present): each rank splits its LOCAL shard into per-expert keys with global indices
-        and keeps them in place -- no gather. dp-replica ranks under DP x EP skip this.
-      - Dense / non-expert weights: kept sharded (FSDP2 DTensor dim-0 shards, or EP replicated plain
-        tensors), NOT gathered to rank 0.
+    Writes an already-processed, FSDP2-sharded model to ``export_dir`` as HF safetensors, entirely
+    distributed. No rank ever holds the whole model:
 
-    All keys are bin-packed into a global ``fqn_to_index_mapping`` (identical on every rank); then
-    ``dcp.save`` with ``HuggingFaceStorageWriter(save_distributed=True)`` has each rank write only its
-    own keys into ``export_dir/sharded/``. ``consolidate_safetensors_files_on_every_rank`` merges
-    those into the final ``model-XXXXX-of-NNNNN.safetensors`` with the output files partitioned across
-    ranks (parallel); rank 0 writes only the index. No rank ever holds the full model in host RAM.
+      1. Fused expert weights (when present): each rank splits its LOCAL shard into per-expert keys
+         with global indices and keeps them in place -- no communication. Experts are therefore
+         already disjoint across ranks. dp-replica ranks under DP x EP skip this.
+      2. Dense / non-expert weights: each fqn is assigned to exactly ONE owner rank and moved there
+         (:func:`_materialize_owned`), so every tensor becomes whole on its owner while the set stays
+         spread across ranks. Replicated and plain values need no transport; dim-0 shards travel
+         point-to-point, bucketed per peer.
+      3. The reverse weight conversion runs per-rank on those whole tensors -- it cannot run while
+         they are sharded, because transformers' conversion ops are written against whole tensors
+         and have no way to express a placement.
+      4. Every rank bin-packs its own owned set into even shards, numbered into a global range, and
+         writes them directly with ``safetensors.save_file``. Rank 0 unions the weight index.
+
+    Peak memory per rank is its owned set, not the model. Placements the point-to-point transport
+    does not cover are rejected rather than routed through an untested slower path.
     """
-    import shutil
-
     import torch.distributed as dist
-    import torch.distributed.checkpoint as dcp
-    from torch.distributed.checkpoint import HuggingFaceStorageWriter
-    from torch.distributed.checkpoint._consolidate_hf_safetensors import (
-        consolidate_safetensors_files_on_every_rank,
-    )
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
     from torch.distributed.tensor import DTensor
 
@@ -877,8 +743,6 @@ def _distributed_save_hf_checkpoint_impl(
     # independent DTensors and both sides would be written. The map is derived from names and is
     # identical on every rank, so the alias is dropped consistently; postprocess_state_dict skips a
     # group whose canonical is missing from this rank's slice rather than orphaning the alias.
-    _PHASE_TIMES.clear()
-    _t_total = _tick()
 
     tied_map = TiedWeightMap(model)
 
@@ -917,12 +781,11 @@ def _distributed_save_hf_checkpoint_impl(
     # FSDP2 / EP-without-DP), so every such rank writes.
     write_experts = dp_idx == 0
 
-    _t = _tick()
     sharded_sd = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False))
 
     # Re-materialize every value as a NORMAL tensor UP FRONT. hf_ptq exports under torch.inference_mode(),
     # so these are inference tensors; the inference flag is STICKY -- clone/reshape/detach/slice all
-    # propagate it -- and the expert split + scale reduce + DCP write below all do version-counted ops
+    # propagate it -- and the expert split, scale reduce and write below all do version-counted ops
     # that reject inference tensors. The only way to drop the flag is to copy the data into a freshly
     # ALLOCATED tensor (here, under the wrapper's inference_mode(False)). For a DTensor, copy the LOCAL
     # shard and rewrap so mesh/placements survive. Bounded to this rank's shard.
@@ -946,7 +809,6 @@ def _distributed_save_hf_checkpoint_impl(
     # value immediately, so peak stays ~1x. (Import of ep-dp's in-place/streaming write handling.)
     for _k in list(sharded_sd.keys()):
         sharded_sd[_k] = _to_normal(sharded_sd[_k])
-    _tock("state_dict", _t)
 
     prefixes = _fused_experts_prefixes(sharded_sd)
     prefix_set = set(prefixes)
@@ -966,7 +828,6 @@ def _distributed_save_hf_checkpoint_impl(
 
     # Sync the shared per-module activation (input) scales across ranks (global max), so every
     # expert of a module gets the same input_scale regardless of which rank owns it.
-    _t = _tick()
     in_keys = sorted(k for k in sharded_sd if k.endswith("_input_scale") and _is_expert_key(k))
     if in_keys:
         stacked = torch.stack(
@@ -978,11 +839,9 @@ def _distributed_save_hf_checkpoint_impl(
         dist.all_reduce(stacked, op=dist.ReduceOp.MAX)
         for j, k in enumerate(in_keys):
             sharded_sd[k] = stacked[j].clone()
-    _tock("amax_sync", _t)
 
     # (1) Experts: split this rank's local shard into per-expert keys (global idx); stays local.
     # Skipped on dp-replica ranks under DP x EP (their experts are written by dp group 0).
-    _t = _tick()
     local_sd: dict = {}
     if write_experts:
         for pi, prefix in enumerate(prefixes):
@@ -997,17 +856,15 @@ def _distributed_save_hf_checkpoint_impl(
         # In place (see above): avoid a transient 2x copy of the per-expert split.
         for _k in list(local_sd.keys()):
             local_sd[_k] = local_sd[_k].detach().contiguous()
-    _tock("expert_split", _t)
 
     # At this point local_sd holds ONLY this rank's (already split, per-expert) experts -- capture the
     # set so _materialize_owned can tell disjoint experts from replicated dense.
     expert_key_set = set(local_sd)
 
-    # (2) Dense / non-expert: keep sharded -- FSDP2 leaves DTensors (dim-0 shard); EP leaves plain
-    # replicated tensors. Do NOT gather to rank 0: DCP writes each DTensor's shards per-rank (parallel,
-    # no rank-0 full-model host-RAM gather) and dedups replicated plain tensors. postprocess runs on
-    # every rank (dict-level key renaming + small scalar scale math -- safe on DTensors).
-    _t = _tick()
+    # (2) Dense / non-expert: leave sharded for now -- FSDP2 leaves DTensors (dim-0 shard); EP leaves
+    # plain replicated tensors. Do NOT gather to rank 0; _materialize_owned below moves each tensor to
+    # a single OWNER rank instead, so the set stays spread across ranks. postprocess runs on every rank
+    # (dict-level key renaming + small scalar scale math -- safe on DTensors).
     nonexpert_keys = [k for k in sharded_sd if not _is_expert_key(k)]
     dense_sd = {k: sharded_sd[k] for k in nonexpert_keys}
     dense_sd = postprocess_state_dict(
@@ -1020,103 +877,11 @@ def _distributed_save_hf_checkpoint_impl(
     # collective absorbed the skew and looked like gather cost.
     del sharded_sd, dense_sd
 
-    _tock("dense_postprocess", _t)
 
     # (3) Whole-tensor redistribution -> reverse conversion -> write. Each tensor ends up WHOLE on
     # exactly one rank (never gathered to a single rank), which is what lets the reverse run: the
     # transformers conversion ops are written against whole tensors and cannot express a placement.
-    # The reverse must precede bin-packing, since it renames keys and splits tensors.
-    import os as _os
-
-    if not _os.environ.get("MODELOPT_EXPORT_CONSOLIDATION"):
-        _t = _tick()
-        _materialize_owned(local_sd, expert_key_set, rank, world)
-        _tock("materialize_owned", _t)
-        _t = _tick()
-        _revert_whole_sd(model, local_sd)
-        _tock("reverse_conversion", _t)
-        _t = _tick()
-        _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
-        _tock("write_shards", _t)
-        _tock("TOTAL", _t_total)
-        _dump_phase_times(rank, world)
-        _xdbg("distsave: no-consolidation write DONE")
-        return
-
-    # ---- legacy DCP + distributed-consolidation path (MODELOPT_EXPORT_CONSOLIDATION=1) ----
-    # torch DCP HuggingFaceStorageWriter consolidation writes 0-dim (scalar) tensors as ZERO (shape ()
-    # -> value dropped); shape (1,) and larger survive. modelopt stores per-tensor scales (input_scale/
-    # weight_scale/weight_scale_2) as 0-dim scalars, so promote any 0-dim tensor to (1,) to preserve its
-    # value. Only needed HERE: the no-gather writer above calls safetensors.save_file directly and
-    # never meets the consolidation bug, and promoting there would emit (1,) scales where the rank-0
-    # gather path emits (), making the two checkpoints differ for no reason.
-    # (Values are already normal tensors -- re-materialized right after get_model_state_dict.)
-    local_sd = {k: (v.reshape(1) if v.dim() == 0 else v) for k, v in local_sd.items()}
-    # Keeps each tensor sharded and merges FILES instead, so the reverse conversion cannot run here.
-    # (3) Global shard layout: bin-pack ALL keys into ~max_shard_size files so every rank passes the
-    # SAME fqn_to_index_mapping to the writer. A DTensor's byte size is its GLOBAL size (numel() is
-    # global) -- the consolidated file holds the whole tensor; plain keys use their own size. The
-    # gather dedups replicated/DTensor keys (present on every rank) and unions the disjoint expert keys.
-    local_sizes = {k: int(v.numel() * v.element_size()) for k, v in local_sd.items()}
-    gathered: list = [None] * world
-    dist.all_gather_object(gathered, local_sizes)
-    all_sizes: dict = {}
-    for g in gathered:
-        all_sizes.update(g)
-    fqn_to_index_mapping = _bin_pack_fqn_to_index(all_sizes, max_shard_size)
-    n_files = max(fqn_to_index_mapping.values()) if fqn_to_index_mapping else 1
-
-    # (4) Distributed write, then DISTRIBUTED consolidation. save_distributed has each rank write only
-    # its own keys (dense DTensor shards + this rank's plain experts) into export_dir/sharded/. We set
-    # enable_consolidation=False because the writer's built-in consolidation runs on RANK 0 ONLY -- a
-    # serial re-read+rewrite of the whole model that dominated export time for large models (~700s for
-    # Kimi-K2 vs ~50s writing). Instead consolidate_safetensors_files_on_every_rank partitions the
-    # output files across ranks (idx % world_size) so every rank merges its own subset in parallel;
-    # rank 0 then writes only the small index. The finfo shim covers the integer-dtype (NVFP4 uint8)
-    # consolidation bug; 0-dim scales were already promoted to (1,) above.
-    sharded_dir = export_dir / "sharded"
-    writer = HuggingFaceStorageWriter(
-        str(sharded_dir),
-        fqn_to_index_mapping=fqn_to_index_mapping,
-        save_distributed=True,
-        enable_consolidation=False,
-        thread_count=8,
-    )
-    with _finfo_accepts_int_dtypes():
-        _t = _tick()
-        dcp.save(local_sd, storage_writer=writer)
-        dist.barrier()
-        _tock("dcp_save", _t)
-        _t = _tick()
-        consolidate_safetensors_files_on_every_rank(
-            input_dir=str(sharded_dir),
-            output_dir=str(export_dir),
-            fqn_to_index_mapping=fqn_to_index_mapping,
-            num_threads=8,
-        )
-        _tock("consolidate", _t)
-
-    # (5) Write the HF weight index. torch's consolidation helper does NOT emit
-    # model.safetensors.index.json, and without it transformers / vLLM cannot map keys to shards, so a
-    # multi-shard checkpoint is unloadable. No extra collective is needed: fqn_to_index_mapping and
-    # all_sizes were already unioned across ranks above (all_gather_object) and are identical on every
-    # rank, so rank 0 builds the index locally. The file names must match what HuggingFaceStorageWriter
-    # emitted from the same mapping -- model-<i>-of-<n>.safetensors, 5-digit zero-padded.
-    if rank == 0:
-        weight_map = {
-            fqn: f"model-{idx:05d}-of-{n_files:05d}.safetensors"
-            for fqn, idx in fqn_to_index_mapping.items()
-        }
-        index = {
-            "metadata": {"total_size": sum(all_sizes.values())},
-            "weight_map": weight_map,
-        }
-        with open(export_dir / "model.safetensors.index.json", "w") as f:
-            json.dump(index, f, indent=2)
-
-    # (6) Drop the intermediate per-rank sharded/ dir.
-    if rank == 0:
-        shutil.rmtree(sharded_dir, ignore_errors=True)
-    dist.barrier()
-    _tock("TOTAL", _t_total)
-    _dump_phase_times(rank, world)
+    # The reverse must precede the shard layout, since it renames keys and splits tensors.
+    _materialize_owned(local_sd, expert_key_set, rank, world)
+    _revert_whole_sd(model, local_sd)
+    _write_even_shards(local_sd, export_dir, max_shard_size, rank, world)
