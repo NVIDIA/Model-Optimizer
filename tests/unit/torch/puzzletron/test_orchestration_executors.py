@@ -1028,7 +1028,7 @@ def test_replacement_width_overrides_compose_with_base_config(tmp_path: Path):
     )
 
     teacher = str(Path(attempt.command.env["PUZZLE_DIR"]) / "ckpts" / "sorted_teacher")
-    assert config["build_replacement_library"]["source_checkpoint_dir"] == teacher
+    assert config["build_library"]["source_checkpoint_dir"] == teacher
     assert config["replacement_scoring"]["source_checkpoint_dir"] == teacher
     assert config["replacement_scoring"]["target_teacher_dir"] == teacher
 
