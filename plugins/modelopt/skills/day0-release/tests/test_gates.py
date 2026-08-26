@@ -429,5 +429,14 @@ def test_harvest_reports_what_it_dropped(tmp_path):
     assert any("h.notok" in m for m in diag["metrics_without_tokens"])
 
 
+def test_ptq_waiver_requires_canonical_values():
+    """A JSON string "false" is truthy, and "not_mxfp4" contains "mxfp4"."""
+    grew = {"output_bytes": 16_800_000_000}
+    assert not evaluate_checkpoint(_ckpt(**grew, accept_size_growth="false"))["pass"]
+    assert not evaluate_checkpoint(_ckpt(**grew, source_precision="not_mxfp4"))["pass"]
+    assert evaluate_checkpoint(_ckpt(**grew, accept_size_growth=True))["pass"]
+    assert evaluate_checkpoint(_ckpt(**grew, source_precision=" MXFP4 "))["pass"]
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

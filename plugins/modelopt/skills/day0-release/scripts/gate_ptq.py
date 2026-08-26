@@ -75,7 +75,7 @@ _INHERENT_GROWTH_MAX = 1.10
 
 # Source precisions that cannot shrink further under a 4-bit recipe. Growth is only
 # excused when the summary declares one of these (or sets accept_size_growth).
-_SUB8_SOURCE_PRECISIONS = ("mxfp4", "nvfp4", "fp4", "int4", "w4a16", "awq", "4bit")
+_SUB8_SOURCE_PRECISIONS = frozenset({"mxfp4", "nvfp4", "fp4", "int4", "w4a16", "awq", "4bit"})
 
 
 def evaluate_checkpoint(summary):
@@ -96,9 +96,11 @@ def evaluate_checkpoint(summary):
     src = summary.get("source_bytes")
     out = summary.get("output_bytes")
     recipe = (summary.get("recipe") or "").lower()
-    source_precision = str(summary.get("source_precision") or "").lower()
-    already_sub8 = bool(summary.get("accept_size_growth")) or any(
-        p in source_precision for p in _SUB8_SOURCE_PRECISIONS
+    source_precision = str(summary.get("source_precision") or "").strip().lower()
+    # Exact membership, not substring: "not_mxfp4" must not match. And require a real
+    # boolean, since a JSON string "false" is truthy and would silently waive the gate.
+    already_sub8 = (
+        summary.get("accept_size_growth") is True or source_precision in _SUB8_SOURCE_PRECISIONS
     )
     counts = summary.get("layer_precision_counts") or {}
     metadata_diffs = summary.get("metadata_diffs") or []
@@ -211,6 +213,8 @@ def main(argv=None):
                     "failure_class": "USER_CONFIG_ERROR",
                     "detail": "v1 requires --summary <validation-summary.json>; "
                     "produce it from the exported checkpoint (size scan + hf_ptq quant summary)",
+                    "checks": {},
+                    "notes": [],
                 }
             )
         )
@@ -220,7 +224,17 @@ def main(argv=None):
         with open(args.summary) as f:
             summary = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        print(json.dumps({"pass": False, "failure_class": "USER_CONFIG_ERROR", "detail": str(e)}))
+        print(
+            json.dumps(
+                {
+                    "pass": False,
+                    "failure_class": "USER_CONFIG_ERROR",
+                    "detail": str(e),
+                    "checks": {},
+                    "notes": [],
+                }
+            )
+        )
         return 2
 
     if args.recipe:
