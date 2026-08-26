@@ -21,6 +21,7 @@ from functools import partial
 
 import pytest
 import torch
+from safetensors.torch import load_file
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from torch.distributed.tensor import DTensor
 
@@ -97,5 +98,76 @@ def test_parallel_load_and_export(dist_workers, tmp_path, cpu_offload):
             ckpt_dir=str(ckpt_dir),
             export_dir=str(tmp_path / "export"),
             cpu_offload=cpu_offload,
+        )
+    )
+
+
+def _test_carry_over_unplaced_weights(rank, size, ckpt_dir, export_dir, orphan_prefix):
+    """Load, export, and require the weights the model could not place to survive."""
+    device = torch.device(f"cuda:{rank}")
+    model = parallel_load_and_prepare_fsdp2(ckpt_dir, device, rank, size)
+
+    unplaced = getattr(model, "_modelopt_unplaced_source_keys", None)
+    assert unplaced, (
+        "the loader placed every checkpoint key; the fixture was supposed to leave an orphaned "
+        "layer behind, so this test would pass vacuously"
+    )
+    assert any(k.startswith(orphan_prefix) for k in unplaced), (
+        f"orphaned '{orphan_prefix}*' weights were not recorded as unplaced; got {sorted(unplaced)[:5]}"
+    )
+
+    export_hf_checkpoint(model, export_dir=export_dir, dtype=torch.bfloat16)
+
+    if rank == 0:
+        exported: dict = {}
+        for shard in sorted(os.listdir(export_dir)):
+            if shard.endswith(".safetensors"):
+                exported.update(load_file(os.path.join(export_dir, shard)))
+        source: dict = {}
+        for shard in sorted(os.listdir(ckpt_dir)):
+            if shard.endswith(".safetensors"):
+                source.update(load_file(os.path.join(ckpt_dir, shard)))
+
+        orphans = sorted(k for k in source if k.startswith(orphan_prefix))
+        assert orphans, "fixture produced no orphaned weights"
+        for k in orphans:
+            assert k in exported, (
+                f"'{k}' is in the source checkpoint and was never loaded into the model, so PTQ "
+                f"could not touch it -- it must be copied into the export, but it is missing"
+            )
+            assert torch.equal(exported[k].cpu(), source[k].cpu()), (
+                f"'{k}' was carried over but its value changed; it should be a verbatim copy"
+            )
+
+
+def test_carry_over_unplaced_weights(dist_workers, tmp_path):
+    """Weights the built model has no home for must still reach the exported checkpoint.
+
+    A checkpoint can carry parameters the model class does not build -- an MTP head is the common
+    case (HF builds only ``num_hidden_layers`` decoders, leaving an inlined MTP tail orphaned), but
+    an auxiliary tower or draft head behaves the same way. Quantization never sees them, so nothing
+    downstream would notice their absence: the export just comes out quietly incomplete.
+
+    The fixture reproduces that shape directly. Build a checkpoint with one more layer than the
+    config admits, so the final layer's weights are present on disk with nowhere to load to.
+    """
+    ckpt_dir = create_tiny_llama_dir(tmp_path, vocab_size=VOCAB_SIZE, num_hidden_layers=3)
+
+    # Truncate the config so the last layer becomes unplaceable -- the same situation an inlined
+    # MTP tail creates, without needing an MTP-capable architecture in the test suite.
+    cfg_path = os.path.join(str(ckpt_dir), "config.json")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+    orphan_idx = cfg["num_hidden_layers"] - 1
+    cfg["num_hidden_layers"] = orphan_idx
+    with open(cfg_path, "w") as f:
+        json.dump(cfg, f)
+
+    dist_workers.run(
+        partial(
+            _test_carry_over_unplaced_weights,
+            ckpt_dir=str(ckpt_dir),
+            export_dir=str(tmp_path / "export_carry"),
+            orphan_prefix=f"model.layers.{orphan_idx}.",
         )
     )

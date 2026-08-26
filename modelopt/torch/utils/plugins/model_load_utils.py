@@ -297,20 +297,23 @@ def _broadcast_load_group(
 
 def _group_sources_by_layer(
     weight_map: dict, plan: dict | None, model_param_names: set[str], layer_prefixes: list[str]
-) -> tuple[dict[int, list[str]], list[str], int]:
+) -> tuple[dict[int, list[str]], list[str], list[str]]:
     """Bucket checkpoint keys by the decoder layer their converted target lives in.
 
-    Returns ``(layer_sources, non_layer_sources, skipped)``: ``layer_sources[i]`` holds the keys
+    Returns ``(layer_sources, non_layer_sources, unplaced)``: ``layer_sources[i]`` holds the keys
     targeting decoder layer ``i``, ``non_layer_sources`` holds root (embed/lm_head/norm) keys, and
-    ``skipped`` counts keys whose target isn't in the model (aux weights, e.g. an MTP head).
+    ``unplaced`` NAMES the keys whose target isn't in the model -- weights the built model has no
+    home for (an MTP head, an auxiliary tower). The names are kept, not just counted, so the export
+    can copy them through: PTQ never touches them, but the exported checkpoint is still expected to
+    contain them.
     """
     layer_sources: dict[int, list[str]] = {i: [] for i in range(len(layer_prefixes))}
     non_layer_sources: list[str] = []
-    skipped = 0
+    unplaced: list[str] = []
     for ckpt_key in weight_map:
         target = _resolve_target(plan, ckpt_key)[0] if plan else ckpt_key
         if target not in model_param_names:
-            skipped += 1
+            unplaced.append(ckpt_key)
             continue
         for i, prefix in enumerate(layer_prefixes):
             if target.startswith(prefix):
@@ -318,7 +321,7 @@ def _group_sources_by_layer(
                 break
         else:
             non_layer_sources.append(ckpt_key)
-    return layer_sources, non_layer_sources, skipped
+    return layer_sources, non_layer_sources, unplaced
 
 
 def parallel_load_and_prepare_fsdp2(
@@ -367,13 +370,20 @@ def parallel_load_and_prepare_fsdp2(
     model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
 
     # Bucket each checkpoint key by its target's decoder layer (root params go to non_layer_sources).
-    layer_sources, non_layer_sources, skipped = _group_sources_by_layer(
+    layer_sources, non_layer_sources, unplaced = _group_sources_by_layer(
         weight_map, plan, model_param_names, layer_prefixes
     )
-    if skipped:
+    if unplaced:
         logger.debug(
-            "skipping %d checkpoint keys not present in the model (e.g. MTP head)", skipped
+            "%d checkpoint keys have no parameter in the built model (e.g. an MTP head); "
+            "recorded for the export to copy through verbatim",
+            len(unplaced),
         )
+    # Recorded on the model so export can read them back from the source without being told where
+    # it came from. Not a state dict: holding these tensors from load to export would waste the
+    # memory this loader exists to save.
+    model._modelopt_unplaced_source_keys = unplaced
+    model._modelopt_source_checkpoint = resolved_path
 
     _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 

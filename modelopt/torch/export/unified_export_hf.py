@@ -61,6 +61,7 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
@@ -1536,6 +1537,57 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
+def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Read back checkpoint weights the model never loaded, so the export stays complete.
+
+    A checkpoint can hold parameters the built model has no home for -- an MTP head, an auxiliary
+    tower -- which means quantization never sees them and they would be missing from the exported
+    checkpoint unless they are copied across verbatim. ``parallel_load_and_prepare_fsdp2`` records
+    which keys those were (:attr:`_modelopt_unplaced_source_keys`) and where they came from; this
+    reads them on demand rather than holding them in memory from load to export.
+
+    Deliberately architecture-agnostic: the question asked at load time was "does the model have a
+    parameter for this checkpoint key", not "is this an MTP head", so anything the model did not
+    load is carried through. Returns an empty dict when the model was not loaded that way.
+
+    Best-effort: a checkpoint that cannot be re-read warns rather than failing the export, since
+    the rest of the weights are already correct.
+    """
+    keys = getattr(model, "_modelopt_unplaced_source_keys", None)
+    ckpt = getattr(model, "_modelopt_source_checkpoint", None)
+    if not keys or not ckpt:
+        return {}
+    try:
+        from safetensors import safe_open
+
+        from modelopt.torch.utils.plugins.model_load_utils import weight_map_for
+
+        weight_map = weight_map_for(ckpt)
+        by_file: dict[str, list[str]] = {}
+        for k in keys:
+            shard = weight_map.get(k)
+            if shard is not None:
+                by_file.setdefault(shard, []).append(k)
+
+        out: dict[str, torch.Tensor] = {}
+        for shard, shard_keys in by_file.items():
+            with safe_open(str(Path(ckpt) / shard), framework="pt") as f:
+                for k in shard_keys:
+                    out[k] = f.get_tensor(k)
+    except Exception as exc:
+        warnings.warn(
+            f"Could not copy {len(keys)} unplaced source weight(s) into the export ({exc}); "
+            "the checkpoint will be missing them."
+        )
+        return {}
+    if out:
+        print_rank_0(
+            f"Carrying {len(out)} source weight(s) the model never loaded into the export "
+            f"(e.g. {sorted(out)[0]})"
+        )
+    return out
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1587,6 +1639,14 @@ def export_hf_checkpoint(
             **kwargs,
         )
         return
+
+    # Weights the model never loaded (MTP head, auxiliary tower, ...) are copied straight from the
+    # source so the exported checkpoint is the complete model. Merged here, ahead of the path
+    # dispatch, so the gather and no-gather writers behave identically. An explicit extra_state_dict
+    # wins on conflict: the caller asked for that tensor by name.
+    _carried = _carry_over_unplaced_source_weights(model)
+    if _carried:
+        extra_state_dict = {**_carried, **(extra_state_dict or {})}
 
     is_distributed = (
         torch.distributed.is_available()
