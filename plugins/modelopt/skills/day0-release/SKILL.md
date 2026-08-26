@@ -54,9 +54,11 @@ progress:
 - [ ] Step 0: Resolve inputs; confirm threshold and eval set
 - [ ] Step 1: Setup gate — creds present, cluster reachable
 - [ ] Step 2: PTQ (ptq skill) → gate_ptq.py
+- [ ] Step 2b: Serving canary — /health + one generation (deployment skill)
 - [ ] Step 3: Baseline eval (evaluation skill, deploys source) → gate_run.py
 - [ ] Step 4: Quantized eval (evaluation skill, deploys candidate) → gate_run.py
 - [ ] Step 5: Compare (compare-results skill) → external sanity → gate_compare.py → decision
+- [ ] Step 5b: Verbosity gate → gate_verbosity.py
 - [ ] Step 6: Closeout — report + publish recommendation
 ```
 
@@ -82,6 +84,31 @@ python "$SKILL_DIR/scripts/gate_ptq.py" --summary <validation-summary.json>
 branch on `failure_class` (see **Triage** below). Do not evaluate an
 unvalidated checkpoint.
 
+#### Step 2b — serving canary (MANDATORY before Step 3)
+
+`gate_ptq.py` checks size, coverage and metadata, not whether the checkpoint
+*loads* — an export can score perfect coverage and still be unservable.
+
+Stand it up once via the **deployment** skill and require `/health` plus one
+coherent generation. This costs ~15 min and protects a multi-hour evaluation;
+skipping it has cost a full baseline eval against a checkpoint vLLM could never
+load (exporter wrote transformers-canonical tensor names, loader expected the
+native layout).
+
+On failure use `failure_class: CHECKPOINT_NOT_SERVABLE` and drop to the
+**deployment** skill; do not proceed to Step 3.
+
+**Write the canary so it cannot lie.** Both of these produced wrong verdicts on a
+large MoE:
+
+- **Poll ceiling > load time**, with headroom. A 50 min poll against a 51 min load
+  reported failure for a checkpoint that serves fine. Large MoE loads are
+  CPU-bound fp8 dequant (~50 min); 0% GPU during *load* is normal.
+- **Print an explicit `RESULT:` on every path** and exit non-zero on failure. A
+  poll loop that falls through to the generation test exits 0 and reads as PASS.
+- Server log on shared storage, not node-local `/tmp`.
+- Canary the **as-exported** artifact, not a copy you modified to make it work.
+
 ### Step 3 — Baseline eval
 
 The baseline is the **source** (pre-quantization) model on the same task set and
@@ -99,7 +126,24 @@ skill** to reproduce and debug serving in isolation (serve the checkpoint
 standalone, confirm `/health` + one generation, iterate on flags / TP / image /
 env vars) rather than burning full eval cycles on a broken endpoint — then carry
 the working command back into NEL's `deployment.command` and resume the eval. If
-the checkpoint genuinely can't serve, `POINT_INFEASIBLE`. Gate:
+the checkpoint genuinely can't serve, `POINT_INFEASIBLE`.
+
+**Before submitting: assert baseline/candidate config parity.** The candidate
+config must differ from the baseline's in nothing but checkpoint path and served
+model name. Diff mechanically — an eyeball pass misses this:
+
+```bash
+diff <(grep -vE 'checkpoint_path|served_model_name' baseline.yaml) \
+     <(grep -vE 'checkpoint_path|served_model_name' candidate.yaml)
+```
+
+Any other difference biases the comparison and invalidates the gate: a mismatched
+`parallelism` between the two sides was worth ~2 pp, enough to invert the sign of
+the delta. If the model card splits sampling params per scenario, apply the same
+split to both sides. Never set an unbounded `request_timeout` (`1e9`) — it turns a
+transient stall into a job that holds its GPUs until the wall clock kills it.
+
+Gate:
 
 ```bash
 python "$SKILL_DIR/scripts/gate_run.py" --run <run-summary.json>
@@ -116,6 +160,27 @@ baseline sanity check before the candidate-delta gate. A failed check is
 rerun the baseline. If no credible comparable external score exists, record the
 baseline as externally unverified and continue using the validated measured
 baseline.
+
+#### Statistical power — check BEFORE trusting any per-task verdict
+
+A task whose measurement noise rivals the threshold cannot decide a gate. Confirm
+each task's repeat count gives a standard error below the threshold; otherwise
+mark it `INDETERMINATE` rather than reporting a pass/fail.
+
+For example, on a 1 % gate on DeepSeek-V4-Pro, both tasks that originally failed passed once measured properly:
+
+| task | repeats | drop | verdict |
+| --- | --- | --- | --- |
+| SciCode | 1 | 2.96 pp | REGRESSION |
+| SciCode | 8 | **-0.96 pp** | PASS |
+| IFBench | 5 | 2.73 pp | REGRESSION |
+| IFBench | 16 | **0.63 pp** | PASS |
+
+`recipes/tasks/aa/scicode.md` ships `num_repeats: 1`, unsuitable for gating as-is.
+
+**Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
+replay cached responses — two runs came back bit-identical to 16 digits. Confirm the score
+actually moved before counting a run as an independent repeat.
 
 After recording the external status, produce per-task deltas and run:
 
@@ -145,12 +210,43 @@ external baseline check. Combined decision:
   implausible (e.g. baseline lower than candidate by a large margin, or a task
   score is outside its valid range) → correct the baseline or surface it.
 
+#### Step 5b — Verbosity gate (MANDATORY; independent of accuracy)
+
+`gate_compare.py` does not measure verbosity, so stopping after Step 5 leaves a
+hard gate unmeasured.
+
+```bash
+python "$SKILL_DIR/scripts/gate_verbosity.py" \
+    --baseline <baseline_eval_root> --candidate <candidate_eval_root> \
+    --glob 'eval_*' --threshold 0.05
+```
+
+Read `response_stats.avg_completion_tokens` from each task's
+`artifacts/eval_factory_metrics.json`. Do **not** use the `reasoning.*` fields:
+`reasoning.*_tokens` are always `0` (only the reasoning/content split is missing)
+and the `*_words` siblings are a proxy that can disagree with the gate — one task
+read +6.10% FAIL in words and +1.32% PASS in tokens.
+
+The gate is two-sided; a large drop in output length is also a change.
+
+Two filters are mandatory: same reasoning effort (`--exclude _high`) and complete runs only (max `successful_count`).
+
+Tasks sharing no sample count are `not_comparable`, not a delta. Means under
+~1000 tokens carry a `short_output_warning` — read absolute counts there.
+
 ### Step 6 — Closeout
 
 Report the decision with: source vs output size + ratio, per-task baseline /
-candidate / delta / within-threshold, external source and sanity status, MLflow
-run IDs, and a publish recommendation (publish / do-not-publish).
-Archive artifacts to the workspace.
+candidate / delta / within-threshold, **the verbosity verdict from Step 5b**,
+external source and sanity status, MLflow run IDs, and a publish recommendation
+(publish / do-not-publish). Archive artifacts to the workspace.
+
+**Publish exactly what was evaluated.** Verify mechanically, not by path
+convention: inode-compare a shard in the evaluated directory against the one being
+published. A day-0 run leaves near-identical sibling exports
+that differ by one calibration suffix — prefix rejected ones `REJECTED-` so the
+artifact cannot be picked by autocomplete, and re-run the Step 2b canary against
+the final path after any move.
 
 ## Triage (gate failure → decision)
 
@@ -161,6 +257,9 @@ Map a gate's `failure_class` to the next action:
 | `INFRA_TRANSIENT` | Retry the stage once; if it recurs, `SYSTEMIC`. |
 | `MODEL_UNSUPPORTED` | PATCH: fix the recipe pattern / add model support (ptq skill owns the patch loop), then retry. If unpatchable, `POINT_INFEASIBLE`. |
 | `QUANT_COVERAGE_FAILURE` | PATCH: fix the recipe wildcard so intended layers are covered; re-run PTQ. |
+| `SIZE_NOT_REDUCED` | Not automatically a blocker. If coverage passed, the growth is likely inherent (already-4-bit source). Check the ratio against a published checkpoint in the same family, and judge against the BF16 denominator the release criteria actually use. |
+| `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
+| `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
 | `EVAL_JUDGE_FAILED` | Usually transient (auth / rate limit) — wait and retry. |
 | `SAMPLE_ACCOUNTING_FAILED` | Investigate dropped/failed samples before trusting scores. |

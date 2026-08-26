@@ -149,6 +149,8 @@ remote_sync_from <remote_output_subdir> /local/output/
 | `unix_listener: cannot bind to path ... Read-only file system` | SSH ControlMaster socket in non-writable `/tmp` | `remote_exec.sh` auto-finds writable dir; ensure `TMPDIR` or `/tmp/claude-*` exists |
 | `cd: /home/user/~/path: No such file or directory` | `~` not expanding on remote | Use absolute paths in `workspace` config, not `~/...` |
 | Login nodes resolve home dirs differently | Symlinked home dirs vary by node | Use absolute lustre/NFS paths (e.g., `/lustre/fs1/...`) in job scripts |
+| `SBATCH_DEPENDENCY` env var has no effect | Some SLURM installs ignore the env-var form | Use the **CLI flag**: `sbatch --dependency=afterok:<jobid> job.sh`. With the env var the job starts immediately with `Dependency=(null)`, running against a half-written input. Confirm with `squeue -o %R`. |
+| A wedged NEL job is `scancel`-ed to free the GPUs | NEL's `afternotok` continuation refuses a user-cancelled predecessor (`finished with 'CANCELLED by <uid>' state. EXIT!`) and discards the response cache | **Let it hit the wall clock** — the continuation then resumes from cached responses. One `scancel` cost ~59 GPU-h. If you must stop it, relaunch fresh. |
 | `#!` becomes `#\!` in scripts | Shell environment mangles shebang | Fix with `sed -i 's\|^#\\\\!\|#!\|' script.sh` after writing |
 
 ## Reference Files

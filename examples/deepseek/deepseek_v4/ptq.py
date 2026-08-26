@@ -53,6 +53,19 @@ Usage (single node, 4 GPUs, MP=4):
 
 For MP=8 across two nodes use torchrun's ``--nnodes=2 --node_rank=<i>
 --master_addr=<ip>`` flags.
+
+Calibration settings
+--------------------
+
+With ``--cast_mxfp4_to_nvfp4`` the expert weights are a lossless bit-cast, so the
+activation amax (``input_scale``) is the only calibrated quantity that survives:
+
+  * ``--calib_seq`` matters more than ``--calib_size``. The 512 default estimates
+    activation ranges on short sequences only; 4096 is what shipped for
+    DeepSeek-V4-Pro-0813 NVFP4, while raising sample count alone was worse.
+
+  * ``--mse_calibrate`` is a no-op here — it tunes weight quantizers only, and
+    the cast overwrites ``weight_scale`` afterwards.
 """
 
 from __future__ import annotations
@@ -296,7 +309,14 @@ def _build_nvfp4_experts_cfg() -> dict:
     }
 
 
-def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list[str]):
+def ptq(
+    model,
+    tokenizer,
+    batch_size: int,
+    calib_size: int,
+    calib_datasets: list[str],
+    calib_seq: int = 512,
+):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
@@ -311,6 +331,7 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_samples=[calib_size] * len(calib_datasets),
+        max_sample_length=calib_seq,
         device=device,
     )
     _trace("calib dataloader ready")
@@ -437,6 +458,15 @@ def main():
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--calib_size", type=int, default=64)
     p.add_argument(
+        "--calib_seq",
+        type=int,
+        default=512,
+        help=(
+            "calibration sequence length (max_sample_length). Activation input_scale is estimated "
+            "at this length, so a short value may not cover long-context activation ranges."
+        ),
+    )
+    p.add_argument(
         "--calib_dataset",
         dest="calib_datasets",
         nargs="+",
@@ -471,7 +501,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
+    model = ptq(
+        model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets, args.calib_seq
+    )
     save_amax_and_quant_config(model, args.output_path)
 
     if args.run_generate is not None:

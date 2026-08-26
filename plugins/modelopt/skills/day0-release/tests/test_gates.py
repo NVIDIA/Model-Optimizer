@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
 from gate_run import evaluate_run
+from gate_verbosity import evaluate_verbosity
 
 # ── gate_compare ──────────────────────────────────────────────────────
 
@@ -186,7 +187,23 @@ def test_ptq_pass():
 
 
 def test_ptq_not_smaller():
+    """Size growth gets its own class: coverage may be perfect."""
     r = evaluate_checkpoint(_ckpt(output_bytes=16_000_000_000))
+    assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
+
+
+def test_ptq_coverage_failure_outranks_size():
+    """A real coverage problem must not be masked by the size complaint."""
+    r = evaluate_checkpoint(
+        _ckpt(
+            output_bytes=16_000_000_000,
+            layer_precision_counts={
+                "NVFP4": 200,
+                "unexpected_unquantized": 24,
+                "declaration_mismatch": 0,
+            },
+        )
+    )
     assert not r["pass"] and r["failure_class"] == "QUANT_COVERAGE_FAILURE"
 
 
@@ -248,3 +265,59 @@ def test_run_running_is_infra_transient():
 
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))
+
+
+# ── gate_verbosity ────────────────────────────────────────────────────
+
+
+def test_verbosity_within_threshold():
+    r = evaluate_verbosity({"gpqa": [(13358.9, 3168)]}, {"gpqa": [(13524.3, 3168)]})
+    assert r["pass"] and r["per_task"]["gpqa"]["within_threshold"]
+    assert r["max_abs_delta"] == 0.0124
+
+
+def test_verbosity_exceeds_threshold():
+    r = evaluate_verbosity({"t": [(1000.0, 100)]}, {"t": [(1100.0, 100)]})
+    assert not r["pass"] and r["failure_class"] == "VERBOSITY_EXCEEDED"
+
+
+def test_verbosity_shorter_output_also_fails():
+    """Two-sided: a large drop in output length is a change too."""
+    r = evaluate_verbosity({"t": [(1000.0, 100)]}, {"t": [(800.0, 100)]})
+    assert not r["pass"] and r["failure_class"] == "VERBOSITY_EXCEEDED"
+
+
+def test_verbosity_partial_runs_dropped():
+    """A truncated run must not drag a side's mean; only max-n runs count."""
+    r = evaluate_verbosity(
+        {"ifbench": [(3575.3, 200), (5503.3, 294), (5757.1, 294)]},
+        {"ifbench": [(5674.0, 294)]},
+    )
+    task = r["per_task"]["ifbench"]
+    assert task["baseline_tokens"] == 5630.2 and task["dropped_partial_runs"] == 1
+    assert r["pass"]
+
+
+def test_verbosity_unequal_sample_counts_not_comparable():
+    """Different successful_count on each side means different samples."""
+    r = evaluate_verbosity({"tbh": [(2389.7, 4559)]}, {"tbh": [(2257.9, 3394)]})
+    assert r["per_task"]["tbh"]["status"] == "not_comparable"
+    assert not r["pass"] and r["failure_class"] == "SAMPLE_ACCOUNTING_FAILED"
+
+
+def test_verbosity_short_output_warns_but_still_gates():
+    """Short means make the ratio unstable; warn, but still gate."""
+    r = evaluate_verbosity({"tau2": [(355.8, 2872)]}, {"tau2": [(410.1, 2872)]})
+    assert "short_output_warning" in r["per_task"]["tau2"]
+    assert not r["pass"] and r["failure_class"] == "VERBOSITY_EXCEEDED"
+
+
+def test_verbosity_task_on_one_side_only():
+    r = evaluate_verbosity({"a": [(100.0, 10)]}, {"b": [(100.0, 10)]})
+    assert r["per_task"]["a"]["status"] == "not_comparable"
+    assert not r["pass"]
+
+
+def test_verbosity_no_metrics_is_user_config_error():
+    r = evaluate_verbosity({}, {})
+    assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR"
