@@ -92,7 +92,21 @@ dependencies = [
 include = ["modelopt*", "modelopt_recipes*"]
 EOF
 fi
+# All nodes of the allocation run this against the SAME shared lustre checkout, and
+# `pip install -e` writes build state into it (nvidia_modelopt.egg-info/). Concurrent
+# installs clobber each other: one node reports "Successfully installed nvidia-modelopt"
+# while another silently ends up without the .dist-info, and every rank on that node then
+# dies at import with "PackageNotFoundError: No package metadata was found for
+# nvidia-modelopt" -- ~5 min in, after vllm serve has already been paid for. Stagger by
+# node id, then verify and retry, since staggering alone only narrows the window.
+sleep $(( ${SLURM_NODEID:-0} * 15 ))
 pip install --no-cache-dir -e modules/Model-Optimizer/
+if ! python3 -c 'from importlib.metadata import version; version("nvidia-modelopt")' 2>/dev/null; then
+    echo "nvidia-modelopt metadata missing after install (concurrent-install race); retrying..." >&2
+    sleep $(( 10 + ${SLURM_NODEID:-0} * 5 ))
+    pip install --no-cache-dir --force-reinstall --no-deps -e modules/Model-Optimizer/
+    python3 -c 'from importlib.metadata import version; print("nvidia-modelopt", version("nvidia-modelopt"))'
+fi
 pip install --no-cache-dir -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install --no-cache-dir 'datasets' 'huggingface-hub>=1.2.1'
 export PATH=$PATH:/workspace/.local/bin
