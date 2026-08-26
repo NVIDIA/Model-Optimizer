@@ -187,6 +187,15 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
     }
 
 
+def _matches_exclude(run_dir, exclude):
+    """True if ``run_dir`` carries ``exclude`` as a whole ``_``-delimited token.
+
+    Substring matching would drop unrelated dirs by default: ``eval_highctx`` and
+    ``eval_qwen_highmem`` both contain ``_high`` without being effort variants.
+    """
+    return exclude.strip("_") in run_dir.split("_")
+
+
 def _task_from_metadata(artifacts_dir):
     """Task name from NEL's ``metadata.yaml`` (``evaluation.tasks[].name``), or None.
 
@@ -212,7 +221,7 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     for path in matches:
         rel = os.path.relpath(path, side).split(os.sep)
         run_dir = rel[0]
-        if exclude and exclude in run_dir:
+        if exclude and _matches_exclude(run_dir, exclude):
             excluded.append(run_dir)
             # Name the task too: a task whose runs are ALL excluded never reaches
             # per_task, so without this it is invisible to the verdict's detail line.

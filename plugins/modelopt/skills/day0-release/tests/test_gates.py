@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
 from gate_run import evaluate_run
-from gate_verbosity import evaluate_verbosity, harvest
+from gate_verbosity import _matches_exclude, evaluate_verbosity, harvest
 from gate_verbosity import main as verbosity_main
 
 # ── gate_compare ──────────────────────────────────────────────────────
@@ -618,6 +618,14 @@ def test_dropped_tasks_covers_the_excluded_channel(tmp_path):
     diag = {}
     assert harvest(str(tmp_path), diagnostics=diag) == {}
     assert diag["excluded_tasks"] == ["h.only_high"]
+
+
+def test_exclude_matches_a_token_not_a_substring():
+    """Substring matching dropped unrelated dirs by default."""
+    assert _matches_exclude("eval_sglang_gpqa_high", "_high")
+    assert not _matches_exclude("eval_highctx", "_high")
+    assert not _matches_exclude("eval_qwen_highmem", "_high")
+    assert not _matches_exclude("eval_sglang_gpqa", "_high")
 
 
 if __name__ == "__main__":
