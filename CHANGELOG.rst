@@ -35,6 +35,7 @@ Changelog
 
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
+- Fix ``--use_fsdp2`` HuggingFace checkpoint export gathering the whole model onto rank 0, which made export the dominant phase of a PTQ run and could exhaust host memory on large models. Each rank now streams the layers it owns straight to its own shard files while rank 0 writes the combined index; on Qwen3-235B-A22B at world size 8 export drops from 2737s to 137s and peak host memory from 585 GB to 68 GB per rank.
 
 0.46 (2026-08-17)
 ^^^^^^^^^^^^^^^^^
