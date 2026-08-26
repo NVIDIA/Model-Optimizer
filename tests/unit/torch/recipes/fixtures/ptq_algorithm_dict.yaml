@@ -1,0 +1,20 @@
+# Algorithm override as dict with method + extra fields
+_test:
+  description: "Algorithm dict override with method and alpha_step"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_config:
+      quantize_config:
+        algorithm:
+          method: awq_lite
+          alpha_step: 0.1
+
+version: "1.0"
+quantization:
+  preset: fp8
+  algorithm:
+    method: awq_lite
+    alpha_step: 0.1

@@ -1,0 +1,22 @@
+# Custom weights/activations without preset
+_test:
+  description: "Custom INT8 weights + INT8 activations (no preset)"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_quant_cfg_has_keys: ["*weight_quantizer", "*input_quantizer"]
+    check_config:
+      quantize_config:
+        quant_cfg:
+          "*weight_quantizer":
+            num_bits: 8
+
+version: "1.0"
+quantization:
+  weights:
+    format: int8
+  activations:
+    format: int8
