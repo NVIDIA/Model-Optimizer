@@ -1047,22 +1047,21 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
     [get_tiny_llama, get_tiny_nemotron_h, get_tiny_gpt_oss],
     ids=["llama", "nemotron_h_hybrid", "gpt_oss_sliding_window"],
 )
-def test_layerwise_calibration_builds_no_kv_cache(factory):
-    """No cache may reach a decoder layer while layerwise calibration runs.
+def test_layerwise_calibration_and_kv_caching(factory):
+    """No cache may reach a decoder layer, and one that does must be refused.
 
-    Layerwise replays each layer's captured inputs several times, so a cache on them
-    lets a layer attend over the keys and values its own earlier replay wrote. This is
-    prevented upstream, by not building one -- which rests on the model honouring
-    ``config.use_cache``, hence the sweep over attention styles.
-
-    Asserted structurally: a retained cache only accumulates across replays, and max
-    calibration's max absorbs that on a small model, so amaxes can match while the
-    invariant is broken.
+    Layerwise replays each layer's captured inputs, so a cache on them lets a layer
+    attend over its own earlier replay's writes. Prevented by not building one, which
+    rests on the model honouring ``config.use_cache`` -- hence the sweep over attention
+    styles -- and backstopped by the capture check, since a caller may pass ``use_cache``
+    or ``past_key_values`` itself.
     """
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    tokens = torch.randint(0, 20, (1, 8))
+
     model = factory().eval()
     assert model.config.use_cache, "fixture must start with caching on to be meaningful"
-    layers = LayerActivationCollector.get_decoder_layers(model)
-
     seen = []
     handles = [
         layer.register_forward_pre_hook(
@@ -1071,18 +1070,18 @@ def test_layerwise_calibration_builds_no_kv_cache(factory):
             ),
             with_kwargs=True,
         )
-        for layer in layers
+        for layer in LayerActivationCollector.get_decoder_layers(model)
     ]
     try:
-        cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-        cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-        mtq.quantize(model, cfg, lambda m: m(torch.randint(0, 20, (1, 8))))
+        mtq.quantize(model, cfg, lambda m: m(tokens))
     finally:
         for h in handles:
             h.remove()
-
-    assert not seen, f"{len(seen)} KV cache(s) reached a decoder layer during calibration"
+    assert not seen, f"{len(seen)} KV cache(s) reached a decoder layer"
     assert model.config.use_cache, "config.use_cache was not restored"
+
+    with pytest.raises(RuntimeError, match="captured a KV cache"):
+        mtq.quantize(factory().eval(), cfg, lambda m: m(tokens, use_cache=True))
 
 
 def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):
