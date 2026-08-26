@@ -28,10 +28,13 @@ merges them into the base weights, and saves the fused model + tokenizer.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 from safetensors.torch import load_file
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
+
+from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 
 def parse_args():
@@ -61,6 +64,16 @@ def parse_args():
         action="store_true",
         help="Allow loading models that define custom code on the HF Hub. Off by default.",
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=(
+            "JSON dict of config fields to override on the base model config and its text_config "
+            "before instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints "
+            "whose nested text_config dims don't propagate to the parent config."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -81,13 +94,21 @@ def main():
     print(f"Loaded {len(lora_sd)} LoRA tensors from {lora_dir}")
     print(f"  Sample keys: {list(lora_sd.keys())[:4]}")
 
-    # Load the original base model
+    # Load the original base model.
+    #
+    # Use load_vlm_or_llm rather than AutoModelForCausalLM directly: it falls back to
+    # AutoModelForCausalLM for plain LLMs (same dtype/device_map, so unchanged behavior), but also
+    # handles VLMs and registers/loads architectures the Auto* maps don't cover. Cosmos3 is the
+    # motivating case -- the transformers-cosmos3 plugin registers only the `cosmos3_omni` config,
+    # never a model under Auto*, so AutoModelForCausalLM raises KeyError('cosmos3_omni') no matter
+    # what is imported.
     print(f"Loading base model from {args.base_model_path}...")
-    model = AutoModelForCausalLM.from_pretrained(
+    model = load_vlm_or_llm(
         args.base_model_path,
-        torch_dtype="auto",
+        dtype="auto",
         device_map="cpu",
         trust_remote_code=args.trust_remote_code,
+        config_overrides=json.loads(args.config_overrides) if args.config_overrides else None,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_path, trust_remote_code=args.trust_remote_code
