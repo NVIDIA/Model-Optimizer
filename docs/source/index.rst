@@ -63,7 +63,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    Quick Start: PTQ - ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq>
    Quick Start: PTQ - PyTorch to ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx>
    Quick Start: PTQ - Windows <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows>
-   Quick Start: QAT <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat>
+   Quick Start: QAT and QAD <https://nvidia.github.io/Model-Optimizer/guides/12_quantization_aware_training.html>
    Quick Start: Pruning <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>
    Quick Start: Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill>
    Quick Start: Speculative Decoding <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding>

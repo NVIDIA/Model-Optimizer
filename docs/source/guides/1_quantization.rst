@@ -17,6 +17,7 @@ Below, you can find the documentation for the quantization toolkit in ModelOpt:
     :maxdepth: 1
 
     ./_basic_quantization.rst
+    ./12_quantization_aware_training.rst
     ./_choosing_quant_methods.rst
     ./_pytorch_quantization.rst
     ./_quant_cfg.rst
