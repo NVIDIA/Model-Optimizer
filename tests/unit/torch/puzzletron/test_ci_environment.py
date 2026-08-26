@@ -24,27 +24,13 @@ import pytest
 import noxfile
 from examples.puzzletron import ci_environment
 
-
-class _Distribution:
-    def __init__(self, payload: dict):
-        self.payload = payload
-
-    def read_text(self, filename: str) -> str | None:
-        assert filename == "direct_url.json"
-        return json.dumps(self.payload)
-
-
 _EXPECTED_SOURCE = {
     "repository": "https://github.com/Separius/Automodel.git",
     "commit": "b22cd029d806197e249f2cc4a42c5de91713b772",
 }
 
 
-def _pep610_source(repository: str, commit: str) -> dict:
-    return {
-        "url": repository,
-        "vcs_info": {"vcs": "git", "commit_id": commit},
-    }
+# Installed-source provenance
 
 
 def test_pep610_exact_source_is_accepted(monkeypatch):
@@ -104,6 +90,9 @@ def test_editable_pinned_dependency_must_be_clean(monkeypatch):
             "nemo-automodel",
             _EXPECTED_SOURCE,
         )
+
+
+# Nox execution order
 
 
 def test_nox_verifier_executes_scalar_version_and_exact_vcs_checks(monkeypatch):
@@ -183,3 +172,21 @@ def test_puzzletron_nox_session_verifies_environment_before_pytest(monkeypatch):
         if event[0] == "run" and event[1][:3] == ("python", "-m", "pytest")
     )
     assert verify_index < pytest_index
+
+
+class _Distribution:
+    """Minimal installed-distribution double exposing PEP 610 metadata."""
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return json.dumps(self.payload)
+
+
+def _pep610_source(repository: str, commit: str) -> dict:
+    return {
+        "url": repository,
+        "vcs_info": {"vcs": "git", "commit_id": commit},
+    }

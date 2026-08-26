@@ -52,6 +52,8 @@ from puzzletron_orchestrator.schema import (
     WorkPlan,
 )
 
+# Local and bare-metal execution
+
 
 def test_local_executor_runs_successful_command(tmp_path: Path):
     executor = LocalExecutor()
@@ -133,6 +135,9 @@ def test_baremetal_submit_uses_one_execution_contract_on_every_host(
     assert [task["hostname"] for task in handle.metadata["tasks"]] == ["node-a", "node-b"]
 
 
+# Slurm script rendering and AIPerf aggregation
+
+
 def test_render_sbatch_script_requests_gpus_per_node():
     runner = RunnerEnvironment(
         kind="slurm",
@@ -206,46 +211,6 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     srun = next(line for line in script.splitlines() if line.startswith("srun "))
     assert "--gpus-per-task" not in srun
     assert "--gpu-bind" not in srun
-
-
-def _aiperf_attempt(tmp_path: Path, experiment_config: dict):
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
-    )
-    node = StagePlanNode(
-        stage_id="aiperf",
-        strategy=ExecutionStrategy.SHARDED,
-        instances=2,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={},
-        gpus_per_instance=8,
-        gpus_per_node=8,
-        nodes=2,
-        total_gpus=16,
-        exclusive=False,
-        parents=("mip",),
-        distributed=False,
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config=experiment_config,
-        runner=runner,
-        execution_defaults={"gpus_per_node": 8},
-        stages=(node,),
-        contract_hash="contract",
-    )
-    adapter = adapter_for_stage(node)
-    work_plan = adapter.plan(plan, node)
-    return adapter.command(
-        plan=plan,
-        node=node,
-        item=work_plan.items[0],
-        attempt_id="a1",
-        runner=runner,
-    )
 
 
 @pytest.mark.parametrize(
@@ -456,6 +421,9 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     assert attempt.command.argv[-1] == "--merge"
 
 
+# Slurm submission and recovery
+
+
 def test_render_sbatch_script_never_requests_exclusive():
     """Exclusive attempt metadata must not request exclusive Slurm nodes."""
 
@@ -614,17 +582,6 @@ def test_slurm_submit_recovers_job_after_ambiguous_timeout(tmp_path: Path, monke
     assert submit_count == 1
 
 
-def _slurm_executor(tmp_path: Path) -> SlurmExecutor:
-    return SlurmExecutor(
-        RunnerEnvironment(
-            kind="slurm",
-            contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-            slurm=SlurmRunnerConfig(account="acct", partition="interactive"),
-        ),
-        scripts_dir=tmp_path / "sbatch",
-    )
-
-
 def test_slurm_recover_keeps_running_when_squeue_misses_and_sacct_says_running(
     tmp_path: Path, monkeypatch
 ):
@@ -713,6 +670,9 @@ def test_slurm_recover_maps_sacct_pending_and_failed_states(tmp_path: Path, monk
         )
         status = _slurm_executor(tmp_path).recover(handle)
         assert status.state is expected, sacct_stdout
+
+
+# Persistent-pool allocation and packing
 
 
 def test_depth_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
@@ -987,58 +947,6 @@ def test_replacement_pool_uses_one_four_node_gang_allocation(tmp_path: Path):
     assert attempt.command.argv[-1].endswith("run_replacement_pool.sh")
 
 
-def _replacement_width_attempts(
-    tmp_path: Path,
-    widths: list[int],
-) -> tuple[CampaignPlan, WorkPlan, list[AttemptSpec]]:
-    runner = RunnerEnvironment(
-        kind="slurm",
-        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
-    )
-    node = StagePlanNode(
-        stage_id="replacement_scoring",
-        strategy=ExecutionStrategy.PERSISTENT_POOL,
-        instances=8,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={"tp": 1, "cp": 1, "pp": 2, "ep": 1, "dp_shard": 2, "dp_replicate": 1},
-        gpus_per_instance=4,
-        gpus_per_node=8,
-        nodes=4,
-        total_gpus=32,
-        exclusive=True,
-        parents=("build_library",),
-        distributed=True,
-        partition="batch",
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config={
-            "embedding_pruning": {"enabled": True, "widths": widths},
-            "replacement_scoring": {"granularity": "subblock"},
-        },
-        runner=runner,
-        execution_defaults={"gpus_per_node": 8},
-        stages=(node,),
-        contract_hash="contract",
-    )
-    adapter = adapter_for_stage(node)
-    work_plan = adapter.plan(plan, node)
-    attempts = [
-        adapter.command(
-            plan=plan,
-            node=node,
-            item=item,
-            attempt_id=f"a{index}",
-            runner=runner,
-            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
-        )
-        for index, item in enumerate(work_plan.items)
-    ]
-    return plan, work_plan, attempts
-
-
 def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path):
     plan, work_plan, attempts = _replacement_width_attempts(tmp_path, [2048, 1792])
     runner = plan.runner
@@ -1240,3 +1148,106 @@ def _baremetal_runner() -> RunnerEnvironment:
             rendezvous_host="node-a",
         ),
     )
+
+
+def _aiperf_attempt(tmp_path: Path, experiment_config: dict) -> AttemptSpec:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="aiperf",
+        strategy=ExecutionStrategy.SHARDED,
+        instances=2,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={},
+        gpus_per_instance=8,
+        gpus_per_node=8,
+        nodes=2,
+        total_gpus=16,
+        exclusive=False,
+        parents=("mip",),
+        distributed=False,
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config=experiment_config,
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    adapter = adapter_for_stage(node)
+    work_plan = adapter.plan(plan, node)
+    return adapter.command(
+        plan=plan,
+        node=node,
+        item=work_plan.items[0],
+        attempt_id="a1",
+        runner=runner,
+    )
+
+
+def _slurm_executor(tmp_path: Path) -> SlurmExecutor:
+    return SlurmExecutor(
+        RunnerEnvironment(
+            kind="slurm",
+            contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+            slurm=SlurmRunnerConfig(account="acct", partition="interactive"),
+        ),
+        scripts_dir=tmp_path / "sbatch",
+    )
+
+
+def _replacement_width_attempts(
+    tmp_path: Path,
+    widths: list[int],
+) -> tuple[CampaignPlan, WorkPlan, list[AttemptSpec]]:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", partition_batch="batch"),
+    )
+    node = StagePlanNode(
+        stage_id="replacement_scoring",
+        strategy=ExecutionStrategy.PERSISTENT_POOL,
+        instances=8,
+        failure_policy=FailurePolicy.STRICT,
+        mesh={"tp": 1, "cp": 1, "pp": 2, "ep": 1, "dp_shard": 2, "dp_replicate": 1},
+        gpus_per_instance=4,
+        gpus_per_node=8,
+        nodes=4,
+        total_gpus=32,
+        exclusive=True,
+        parents=("build_library",),
+        distributed=True,
+        partition="batch",
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={
+            "embedding_pruning": {"enabled": True, "widths": widths},
+            "replacement_scoring": {"granularity": "subblock"},
+        },
+        runner=runner,
+        execution_defaults={"gpus_per_node": 8},
+        stages=(node,),
+        contract_hash="contract",
+    )
+    adapter = adapter_for_stage(node)
+    work_plan = adapter.plan(plan, node)
+    attempts = [
+        adapter.command(
+            plan=plan,
+            node=node,
+            item=item,
+            attempt_id=f"a{index}",
+            runner=runner,
+            overrides=["+replacement_scoring.automodel.lm_head_backend=streaming"],
+        )
+        for index, item in enumerate(work_plan.items)
+    ]
+    return plan, work_plan, attempts

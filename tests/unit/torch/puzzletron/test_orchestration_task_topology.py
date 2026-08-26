@@ -27,25 +27,6 @@ from puzzletron_orchestrator.schema import AttemptSpec, CommandSpec, TaskLaunche
 from puzzletron_orchestrator.task_topology import resolve_task_topology
 
 
-def _attempt(
-    *,
-    nodes: int = 1,
-    total_gpus: int = 8,
-    gpus_per_node: int = 8,
-    topology: TaskTopology = TaskTopology(),
-) -> AttemptSpec:
-    return AttemptSpec(
-        attempt_id="attempt-a",
-        work_id="stage:0",
-        stage_id="stage",
-        command=CommandSpec(argv=("python", "worker.py")),
-        allocation_nodes=nodes,
-        allocation_gpus=total_gpus,
-        metadata={"gpus_per_node": gpus_per_node},
-        task_topology=topology,
-    )
-
-
 @pytest.mark.parametrize(
     ("nodes", "gpus_per_node", "tasks", "gpus_per_task", "group", "capacity"),
     [
@@ -294,20 +275,6 @@ def test_nonzero_group_rank_does_not_own_pool_control_path(
     subprocess.run(["bash", str(script)], env=env, check=True, timeout=10)
 
 
-def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:
-    return task_launcher.TaskBinding(
-        task_index=0,
-        local_task_index=0,
-        hostname="node-a",
-        group_index=0,
-        group_rank=0,
-        group_size=group_size,
-        master_addr="node-a",
-        master_port=23456,
-        rendezvous_id="attempt-a-group-0",
-    )
-
-
 def test_single_node_torchrun_lets_c10d_choose_a_free_local_port() -> None:
     command = task_launcher.build_task_command(
         payload=("python", "worker.py"),
@@ -339,3 +306,36 @@ def test_direct_launcher_does_not_wrap_payload() -> None:
     )
 
     assert command == ("python", "worker.py")
+
+
+def _attempt(
+    *,
+    nodes: int = 1,
+    total_gpus: int = 8,
+    gpus_per_node: int = 8,
+    topology: TaskTopology = TaskTopology(),
+) -> AttemptSpec:
+    return AttemptSpec(
+        attempt_id="attempt-a",
+        work_id="stage:0",
+        stage_id="stage",
+        command=CommandSpec(argv=("python", "worker.py")),
+        allocation_nodes=nodes,
+        allocation_gpus=total_gpus,
+        metadata={"gpus_per_node": gpus_per_node},
+        task_topology=topology,
+    )
+
+
+def _task_binding(*, group_size: int) -> task_launcher.TaskBinding:
+    return task_launcher.TaskBinding(
+        task_index=0,
+        local_task_index=0,
+        hostname="node-a",
+        group_index=0,
+        group_rank=0,
+        group_size=group_size,
+        master_addr="node-a",
+        master_port=23456,
+        rendezvous_id="attempt-a-group-0",
+    )

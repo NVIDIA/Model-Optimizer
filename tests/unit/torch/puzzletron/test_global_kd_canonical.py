@@ -731,7 +731,11 @@ def test_gradient_groups_are_observed_at_optimizer_step():
         {"text_config": {"block_configs": [{"subblock_configs": []}]}},
     ],
 )
-def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch, checkpoint_config):
+def test_global_kd_checkpoint_refreshes_supported_config_layouts_before_completion(
+    tmp_path, monkeypatch, checkpoint_config
+):
+    """Forward the metric key, refresh either config layout, then mark completion."""
+
     # Lazy import keeps the optional NeMo AutoModel runtime out of test collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
@@ -793,6 +797,8 @@ def test_global_kd_checkpoint_forwards_best_metric_key(tmp_path, monkeypatch, ch
 
 
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
+    """Preserve the failing rank's exception while every rank completes collectives."""
+
     # Import the dynamic mixin at test runtime to preserve lightweight module collection.
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
@@ -856,6 +862,7 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
         instance.cfg = {"model": {"trust_remote_code": False}}
         return instance
 
+    # A main-rank publication failure is re-raised locally and reported to its peer.
     with pytest.raises(ValueError, match="refresh failed"):
         recipe(is_main=True).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
     assert publication == {
@@ -871,6 +878,7 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
         recipe(is_main=False).save_checkpoint(2, 19, 0.5, {"lm_loss": 0.25})
     assert publication["broadcasts"] == 2
 
+    # A main-rank parent-save failure follows the same collective path.
     publication.update(error=None, broadcasts=0)
     parent_save_errors[:] = ["OSError: parent save failed", None]
     BaseRecipe.fail_rank = 0
@@ -889,6 +897,7 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
         recipe(is_main=False).save_checkpoint(2, 23, 0.5, {"lm_loss": 0.25})
     assert publication["broadcasts"] == 2
 
+    # A non-main parent-save failure is preserved there and contextualized on rank zero.
     publication.update(error=None, broadcasts=0)
     parent_save_errors[:] = [None, "OSError: parent save failed"]
     BaseRecipe.fail_rank = 1

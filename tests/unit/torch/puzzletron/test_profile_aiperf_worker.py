@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Tests for sharded AIPerf worker selection, merging, and policy forwarding."""
 
 import json
@@ -34,6 +31,8 @@ from examples.puzzletron.run_profile_aiperf_worker import (
     shard_work,
 )
 from modelopt.torch.puzzletron import benchmarks
+
+# Work selection and aggregation
 
 
 def test_profile_aiperf_filters_registry_to_explicit_solutions():
@@ -143,6 +142,9 @@ def test_profile_aiperf_merge_honors_explicit_concurrency_subset(tmp_path):
     payload = json.loads(output.read_text())
     assert payload["concurrencies"] == [1]
     assert len(payload["results"]) == 12
+
+
+# Security-policy forwarding
 
 
 def test_profile_aiperf_cli_forwards_explicit_security_flags(tmp_path, monkeypatch):

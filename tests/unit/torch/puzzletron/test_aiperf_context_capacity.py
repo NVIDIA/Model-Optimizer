@@ -34,6 +34,8 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _vllm_server_command,
 )
 
+# Subprocess environment and request sizing
+
 
 def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", "/existing")
@@ -84,6 +86,9 @@ def test_server_context_headroom_cannot_be_negative():
         _server_max_model_len(256, 32, {"server_context_overhead_tokens": -1})
 
 
+# Checkpoint preparation and tokenizer policy
+
+
 def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, tmp_path):
     config = {
         "architectures": ["BaseModel"],
@@ -123,16 +128,6 @@ def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
     assert _prepare_vllm_checkpoint(tmp_path) is False
 
 
-def _offline_environment() -> dict[str, str]:
-    return {
-        "HF_HUB_OFFLINE": "1",
-        "TRANSFORMERS_OFFLINE": "1",
-        "HF_DATASETS_OFFLINE": "1",
-        "HF_HOME": "/cache/huggingface",
-        "UNCHANGED": "value",
-    }
-
-
 def test_aiperf_online_tokenizer_relaxation_is_explicit_and_non_mutating():
     expected_source = _offline_environment()
     source = dict(expected_source)
@@ -151,6 +146,9 @@ def test_aiperf_online_tokenizer_relaxation_is_explicit_and_non_mutating():
     assert resolved["HF_HOME"] == "/cache/huggingface"
     assert resolved["UNCHANGED"] == "value"
     assert source == expected_source
+
+
+# vLLM topology and policy-owned arguments
 
 
 def test_canonical_topology_covers_tp_pp_dp_effective_ep_and_context_parallel():
@@ -266,6 +264,9 @@ def test_vllm_server_command_rejects_remote_code_policy_override(monkeypatch, tm
         )
 
 
+# AIPerf command and result mapping
+
+
 def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
     command = _profile_command(
         executable=Path("/opt/aiperf/bin/aiperf"),
@@ -324,3 +325,13 @@ def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
     assert metrics["total_gpu_power_w"] == 900.0
     assert metrics["total_gpu_energy_j"] == 4500.0
     assert metrics["output_tokens_per_joule"] == 64.0
+
+
+def _offline_environment() -> dict[str, str]:
+    return {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_HOME": "/cache/huggingface",
+        "UNCHANGED": "value",
+    }
