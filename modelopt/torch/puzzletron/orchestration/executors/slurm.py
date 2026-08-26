@@ -20,23 +20,22 @@ from __future__ import annotations
 import math
 import os
 import shlex
-import subprocess  # nosec B404
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 from ..schema import AttemptSpec, JobHandle, JobState, JobStatus, RunnerEnvironment
 from ..task_launcher import TASK_IDENTITY_ENV_KEYS
 from ..task_topology import resolve_task_topology
+from .baremetal import _run_command
 from .base import Executor
 
 __all__ = ["SlurmExecutor", "render_hook_lines", "render_sbatch_script"]
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # nosec B603 - explicit argv is executed without a shell
-        list(argv), capture_output=True, text=True, check=False
-    )
+class _CapturedStreams(Protocol):
+    stdout: str
+    stderr: str
 
 
 def _slurm_job_id(handle: JobHandle) -> str | None:
@@ -63,7 +62,7 @@ _CANCEL_POLL_ATTEMPTS = 60
 _CANCEL_POLL_SECONDS = 1.0
 
 
-def _is_transient_submit_error(result: subprocess.CompletedProcess[str]) -> bool:
+def _is_transient_submit_error(result: _CapturedStreams) -> bool:
     detail = f"{result.stderr}\n{result.stdout}".lower()
     return any(marker in detail for marker in _TRANSIENT_SUBMIT_ERRORS)
 
