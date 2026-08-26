@@ -225,7 +225,7 @@ hard gate unmeasured. Step 5's ACCEPT is accuracy-only — Step 6 requires both.
 ```bash
 python "$SKILL_DIR/scripts/gate_verbosity.py" \
     --baseline <baseline_eval_root> --candidate <candidate_eval_root> \
-    --glob 'eval_*' --threshold 0.05
+    --glob 'eval_*' --exclude _high --threshold 0.05
 ```
 
 Exit codes follow the other gates: `0` pass, `1` the gate failed, `2` it could not read its input.
@@ -243,7 +243,8 @@ read +6.10% FAIL in words and +1.32% PASS in tokens.
 
 The gate is two-sided; a large drop in output length is also a change.
 
-Two filters are mandatory: same reasoning effort (`--exclude _high`) and complete runs only —
+Two filters are mandatory: same reasoning effort (pass `--exclude` explicitly — it is empty by
+default, since which tier is canonical is run-specific) and complete runs only —
 runs within 1% of the largest `successful_count` that **both** sides can match (exact equality
 would make one dropped sample unmeasurable). A task with no such count on both sides is
 `not_comparable`. When the matched count is below a run

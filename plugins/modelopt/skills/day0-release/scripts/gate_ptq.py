@@ -75,10 +75,12 @@ _RECIPE_EXPECTED_PRECISION = {
 }
 
 
-# Largest source->output growth an already-4-bit source can explain. NVFP4 over MXFP4
-# keeps the E2M1 nibbles but swaps an E8M0 scale per 32 elements for an E4M3 per 16, so
-# scale bytes double; published checkpoints land near 1.06x. Beyond this, suspect a real
-# problem rather than an inherent one.
+# Largest growth we are willing to call inherent when the recipe cannot shrink the
+# source. Calibrated on the best-understood case -- NVFP4 over MXFP4 keeps the E2M1
+# nibbles but swaps an E8M0 scale per 32 elements for an E4M3 per 16, so scale bytes
+# double and published checkpoints land near 1.06x. It is applied to 8-bit sources as a
+# conservative ceiling rather than a derived figure: those paths add scale/metadata
+# overhead too, but nobody has characterised it, so this bounds rather than blesses them.
 _INHERENT_GROWTH_MAX = 1.10
 
 # Bits per weight, used to decide whether a recipe can shrink a given source at all.
@@ -88,6 +90,7 @@ _PRECISION_BITS = {
     "fp16": 16,
     "fp8": 8,
     "int8": 8,
+    "mxfp8": 8,
     "mxfp4": 4,
     "nvfp4": 4,
     "fp4": 4,
@@ -149,7 +152,13 @@ def evaluate_checkpoint(summary):
     else:
         ratio = out / src
         checks["size"] = f"{out}/{src} = {ratio:.3f}x"
-        if ratio >= 1.0:
+        if ratio >= 1.0 and tgt_bits is None and recipe:
+            # Growth genuinely cannot be assessed without a target precision, and the
+            # unknown-recipe USER_CONFIG_ERROR below is the actionable failure. Emitting
+            # SIZE_NOT_REDUCED here would outrank it and hand the operator a triage row
+            # about compression when the real problem is the recipe name.
+            checks["size"] += " (not assessed: unknown recipe)"
+        elif ratio >= 1.0:
             # Blocking by default (ptq/references/checkpoint-validation.md: a ratio >= 1.0 for
             # a compression recipe blocks "unless the user explicitly accepts the explanation").
             # Two distinct waivers, deliberately not conflated:

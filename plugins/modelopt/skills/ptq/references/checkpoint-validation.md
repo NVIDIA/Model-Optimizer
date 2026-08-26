@@ -26,7 +26,8 @@ Before moving to deployment/evaluation, report a table in this shape:
 Stop instead of proceeding if:
 
 - Output/source ratio is `>= 1.0` for a compression recipe, unless the recorded `source_precision`
-  already explains it (an already-4-bit source) or the user explicitly accepts the explanation.
+  already explains it (a source already at or below the recipe's target bits) or the user
+  explicitly accepts the explanation.
 - Any layer group intended to be quantized has zero or unexpectedly low coverage.
 - Any layer has quantization metadata inconsistent with its declared precision.
 - Prompting, tokenizer, generation, architecture, context-length, or special-token metadata changed unexpectedly.

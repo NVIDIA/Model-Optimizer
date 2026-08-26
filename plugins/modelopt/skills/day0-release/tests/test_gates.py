@@ -425,7 +425,7 @@ def test_harvest_reports_what_it_dropped(tmp_path):
         json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
     )
     diag = {}
-    out = harvest(str(tmp_path), diagnostics=diag)
+    out = harvest(str(tmp_path), exclude="_high", diagnostics=diag)
     assert set(out) == {"h.good"}
     assert diag["excluded_run_dirs"] == ["eval_high"]
     assert any("h.notok" in m for m in diag["metrics_without_tokens"])
@@ -616,7 +616,7 @@ def test_dropped_tasks_covers_the_excluded_channel(tmp_path):
         json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
     )
     diag = {}
-    assert harvest(str(tmp_path), diagnostics=diag) == {}
+    assert harvest(str(tmp_path), exclude="_high", diagnostics=diag) == {}
     assert diag["excluded_tasks"] == ["h.only_high"]
 
 
@@ -772,6 +772,49 @@ def test_ptq_every_rejection_branch_points_at_the_reference():
     ):
         r = evaluate_checkpoint(_ckpt(**huge, **kw))
         assert not r["pass"] and "checkpoint-validation.md" in r["detail"]
+
+
+def test_verbosity_zero_baseline_mean_is_not_a_crash():
+    """The pure entry point is imported directly; it must not raise ZeroDivisionError."""
+    r = evaluate_verbosity({"t": [(0.0, 10)]}, {"t": [(5.0, 10)]})
+    assert r["per_task"]["t"]["status"] == "not_comparable"
+    assert "zero" in r["per_task"]["t"]["reason"]
+
+
+def test_verbosity_zero_samples_is_an_eval_failure_not_a_config_error():
+    """Artifacts present but no successful samples means the eval died, not the command."""
+    found = evaluate_verbosity({}, {}, found_artifacts=True)
+    absent = evaluate_verbosity({}, {}, found_artifacts=False)
+    assert found["failure_class"] == "SAMPLE_ACCOUNTING_FAILED"
+    assert absent["failure_class"] == "USER_CONFIG_ERROR"
+
+
+def test_unreadable_artifact_does_not_count_toward_collapse(tmp_path):
+    """A truncated write contributes no data, so it must not block the gate."""
+    good = _mk_run(tmp_path, "inv1.0")
+    bad = tmp_path / "eval_run" / "inv1.1" / "artifacts"
+    bad.mkdir(parents=True)
+    (bad / "eval_factory_metrics.json").write_text("{truncated")
+    assert good.exists()
+    diag = {}
+    out = harvest(str(tmp_path), diagnostics=diag)
+    assert set(out) == {"inv1"}
+    assert "collapsed_keys" not in diag
+    assert diag["unreadable_metrics"]
+
+
+def test_ptq_recognises_mxfp8_as_a_source_precision():
+    """mxfp8 is a shipped ModelOpt format; a correct declaration must not read as unknown."""
+    r = evaluate_checkpoint(_ckpt_fp8(output_bytes=16_800_000_000, source_precision="mxfp8"))
+    assert r["pass"] and "mxfp8" in r["notes"][0]
+
+
+def test_ptq_unknown_recipe_surfaces_the_recipe_error_not_a_size_verdict():
+    """Growth cannot be assessed without a target precision; the recipe name is the fix."""
+    r = evaluate_checkpoint(
+        _ckpt(recipe="bogus_xyz", output_bytes=16_800_000_000, source_precision="bf16")
+    )
+    assert r["failure_class"] == "USER_CONFIG_ERROR" and "unknown recipe" in r["detail"]
 
 
 if __name__ == "__main__":

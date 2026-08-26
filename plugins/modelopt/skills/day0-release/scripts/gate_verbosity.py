@@ -26,8 +26,8 @@ are always 0 (only the reasoning/content split is missing, not the total) and th
 ``main`` also attaches ``harvest_diagnostics`` recording anything dropped before the
 comparison (excluded run dirs, unreadable artifacts, metrics missing token counts).
 
-Two filters run before averaging: skip run dirs matching ``--exclude`` (mismatched
-reasoning effort) and keep only runs at the largest ``successful_count`` present on
+Two filters run before averaging: skip run dirs matching ``--exclude`` (opt-in, for a
+mismatched reasoning-effort variant) and keep only runs at the largest ``successful_count`` present on
 *both* sides. Tasks with no common sample count are reported ``not_comparable``;
 when that shared count is below a run one side has, ``truncated_comparison`` says so.
 """
@@ -62,7 +62,14 @@ def _coverage_caveat(dropped_tasks):
     return f"; {len(dropped_tasks)} task(s) DROPPED BEFORE COMPARISON: {sorted(dropped_tasks)}"
 
 
-def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), collapsed_keys=None):
+def evaluate_verbosity(
+    baseline,
+    candidate,
+    threshold=0.05,
+    dropped_tasks=(),
+    collapsed_keys=None,
+    found_artifacts=False,
+):
     """Decide the verbosity gate from harvested per-run token counts.
 
     Args:
@@ -74,6 +81,9 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
             reach ``per_task``, so without this the verdict reads as full coverage over a
             silently smaller task set. Artifacts that failed to parse are reported by path
             in ``harvest_diagnostics.unreadable_metrics``, since no task name exists yet.
+        found_artifacts: True if harvest located metrics files at all. Distinguishes "the
+            eval produced no usable samples" (a failed run) from "you pointed me at the
+            wrong place" (a bad invocation), which route to different exit codes.
         collapsed_keys: ``{key: [dirs]}`` where distinct artifact dirs landed on one task
             key. Blocking: the means would pool unrelated tasks, and a pooled delta can
             fall inside the threshold and report a pass nobody asked for.
@@ -82,10 +92,20 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
         dict ``{pass, failure_class, detail, per_task, not_comparable, max_abs_delta}``.
     """
     if not baseline or not candidate:
+        # Artifacts present but nothing usable => the eval failed, not the invocation.
+        cls = "SAMPLE_ACCOUNTING_FAILED" if found_artifacts else "USER_CONFIG_ERROR"
         return {
             "pass": False,
-            "failure_class": "USER_CONFIG_ERROR",
-            "detail": f"no metrics harvested (baseline={len(baseline)}, candidate={len(candidate)})",
+            "failure_class": cls,
+            "detail": (
+                f"no usable metrics (baseline={len(baseline)}, candidate={len(candidate)}); "
+                + (
+                    "artifacts were found but no run reported successful samples -- check "
+                    "the eval, not the invocation"
+                    if found_artifacts
+                    else "no metrics files matched -- check --baseline/--candidate/--glob"
+                )
+            ),
             "per_task": {},
             "not_comparable": [],
             "max_abs_delta": None,
@@ -143,6 +163,14 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
         dropped = (len(b_runs) - len(b)) + (len(c_runs) - len(c))
 
         b_mean, c_mean = statistics.mean(b), statistics.mean(c)
+        if not b_mean:
+            # Unreachable via harvest (it gates on a truthy token count), but this is the
+            # documented pure entry point and is imported directly by callers and tests.
+            per_task[task] = {
+                "status": "not_comparable",
+                "reason": "baseline mean is zero, so a relative delta is undefined",
+            }
+            continue
         delta = (c_mean - b_mean) / b_mean
         within = abs(delta) <= threshold
         best = max(n for _, n in b_runs + c_runs)
@@ -275,9 +303,10 @@ def _task_from_metadata(artifacts_dir):
     return None
 
 
-def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
+def harvest(side, glob="eval_*", exclude="", diagnostics=None):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
     out, unreadable, excluded, no_metric = {}, [], [], []
+    parsed_any = [False]
     source_dirs, excluded_tasks, metadata_keys = {}, set(), set()
     # Depth-agnostic: repo-documented trees put <harness>.<task>/artifacts/ directly under the
     # run dir, while NEL invocations add an invocation level. Hard-coding either one silently
@@ -312,19 +341,21 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             name = parts[-3]
             head, _, tail = name.rpartition(".")
             task = head if head and re.fullmatch(r"\d+", tail) else name
-        if from_metadata:
-            # A declared task name is authoritative: sibling dirs sharing it are repeats.
-            metadata_keys.add(task)
-        else:
-            source_dirs.setdefault(task, set()).add(parts[-3])
         try:
             with open(path) as f:
                 stats = json.load(f).get("response_stats", {})
         except (OSError, json.JSONDecodeError) as e:
             unreadable.append(f"{path}: {e}")
             continue
+        # Registered only after a successful parse: a truncated artifact contributes no
+        # data, so counting it toward collapse would block the gate on a partial write.
+        if from_metadata:
+            metadata_keys.add(task)
+        else:
+            source_dirs.setdefault(task, set()).add(parts[-3])
         tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
         if tokens and count:
+            parsed_any[0] = True
             out.setdefault(task, []).append((tokens, count))
         else:
             # No usable token count: usually a run that produced no successful samples,
@@ -355,8 +386,10 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             diagnostics["no_files_matched"] = pattern
         diagnostics["excluded_run_dirs"] = sorted(set(excluded))
         diagnostics["excluded_tasks"] = sorted(excluded_tasks)
+        diagnostics["partially_excluded_tasks"] = sorted(excluded_tasks & set(out))
         diagnostics["unreadable_metrics"] = unreadable
         diagnostics["metrics_without_tokens"] = no_metric
+        diagnostics["found_metrics_files"] = bool(matches)
     if collapsed:
         print(
             f"warning: {len(collapsed)} task key(s) came from multiple artifact dirs, so "
@@ -384,8 +417,12 @@ def main(argv=None):
     p.add_argument("--glob", default="eval_*", help="run-dir glob within each side")
     p.add_argument(
         "--exclude",
-        default="_high",
-        help="skip run dirs carrying this as whole _-delimited token(s) (effort mismatch); '' disables",
+        default="",
+        help=(
+            "skip run dirs carrying this as whole _-delimited token(s), e.g. '_high' for a "
+            "reasoning-effort variant. Empty by default: which tier is canonical is "
+            "run-specific, so excluding one is an operator decision"
+        ),
     )
     p.add_argument(
         "--threshold", type=float, default=0.05, help="max |delta| fraction (default 0.05)"
@@ -403,6 +440,12 @@ def main(argv=None):
         dropped |= set(side_diag.get("excluded_tasks", []))
         for entry in side_diag.get("metrics_without_tokens", []):
             dropped.add(entry.split(":", 1)[0])
+    # Tasks excluded ENTIRELY drop out below; a task that merely lost some runs stays a
+    # key on both sides, so it would vanish from the caveat -- which is the case where
+    # the exclusion actually changed the comparison.
+    partial = set()
+    for side_diag in diag.values():
+        partial |= set(side_diag.get("partially_excluded_tasks", []))
     dropped -= set(baseline) | set(candidate)
     collapsed = {}
     for side, side_diag in diag.items():
@@ -410,7 +453,13 @@ def main(argv=None):
         # last side's directories.
         for k, dirs in side_diag.get("collapsed_keys", {}).items():
             collapsed[f"{side}:{k}"] = dirs
-    result = evaluate_verbosity(baseline, candidate, args.threshold, sorted(dropped), collapsed)
+    found = any(sd.get("found_metrics_files") for sd in diag.values())
+    result = evaluate_verbosity(
+        baseline, candidate, args.threshold, sorted(dropped), collapsed, found
+    )
+    if partial:
+        result["partially_excluded_tasks"] = sorted(partial)
+        result["detail"] += f"; {len(partial)} task(s) had SOME runs excluded: {sorted(partial)}"
     # Anything harvest dropped belongs in the JSON, not only on stderr: a task whose runs
     # were all excluded never reaches per_task, so the verdict would otherwise look
     # complete for a task set smaller than the eval set.
