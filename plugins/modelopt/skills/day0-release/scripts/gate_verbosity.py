@@ -45,6 +45,11 @@ import sys
 # Below this, a few tokens of difference is a large percentage. Flagged, not failed.
 _SHORT_OUTPUT_TOKENS = 1000
 
+# Relative tolerance when matching sample counts across sides. Partial sample loss is a
+# normal event (a judge 5xx, one dropped rollout); demanding exact equality would make
+# such a task unmeasurable, and an unmeasured task still passes the gate.
+_SAMPLE_COUNT_TOL = 0.01
+
 
 def evaluate_verbosity(baseline, candidate, threshold=0.05):
     """Decide the verbosity gate from harvested per-run token counts.
@@ -55,7 +60,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
         threshold: max allowed |delta| as a fraction of baseline (default 0.05)
 
     Returns:
-        dict ``{pass, failure_class, detail, per_task, max_abs_delta}``.
+        dict ``{pass, failure_class, detail, per_task, not_comparable, max_abs_delta}``.
     """
     if not baseline or not candidate:
         return {
@@ -74,19 +79,24 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             per_task[task] = {"status": "not_comparable", "reason": "present on one side only"}
             continue
 
-        # Largest sample count present on BOTH sides. Taking the max over the union would
-        # discard a genuinely comparable pair whenever one side also has a larger run.
-        common = {n for _, n in b_runs} & {n for _, n in c_runs}
-        full = max(common) if common else None
-        b = [t for t, n in b_runs if n == full]
-        c = [t for t, n in c_runs if n == full]
+        # Sample counts must be comparable, not identical. Exact equality is knife-edge:
+        # one 5xx'd judge call (294 vs 293) would make a task unmeasurable, and since an
+        # unmeasured task still passes, the steady state would be a green gate covering a
+        # shrinking subset of the eval set. Anchor on the smaller side's best run and keep
+        # runs within _SAMPLE_COUNT_TOL of it -- close enough not to bias the mean, far
+        # enough to still reject a genuinely truncated run.
+        target = min(max(n for _, n in b_runs), max(n for _, n in c_runs))
+        near = lambda n: abs(n - target) <= _SAMPLE_COUNT_TOL * target  # noqa: E731
+        b = [t for t, n in b_runs if near(n)]
+        c = [t for t, n in c_runs if near(n)]
         dropped = (len(b_runs) - len(b)) + (len(c_runs) - len(c))
         if not b or not c:
             per_task[task] = {
                 "status": "not_comparable",
                 "reason": (
-                    f"no runs at a common sample count (baseline n="
-                    f"{sorted({n for _, n in b_runs})}, candidate n={sorted({n for _, n in c_runs})})"
+                    f"no runs within {_SAMPLE_COUNT_TOL:.0%} of a common sample count "
+                    f"(baseline n={sorted({n for _, n in b_runs})}, "
+                    f"candidate n={sorted({n for _, n in c_runs})})"
                 ),
             }
             continue
@@ -95,9 +105,10 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
         delta = (c_mean - b_mean) / b_mean
         within = abs(delta) <= threshold
         best = max(n for _, n in b_runs + c_runs)
+        compared_ns = sorted({n for _, n in b_runs + c_runs if near(n)})
         entry = {
             "status": "compared",
-            "sample_count": full,
+            "sample_count": compared_ns[0] if len(compared_ns) == 1 else compared_ns,
             "baseline_tokens": round(b_mean, 1),
             "candidate_tokens": round(c_mean, 1),
             "delta": round(delta, 4),
@@ -105,11 +116,11 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "runs": [len(b), len(c)],
             "dropped_mismatched_runs": dropped,
         }
-        if full < best:
+        if max(compared_ns) < best:
             # Both sides truncated to the same n. Same bias applied twice, but it is not
             # the matched-complete answer -- say so rather than implying a full comparison.
             entry["truncated_comparison"] = (
-                f"compared at n={full}; a run at n={best} exists but not on both sides"
+                f"compared at n={compared_ns}; a run at n={best} exists but not on both sides"
             )
         if min(b_mean, c_mean) < _SHORT_OUTPUT_TOKENS:
             entry["short_output_warning"] = (

@@ -82,6 +82,10 @@ _INHERENT_GROWTH_MAX = 1.10
 # excused when the summary declares one of these (or sets accept_size_growth).
 _SUB8_SOURCE_PRECISIONS = frozenset({"mxfp4", "nvfp4", "fp4", "int4", "w4a16", "awq", "4bit"})
 
+# Recognised tokens that are NOT sub-8-bit. Kept separate so a source that simply should
+# have compressed gets told that, rather than being handed the list of waiving values.
+_OTHER_SOURCE_PRECISIONS = frozenset({"bf16", "fp16", "fp32", "fp8", "int8"})
+
 
 def evaluate_checkpoint(summary):
     """Validate an exported quantized checkpoint summary.
@@ -144,8 +148,11 @@ def evaluate_checkpoint(summary):
                     f"declared {source_precision!r} source explains at most {_INHERENT_GROWTH_MAX}x"
                     if source_is_sub8
                     else (
-                        f"source_precision={source_precision or None!r} is not one of "
-                        f"{sorted(_SUB8_SOURCE_PRECISIONS)}, so growth is not explained"
+                        f"declared {source_precision!r} source should compress under this "
+                        "recipe, so growth is not explained"
+                        if source_precision in _OTHER_SOURCE_PRECISIONS
+                        else f"source_precision={source_precision or None!r} is not a recognised "
+                        f"precision token (see ptq/references/checkpoint-validation.md)"
                     )
                 )
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))

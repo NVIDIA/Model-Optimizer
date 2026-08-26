@@ -22,6 +22,7 @@ decision functions that the gates rest on. Run with:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -482,7 +483,10 @@ def test_ptq_rejected_source_precision_is_self_diagnosing():
     assert "mxfp4 experts / bf16 attention" in bad["detail"]  # echoes what it read
     assert "None" in absent["detail"]
     for r in (bad, absent):
-        assert "mxfp4" in r["detail"] and "int4" in r["detail"]  # lists the vocabulary
+        # Points at the reference rather than enumerating the tokens that would waive
+        # the gate -- listing them turns the failure into a how-to-bypass hint.
+        assert "checkpoint-validation.md" in r["detail"]
+        assert "int4" not in r["detail"]
 
 
 def test_verbosity_exit_codes_match_sibling_gates(tmp_path, capsys):
@@ -504,6 +508,52 @@ def test_verbosity_exit_codes_match_sibling_gates(tmp_path, capsys):
     c2 = side("c2", 101.0)
     assert verbosity_main(["--baseline", b, "--candidate", c2]) == 0
     capsys.readouterr()
+
+
+_TRIAGE_CLASSES = {
+    "MODEL_UNSUPPORTED",
+    "QUANT_COVERAGE_FAILURE",
+    "SIZE_NOT_REDUCED",
+    "VERBOSITY_EXCEEDED",
+    "SAMPLE_ACCOUNTING_FAILED",
+    "EVAL_JUDGE_FAILED",
+    "DEPLOYMENT_HEALTH_FAILED",
+    "EXTERNAL_BASELINE_MISMATCH",
+    "INFRA_TRANSIENT",
+    "CHECKPOINT_NOT_SERVABLE",
+}
+
+
+def test_verbosity_tolerates_small_sample_count_drift():
+    """One dropped sample must not make a task unmeasurable -- an unmeasured task passes."""
+    r = evaluate_verbosity({"t": [(1000.0, 294)]}, {"t": [(1010.0, 293)]})
+    assert r["per_task"]["t"]["status"] == "compared"
+    r2 = evaluate_verbosity({"t": [(1000.0, 294)]}, {"t": [(1010.0, 200)]})
+    assert r2["per_task"]["t"]["status"] == "not_comparable"  # genuinely truncated
+
+
+def test_ptq_rejection_distinguishes_known_from_unknown_precision():
+    """A bf16 source should be told it should have compressed, not handed the waiver list."""
+    grew = {"output_bytes": 16_800_000_000}
+    known = evaluate_checkpoint(_ckpt(**grew, source_precision="bf16"))["detail"]
+    unknown = evaluate_checkpoint(_ckpt(**grew, source_precision="mixed stuff"))["detail"]
+    assert "should compress" in known
+    assert "mxfp4" not in known  # must not enumerate the values that would waive the gate
+    assert "not a recognised precision token" in unknown
+
+
+def test_every_emitted_failure_class_has_a_triage_row():
+    """The triage table is the dispatch contract; a class with no row is undefined behaviour."""
+    scripts = Path(__file__).parent.parent / "scripts"
+    emitted = set()
+    for f in scripts.glob("gate_*.py"):
+        emitted |= set(re.findall(r'"([A-Z][A-Z_]{4,})"', f.read_text()))
+    emitted -= {"USER_CONFIG_ERROR"}  # generic; documented separately
+    rows = set(
+        re.findall(r"^\| `([A-Z_]+)` \|", (scripts.parent / "SKILL.md").read_text(), re.MULTILINE)
+    )
+    missing = {c for c in emitted if c in _TRIAGE_CLASSES} - rows
+    assert not missing, f"failure classes emitted but absent from the triage table: {missing}"
 
 
 if __name__ == "__main__":
