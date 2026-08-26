@@ -21,9 +21,10 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from ..executors.local import LocalExecutor
 from ..executors.slurm import SlurmExecutor
-from ..process import run_argv
 from ..schema import (
     AttemptSpec,
     CampaignPlan,
@@ -41,6 +42,13 @@ from ..vllm_measurements import normalize_vllm_measurements
 from .base import WorkAdapter
 from .packing import packed_allocation
 from .stage_compat import stage_is_complete, stage_output_patterns
+
+if TYPE_CHECKING:
+    from ...security_policy import require_boolean_policy
+elif __package__.startswith("puzzletron_orchestrator."):
+    from puzzletron_orchestrator.security_policy import require_boolean_policy
+else:
+    from ...security_policy import require_boolean_policy
 
 __all__ = ["ShardedStageAdapter"]
 
@@ -120,6 +128,46 @@ def _run_slurm_aggregate(
                 f"[{handle.handle_id}]: {detail or status.reason or 'no log output'}"
             )
         time.sleep(2)
+
+
+def _run_local_aggregate(
+    *,
+    plan: CampaignPlan,
+    node: StagePlanNode,
+    command: tuple[str, ...],
+) -> None:
+    """Run a controller-side merge through the reviewed local executor."""
+
+    attempt_id = str(uuid.uuid4())
+    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    attempt = AttemptSpec(
+        attempt_id=attempt_id,
+        work_id=f"{node.stage_id}:aggregate",
+        stage_id=f"{node.stage_id}_merge",
+        command=CommandSpec(
+            argv=command,
+            cwd=plan.runner.contract.repository,
+            log_path=str(log_path),
+        ),
+        allocation_nodes=1,
+        allocation_gpus=0,
+        contract_hash=plan.contract_hash,
+        metadata={"gpus_per_node": 0},
+        task_topology=TaskTopology(task_count=1, gpus_per_task=0),
+    )
+    executor = LocalExecutor(plan.runner)
+    handle = executor.submit(attempt)
+    while True:
+        status = executor.poll([handle])[0]
+        if status.state is JobState.COMPLETED:
+            return
+        if status.state not in {JobState.PENDING, JobState.RUNNING}:
+            detail = _read_log_tail(str(log_path))
+            raise RuntimeError(
+                f"{node.stage_id} aggregation {status.state.value}: "
+                f"{detail or status.reason or 'no log output'}"
+            )
+        time.sleep(0.1)
 
 
 def _gang_item(
@@ -234,6 +282,7 @@ class ShardedStageAdapter(WorkAdapter):
         )
         if node.stage_id == "aiperf":
             aiperf = plan.experiment_config.get("aiperf") or {}
+            model = plan.experiment_config.get("model") or {}
             argv = [
                 "python",
                 str(script_path),
@@ -248,6 +297,26 @@ class ShardedStageAdapter(WorkAdapter):
                 "--output-tokens",
                 str(aiperf.get("output_tokens", 1024)),
             ]
+            if "trust_remote_code" in aiperf:
+                trust_remote_code_path = "aiperf.trust_remote_code"
+                trust_remote_code_value = aiperf["trust_remote_code"]
+            else:
+                trust_remote_code_path = "model.trust_remote_code"
+                trust_remote_code_value = model.get("trust_remote_code", False)
+            trust_remote_code = require_boolean_policy(
+                trust_remote_code_value,
+                path=trust_remote_code_path,
+                default=False,
+            )
+            allow_online_tokenizer_resolution = require_boolean_policy(
+                aiperf.get("allow_aiperf_v011_online_tokenizer_resolution", False),
+                path="aiperf.allow_aiperf_v011_online_tokenizer_resolution",
+                default=False,
+            )
+            if trust_remote_code:
+                argv.append("--trust-remote-code")
+            if allow_online_tokenizer_resolution:
+                argv.append("--allow-aiperf-v011-online-tokenizer-resolution")
         else:
             argv = ["python", str(script_path), "--config", plan.experiment_config_path]
             argv.extend(extra_args)
@@ -365,15 +434,7 @@ class ShardedStageAdapter(WorkAdapter):
                     command=command,
                 )
             else:
-                result = run_argv(
-                    command,
-                    cwd=plan.runner.contract.repository,
-                )
-                if result.returncode:
-                    raise RuntimeError(
-                        f"{node.stage_id} aggregation failed: "
-                        f"{result.stderr.strip() or result.stdout.strip()}"
-                    )
+                _run_local_aggregate(plan=plan, node=node, command=command)
         return PublishedOutput(
             stage_id=node.stage_id,
             artifacts=stage_output_patterns(plan.experiment_config, node.stage_id),

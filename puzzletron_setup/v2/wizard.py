@@ -53,7 +53,7 @@ from .parallel_validation import validate_automodel_parallelism, validate_vllm_p
 from .post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
 from .presets import QUICK_SETUP_PRESETS, get_setup_preset
 from .prompts import BACK as _BACK
-from .prompts import InteractiveBackend, PromptBackend, PromptChoice
+from .prompts import InteractiveBackend, NonInteractiveBackend, PromptBackend, PromptChoice
 from .resources import (
     ParallelProfile,
     ResourceProfileRegistry,
@@ -147,6 +147,11 @@ SUPPORTED_MODEL_GROUPS = (
         ),
     ),
 )
+
+
+def _is_back(value: Any) -> bool:
+    """Return whether an untyped prompt result requests Back navigation."""
+    return value is BACK
 
 
 def _model_family_choices(resolver: DefaultsResolver) -> list[PromptChoice]:
@@ -336,11 +341,16 @@ def _select_model_source(
     resolver: DefaultsResolver,
 ) -> Any:
     while True:
+        explicit_default = resolver.file_default("model.source")
         family = session.select(
             "model.source_family",
             "Model:",
             _model_family_choices(resolver),
-            default=_CUSTOM_MODEL_SOURCE,
+            default=(
+                _DEFAULT_MODEL_SOURCE
+                if explicit_default is not None and explicit_default.value
+                else _CUSTOM_MODEL_SOURCE
+            ),
         )
         if family is BACK:
             return BACK
@@ -378,6 +388,8 @@ def model_section(session: WizardSession, resolver: DefaultsResolver, context: d
         try:
             source = normalize_model_source(str(source))
         except SetupError as error:
+            if isinstance(session.backend, NonInteractiveBackend):
+                raise
             print(f"  {error}")
             continue
         session.state.set_field("model.source", source, source=source_kind)
@@ -498,7 +510,7 @@ def data_section(
             modality_choices,
             default=suggested_modality,
         )
-        if modality is BACK:
+        if _is_back(modality):
             return False
         modality_source = "user"
     else:
@@ -559,7 +571,7 @@ def data_section(
                 seed_default,
                 minimum=0,
             )
-            if seed is BACK:
+            if _is_back(seed):
                 return False
         acquisition = {
             "adapter": adapter,
@@ -661,7 +673,7 @@ def data_section(
             ],
             default=default_layout,
         )
-        if layout is BACK:
+        if _is_back(layout):
             return False
         sequence = _integer_field(
             session,
@@ -670,7 +682,7 @@ def data_section(
             "Sequence length used by width, depth, bypass, evaluation, and global KD:",
             4096,
         )
-        if sequence is BACK:
+        if _is_back(sequence):
             return False
     session.state.set_field("data.source", runtime_source, source=source_kind)
     session.state.set_field("data.selected_source", source, source=source_kind)
@@ -1160,7 +1172,7 @@ def _profile_prompt(
             "Parallel configuration name:",
             default=stage_id,
         )
-        if name is BACK:
+        if _is_back(name):
             return BACK
         values = {}
         for field_name, label, default in (
@@ -1329,7 +1341,7 @@ def _configure_stage_resource(
                 default=int(defaults["instances"]),
                 minimum=1,
             )
-            if instances is BACK:
+            if _is_back(instances):
                 return BACK
         batch_unit = profile.batch_unit
         requested_batch = session.integer(
@@ -1457,7 +1469,7 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
             _depth_granularity_choices(inventory),
             default=granularity,
         )
-        if granularity is BACK:
+        if _is_back(granularity):
             return False
         count = inventory.num_sublayers if granularity == "subblock" else inventory.num_layers
         remove = session.integer(
@@ -1480,7 +1492,7 @@ def depth_section(session: WizardSession, resolver: DefaultsResolver, context: d
                 default=samples,
                 minimum=1,
             )
-            if samples is BACK:
+            if _is_back(samples):
                 return False
     pruning["depth_granularity"] = str(granularity)
     pruning["depth_remove"] = int(remove)
@@ -1601,7 +1613,7 @@ def width_axes_section(session: WizardSession, resolver: DefaultsResolver, conte
                     require_reduced=require_reduced,
                 ),
             )
-            if selected is BACK:
+            if _is_back(selected):
                 return False
         selected_values = _normalized_axis_values(axis, selected)
         enabled = any(value < int(axis.teacher_value) for value in selected_values)
@@ -1662,7 +1674,7 @@ def width_importance_section(
             default=samples,
             minimum=1,
         )
-        if samples is BACK:
+        if _is_back(samples):
             return False
     pruning["width_importance_samples"] = int(samples)
     session.state.set_collection("pruning", pruning)
@@ -1713,7 +1725,7 @@ def sort_sanity_section(session: WizardSession, resolver: DefaultsResolver, cont
             "Run sorting sanity evaluation?",
             default=enabled,
         )
-        if enabled is BACK:
+        if _is_back(enabled):
             return False
         if enabled:
             samples = session.integer(
@@ -1722,7 +1734,7 @@ def sort_sanity_section(session: WizardSession, resolver: DefaultsResolver, cont
                 default=samples,
                 minimum=1,
             )
-            if samples is BACK:
+            if _is_back(samples):
                 return False
     pruning["sort_sanity"] = bool(enabled)
     pruning["sort_sanity_samples"] = int(samples)
@@ -1810,7 +1822,7 @@ def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, con
             "Run width sanity evaluation?",
             default=enabled,
         )
-        if enabled is BACK:
+        if _is_back(enabled):
             return False
         if enabled:
             samples = session.integer(
@@ -1835,7 +1847,7 @@ def width_sanity_section(session: WizardSession, resolver: DefaultsResolver, con
                 minimum=1,
                 maximum=max_targets_per_axis,
             )
-            if BACK in (samples, layer_count, targets_per_axis):
+            if any(_is_back(value) for value in (samples, layer_count, targets_per_axis)):
                 return False
     pruning["width_sanity"] = bool(enabled)
     pruning["width_sanity_samples"] = int(samples)
@@ -1890,7 +1902,7 @@ def slicing_sanity_section(
             "Run slicing sanity evaluation?",
             default=enabled,
         )
-        if enabled is BACK:
+        if _is_back(enabled):
             return False
     pruning["slicing_sanity"] = bool(enabled)
     session.state.set_collection("pruning", pruning)
@@ -1945,7 +1957,7 @@ def bypass_section(session: WizardSession, resolver: DefaultsResolver, context: 
             "Run local bypass distillation?",
             default=enabled,
         )
-        if enabled is BACK:
+        if _is_back(enabled):
             return False
         if enabled:
             granularity = session.select(
@@ -2157,7 +2169,7 @@ def pre_mip_stages_section(
                     default=gpus_per_node,
                     minimum=1,
                 )
-                if instances is BACK:
+                if _is_back(instances):
                     return False
             requested_batch = session.integer(
                 f"stages.{stage_id}.batch",
@@ -2165,7 +2177,7 @@ def pre_mip_stages_section(
                 default=resolve_batch(8, profile).effective,
                 minimum=profile.batch_unit,
             )
-            if requested_batch is BACK:
+            if _is_back(requested_batch):
                 return False
         else:
             profile = (
@@ -3379,14 +3391,15 @@ def mip_section(session: WizardSession, resolver: DefaultsResolver, context: dic
             if homogeneous_mode == "all":
                 homogeneous_keep = "all"
             else:
-                homogeneous_keep = session.integer(
+                selected_homogeneous_keep = session.integer(
                     f"mip.search.{search_id}.homogeneous.keep",
                     "Homogeneous solutions retained per solve:",
                     default=5,
                     minimum=1,
                 )
-                if homogeneous_keep is BACK:
+                if selected_homogeneous_keep is BACK:
                     return False
+                homogeneous_keep = int(selected_homogeneous_keep)
 
         explicit_variants: OrderedDict[str, Any] = OrderedDict()
         if variants:
@@ -3554,7 +3567,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                 ],
                 default="recommended",
             )
-            if flow_mode is BACK:
+            if _is_back(flow_mode):
                 return False
         if flow_mode == "none":
             continue
@@ -3865,7 +3878,7 @@ def _vllm_topology_prompt(
                 ),
                 default=bool(topology_defaults.get("enable_expert_parallel", False)),
             )
-            if enable_expert_parallel is BACK:
+            if _is_back(enable_expert_parallel):
                 return BACK
         topology.update(
             {
@@ -3888,6 +3901,9 @@ def _vllm_topology_prompt(
             stage_id=stage_id,
         )
         if issues:
+            if isinstance(session.backend, NonInteractiveBackend):
+                detail = "; ".join(f"{issue.path}: {issue.message}" for issue in issues)
+                raise SetupError(f"Non-interactive vLLM topology is incompatible: {detail}")
             _print_parallel_issues(issues)
             topology_defaults = topology
             continue
@@ -4079,7 +4095,7 @@ def _configure_dynamic_resources(
                 f"Customize resources and batch for {node_id}?",
                 default=False,
             )
-            if customize is BACK:
+            if _is_back(customize):
                 return BACK
         strategy = _post_mip_strategy(node)
         instances = gpus_per_node
@@ -4090,7 +4106,7 @@ def _configure_dynamic_resources(
                 default=gpus_per_node,
                 minimum=1,
             )
-            if instances is BACK:
+            if _is_back(instances):
                 return BACK
         entry = {
             "strategy": str(strategy),
@@ -4169,7 +4185,7 @@ def _configure_dynamic_resources(
                     default=profile.batch_unit,
                     minimum=profile.batch_unit,
                 )
-                if requested is BACK:
+                if _is_back(requested):
                     return BACK
             resolved = resolve_batch(int(requested), profile)
             config = dict(node.config)
@@ -4504,10 +4520,27 @@ def _fresh_state(
     defaults_path: Path | None,
     *,
     full: bool,
+    campaign_dir: Path | None = None,
+    setup_profile: str = "balanced",
 ) -> WizardState:
+    if campaign_dir is not None:
+        get_setup_preset(setup_profile)
+        if full:
+            return WizardState.start(
+                Path(campaign_dir).expanduser(),
+                defaults_path=defaults_path,
+                setup_mode="full",
+                preset=setup_profile,
+            )
+        return WizardState.start(
+            Path(campaign_dir).expanduser(),
+            defaults_path=defaults_path,
+            setup_mode="quick",
+            preset=setup_profile,
+        )
     if full:
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 continue
             if not str(value).strip():
@@ -4520,11 +4553,11 @@ def _fresh_state(
             )
 
     while True:
-        preset = _select_setup_preset(backend)
+        preset = _select_setup_preset(backend, default=setup_profile)
         if preset is BACK:
             continue
         while True:
-            value = backend.text("Campaign directory:", "")
+            value = backend.text("Campaign directory:", None)
             if value is BACK:
                 break
             if not str(value).strip():
@@ -4556,8 +4589,16 @@ def run_wizard_v2(
     defaults_path: Path | None,
     backend: PromptBackend | None = None,
     full: bool = False,
+    campaign_dir: Path | None = None,
+    setup_profile: str = "balanced",
 ) -> Path:
-    """Run setup v2, save every answer, validate bundles, and never launch jobs."""
+    """Resolve setup answers, validate both bundles, and never launch jobs.
+
+    ``campaign_dir`` and ``setup_profile`` let automation bypass only the new
+    campaign prompts while using the same wizard sections and bundle renderer.
+    """
+    if resume is not None and campaign_dir is not None:
+        raise SetupError("campaign_dir cannot be combined with resume")
     backend = backend or InteractiveBackend()
     print("Welcome to Puzzletron setup v2.")
     if resume is None:
@@ -4569,7 +4610,13 @@ def run_wizard_v2(
                 "defaults from a profile."
             )
             print("  Use --full only when you need every advanced control.")
-        state = _fresh_state(backend, defaults_path, full=full)
+        state = _fresh_state(
+            backend,
+            defaults_path,
+            full=full,
+            campaign_dir=campaign_dir,
+            setup_profile=setup_profile,
+        )
     else:
         state = WizardState.resume(resume)
         if full and state.setup_mode != "full":

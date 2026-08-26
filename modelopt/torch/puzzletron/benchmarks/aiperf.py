@@ -35,18 +35,25 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, cast
 
 from ..identity import stable_hash
 from ..orchestration.mesh import normalize_vllm_topology
 from .schema import BenchmarkResult
+
+if TYPE_CHECKING:
+    from ..anymodel.model_descriptor import ModelDescriptor
 
 __all__ = ["run_aiperf_benchmark", "run_aiperf_sweep"]
 
 _CHECKPOINT_PREPARE_LOCK = Lock()
 
 
-def _prepare_vllm_checkpoint(checkpoint_dir: Path) -> bool:
+def _prepare_vllm_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    trust_remote_code: bool = False,
+) -> bool:
     """Restore AnyModel metadata lost by generic HF checkpoint consolidation."""
     with _CHECKPOINT_PREPARE_LOCK:
         config = json.loads((checkpoint_dir / "config.json").read_text())
@@ -57,7 +64,10 @@ def _prepare_vllm_checkpoint(checkpoint_dir: Path) -> bool:
             return False
         from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
-        refresh_realized_checkpoint_config(checkpoint_dir)
+        refresh_realized_checkpoint_config(
+            checkpoint_dir,
+            trust_remote_code=trust_remote_code,
+        )
         return True
 
 
@@ -67,7 +77,8 @@ def _descriptor_vllm_args(checkpoint_dir: Path) -> list[str]:
 
     config = json.loads((checkpoint_dir / "config.json").read_text())
     resolution = resolve_descriptor(config)
-    return [str(arg) for arg in resolution.descriptor.runtime_vllm_benchmark_args(config)]
+    descriptor = cast("type[ModelDescriptor]", resolution.descriptor)
+    return [str(arg) for arg in descriptor.runtime_vllm_benchmark_args(config)]
 
 
 def _free_port() -> int:
@@ -309,6 +320,53 @@ def _profile_command(
     return command
 
 
+def _vllm_server_command(
+    *,
+    checkpoint_dir: Path,
+    port: int,
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+    topology: dict[str, Any],
+    trust_remote_code: bool,
+) -> list[str]:
+    """Build the vLLM command under the caller's explicit code-trust policy."""
+
+    command = [
+        "vllm",
+        "serve",
+        str(checkpoint_dir),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--served-model-name",
+        model_name,
+        "--max-model-len",
+        str(_server_max_model_len(input_tokens, output_tokens, topology)),
+    ]
+    if trust_remote_code:
+        command.append("--trust-remote-code")
+    command.extend(_topology_vllm_args(topology))
+    command.extend(_descriptor_vllm_args(checkpoint_dir))
+    extra_vllm_args = tuple(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    reserved_options = {"--config", "--trust-remote-code"}
+    normalized_options = {arg.partition("=")[0].replace("_", "-") for arg in extra_vllm_args}
+    overridden_options = {
+        reserved
+        for option in normalized_options
+        for reserved in reserved_options
+        if reserved.startswith(option)
+    }
+    if overridden_options:
+        raise ValueError(
+            "topology.extra_vllm_args cannot set policy-owned vLLM options: "
+            + ", ".join(sorted(overridden_options))
+        )
+    command.extend(extra_vllm_args)
+    return command
+
+
 def _clean_subprocess_environment(
     gpu_ids: str, *, architecture_id: str, topology_id: str
 ) -> dict[str, str]:
@@ -355,6 +413,24 @@ def _clean_subprocess_environment(
     return env
 
 
+def _aiperf_subprocess_environment(
+    env: dict[str, str],
+    *,
+    allow_aiperf_v011_online_tokenizer_resolution: bool = False,
+) -> dict[str, str]:
+    """Work around AIPerf v0.11's broken offline local-tokenizer resolution.
+
+    Remove this compatibility option after the pinned AIPerf resolver accepts
+    absolute local tokenizer directories while offline.
+    """
+
+    resolved = dict(env)
+    if allow_aiperf_v011_online_tokenizer_resolution:
+        resolved.pop("HF_HUB_OFFLINE", None)
+        resolved.pop("TRANSFORMERS_OFFLINE", None)
+    return resolved
+
+
 def run_aiperf_sweep(
     checkpoint_dir: str | Path,
     *,
@@ -376,13 +452,18 @@ def run_aiperf_sweep(
     readiness_timeout: float = 1200,
     benchmark_timeout: float = 600,
     gpu_telemetry: str | None = "pynvml",
+    trust_remote_code: bool = False,
+    allow_aiperf_v011_online_tokenizer_resolution: bool = False,
 ) -> list[BenchmarkResult]:
-    """Run multiple concurrencies against one persistent vLLM server."""
+    """Run a serving sweep while preserving offline and remote-code policy by default."""
 
     checkpoint_dir = Path(checkpoint_dir).resolve()
     artifact_dir = Path(artifact_dir).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_vllm_checkpoint(checkpoint_dir)
+    _prepare_vllm_checkpoint(
+        checkpoint_dir,
+        trust_remote_code=trust_remote_code,
+    )
     concurrency_values = tuple(int(value) for value in concurrencies)
     if not concurrency_values or len(set(concurrency_values)) != len(concurrency_values):
         raise ValueError("AIPerf concurrencies must be non-empty and unique")
@@ -405,23 +486,15 @@ def run_aiperf_sweep(
     model_name = f"puzzletron-{architecture_id[:16]}"
     tokenizer_dir = _short_tokenizer_alias(checkpoint_dir, artifact_dir)
     server_log = artifact_dir / "vllm_server.log"
-    server_cmd = [
-        "vllm",
-        "serve",
-        str(checkpoint_dir),
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--served-model-name",
-        model_name,
-        "--max-model-len",
-        str(_server_max_model_len(input_tokens, output_tokens, topology)),
-        "--trust-remote-code",
-    ]
-    server_cmd.extend(_topology_vllm_args(topology))
-    server_cmd.extend(_descriptor_vllm_args(checkpoint_dir))
-    server_cmd.extend(str(arg) for arg in topology.get("extra_vllm_args", ()))
+    server_cmd = _vllm_server_command(
+        checkpoint_dir=checkpoint_dir,
+        port=port,
+        model_name=model_name,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        topology=topology,
+        trust_remote_code=trust_remote_code,
+    )
     executable = _resolve_executable(executable)
     env = _clean_subprocess_environment(
         gpu_ids,
@@ -430,6 +503,12 @@ def run_aiperf_sweep(
     )
     for key, value in (topology.get("env") or {}).items():
         env[str(key)] = str(value)
+    aiperf_env = _aiperf_subprocess_environment(
+        env,
+        allow_aiperf_v011_online_tokenizer_resolution=(
+            allow_aiperf_v011_online_tokenizer_resolution
+        ),
+    )
     cached: dict[int, BenchmarkResult] = {}
     missing: list[tuple[int, Path, list[str], str]] = []
     for concurrency in concurrency_values:
@@ -463,6 +542,10 @@ def run_aiperf_sweep(
                 "endpoint_type": endpoint_type,
                 "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
                 "use_server_token_count": use_server_token_count,
+                "trust_remote_code": trust_remote_code,
+                "allow_aiperf_v011_online_tokenizer_resolution": (
+                    allow_aiperf_v011_online_tokenizer_resolution
+                ),
                 "revisions": revisions,
             },
             prefix="aiperf_result",
@@ -470,7 +553,7 @@ def run_aiperf_sweep(
         metadata_path = run_dir / "puzzletron_aiperf_result.json"
         export = run_dir / "profile_export_aiperf.json"
         if metadata_path.is_file() and export.is_file():
-            result = BenchmarkResult.model_validate(json.loads(metadata_path.read_text()))
+            result = BenchmarkResult(**json.loads(metadata_path.read_text()))
             if result.cache_identity == cache_identity:
                 cached[concurrency] = result
                 continue
@@ -496,7 +579,7 @@ def run_aiperf_sweep(
                     command,
                     check=True,
                     timeout=benchmark_timeout,
-                    env=env,
+                    env=aiperf_env,
                 )
                 export = run_dir / "profile_export_aiperf.json"
                 if not export.is_file():
@@ -542,8 +625,13 @@ def run_aiperf_sweep(
                     command=tuple(command),
                     started_at=started_at,
                 )
+                result_payload = (
+                    result.model_dump(mode="json")
+                    if hasattr(result, "model_dump")
+                    else json.loads(result.json())
+                )
                 (run_dir / "puzzletron_aiperf_result.json").write_text(
-                    json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+                    json.dumps(result_payload, indent=2, sort_keys=True) + "\n"
                 )
                 cached[concurrency] = result
         finally:

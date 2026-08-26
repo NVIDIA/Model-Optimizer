@@ -48,6 +48,21 @@ Use the full flow to expose every section and nested setting:
 python examples/puzzletron/puzzletron_setup_v2.py --full
 ```
 
+Automation can use the same setup entry point without answering prompts. The
+defaults file must provide every required value that has no resolved default:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults /path/to/setup-v2-defaults.yaml \
+  --campaign-dir /path/to/campaign \
+  --profile smoke \
+  --non-interactive
+```
+
+Non-interactive setup fails instead of guessing when a required answer has no
+resolved default. It generates and validates the same smoke and production
+bundles as the interactive wizard.
+
 ## Navigation and resume
 
 Press **Esc** to return from any prompt. Selection prompts include a visible

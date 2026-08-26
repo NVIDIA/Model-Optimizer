@@ -199,6 +199,11 @@ See [controller operations](docs/orchestration_operations.md) for individual
 stages, non-interactive behavior, logging options, execution strategies,
 recovery, and controller records.
 
+Remote model code and AIPerf v0.11 online tokenizer resolution are disabled by
+default. Enable remote code only for a trusted model source. The tokenizer
+compatibility option permits the AIPerf child process to resolve its tokenizer
+online even when the surrounding campaign is configured for offline loading.
+
 The controller shows live progress and keeps resume state under
 `${puzzle_dir}/orchestration/`. Press `q` or Ctrl-C in an interactive terminal
 to cancel, detach, or continue. Run the same command again to recover a detached

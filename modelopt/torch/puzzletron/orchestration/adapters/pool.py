@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 from ..identity import stable_hash
 from ..schema import (
@@ -66,6 +65,14 @@ def _replacement_puzzle_dir(plan: CampaignPlan, width: int | None) -> Path:
     if width is None:
         return plan.puzzle_dir
     return plan.puzzle_dir / "scenarios" / f"width-{int(width):04d}" / "depth-00"
+
+
+def _replacement_work_id(stage_id: str, width: int | None, width_count: int) -> str:
+    if width_count == 1:
+        return f"{stage_id}:gang"
+    if width is None:
+        raise RuntimeError("multi-width replacement scoring requires concrete widths")
+    return f"{stage_id}:width-{width:04d}"
 
 
 def _replacement_environment(plan: CampaignPlan, puzzle_dir: Path) -> dict[str, str]:
@@ -125,16 +132,16 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
     )
     teacher = puzzle_dir / "ckpts" / "sorted_teacher"
     overrides = [
-        f"puzzle_dir={puzzle_dir}",
+        f"++puzzle_dir={puzzle_dir}",
         f"experiment.dir={puzzle_dir}",
         f"teacher_dir={teacher}",
         f"convert.teacher_dir={teacher}",
         "bypass.enabled=false",
         f"replacement_library_path={puzzle_dir / 'replacement_library.json'}",
-        f"build_replacement_library.source_checkpoint_dir={teacher}",
+        f"++build_replacement_library.source_checkpoint_dir={teacher}",
         f"replacement_scoring.teacher_dir={teacher}",
-        f"replacement_scoring.source_checkpoint_dir={teacher}",
-        f"replacement_scoring.target_teacher_dir={teacher}",
+        f"++replacement_scoring.source_checkpoint_dir={teacher}",
+        f"++replacement_scoring.target_teacher_dir={teacher}",
         f"replacement_scoring.solutions_path={puzzle_dir / f'{stem}.json'}",
         f"replacement_scoring.output_dir={puzzle_dir / f'{stem}--validation'}",
     ]
@@ -178,11 +185,7 @@ class PersistentPoolAdapter(WorkAdapter):
             workers_per_width, remainder = divmod(node.instances, len(widths))
             items = tuple(
                 WorkItem(
-                    work_id=(
-                        f"{node.stage_id}:gang"
-                        if len(widths) == 1
-                        else f"{node.stage_id}:width-{cast('int', width):04d}"
-                    ),
+                    work_id=_replacement_work_id(node.stage_id, width, len(widths)),
                     stage_id=node.stage_id,
                     shard_index=index,
                     shard_count=len(widths),
@@ -271,12 +274,15 @@ class PersistentPoolAdapter(WorkAdapter):
             effective_overrides.extend(_replacement_overrides(plan, replacement_puzzle_dir))
         if role == "gang":
             worker_count = int(item.metadata.get("worker_count", node.instances))
+            allocation_nodes, allocation_gpus, topology = packed_allocation(
+                node, instances=worker_count
+            )
             env = {
                 "CAMPAIGN_DIR": str(campaign_dir),
                 "CONFIG_PATH": plan.experiment_config_path,
                 "PUZZLE_DIR": str(replacement_puzzle_dir),
                 "WORLD_SIZE": str(node.gpus_per_instance),
-                "NPROC_PER_NODE": str(node.gpus_per_instance),
+                "NPROC_PER_NODE": str(topology.gpus_per_task),
                 "WORKER_COUNT": str(worker_count),
             }
             if node.stage_id == "depth_importance":
@@ -309,9 +315,6 @@ class PersistentPoolAdapter(WorkAdapter):
                 existing = env.get("DISTRIBUTED_EVAL_OVERRIDES", "")
                 env["DISTRIBUTED_EVAL_OVERRIDES"] = f"{existing}\n{override}".strip()
             log_path = str(log_dir / f"{node.stage_id}_gang_{attempt_id}.log")
-            allocation_nodes, allocation_gpus, topology = packed_allocation(
-                node, instances=worker_count
-            )
             return AttemptSpec(
                 attempt_id=attempt_id,
                 work_id=item.work_id,
@@ -367,13 +370,9 @@ class PersistentPoolAdapter(WorkAdapter):
         if role == "worker":
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu) for gpu in item.local_gpu_ids)
             env["NPROC_PER_NODE"] = str(node.gpus_per_instance)
-            env["NNODES"] = "1"
-            env["NODE_RANK"] = "0"
             worker_id = int(item.metadata.get("worker_id", 0))
             env["WORKER_GROUP_INDEX"] = str(worker_id)
             env["WORKER_PORT"] = str(5010 + worker_id)
-            env["RDZV_ENDPOINT"] = f"127.0.0.1:{29500 + worker_id}"
-            env["RDZV_ID"] = f"{node.stage_id}-{attempt_id}"
         argv = ("bash", str(script))
         # GPU partitions reject zero-GPU jobs; coordinators still need one GPU slot.
         allocation_gpus = 1 if role == "coordinator" else node.gpus_per_instance

@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .prompts import BACK, InteractiveBackend, PromptBackend, PromptChoice
+from puzzletron_setup import SetupError
+
+from .prompts import BACK, InteractiveBackend, NonInteractiveBackend, PromptBackend, PromptChoice
 from .state import PromptFrame, WizardState
 
 if TYPE_CHECKING:
@@ -167,6 +169,8 @@ class WizardSession:
             if verdict is True:
                 return rendered
             self.state.pop_frame()
+            if isinstance(self.backend, NonInteractiveBackend):
+                raise SetupError(str(verdict))
             print(f"  {verdict}")
 
     def integer(
@@ -282,4 +286,6 @@ class WizardSession:
             if verdict is True:
                 return rendered
             self.state.pop_frame()
+            if isinstance(self.backend, NonInteractiveBackend):
+                raise SetupError(str(verdict))
             print(f"  {verdict}")

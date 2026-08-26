@@ -49,7 +49,7 @@ from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 def _finalize_replacement_scoring(tmp_path, monkeypatch):
     config_path = tmp_path / "experiment.yaml"
     config_path.touch()
-    root_override = "+replacement_scoring.automodel.lm_head_backend=streaming"
+    root_override = "++replacement_scoring.automodel.lm_head_backend=streaming"
     loaded_overrides = []
     config = {
         "puzzle_dir": str(tmp_path),
@@ -96,7 +96,7 @@ def test_replacement_scoring_finalizer_publishes_current_terminal_manifest(tmp_p
 
     manifest_path = tmp_path / "manifests" / "replacement_scoring.json"
     manifest = json.loads(manifest_path.read_text())
-    assert loaded_overrides == ["+replacement_scoring.automodel.lm_head_backend=streaming"]
+    assert loaded_overrides == ["++replacement_scoring.automodel.lm_head_backend=streaming"]
     assert published_report == {"scenario_count": 1, "widths": [256]}
     assert manifest["stage"] == "replacement_scoring"
     assert manifest["status"] == "success"
@@ -181,7 +181,7 @@ def test_replacement_scoring_marker_uses_one_manifest_snapshot(tmp_path, monkeyp
 def test_replacement_scoring_finalizer_main_reads_root_overrides(monkeypatch):
     captured = {}
     overrides = [
-        "+replacement_scoring.automodel.lm_head_backend=streaming",
+        "++replacement_scoring.automodel.lm_head_backend=streaming",
         "embedding_pruning.enabled=false",
     ]
 

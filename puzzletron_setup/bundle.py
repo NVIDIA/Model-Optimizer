@@ -469,6 +469,7 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
             "modality": data["modality"],
             "layout": data["layout"],
             "max_sample_length": sequence_length,
+            "sequence_length": sequence_length,
             "path": data["source"],
             "acquisition": deepcopy(data_acquisition) if data_acquisition else None,
             "packing": (

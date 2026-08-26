@@ -23,6 +23,9 @@ from typing import TYPE_CHECKING
 
 from puzzletron_setup import SetupError
 
+from .presets import QUICK_SETUP_PRESETS
+from .prompts import NonInteractiveBackend
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -44,6 +47,22 @@ def _parser() -> argparse.ArgumentParser:
         help="Explicit versioned defaults YAML; never discovered automatically.",
     )
     parser.add_argument(
+        "--campaign-dir",
+        type=Path,
+        help="Campaign directory for a new setup; bypasses that interactive prompt.",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=tuple(preset.name for preset in QUICK_SETUP_PRESETS),
+        default="balanced",
+        help="Guided setup profile for a new campaign (default: balanced).",
+    )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Accept resolved defaults and fail if any required answer has no default.",
+    )
+    parser.add_argument(
         "--full",
         action="store_true",
         help=(
@@ -56,7 +75,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the setup-v2 command-line interface."""
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.resume is not None and args.campaign_dir is not None:
+        parser.error("--campaign-dir cannot be combined with --resume")
+    if args.non_interactive and args.resume is None:
+        if args.campaign_dir is None:
+            parser.error("--non-interactive requires --campaign-dir for a new campaign")
+        if args.defaults is None:
+            parser.error("--non-interactive requires --defaults for a new campaign")
     # Keep heavyweight model inspection out of --help and argument-error paths.
     from .wizard import run_wizard_v2
 
@@ -65,6 +92,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=args.resume,
             defaults_path=args.defaults,
             full=args.full,
+            campaign_dir=args.campaign_dir,
+            setup_profile=args.profile,
+            backend=NonInteractiveBackend() if args.non_interactive else None,
         )
     except KeyboardInterrupt:
         target = args.resume or "<campaign>"

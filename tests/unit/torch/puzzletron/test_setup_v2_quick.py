@@ -36,6 +36,7 @@ from puzzletron_setup.v2.presets import QUICK_SETUP_PRESETS, get_setup_preset
 from puzzletron_setup.v2.prompts import (
     BACK,
     InteractiveBackend,
+    NonInteractiveBackend,
     PromptChoice,
     ScriptedBackend,
     _bind_escape_back,
@@ -44,7 +45,6 @@ from puzzletron_setup.v2.session import WizardSession
 from puzzletron_setup.v2.state import WizardState
 from puzzletron_setup.v2.wizard import (
     _CUSTOM_DATA_SOURCE,
-    _CUSTOM_MODEL_SOURCE,
     _PUZZLE_KD_DATA_SOURCE,
     _acquisition_sample_requirements,
     _fresh_state,
@@ -57,6 +57,9 @@ from puzzletron_setup.v2.wizard import (
 
 _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
+
+
+# Public facade and guided-profile defaults
 
 
 def test_common_helpers_remain_available_from_wizard_facade():
@@ -84,33 +87,6 @@ def test_common_helpers_remain_available_from_wizard_facade():
 
     for name in names:
         assert getattr(wizard_module, name) is getattr(wizard_common_module, name)
-
-
-def _qwen_inventory(
-    *,
-    num_layers,
-    hidden_size,
-    intermediate_size,
-    num_attention_heads,
-    num_key_value_heads,
-):
-    return SimpleNamespace(
-        num_layers=num_layers,
-        facts={
-            "hidden_size": hidden_size,
-            "intermediate_size": intermediate_size,
-            "num_attention_heads": num_attention_heads,
-            "num_key_value_heads": num_key_value_heads,
-        },
-    )
-
-
-def _context():
-    return {
-        "model": SimpleNamespace(
-            inventory=SimpleNamespace(multimodal=False),
-        )
-    }
 
 
 def test_guided_profiles_explain_cost_and_load_family_defaults():
@@ -363,18 +339,166 @@ def test_fresh_guided_state_records_profile_and_cli_full_is_explicit(tmp_path):
     assert _parser().parse_args([]).full is False
     assert _parser().parse_args(["--full"]).full is True
 
+    full_state = _fresh_state(
+        ScriptedBackend([]),
+        None,
+        full=True,
+        campaign_dir=tmp_path / "full-campaign",
+        setup_profile="smoke",
+    )
+    assert full_state.setup_mode == "full"
+    assert full_state.preset == "smoke"
 
-def test_cli_forwards_full_to_the_wizard(monkeypatch, tmp_path):
+    with pytest.raises(SetupError, match="Unknown setup preset"):
+        _fresh_state(
+            ScriptedBackend([]),
+            None,
+            full=True,
+            campaign_dir=tmp_path / "invalid-campaign",
+            setup_profile="invalid",
+        )
+
+
+# Non-interactive CLI behavior
+
+
+def test_non_interactive_backend_uses_semantic_defaults() -> None:
+    backend = NonInteractiveBackend()
+    choices = [PromptChoice("First", "first"), PromptChoice("Second", "second")]
+
+    assert backend.text("Path:", "/resolved/path") == "/resolved/path"
+    assert backend.text("Optional commands:", "") == ""
+    assert backend.select("Choice:", choices, "second") == "second"
+    assert backend.checkbox("Choices:", choices, ["first"]) == ["first"]
+    with pytest.raises(SetupError, match="requires a default"):
+        backend.text("Path:", None)
+
+
+def test_cli_forwards_noninteractive_setup_contract_to_the_wizard(monkeypatch, tmp_path):
     captured = {}
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text("schema_version: 1\n")
+    campaign = tmp_path / "campaign"
 
     def run_wizard_v2(**kwargs):
         captured.update(kwargs)
-        return tmp_path / "campaign"
+        return campaign
 
     monkeypatch.setattr(wizard_module, "run_wizard_v2", run_wizard_v2)
 
-    assert cli_module.main(["--full"]) == 0
+    assert (
+        cli_module.main(
+            [
+                "--non-interactive",
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(campaign),
+                "--profile",
+                "smoke",
+                "--full",
+            ]
+        )
+        == 0
+    )
+    assert captured["resume"] is None
+    assert captured["defaults_path"] == defaults
+    assert captured["campaign_dir"] == campaign
+    assert captured["setup_profile"] == "smoke"
     assert captured["full"] is True
+    assert isinstance(captured["backend"], NonInteractiveBackend)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--resume", "existing", "--campaign-dir", "new"],
+        ["--non-interactive", "--defaults", "defaults.yaml"],
+        ["--non-interactive", "--campaign-dir", "campaign"],
+    ],
+)
+def test_cli_rejects_invalid_automation_argument_combinations(argv):
+    with pytest.raises(SystemExit) as error:
+        cli_module.main(argv)
+
+    assert error.value.code == 2
+
+
+def test_cli_incomplete_noninteractive_defaults_fail_fast(tmp_path, capsys):
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text("schema_version: 1\n")
+
+    assert (
+        cli_module.main(
+            [
+                "--non-interactive",
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(tmp_path / "campaign"),
+            ]
+        )
+        == 2
+    )
+    assert "Setup stopped: Enter a model path or Hugging Face URL." in capsys.readouterr().out
+
+
+def test_cli_invalid_noninteractive_vllm_topology_fails_fast(tmp_path, monkeypatch, capsys):
+    campaign = tmp_path / "campaign"
+    model_path = tmp_path / "model"
+    dataset = tmp_path / "dataset"
+    model_path.mkdir()
+    dataset.mkdir()
+    inspected = _qwen_inspected_model(model_path)
+    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
+    monkeypatch.setattr(
+        wizard_module,
+        "infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model": {"source": str(model_path)},
+                "data": {"source": str(dataset), "modality": "text"},
+                "infrastructure": {
+                    "execution_contract": {
+                        "repository": "/worker/modelopt",
+                        "venv": "/worker/venv",
+                    }
+                },
+                "vllm": {
+                    "enabled": True,
+                    "topology": {"tensor_parallel_size": 3},
+                },
+            },
+            sort_keys=False,
+        )
+    )
+
+    assert (
+        cli_module.main(
+            [
+                "--non-interactive",
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(campaign),
+                "--profile",
+                "smoke",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "Setup stopped: Non-interactive vLLM topology is incompatible" in output
+    assert "TP=3 is incompatible" in output
+    assert "valid choices [1, 2, 4, 8]" in output
+
+
+# Resume and navigation behavior
 
 
 @pytest.mark.parametrize("full", [False, True])
@@ -529,6 +653,9 @@ def test_invalid_resume_replacement_defaults_file_is_not_persisted(
         )
 
     assert WizardState.resume(state.path).defaults_path is None
+
+
+# Guided defaults and data validation
 
 
 @pytest.mark.parametrize(
@@ -763,6 +890,9 @@ def test_guided_data_rejects_non_integer_defaults(
         )
 
 
+# Bundle generation and review output
+
+
 def test_width_sanity_samples_contribute_without_sort_sanity(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     state.set_collection(
@@ -825,76 +955,45 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     dataset = tmp_path / "dataset"
     model_path.mkdir()
     dataset.mkdir()
-    inventory = ModelInventory(
-        family="qwen3_5",
-        descriptor="qwen3_5_text",
-        family_config="examples/puzzletron/configs/families/qwen3_5/family.yaml",
-        model_type="qwen3_5_text",
-        architectures=("Qwen3_5ForCausalLM",),
-        multimodal=False,
-        moe=False,
-        num_layers=24,
-        num_sublayers=48,
-        layer_counts={"full_attention": 6, "linear_attention": 18},
-        facts={
-            "hidden_size": 1024,
-            "num_attention_heads": 8,
-            "num_key_value_heads": 2,
-            "intermediate_size": 3584,
-        },
-        axes=(
-            AxisInventory(
-                axis_id="hidden_width",
-                label="Hidden width",
-                teacher_value=1024,
-                values=(1024, 768),
-                alignment=256,
-            ),
-        ),
-    )
-    inspected = InspectedModel(
-        source=str(model_path),
-        requested_revision=None,
-        resolved_revision=None,
-        is_local=True,
-        config={
-            "model_type": "qwen3_5_text",
-            "text_config": {
-                "num_hidden_layers": 24,
-                "layer_types": ["linear_attention"] * 18 + ["full_attention"] * 6,
-            },
-        },
-        inventory=inventory,
-    )
+    inspected = _qwen_inspected_model(model_path)
     monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
     monkeypatch.setattr(
         wizard_module,
         "infer_dataset_modality",
         lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
     )
-    backend = ScriptedBackend(
-        [
-            "smoke",
-            str(campaign),
-            _CUSTOM_MODEL_SOURCE,
-            str(model_path),
-            _CUSTOM_DATA_SOURCE,
-            str(dataset),
-            "defaults",
-            "/worker/modelopt",
-            "/worker/venv",
-            True,
-        ]
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model": {"source": str(model_path)},
+                "data": {
+                    "source": str(dataset),
+                    "modality": "text",
+                    "layout": "fixed",
+                    "sequence_length": 32,
+                },
+                "infrastructure": {
+                    "execution_contract": {
+                        "repository": "/worker/modelopt",
+                        "venv": "/worker/venv",
+                    }
+                },
+            },
+            sort_keys=False,
+        )
     )
 
     result = wizard_module.run_wizard_v2(
         resume=None,
-        defaults_path=None,
-        backend=backend,
+        defaults_path=defaults,
+        backend=NonInteractiveBackend(),
+        campaign_dir=campaign,
+        setup_profile="smoke",
     )
 
     assert result == campaign.resolve()
-    assert backend.remaining == 0
     assert (campaign / "smoke" / "experiment.yaml").is_file()
     assert (campaign / "production" / "experiment.yaml").is_file()
     assert (campaign / "resolved_defaults.yaml").is_file()
@@ -935,6 +1034,9 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "source": "preset",
     }
     assert resolved_defaults["profiles"]["effective"] == profiles
+
+
+# Interactive prompt navigation
 
 
 def test_guided_section_uses_profile_without_action_prompt(tmp_path):
@@ -1211,3 +1313,74 @@ def test_escape_binding_supports_a_merged_binding_adapter(monkeypatch):
     assert question.application.key_bindings is merged_bindings
     registered["escape"](SimpleNamespace(app=application))
     assert application.result is BACK
+
+
+def _qwen_inspected_model(model_path) -> InspectedModel:
+    inventory = ModelInventory(
+        family="qwen3_5",
+        descriptor="qwen3_5_text",
+        family_config=_QWEN_FAMILY_CONFIG,
+        model_type="qwen3_5_text",
+        architectures=("Qwen3_5ForCausalLM",),
+        multimodal=False,
+        moe=False,
+        num_layers=24,
+        num_sublayers=48,
+        layer_counts={"full_attention": 6, "linear_attention": 18},
+        facts={
+            "hidden_size": 1024,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+            "intermediate_size": 3584,
+        },
+        axes=(
+            AxisInventory(
+                axis_id="hidden_width",
+                label="Hidden width",
+                teacher_value=1024,
+                values=(1024, 768),
+                alignment=256,
+            ),
+        ),
+    )
+    return InspectedModel(
+        source=str(model_path),
+        requested_revision=None,
+        resolved_revision=None,
+        is_local=True,
+        config={
+            "model_type": "qwen3_5_text",
+            "text_config": {
+                "num_hidden_layers": 24,
+                "layer_types": ["linear_attention"] * 18 + ["full_attention"] * 6,
+            },
+        },
+        inventory=inventory,
+    )
+
+
+def _qwen_inventory(
+    *,
+    num_layers,
+    hidden_size,
+    intermediate_size,
+    num_attention_heads,
+    num_key_value_heads,
+):
+    return SimpleNamespace(
+        num_layers=num_layers,
+        facts={
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_attention_heads": num_attention_heads,
+            "num_key_value_heads": num_key_value_heads,
+        },
+    )
+
+
+def _context():
+    return {
+        "model": SimpleNamespace(
+            inventory=SimpleNamespace(multimodal=False),
+        )
+    }
