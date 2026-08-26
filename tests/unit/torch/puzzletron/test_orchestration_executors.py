@@ -23,13 +23,13 @@ import pytest
 import yaml
 
 import puzzletron_orchestrator.adapters.sharded as sharded_module
+from modelopt.torch.puzzletron.distributed_eval.config import load_runtime_config
 from puzzletron_orchestrator.adapters.registry import adapter_for_stage
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
 )
-from puzzletron_orchestrator.config import load_experiment_config
 from puzzletron_orchestrator.executors.baremetal import BareMetalSSHExecutor
 from puzzletron_orchestrator.executors.local import LocalExecutor
 from puzzletron_orchestrator.executors.slurm import SlurmExecutor, render_sbatch_script
@@ -1196,22 +1196,22 @@ def test_replacement_pool_splits_workers_across_embedding_widths(tmp_path: Path)
     assert attempts[1].command.env["PUZZLE_DIR"].endswith("scenarios/width-1792/depth-00")
 
 
-def test_replacement_width_overrides_compose_with_base_config(tmp_path: Path):
+def test_replacement_width_overrides_reach_runtime_config(tmp_path: Path):
     _, _, attempts = _replacement_width_attempts(tmp_path, [2048])
     attempt = attempts[0]
 
-    config = load_experiment_config(
+    config = load_runtime_config(
         Path(__file__).parents[4] / "examples/puzzletron/configs/base.yaml",
         overrides=[
-            "++input_hf_model_path=tiny-model",
+            f"++input_hf_model_path={tmp_path / 'model'}",
             *attempt.command.env["DISTRIBUTED_EVAL_OVERRIDES"].splitlines(),
         ],
     )
 
     teacher = str(Path(attempt.command.env["PUZZLE_DIR"]) / "ckpts" / "sorted_teacher")
-    assert config["build_replacement_library"]["source_checkpoint_dir"] == teacher
-    assert config["replacement_scoring"]["source_checkpoint_dir"] == teacher
-    assert config["replacement_scoring"]["target_teacher_dir"] == teacher
+    assert config.build_replacement_library.source_checkpoint_dir == teacher
+    assert config.scoring.source_checkpoint_dir == teacher
+    assert config.scoring.target_teacher_dir == teacher
 
 
 def test_replacement_pool_completion_identity_changes_with_embedding_widths(tmp_path: Path):

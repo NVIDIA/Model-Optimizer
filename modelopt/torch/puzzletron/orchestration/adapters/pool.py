@@ -138,7 +138,7 @@ def _replacement_overrides(plan: CampaignPlan, puzzle_dir: Path) -> tuple[str, .
         f"convert.teacher_dir={teacher}",
         "bypass.enabled=false",
         f"replacement_library_path={puzzle_dir / 'replacement_library.json'}",
-        f"++build_replacement_library.source_checkpoint_dir={teacher}",
+        f"build_library.source_checkpoint_dir={teacher}",
         f"replacement_scoring.teacher_dir={teacher}",
         f"++replacement_scoring.source_checkpoint_dir={teacher}",
         f"++replacement_scoring.target_teacher_dir={teacher}",

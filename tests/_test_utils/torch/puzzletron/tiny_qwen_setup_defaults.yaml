@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The tiny model, dataset, result, checkout, and virtual-environment paths are
+# created per test and filled in by tiny_qwen_fixture.py before setup runs.
+schema_version: 1
+
+model:
+  source:
+  trust_remote_code: false
+  force_hf: false
+
+data:
+  source:
+  modality: text
+  layout: fixed
+  sequence_length: 32
+
+pruning:
+  depth_remove: 0
+  depth_importance_samples: 2
+  width_importance_samples: 2
+  replacement_samples: 2
+  sort_sanity: false
+  width_sanity: false
+  slicing_sanity: false
+  replacement_granularity: block
+  axes:
+    hidden_width:
+      values: [256]
+    kv_groups:
+      values: [2]
+    q_heads_per_group:
+      values: [2]
+    ffn_intermediate:
+      values: [768, 512, 256]
+    gdn_key_groups:
+      values: [2]
+    gdn_value_heads_per_group:
+      values: [2]
+    gdn_key_head_dim:
+      values: [8]
+    gdn_value_head_dim:
+      values: [8]
+  bypass:
+    enabled: false
+
+vllm:
+  enabled: false
+  prefill_seq_len: 32
+  generation_seq_len: 8
+  batch_size: 1
+  max_num_seqs: 1
+
+mip:
+  goal_metric: params
+  goal_value: 90%
+  num_solutions: 3
+
+stages:
+  width_importance:
+    batch: 1
+  replacement_scoring:
+    batch: 1
+    instances: 1
+
+output:
+  result_root:
+
+infrastructure:
+  gpus_per_node: 1
+  execution_contract:
+    repository:
+    venv:
+    container:
+    container_mounts:
+    prerun_commands: []
+    postrun_commands: []

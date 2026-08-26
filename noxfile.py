@@ -223,7 +223,45 @@ def gpu(session):
         "mamba_ssm",
         "causal-conv1d",
     )
-    session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "tests/gpu",
+        "--ignore=tests/gpu/torch/puzzletron/test_puzzletron.py",
+        *_cov_args(),
+    )
+
+
+# Container: dedicated Puzzletron v2 GPU image with the pinned ci_environment.json runtime.
+@nox.session(venv_backend="none")
+def gpu_puzzletron(session):
+    """Run the focused Puzzletron suite in its pinned one-GPU image."""
+    _verify_puzzletron_v2_environment(session)
+    session.run(
+        "python",
+        "-c",
+        (
+            "import torch; "
+            "assert torch.cuda.is_available(), 'Puzzletron GPU CI requires CUDA'; "
+            "assert torch.cuda.device_count() == 1, "
+            "f'Puzzletron GPU CI requires exactly one visible GPU, got {torch.cuda.device_count()}'; "
+            "assert torch.version.cuda == '12.9', "
+            "f'Puzzletron GPU CI requires CUDA 12.9, got {torch.version.cuda}'"
+        ),
+    )
+    session.run(
+        "python",
+        "-m",
+        "pytest",
+        "-o",
+        "addopts=",
+        (
+            "tests/gpu/torch/puzzletron/test_puzzletron.py::"
+            "test_tiny_qwen_campaign_uses_current_public_route"
+        ),
+        *_cov_args(),
+    )
 
 
 # Container: nvcr.io/nvidia/nemo:26.04 or later

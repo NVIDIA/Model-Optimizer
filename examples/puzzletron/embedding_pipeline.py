@@ -150,24 +150,24 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         "bypass.enabled=false",
         "embedding_pruning.enabled=false",
         f"replacement_library_path={scenario / 'replacement_library.json'}",
-        f"build_replacement_library.source_checkpoint_dir={teacher}",
-        "calc_subblock_stats.runtime_stats.execution=inline",
+        f"build_library.source_checkpoint_dir={teacher}",
+        "++vllm_stats.runtime_stats.execution=inline",
         f"replacement_scoring.teacher_dir={teacher}",
-        f"replacement_scoring.source_checkpoint_dir={teacher}",
-        f"replacement_scoring.target_teacher_dir={teacher}",
+        f"++replacement_scoring.source_checkpoint_dir={teacher}",
+        f"++replacement_scoring.target_teacher_dir={teacher}",
         f"replacement_scoring.solutions_path={scoring_solutions}",
         f"replacement_scoring.output_dir={scoring_output}",
-        f"vllm_stats_diagnostic.stats_path={scenario / 'subblock_stats.json'}",
-        f"vllm_stats_diagnostic.output_dir={scenario / 'artifacts/vllm_stats_diagnostic'}",
-        f"scoring_diagnostic.scores_dir={scoring_output}",
-        f"scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
+        f"++vllm_stats_diagnostic.stats_path={scenario / 'subblock_stats.json'}",
+        f"++vllm_stats_diagnostic.output_dir={scenario / 'artifacts/vllm_stats_diagnostic'}",
+        f"++scoring_diagnostic.scores_dir={scoring_output}",
+        f"++scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
     ]
     packed_token_cache_path = replacement_scoring.get("packed_token_cache_path")
     if packed_token_cache_path:
-        overrides.append(f"replacement_scoring.packed_token_cache_path={packed_token_cache_path}")
+        overrides.append(f"++replacement_scoring.packed_token_cache_path={packed_token_cache_path}")
     if scenario_manifest.get("bypass_checkpoint") is not None:
         overrides.append(
-            f"replacement_scoring.bypass_checkpoint_dir={scenario / 'ckpts' / 'bypass_overlay'}"
+            f"++replacement_scoring.bypass_checkpoint_dir={scenario / 'ckpts' / 'bypass_overlay'}"
         )
     return tuple(overrides)
 
