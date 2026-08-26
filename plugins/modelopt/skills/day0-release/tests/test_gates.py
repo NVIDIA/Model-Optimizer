@@ -186,10 +186,11 @@ def test_ptq_pass():
     assert evaluate_checkpoint(_ckpt())["pass"]
 
 
-def test_ptq_not_smaller():
-    """Size growth gets its own class: coverage may be perfect."""
+def test_ptq_not_smaller_is_a_note_not_a_failure():
+    """An already-4-bit source cannot shrink; warn without blocking the release."""
     r = evaluate_checkpoint(_ckpt(output_bytes=16_000_000_000))
-    assert not r["pass"] and r["failure_class"] == "SIZE_NOT_REDUCED"
+    assert r["pass"]
+    assert any("SIZE_NOT_REDUCED" in n for n in r["notes"])
 
 
 def test_ptq_coverage_failure_outranks_size():
@@ -263,10 +264,6 @@ def test_run_running_is_infra_transient():
     assert not r["pass"] and r["failure_class"] == "INFRA_TRANSIENT"
 
 
-if __name__ == "__main__":
-    sys.exit(__import__("pytest").main([__file__, "-q"]))
-
-
 # ── gate_verbosity ────────────────────────────────────────────────────
 
 
@@ -321,3 +318,27 @@ def test_verbosity_task_on_one_side_only():
 def test_verbosity_no_metrics_is_user_config_error():
     r = evaluate_verbosity({}, {})
     assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR"
+
+
+def test_verbosity_intersection_not_union_of_sample_counts():
+    """A count common to both sides must be used even if one side also has a larger run."""
+    r = evaluate_verbosity(
+        {"t": [(1000.0, 294), (1000.0, 200)]},
+        {"t": [(1010.0, 200)]},
+    )
+    assert r["per_task"]["t"]["status"] == "compared"
+    assert r["per_task"]["t"]["runs"] == [1, 1] and r["pass"]
+
+
+def test_verbosity_not_comparable_is_surfaced_not_masked():
+    """A passing task must not hide a sibling the gate could not measure."""
+    r = evaluate_verbosity(
+        {"ok": [(1000.0, 10)], "skip": [(100.0, 10)]},
+        {"ok": [(1005.0, 10)], "skip": [(100.0, 11)]},
+    )
+    assert r["pass"] and r["not_comparable"] == ["skip"]
+    assert "NOT MEASURED" in r["detail"]
+
+
+if __name__ == "__main__":
+    sys.exit(__import__("pytest").main([__file__, "-q"]))

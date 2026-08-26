@@ -78,7 +78,8 @@ def evaluate_checkpoint(summary):
     metadata_diffs = summary.get("metadata_diffs") or []
 
     checks = {}
-    failures = []  # (failure_class, detail)
+    failures = []
+    notes = []  # non-blocking observations
 
     # Check 1 — size.
     if not isinstance(src, (int, float)) or not isinstance(out, (int, float)) or src <= 0:
@@ -88,13 +89,15 @@ def evaluate_checkpoint(summary):
         ratio = out / src
         checks["size"] = f"{out}/{src} = {ratio:.3f}x"
         if ratio >= 1.0:
-            # Not a coverage failure: growth can be inherent. A source whose weights are
+            # Warning, not a failure. Growth can be inherent: a source whose weights are
             # already 4-bit (e.g. MXFP4 experts) cannot shrink under NVFP4 -- same E2M1
             # nibbles, but an E4M3 scale per 16 elements replaces an E8M0 per 32, so scale
             # bytes double. Published NVFP4 checkpoints exist that are ~1.06x their source.
-            # Release criteria measure reduction vs BF16, so this is a heuristic.
-            failures.append(
-                ("SIZE_NOT_REDUCED", f"output not smaller than source (ratio {ratio:.3f})")
+            # Release criteria measure reduction vs BF16, not vs the source checkpoint, so
+            # blocking here would stop a valid release with no defined path forward.
+            notes.append(
+                f"SIZE_NOT_REDUCED: output not smaller than source (ratio {ratio:.3f}); "
+                "confirm coverage passed and judge against the BF16 denominator"
             )
 
     # Check 2 — coverage.
@@ -142,22 +145,19 @@ def evaluate_checkpoint(summary):
             "failure_class": None,
             "detail": "size, coverage, and metadata all pass",
             "checks": checks,
+            "notes": notes,
         }
 
     # Surface the most actionable failure_class first: MODEL_UNSUPPORTED >
-    # QUANT_COVERAGE_FAILURE > SIZE_NOT_REDUCED > USER_CONFIG_ERROR.
-    order = [
-        "MODEL_UNSUPPORTED",
-        "QUANT_COVERAGE_FAILURE",
-        "SIZE_NOT_REDUCED",
-        "USER_CONFIG_ERROR",
-    ]
+    # QUANT_COVERAGE_FAILURE > USER_CONFIG_ERROR.
+    order = ["MODEL_UNSUPPORTED", "QUANT_COVERAGE_FAILURE", "USER_CONFIG_ERROR"]
     failures.sort(key=lambda f: order.index(f[0]) if f[0] in order else len(order))
     return {
         "pass": False,
         "failure_class": failures[0][0],
         "detail": "; ".join(d for _, d in failures),
         "checks": checks,
+        "notes": notes,
     }
 
 

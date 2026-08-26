@@ -38,7 +38,7 @@ Use this inside the top-level `evaluation.tasks` list:
         parallelism: 8
         extra:
           args: ++prompt_config=eval/scicode/default ++with_background=true
-          num_repeats: 1
+          num_repeats: 1 # exploratory only; raise for threshold gating (see above)
 ```
 
 ## Score Extraction from mlflow

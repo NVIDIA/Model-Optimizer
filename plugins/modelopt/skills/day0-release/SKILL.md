@@ -257,7 +257,6 @@ Map a gate's `failure_class` to the next action:
 | `INFRA_TRANSIENT` | Retry the stage once; if it recurs, `SYSTEMIC`. |
 | `MODEL_UNSUPPORTED` | PATCH: fix the recipe pattern / add model support (ptq skill owns the patch loop), then retry. If unpatchable, `POINT_INFEASIBLE`. |
 | `QUANT_COVERAGE_FAILURE` | PATCH: fix the recipe wildcard so intended layers are covered; re-run PTQ. |
-| `SIZE_NOT_REDUCED` | Not automatically a blocker. If coverage passed, the growth is likely inherent (already-4-bit source). Check the ratio against a published checkpoint in the same family, and judge against the BF16 denominator the release criteria actually use. |
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
@@ -266,6 +265,10 @@ Map a gate's `failure_class` to the next action:
 | `EXTERNAL_BASELINE_MISMATCH` | Investigate baseline configuration, correct it, rerun the baseline, and repeat external sanity before comparison. |
 | `USER_CONFIG_ERROR` | Correct it from the request, workspace, or model/config metadata and retry; if irrecoverable, return `ANOMALOUS` with evidence. |
 | `UNKNOWN` | Investigate with the owning domain skill; if unresolved, return `ANOMALOUS` with the evidence and next automated retry or patch action. |
+
+`gate_ptq.py` also emits non-blocking `notes`. `SIZE_NOT_REDUCED` is one: a source whose
+weights are already 4-bit cannot shrink, and the release criteria measure reduction against
+BF16, not the source checkpoint. Confirm coverage passed and judge on that denominator.
 
 `SYSTEMIC` (cluster down, dataset unavailable) aborts the whole run.
 `POINT_INFEASIBLE` means this (model, recipe) can't work as configured.

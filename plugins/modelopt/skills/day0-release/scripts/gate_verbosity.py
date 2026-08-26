@@ -34,6 +34,7 @@ import argparse
 import glob as globmod
 import json
 import os
+import re
 import statistics
 import sys
 
@@ -68,7 +69,10 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             per_task[task] = {"status": "not_comparable", "reason": "present on one side only"}
             continue
 
-        full = max(n for _, n in b_runs + c_runs)
+        # Largest sample count present on BOTH sides. Taking the max over the union would
+        # discard a genuinely comparable pair whenever one side also has a larger run.
+        common = {n for _, n in b_runs} & {n for _, n in c_runs}
+        full = max(common) if common else None
         b = [t for t, n in b_runs if n == full]
         c = [t for t, n in c_runs if n == full]
         dropped = (len(b_runs) - len(b)) + (len(c_runs) - len(c))
@@ -120,32 +124,59 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05):
             "max_abs_delta": None,
         }
     n_cmp = sum(1 for v in per_task.values() if v.get("status") == "compared")
+    skipped = [t for t, v in per_task.items() if v.get("status") == "not_comparable"]
+    detail = f"all {n_cmp} comparable task(s) within threshold {threshold}"
+    if skipped:
+        # Not a failure -- a task can be legitimately incomparable (different sample sets).
+        # But it must not be silently absorbed by a passing sibling: the gate is unmeasured
+        # for these, and the caller has to decide whether that is acceptable.
+        detail += f"; {len(skipped)} task(s) NOT MEASURED: {skipped}"
     return {
         "pass": True,
         "failure_class": None,
-        "detail": f"all {n_cmp} comparable task(s) within threshold {threshold}",
+        "detail": detail,
         "per_task": per_task,
+        "not_comparable": skipped,
         "max_abs_delta": round(worst, 4),
     }
 
 
 def harvest(side, glob="eval_*", exclude="_high"):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
-    out = {}
+    out, unreadable, excluded = {}, [], []
     pattern = os.path.join(side, glob, "*", "*", "artifacts", "eval_factory_metrics.json")
     for path in globmod.glob(pattern):
         parts = path.split(os.sep)
         if exclude and exclude in parts[-5]:
+            excluded.append(parts[-5])
             continue
-        task = parts[-3].rsplit(".", 1)[0].split(".", 1)[-1]
+        # Dir is "<harness>.<task>[.<run_index>]" -- the run index is optional, so strip it
+        # only when the trailing segment is numeric. Splitting blindly returns the harness
+        # for the index-less form, pooling every task under it into one mean.
+        name = parts[-3]
+        head, _, tail = name.rpartition(".")
+        if head and re.fullmatch(r"\d+", tail):
+            name = head
+        task = name.split(".", 1)[1] if "." in name else name
         try:
             with open(path) as f:
                 stats = json.load(f).get("response_stats", {})
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as e:
+            unreadable.append(f"{path}: {e}")
             continue
         tokens, count = stats.get("avg_completion_tokens"), stats.get("successful_count")
         if tokens and count:
             out.setdefault(task, []).append((tokens, count))
+    if excluded:
+        print(
+            f"note: excluded {len(excluded)} run dir(s) matching {exclude!r}: "
+            f"{sorted(set(excluded))}",
+            file=sys.stderr,
+        )
+    if unreadable:
+        print(f"warning: skipped {len(unreadable)} unreadable metrics file(s)", file=sys.stderr)
+        for u in unreadable:
+            print(f"  {u}", file=sys.stderr)
     return out
 
 

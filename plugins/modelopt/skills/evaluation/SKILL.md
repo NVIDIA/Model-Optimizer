@@ -179,7 +179,17 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 > `Invalid repository ID or local directory specified: '/checkpoint'`. Pre-staging into `HF_HOME`
 > does not help — that works for `from_pretrained`, not a mounted directory. Build a hardlink farm
 > (same filesystem, no extra space) and point at that:
-> `find "$SNAP" ! -type d -exec sh -c 'ln "$(readlink -f "$1")" "$DEST/$(basename "$1")"' _ {} \;`
+>
+> ```bash
+> find "$SNAP" ! -type d -exec sh -c '
+>   for f; do
+>     rel=${f#"$SNAP"/}; mkdir -p "$DEST/$(dirname "$rel")"
+>     ln -f "$(readlink -f "$f")" "$DEST/$rel"
+>   done' _ {} +
+> ```
+>
+> (`SNAP`/`DEST` must be **exported** — they are read inside a new shell — and the loop preserves
+> nested paths; `basename` would flatten subdirectories into one level.)
 > The same applies to ModelOpt exports whose `--source_ckpt` was a snapshot: the exporter preserves
 > symlinks, shipping a dangling `tokenizer.json`. Check with `find "$OUT" -type l` before serving.
 >
@@ -298,7 +308,9 @@ Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling 
 
 **`temperature` / `top_p` are different: per-task overrides ARE allowed and often required.** Cards often specify sampling per scenario — DeepSeek-V4-Pro-0813 gives `top_p = 0.95` for agentic scenarios and `1.0` otherwise, so a single top-level `0.95` is wrong for every non-agentic task.
 Set the top-level value for the majority case, override only the tasks the card calls out, and apply
-the split identically to baseline and candidate.
+the split identically to baseline and candidate. **The `export.mlflow` tags record only the
+top-level values**, so note any per-task override in the run `description` — otherwise the
+overridden task is reported under sampling params it did not use.
 
 #### `max_new_tokens` — mandatory model-card lookup
 

@@ -57,15 +57,19 @@ For MP=8 across two nodes use torchrun's ``--nnodes=2 --node_rank=<i>
 Calibration settings
 --------------------
 
-With ``--cast_mxfp4_to_nvfp4`` the expert weights are a lossless bit-cast, so the
+When the amax dumped here is later consumed by ``quantize_to_nvfp4.py
+--cast_mxfp4_to_nvfp4``, the expert weights are a lossless bit-cast, so the
 activation amax (``input_scale``) is the only calibrated quantity that survives:
 
-  * ``--calib_seq`` matters more than ``--calib_size``. The 512 default estimates
-    activation ranges on short sequences only; 4096 is what shipped for
-    DeepSeek-V4-Pro-0813 NVFP4, while raising sample count alone was worse.
+  * ``--calib_seq`` matters more than ``--calib_size``: it raises the tokenizer
+    truncation cap, so long documents survive intact instead of being cut at the
+    512 default. It is a *cap*, not a target -- rows shorter than it are not
+    extended, and ``calibrate_loop`` passes only ``input_ids``, so padding tokens
+    do participate in calibration.
 
-  * ``--mse_calibrate`` is a no-op here — it tunes weight quantizers only, and
-    the cast overwrites ``weight_scale`` afterwards.
+  * ModelOpt's ``mse_calibrate`` has no effect on this path — it tunes weight
+    quantizers only, and the MXFP4->NVFP4 cast overwrites ``weight_scale``
+    afterwards.
 """
 
 from __future__ import annotations
@@ -462,8 +466,8 @@ def main():
         type=int,
         default=512,
         help=(
-            "calibration sequence length (max_sample_length). Activation input_scale is estimated "
-            "at this length, so a short value may not cover long-context activation ranges."
+            "calibration sequence truncation cap (max_sample_length). Documents longer than this "
+            "are truncated, so a short value cannot cover long-context activation ranges."
         ),
     )
     p.add_argument(
