@@ -746,5 +746,33 @@ def test_task_name_block_is_bounded_by_indentation(tmp_path):
     assert _task_from_metadata(str(d)) == "only_this"
 
 
+def test_collapse_guard_exempts_bare_name_repeats(tmp_path):
+    """`ifbench` beside `ifbench.1` is one task being run-indexed, not two tasks."""
+    _mk_run(tmp_path, "ifbench")
+    _mk_run(tmp_path, "ifbench.1")
+    diag = {}
+    out = harvest(str(tmp_path), diagnostics=diag)
+    assert list(out) == ["ifbench"] and len(out["ifbench"]) == 2
+    assert "collapsed_keys" not in diag
+
+
+def test_ambiguous_file_does_not_veto_an_unambiguous_later_one(tmp_path):
+    """An invocation-wide metadata.yaml must not discard a per-task config.yml."""
+    d = _mk_run(tmp_path, "z.0", cfg=_CFG_ONE.format(n="real.task"), meta=_CFG_MANY)
+    assert _task_from_metadata(str(d)) == "real.task"
+
+
+def test_ptq_every_rejection_branch_points_at_the_reference():
+    """The bounded-claim branch quotes a bare number and needs the pointer most."""
+    huge = {"output_bytes": 32_000_000_000}
+    for kw in (
+        {"source_precision": "mxfp4"},
+        {"source_precision": "bf16"},
+        {"source_precision": "nonsense"},
+    ):
+        r = evaluate_checkpoint(_ckpt(**huge, **kw))
+        assert not r["pass"] and "checkpoint-validation.md" in r["detail"]
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

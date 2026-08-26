@@ -268,7 +268,10 @@ def _task_from_metadata(artifacts_dir):
         if len(names) == 1:
             return names[0].strip("\"'")
         if len(names) > 1:
-            return None
+            # Invocation-scoped file. Keep the verdict local to it: a later per-task
+            # file (config.yml lives under <harness>.<task>/artifacts/) can still
+            # answer unambiguously.
+            continue
     return None
 
 
@@ -332,10 +335,18 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     # like "<harness>.<task>": "h.task.1" + "h.task.2" are repeats of one task, whereas
     # "inv.0" + "inv.1" are distinct tasks of one invocation collapsing onto the
     # invocation id. Flagging repeats would make this mandatory gate unpassable.
+    # A key is a collapse only if the dirs behind it cannot be explained as repeats:
+    #   - a declared name is authoritative                       -> metadata_keys
+    #   - "<harness>.<task>" keys come from "<...>.<run_index>"   -> "." in k
+    #   - a dir equal to the key sits next to its own indexed
+    #     siblings ("ifbench" beside "ifbench.1"), which an
+    #     invocation id never does                                -> k in v
+    # What remains -- a dotless key with only indexed dirs -- is genuinely ambiguous
+    # from the names alone, so it blocks rather than risking a pooled mean.
     collapsed = {
         k: sorted(v)
         for k, v in source_dirs.items()
-        if len(v) > 1 and k not in metadata_keys and "." not in k
+        if len(v) > 1 and k not in metadata_keys and "." not in k and k not in v
     }
     if diagnostics is not None:
         if collapsed:

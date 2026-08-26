@@ -177,23 +177,29 @@ def evaluate_checkpoint(summary):
                     f"{source_precision!r} source; judge reduction against BF16"
                 )
             else:
-                why = (
-                    f"declared {source_precision!r} source explains at most {_INHERENT_GROWTH_MAX}x"
-                    if source_cannot_shrink
-                    else (
+                if source_cannot_shrink:
+                    why = (
+                        f"declared {source_precision!r} source explains at most "
+                        f"{_INHERENT_GROWTH_MAX}x"
+                    )
+                elif bits_known:
+                    why = (
                         f"declared {source_precision!r} source should compress under this "
                         "recipe, so growth is not explained"
-                        if bits_known
-                        else (
-                            f"source_precision={source_precision or None!r} is not a "
-                            "recognised precision token"
-                            if tgt_bits is not None
-                            else f"recipe {recipe!r} has no known target precision, so "
-                            "growth cannot be assessed"
-                        )
-                        + " (see ptq/references/checkpoint-validation.md)"
                     )
-                )
+                elif tgt_bits is not None:
+                    why = (
+                        f"source_precision={source_precision or None!r} is not a recognised "
+                        "precision token"
+                    )
+                else:
+                    why = (
+                        f"recipe {recipe!r} has no known target precision, so growth "
+                        "cannot be assessed"
+                    )
+                # Every branch points at the reference: the bounded-claim branch quotes a
+                # bare number, which is the one an operator is most likely to question.
+                why += " (see ptq/references/checkpoint-validation.md)"
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
 
     # Check 2 — coverage.

@@ -229,7 +229,11 @@ python "$SKILL_DIR/scripts/gate_verbosity.py" \
 ```
 
 Exit codes follow the other gates: `0` pass, `1` the gate failed, `2` it could not read its input.
-A `2` means fix the invocation, not the checkpoint.
+A `2` means fix the invocation, not the checkpoint — check `--baseline`/`--candidate`, `--glob`
+(`no_files_matched` names the pattern that missed), and `--exclude`. If the detail names
+`collapsed_keys`, the artifact tree gave several tasks one name: point the gate at a tree whose
+task dirs are `<harness>.<task>` rather than `<invocation_id>.<job_index>`, or re-sync so each
+`artifacts/` carries its own `config.yml`.
 
 Read `response_stats.avg_completion_tokens` from each task's
 `artifacts/eval_factory_metrics.json`. Do **not** use the `reasoning.*` fields:
