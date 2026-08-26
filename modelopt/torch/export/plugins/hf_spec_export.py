@@ -406,6 +406,25 @@ class DFlashExporter(SpeculativeDecodingExporter):
             "num_target_layers": base_config.num_hidden_layers,
         }
 
+        # Carry the DRAFT's non-default RoPE type. rope_theta alone is not enough for
+        # Gemma 4: its full_attention kind uses rope_type "proportional" with
+        # partial_rotary_factor, which rotates only a fraction of the head dim and leaves
+        # the rest as NoPE. Emitting just the theta makes any consumer (vLLM, the AL
+        # harness) rebuild plain default rope and rotate every channel, silently
+        # disagreeing with how the draft was trained.
+        _draft_rope = getattr(draft_config, "rope_parameters", None)
+        if isinstance(_draft_rope, dict):
+            if any(isinstance(v, dict) for v in _draft_rope.values()):
+                # Nested per-attention-kind form; a draft is single-kind by construction.
+                _draft_rope = next(v for v in _draft_rope.values() if isinstance(v, dict))
+            _rope_type = _draft_rope.get("rope_type")
+            if _rope_type and _rope_type != "default":
+                config["rope_type"] = _rope_type
+                if "partial_rotary_factor" in _draft_rope:
+                    config["partial_rotary_factor"] = _draft_rope["partial_rotary_factor"]
+                if _draft_rope.get("rope_theta") is not None:
+                    config["rope_theta"] = _draft_rope["rope_theta"]
+
         # Add layer_types if present (Qwen3-style)
         if hasattr(draft_config, "layer_types"):
             config["layer_types"] = draft_config.layer_types
