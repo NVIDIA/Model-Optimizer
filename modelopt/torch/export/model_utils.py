@@ -18,6 +18,8 @@ import warnings
 
 import torch.nn as nn
 
+from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
+
 MODEL_NAME_TO_TYPE = {
     "GPT2": "gpt",
     "Mllama": "mllama",
@@ -152,6 +154,23 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     # Pattern 4: No language_model found
     return None
+
+
+def get_export_units(model):
+    """Split the model into the module groups that can be exported independently.
+
+    One group per decoder layer, plus a final group of the weight-owning modules outside any layer
+    (embeddings, lm_head, norm). Every rank builds the same list in the same order, so ranks can
+    divide the groups between them without communicating.
+    """
+    decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
+    in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
+    root_leaves = [
+        m
+        for m in model.modules()
+        if id(m) not in in_layer and next(m.parameters(recurse=False), None) is not None
+    ]
+    return [[layer] for layer in decoder_layers] + [root_leaves]
 
 
 class TiedWeightMap:
