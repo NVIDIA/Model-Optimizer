@@ -24,6 +24,10 @@ Generated bundles write their selected `puzzle_dir` directly. In both cases,
 `puzzle_dir` is the canonical location for artifacts, manifests, controller
 state, and logs unless `runner.slurm.log_dir` relocates attempt logs.
 
+Run the orchestrator with `--dry-run` after any configuration change. It
+resolves and validates the experiment, runner, and execution files before job
+submission, so misspelled or misplaced fields fail at the command boundary.
+
 ## Command-line overrides
 
 Use command-line overrides for temporary experiment value changes. Append a
