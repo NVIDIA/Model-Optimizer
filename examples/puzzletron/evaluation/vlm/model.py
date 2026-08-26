@@ -23,11 +23,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["SOURCE_MODEL_REVISION", "verify_checkpoint"]
+__all__ = ["verify_checkpoint"]
 
 _MODEL_TYPE = "qwen3_5"
 _ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
-SOURCE_MODEL_REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
 _TEXT_GEOMETRY = {
     "hidden_size": 1024,
     "intermediate_size": 3584,

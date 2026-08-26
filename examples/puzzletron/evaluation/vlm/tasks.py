@@ -384,7 +384,7 @@ def prepare(
         _write_quick_selection_module(tasks_root, quick_manifest)
     if suite == "mmvu-smoke":
         _write_mmvu_smoke_selection_module(tasks_root)
-    if "mmvu_val" in source_tasks:
+    if suite == "full":
         _write_mmvu_guard(tasks_root)
     if set(source_tasks) & {"videomme", "perceptiontest_val_mc"}:
         _write_video_path_adapter(tasks_root)
@@ -481,6 +481,6 @@ def _write_single_task(
         generation_kwargs=suites.generation_kwargs(task),
         doc_to_visual=doc_to_visual,
         process_docs=process_docs,
-        process_results="process_results" if task == "mmvu_val" else None,
+        process_results="process_results" if suite == "full" and task == "mmvu_val" else None,
     )
     return configured_task

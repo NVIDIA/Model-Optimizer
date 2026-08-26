@@ -22,6 +22,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from typing import TypedDict
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import profile
@@ -39,7 +40,10 @@ __all__ = [
     "SINGLE_TASK_SMOKE_SUITES",
     "SMOKE_SUITES",
     "VIDEO_MMMU_LEAF_TASKS",
-    "dataset_revisions",
+    "ExecutionPolicy",
+    "FramePolicy",
+    "GenerationPolicy",
+    "execution_policy",
     "generation_kwargs",
     "load_quick_manifest",
     "manifest_sha256",
@@ -99,6 +103,32 @@ DEFAULT_SMOKE_TIMEOUT_SECONDS = 3_000.0
 DEFAULT_FULL_TIMEOUT_SECONDS = 24 * 60 * 60.0
 
 
+class FramePolicy(TypedDict):
+    """Frame sampling fields shared by provenance and execution."""
+
+    reader: str
+    fps: int
+    max_frames: int
+
+
+class GenerationPolicy(TypedDict):
+    """Generation fields shared by provenance and execution."""
+
+    enable_thinking: bool
+    temperature: int
+    do_sample: bool
+
+
+class ExecutionPolicy(TypedDict):
+    """Resolved execution fields for one suite invocation."""
+
+    frame: FramePolicy
+    generation: GenerationPolicy
+    limit: int | None
+    repetitions: int
+    timeout_seconds: float
+
+
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
     if suite == "short":
@@ -114,15 +144,28 @@ def source_tasks(suite: str) -> tuple[str, ...]:
     raise ValueError(f"unsupported VLM benchmark suite: {suite}")
 
 
+def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionPolicy:
+    """Resolve the provenance and runtime execution fields for one suite."""
+    source_tasks(suite)
+    is_smoke = suite in SMOKE_SUITES
+    default_timeout_seconds = (
+        DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
+    )
+    return {
+        "frame": {"reader": "torchcodec", "fps": 2, "max_frames": 32},
+        "generation": {"enable_thinking": False, "temperature": 0, "do_sample": False},
+        "limit": 8 if is_smoke else None,
+        "repetitions": 2 if suite == "short" else 1,
+        "timeout_seconds": (
+            timeout_seconds if timeout_seconds is not None else default_timeout_seconds
+        ),
+    }
+
+
 def task_name(task: str, *, leaf: str | None = None) -> str:
     """Return the generated task name for one upstream task or leaf."""
     suffix = f"_{leaf}" if leaf is not None else ""
     return f"modelopt_vlm_benchmark_{task}{suffix}"
-
-
-def dataset_revisions(tasks: tuple[str, ...]) -> dict[str, str]:
-    """Return the pinned dataset revisions for a suite's source tasks."""
-    return {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in tasks}
 
 
 def load_quick_manifest(path: Path | None) -> dict[str, object]:

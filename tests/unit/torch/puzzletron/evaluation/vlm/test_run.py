@@ -160,7 +160,7 @@ def test_short_profile_materializes_pinned_tasks_and_qwen_backend(monkeypatch, t
         )
         return {"attempt": len(calls), "output_root": str(output_root)}
 
-    monkeypatch.setattr(evaluation, "run_lmms_eval_checkpoint", fake_runner)
+    monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
     argv = [
         "--checkpoint",
         str(model),
@@ -207,6 +207,48 @@ def test_short_profile_materializes_pinned_tasks_and_qwen_backend(monkeypatch, t
     assert settings["checkpoint_arg"] == "pretrained"
     assert "topology" not in settings
     assert settings["env"]["HF_HUB_OFFLINE"] == "1"
+    assert report["sample_limit"] == settings["limit"]
+    assert report["timeout_seconds"] == settings["timeout_seconds"]
+    assert report["frame_policy"] == {
+        "reader": settings["env"]["FORCE_QWENVL_VIDEO_READER"],
+        "fps": settings["model_args"]["fps"],
+        "max_frames": settings["model_args"]["max_frames"],
+    }
+    assert report["generation_policy"] == {
+        "enable_thinking": settings["model_args"]["enable_thinking"],
+        **settings["gen_kwargs"],
+    }
+
+
+def test_mmvu_guard_is_limited_to_full_suite(tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+
+    tasks_root, configured_tasks = tasks.prepare(
+        tmp_path / "results",
+        suite="mmvu-smoke",
+        dataset_snapshots={"mmvu_val": snapshot},
+        quick_manifest=None,
+    )
+
+    assert configured_tasks == ("modelopt_vlm_benchmark_mmvu_val",)
+    assert not (tasks_root / "modelopt_mmvu_guard.py").exists()
+    generated = (tasks_root / "modelopt_vlm_benchmark_mmvu_val.yaml").read_text()
+    assert "\nprocess_results:" not in generated
+    assert (
+        "process_docs: !function "
+        "modelopt_quick_selection.select_modelopt_vlm_benchmark_mmvu_val\n" in generated
+    )
+
+    full_root, _ = tasks.prepare(
+        tmp_path / "full-results",
+        suite="full",
+        dataset_snapshots=dict.fromkeys(profile.VLM_BENCHMARK_TASKS, snapshot),
+        quick_manifest=None,
+    )
+    assert (full_root / "modelopt_mmvu_guard.py").is_file()
+    full_generated = (full_root / "modelopt_vlm_benchmark_mmvu_val.yaml").read_text()
+    assert "\nprocess_results: !function modelopt_mmvu_guard.process_results\n" in full_generated
 
 
 def test_quick_manifest_requires_exact_pins_counts_and_leaf_balance(tmp_path):
@@ -369,9 +411,6 @@ def test_profile_contract_pins_every_task_and_revision():
         "perceptiontest_val_mc",
     )
     assert all(len(item.revision) == 40 for item in profile.VLM_BENCHMARK_DATASETS.values())
-    assert set(suites.dataset_revisions(profile.VLM_BENCHMARK_TASKS)) == set(
-        profile.VLM_BENCHMARK_TASKS
-    )
 
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():

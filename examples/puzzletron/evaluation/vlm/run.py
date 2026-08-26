@@ -29,8 +29,6 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from examples.puzzletron.evaluation import checkpoint  # noqa: E402
 from examples.puzzletron.evaluation.vlm import preflight, suites, tasks  # noqa: E402
 
-run_lmms_eval_checkpoint = checkpoint.run_lmms_eval_checkpoint
-
 
 def _checkpoint_directory(value: str) -> Path:
     checkpoint_path = Path(value).expanduser().absolute()
@@ -152,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             configured_tasks=configured_tasks,
             prepared=prepared,
         )
-        repetitions = 2 if prepared.suite == "short" else 1
+        repetitions = prepared.execution_policy["repetitions"]
         runs = []
         with checkpoint.without_huggingface_credentials():
             for repetition in range(1, repetitions + 1):
@@ -160,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                 if repetitions > 1:
                     output_root = output_root / f"short-repetition-{repetition}"
                 runs.append(
-                    run_lmms_eval_checkpoint(
+                    checkpoint.run_lmms_eval_checkpoint(
                         args.checkpoint,
                         output_root=output_root,
                         settings=settings,

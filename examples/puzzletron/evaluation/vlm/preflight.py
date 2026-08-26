@@ -36,11 +36,11 @@ class PreparedSuite:
     """Validated local inputs and policy for one VLM suite execution."""
 
     suite: str
-    source_tasks: tuple[str, ...]
     dataset_snapshots: dict[str, Path]
     quick_manifest: dict[str, object] | None
     hf_home: Path
     judge_env: dict[str, str]
+    execution_policy: suites.ExecutionPolicy
     report: dict[str, object]
 
 
@@ -50,7 +50,8 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
-    revisions = suites.dataset_revisions(source_tasks)
+    execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
+    revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
     quick_manifest = suites.load_quick_manifest(args.quick_manifest) if suite == "quick" else None
     if suite != "quick" and args.quick_manifest is not None:
         raise ValueError("--quick-manifest is valid only for the quick suite")
@@ -76,14 +77,15 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         hf_home=hf_home,
         judge_policy=judge_policy,
         lmms_eval_revision=lmms_eval_revision,
+        execution_policy=execution_policy,
     )
     return PreparedSuite(
         suite=suite,
-        source_tasks=source_tasks,
         dataset_snapshots=dataset_snapshots,
         quick_manifest=quick_manifest,
         hf_home=hf_home,
         judge_env=judge_env,
+        execution_policy=execution_policy,
         report=report,
     )
 
@@ -164,23 +166,21 @@ def _report(
     hf_home: Path,
     judge_policy: dict[str, object] | None,
     lmms_eval_revision: str,
+    execution_policy: suites.ExecutionPolicy,
 ) -> dict[str, object]:
     return {
         "profile": suites.EVALUATION_PROFILE,
         "suite": suite,
         "checkpoint": str(args.checkpoint),
-        "expected_source_model_revision": model.SOURCE_MODEL_REVISION,
         "lmms_eval_revision": lmms_eval_revision,
         "source_tasks": list(source_tasks),
         "dataset_revisions": revisions,
         "dataset_snapshots": {task: str(snapshot) for task, snapshot in dataset_snapshots.items()},
         "hf_home": str(hf_home),
-        "frame_policy": {"reader": "torchcodec", "fps": 2, "max_frames": 32},
-        "generation_policy": {
-            "enable_thinking": False,
-            "temperature": 0,
-            "do_sample": False,
-        },
+        "frame_policy": execution_policy["frame"],
+        "generation_policy": execution_policy["generation"],
+        "sample_limit": execution_policy["limit"],
+        "timeout_seconds": execution_policy["timeout_seconds"],
         "quick_selected_rows": 344 if suite == "quick" else None,
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
@@ -188,7 +188,7 @@ def _report(
         "quick_manifest_sha256": (
             suites.manifest_sha256(quick_manifest) if quick_manifest is not None else None
         ),
-        "short_repetitions": 2 if suite == "short" else None,
+        "short_repetitions": execution_policy["repetitions"] if suite == "short" else None,
         "judge_policy": judge_policy,
         "network_policy": "offline_cached_data_only",
     }
@@ -202,25 +202,28 @@ def settings(
     prepared: PreparedSuite,
 ) -> dict[str, object]:
     """Build shared runner settings for a validated VLM suite."""
-    timeout_seconds = args.timeout_seconds
-    if timeout_seconds is None:
-        timeout_seconds = (
-            suites.DEFAULT_SMOKE_TIMEOUT_SECONDS
-            if prepared.suite in suites.SMOKE_SUITES
-            else suites.DEFAULT_FULL_TIMEOUT_SECONDS
-        )
+    execution_policy = prepared.execution_policy
+    frame_policy = execution_policy["frame"]
+    generation_policy = execution_policy["generation"]
     return {
         "model": "qwen3_5",
         "checkpoint_arg": "pretrained",
         "tasks": ",".join(configured_tasks),
-        "limit": 8 if prepared.suite in suites.SMOKE_SUITES else None,
+        "limit": execution_policy["limit"],
         "batch_size": args.batch_size,
         "seed": args.seed,
-        "timeout_seconds": timeout_seconds,
-        "model_args": {"enable_thinking": False, "fps": 2, "max_frames": 32},
-        "gen_kwargs": {"temperature": 0, "do_sample": False},
+        "timeout_seconds": execution_policy["timeout_seconds"],
+        "model_args": {
+            "enable_thinking": generation_policy["enable_thinking"],
+            "fps": frame_policy["fps"],
+            "max_frames": frame_policy["max_frames"],
+        },
+        "gen_kwargs": {
+            "temperature": generation_policy["temperature"],
+            "do_sample": generation_policy["do_sample"],
+        },
         "env": {
-            "FORCE_QWENVL_VIDEO_READER": "torchcodec",
+            "FORCE_QWENVL_VIDEO_READER": frame_policy["reader"],
             "HF_DATASETS_OFFLINE": "1",
             "HF_HOME": str(prepared.hf_home),
             "HF_HUB_OFFLINE": "1",

@@ -40,6 +40,7 @@ REPOSITORY_ROOT = Path(__file__).absolute().parents[5]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from examples.puzzletron.evaluation import checkpoint  # noqa: E402
 from examples.puzzletron.evaluation.vlm import profile  # noqa: E402
 
 if TYPE_CHECKING:
@@ -631,13 +632,6 @@ def _prepare(hf_home: Path, task: str, snapshot: Path) -> dict[str, object]:
     return report
 
 
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive")
-    return parsed
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hf-home", required=True, type=Path)
@@ -650,7 +644,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--download-only", action="store_true")
     mode.add_argument("--extract-only", action="store_true")
-    parser.add_argument("--max-workers", type=_positive_int, default=8)
+    parser.add_argument("--max-workers", type=checkpoint.positive_int, default=8)
     parser.add_argument(
         "--range-resume",
         action="store_true",

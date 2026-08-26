@@ -36,7 +36,6 @@ __all__ = [
     "HUGGINGFACE_CREDENTIAL_NAMES",
     "LMMS_EVAL_REVISION",
     "credential_free_environment",
-    "load_runner",
     "positive_float",
     "positive_int",
     "run_lmms_eval_checkpoint",
@@ -67,7 +66,7 @@ def _load_source_module(name: str, relative_path: str) -> ModuleType:
     return module
 
 
-def load_runner() -> Callable[..., dict[str, object]]:
+def _load_runner() -> Callable[..., dict[str, object]]:
     """Load the narrow evaluator without importing unrelated ModelOpt plugins."""
     for package, relative_path in (
         ("modelopt", "modelopt"),
@@ -100,7 +99,7 @@ def load_runner() -> Callable[..., dict[str, object]]:
 
 def run_lmms_eval_checkpoint(*args, **kwargs) -> dict[str, object]:
     """Load the ModelOpt runner only when an evaluation is actually executed."""
-    return load_runner()(*args, **kwargs)
+    return _load_runner()(*args, **kwargs)
 
 
 def positive_int(value: str) -> int:
