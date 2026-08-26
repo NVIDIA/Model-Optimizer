@@ -58,8 +58,8 @@ tasks). If the user asks for GDPVal:
 
 1. Read **`references/gym-gdpval.md`** (Apptainer SIF sandbox, gym prepare/reap
    machinery, deploy sizing, rubric-vs-comparison scoring, MLflow deliverables trap,
-   failure modes) + **`recipes/tasks/aa_gym/gdpval.md`**.
-2. Start from **`recipes/examples/gym_gdpval/example_gym_gdpval.yaml`** — a single
+   failure modes) + **`recipes/tasks/gym/gdpval.md`**.
+2. Start from **`recipes/examples/gym/example_gdpval.yaml`** — a single
    self-contained file.
 3. Prerequisite — the Apptainer SIF. **If your site provides one, use it**
    (NVIDIA-internal: `modelopttools:eval-config` Step 3c); otherwise set
@@ -80,6 +80,33 @@ tasks). If the user asks for GDPVal:
 
 ---
 
+### MRCR (NeMo Gym `simple_agent`) path — branch here too
+
+A 0.2.6 `nemo_gym` task like GDPVal and equally **standalone**, but far simpler:
+`simple_agent`, **no SIF, no judge, no Tavily** — deterministic prefix-gated
+grading, `HF_TOKEN` the only secret. **Not an AA benchmark** — never generate it
+for an "AA" request. If the user asks for MRCR:
+
+1. Read **`recipes/tasks/gym/mrcr.md`**; start from
+   **`recipes/examples/gym/example_mrcr.yaml`** (1M variant, like the golden).
+2. **Pick the variant first** (`config_n3_1m` / `config_n3_128k` / `config`) — it
+   sets the context cap, dataset *and* metric prefix; the three are not
+   comparable; set it in **both** `data_prep_params` and `collect_rollout_params`.
+3. `.env`: `HF_TOKEN` (dataset + n3 tokenizer are gated) plus
+   `NEMO_EVALUATOR_TRUST_PRE_CMD=1` (the `pre_cmd` installs `tiktoken` +
+   `transformers`; prepare fails without it) and
+   `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` (`nemo_gym` is not in the FDF map).
+4. **MRCR needs a git-backed Gym image.** The pin is newer than any image's baked
+   Gym and must apply, so the template's `container:` is `???` and the bootstrap
+   exits 1 on a non-git `/opt/Gym` (the public `eval-factory/nemo-gym:*` images).
+   NVIDIA-internal: `modelopttools:eval-config` Step 3d names a working image.
+5. Long-context deploy (`--max-model-len 1100000` +
+   `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`, `gpu_memory_utilization: 0.95`,
+   multi-instance fan-out); **never cap output tokens**; report the needle-count
+   strata alongside `pass@1/accuracy`.
+
+---
+
 ### Step 1 — Prerequisites
 
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
@@ -93,9 +120,14 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
 - AA Index v2 suite (default for quantized-checkpoint validation, see `references/quantization-benchmarks.md`): `recipes/tasks/aa/{gpqa_diamond,hle,lcr,scicode,ifbench,mmmu_pro,tau2_bench_telecom,omniscience}.md`
 - Optional: `recipes/tasks/mmlu_pro.md`, `recipes/tasks/aime_2025.md`, `recipes/tasks/livecodebench.md`
 - **nel-next only** (different evaluator — see the nel-next section below, NOT the 0.2.6 steps): shared reference `references/nel-next.md` + per-benchmark recipes `recipes/tasks/aa_next/{terminal_bench_2_1,swebench_verified}.md` (agentic). The `aa_next/` dir holds tasks that require `nemo-evaluator[harbor]` 0.4.x (the package; `nemo-evaluator-next` is the eval *image* repo); `aa/` is the 0.2.6 suite.
-- **GDPVal (NeMo Gym / agentic)** — **part of the AA suite** but a 0.2.6 `nemo_gym` task on a different harness, so it's **standalone** (see the GDPVal branch above): recipe `recipes/tasks/aa_gym/gdpval.md` + shared reference `references/gym-gdpval.md` + self-contained example `recipes/examples/gym_gdpval/`. Generated as its **own config** from the example, **never merged into the `aa/` multi-task `tasks` list**. The `aa_gym/` dir holds the NeMo Gym Stirrup-agent tasks.
+- **NeMo Gym tasks** — `recipes/tasks/gym/*.md`, with self-contained examples at `recipes/examples/gym/example_<task>.yaml`. The `gym/` dir groups by **harness** (0.2.6 `nemo_gym`), **not** by suite membership, so read AA membership per task from the table below — never from the path. Every gym task is **standalone**: generated as its own config from its example, one gym eval per config, **never merged into the `aa/` multi-task `tasks` list** and never mixed with each other.
 
-**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/aa_gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
+  | Task | Recipe / example | In AA suite? | Generate when |
+  | --- | --- | --- | --- |
+  | **GDPVal** (Stirrup agent, agentic) | `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `recipes/examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
+  | **MRCR** (simple agent, long-context) | `recipes/tasks/gym/mrcr.md`, `recipes/examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
+
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
 
 **Shortcut path** (when task list is known up front, e.g. "run AA"):
 
@@ -242,13 +274,16 @@ nemo_evaluator_config:
 
 Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling everywhere.
 
+**Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
+
 #### `max_new_tokens` — mandatory model-card lookup
 
 1. **Fetch the HF model card before writing the value.** Not optional.
 2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
-3. If the card is genuinely silent after a thorough read, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
-4. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
-5. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
+3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
+4. If the card is genuinely silent after a thorough read **and** the family table offers no usable pattern, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
+5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
+6. **A higher cap doesn't fix runaway reasoning.** On hard tasks (e.g. HLE) a non-terminating model just rambles to the larger cap (~80% length-capped at 131072), and the cap only helps if deployment `--max-model-len > prompt + max_new_tokens` (else generation is silently clipped — AA-LCR's ~120K input leaves little room). Treat such tasks as low-confidence.
 
 #### Quantization-aware benchmark defaults
 

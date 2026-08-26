@@ -245,6 +245,16 @@ class _QuantTEGroupedLinear(_ParallelLinear):
             if weight_i is not None:
                 yield weight_i, (self.weight_quantizer[i] if grouped else self.weight_quantizer)
 
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold each grouped weight with its corresponding fake-quant quantizer."""
+        quantizer_weights: dict[TensorQuantizer, list[torch.Tensor]] = {}
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if isinstance(quantizer, TensorQuantizer) and quantizer.fake_quant:
+                quantizer_weights.setdefault(quantizer, []).append(weight)
+
+        for quantizer, weights in quantizer_weights.items():
+            self._fold_weight_quantizer(quantizer, weights, keep_attrs)
+
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
         _assert_te_fp8_enabled()
