@@ -114,19 +114,18 @@ dependencies. The `NeMo container catalog <https://catalog.ngc.nvidia.com/orgs/n
 lists the latest available image; the commands below use ``nvcr.io/nvidia/nemo:26.08``.
 Run them on a host with NVIDIA GPUs and Docker configured for GPU access.
 
-From the Model Optimizer repository root, prepare a directory for checkpoints and
-Hugging Face caches, then start an interactive container. Replace ``$HF_TOKEN`` with
-a token that can read the selected model and dataset.
+Prepare a directory for checkpoints and Hugging Face caches, then start an
+interactive container. Replace ``$HF_TOKEN`` with a token that can read the selected
+model and dataset. The default command uses the Model Optimizer version bundled in
+the container; it does not overlay a host checkout.
 
 .. code-block:: bash
 
-    export MODELOPT_DIR="$PWD"
     export QAT_WORK_DIR="$PWD/qat-qad-work"
     mkdir -p "$QAT_WORK_DIR/hf-cache"
 
     docker run --rm -it --gpus all --shm-size=16g --net=host --ulimit memlock=-1 \
         -e HF_TOKEN="$HF_TOKEN" \
-        -v "$MODELOPT_DIR":/opt/Model-Optimizer \
         -v "$QAT_WORK_DIR":/workspace \
         -v "$QAT_WORK_DIR/hf-cache":/root/.cache/huggingface \
         -w /opt/Model-Optimizer \
@@ -137,6 +136,16 @@ the token was not provided through the environment. The mounted ``/workspace``
 directory preserves checkpoints after the container exits. The examples below use a
 small Qwen model and one GPU to demonstrate the command shape; increase the GPU
 count and choose TP, PP, CP, and EP to fit the target model and sequence length.
+
+To use a Model Optimizer version newer than the one bundled in the container, overlay
+your checkout explicitly by adding this mount to the ``docker run`` command:
+
+.. code-block:: bash
+
+    -v "$PWD":/opt/Model-Optimizer
+
+Use the overlay only when needed for newer source changes; otherwise retain the
+container's tested Model Optimizer installation.
 
 Megatron-Bridge
 ---------------
