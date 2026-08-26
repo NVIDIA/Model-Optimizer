@@ -1504,6 +1504,23 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
+def _revert_quant_config_names_best_effort(model: nn.Module, hf_quant_config: dict | None) -> None:
+    """Rename the quant config's module references back to their original checkpoint names.
+
+    Best-effort: on failure the config keeps the in-memory names and export continues, matching
+    what the weights do.
+    """
+    try:
+        name_mapper = build_reverse_name_mapper(model)
+        if name_mapper is not None and hf_quant_config:
+            revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+    except Exception as exc:
+        warnings.warn(
+            f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+            "names may not match the original HF hub checkpoint."
+        )
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1589,19 +1606,8 @@ def export_hf_checkpoint(
             )
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
-            try:
-                name_mapper = build_reverse_name_mapper(model)
-                if name_mapper is not None and hf_quant_config:
-                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
-            except Exception as exc:
-                warnings.warn(
-                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                    "names may not match the original HF hub checkpoint."
-                )
-            _write_hf_export_config(model, hf_quant_config, export_dir)
-            return
-
-        if is_distributed:
+            _revert_quant_config_names_best_effort(model, hf_quant_config)
+        elif is_distributed:
             # FSDP2 multi-rank: stream each rank's owned units straight to its own shard files, so
             # a rank holds one unit at a time rather than its whole share of the model, and the
             # writes run concurrently. Every rank must call this -- it unshards collectively.
@@ -1620,70 +1626,61 @@ def export_hf_checkpoint(
             if rank == 0:
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
                     torch.save(modelopt_state(model), export_dir / "modelopt_state.pth")
-                try:
-                    name_mapper = build_reverse_name_mapper(model)
-                    if name_mapper is not None and hf_quant_config:
-                        revert_quant_config_names(
-                            hf_quant_config.get("quantization", {}), name_mapper
-                        )
-                except Exception as exc:
-                    warnings.warn(
-                        f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                        "names may not match the original HF hub checkpoint."
-                    )
-                _write_hf_export_config(model, hf_quant_config, export_dir)
-            return
-
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype, **kwargs)
-
-        # Remove hf_quantizer from model so post_state_dict can be exported.
-        if getattr(model, "hf_quantizer", None) is not None:
-            model.hf_quantizer = None
-
-        # extra_state_dict (e.g. MTP) is not part of any rank's shard, so rank 0 carries it.
-        export_state_dict = dict(post_state_dict)
-        if extra_state_dict and rank == 0:
-            export_state_dict.update(extra_state_dict)
-
-        # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
-        # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
-        # differ from the original hub checkpoint. Reverse it quantization-aware so exported
-        # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
-        # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
-        # do it here. The same rename is applied to the quant-config module references
-        # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
-        # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
-        # and fails). Best-effort: any failure (an op we cannot reverse yet, transformers API
-        # drift, unexpected shapes) falls back to the in-memory names.
-        try:
-            name_mapper = build_reverse_name_mapper(model)
-            export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
-            if name_mapper is not None and hf_quant_config:
-                revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
-        except Exception as exc:
-            warnings.warn(
-                f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
-                "names may not match the original HF hub checkpoint."
+                _revert_quant_config_names_best_effort(model, hf_quant_config)
+        else:
+            post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+                model, dtype, **kwargs
             )
 
-        _sanitize_generation_config_for_save(model)
+            # Remove hf_quantizer from model so post_state_dict can be exported.
+            if getattr(model, "hf_quantizer", None) is not None:
+                model.hf_quantizer = None
 
-        # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
-        # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
-        # scale tensors). Patch both the source and importing module since modeling_utils does
-        # `from core_model_loading import revert_weight_conversion`.
-        _patches = _patch_revert_weight_conversion()
-        try:
-            model.save_pretrained(
-                export_dir,
-                state_dict=export_state_dict,
-                save_modelopt_state=save_modelopt_state,
-                max_shard_size=max_shard_size,
-            )
-        finally:
-            _unpatch_revert_weight_conversion(_patches)
+            # extra_state_dict (e.g. MTP) is not part of any rank's shard, so rank 0 carries it.
+            export_state_dict = dict(post_state_dict)
+            if extra_state_dict and rank == 0:
+                export_state_dict.update(extra_state_dict)
 
-        _write_hf_export_config(model, hf_quant_config, export_dir)
+            # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,
+            # renamed MoE leaves, reordered model/language_model prefix), so the in-memory names
+            # differ from the original hub checkpoint. Reverse it quantization-aware so exported
+            # tensor names stay aligned with the hub checkpoint (the unified-checkpoint contract).
+            # transformers' own revert_weight_conversion errors on 0-d scalar scale tensors, so we
+            # do it here. The same rename is applied to the quant-config module references
+            # (exclude_modules / quantized_layers keys) so a deployment loader matches them against
+            # the reverted hub-named modules (otherwise an excluded BF16 layer is loaded as quantized
+            # and fails). Best-effort: any failure (an op we cannot reverse yet, transformers API
+            # drift, unexpected shapes) falls back to the in-memory names.
+            try:
+                name_mapper = build_reverse_name_mapper(model)
+                export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
+                if name_mapper is not None and hf_quant_config:
+                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+            except Exception as exc:
+                warnings.warn(
+                    f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
+                    "names may not match the original HF hub checkpoint."
+                )
+
+            _sanitize_generation_config_for_save(model)
+
+            # Keep transformers' own revert_weight_conversion disabled (the quant-aware reverse
+            # above replaces it): it can't handle quantized state dicts (RuntimeError on 0-d scalar
+            # scale tensors). Patch both the source and importing module since modeling_utils does
+            # `from core_model_loading import revert_weight_conversion`.
+            _patches = _patch_revert_weight_conversion()
+            try:
+                model.save_pretrained(
+                    export_dir,
+                    state_dict=export_state_dict,
+                    save_modelopt_state=save_modelopt_state,
+                    max_shard_size=max_shard_size,
+                )
+            finally:
+                _unpatch_revert_weight_conversion(_patches)
+
+        if rank == 0:
+            _write_hf_export_config(model, hf_quant_config, export_dir)
 
     except Exception as e:
         warnings.warn(
