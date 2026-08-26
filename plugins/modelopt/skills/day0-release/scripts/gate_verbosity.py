@@ -239,7 +239,14 @@ def main(argv=None):
     # complete for a task set smaller than the eval set.
     result["harvest_diagnostics"] = diag
     print(json.dumps(result, indent=2))
-    return 0 if result["pass"] else 1
+    if result["pass"]:
+        return 0
+    # Match gate_compare / gate_run / gate_ptq: 2 = the gate could not read its input,
+    # 1 = the gate ran and failed. USER_CONFIG_ERROR is this gate's only bad-invocation
+    # signal (wrong --baseline root, --glob matched nothing, --exclude swallowed every
+    # run dir), so collapsing it into 1 would route an operator error into the
+    # VERBOSITY_EXCEEDED triage row -- "a real behavioural change; do not publish".
+    return 2 if result["failure_class"] == "USER_CONFIG_ERROR" else 1
 
 
 if __name__ == "__main__":

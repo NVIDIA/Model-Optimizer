@@ -31,6 +31,7 @@ from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
 from gate_run import evaluate_run
 from gate_verbosity import evaluate_verbosity, harvest
+from gate_verbosity import main as verbosity_main
 
 # ── gate_compare ──────────────────────────────────────────────────────
 
@@ -482,6 +483,27 @@ def test_ptq_rejected_source_precision_is_self_diagnosing():
     assert "None" in absent["detail"]
     for r in (bad, absent):
         assert "mxfp4" in r["detail"] and "int4" in r["detail"]  # lists the vocabulary
+
+
+def test_verbosity_exit_codes_match_sibling_gates(tmp_path, capsys):
+    """2 = bad invocation, 1 = the gate failed, 0 = pass -- as gate_compare/run/ptq do."""
+
+    def side(name, tokens):
+        d = tmp_path / name / "eval_x" / "inv" / "h.t" / "artifacts"
+        _write_metrics(d, tokens=tokens)
+        return str(tmp_path / name)
+
+    assert (
+        verbosity_main(
+            ["--baseline", str(tmp_path / "nope"), "--candidate", str(tmp_path / "nope2")]
+        )
+        == 2
+    )
+    b, c = side("b", 100.0), side("c", 300.0)
+    assert verbosity_main(["--baseline", b, "--candidate", c]) == 1
+    c2 = side("c2", 101.0)
+    assert verbosity_main(["--baseline", b, "--candidate", c2]) == 0
+    capsys.readouterr()
 
 
 if __name__ == "__main__":

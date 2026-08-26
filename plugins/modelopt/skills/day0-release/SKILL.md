@@ -222,6 +222,9 @@ python "$SKILL_DIR/scripts/gate_verbosity.py" \
     --glob 'eval_*' --threshold 0.05
 ```
 
+Exit codes follow the other gates: `0` pass, `1` the gate failed, `2` it could not read its input.
+A `2` means fix the invocation, not the checkpoint.
+
 Read `response_stats.avg_completion_tokens` from each task's
 `artifacts/eval_factory_metrics.json`. Do **not** use the `reasoning.*` fields:
 `reasoning.*_tokens` are always `0` (only the reasoning/content split is missing)
