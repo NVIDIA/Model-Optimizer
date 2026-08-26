@@ -98,7 +98,7 @@ print(f'Output/source ratio: {ratio:.2f}x')
 ```
 
 Treat the ratio as the first-order bits-per-weight proxy unless you separately load tensors and compute exact parameter bit counts. For compression recipes, a ratio at or above `1.0x` is blocking unless `source_precision` shows the
-source was already at or below 4 bits, or the user explicitly accepts the explanation.
+source is already at or below the recipe's target bits, or the user explicitly accepts the explanation.
 
 ## Layer coverage and precision script
 

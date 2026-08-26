@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from gate_compare import evaluate_comparison
 from gate_ptq import evaluate_checkpoint
 from gate_run import evaluate_run
-from gate_verbosity import _matches_exclude, evaluate_verbosity, harvest
+from gate_verbosity import _matches_exclude, _task_from_metadata, evaluate_verbosity, harvest
 from gate_verbosity import main as verbosity_main
 
 # ── gate_compare ──────────────────────────────────────────────────────
@@ -702,6 +702,48 @@ def test_ptq_unknown_recipe_does_not_claim_a_comparison():
     )
     assert not r["pass"]
     assert "no known target precision" in r["detail"] or r["failure_class"] == "USER_CONFIG_ERROR"
+
+
+_CFG_ONE = "evaluation:\n  tasks:\n  - name: {n}\n    container: x\nexport:\n  name: notthis\n"
+_CFG_MANY = "evaluation:\n  tasks:\n  - name: task_a\n  - name: task_b\n"
+
+
+def _mk_run(root, leaf, cfg=None, meta=None):
+    d = root / "eval_run" / leaf / "artifacts"
+    d.mkdir(parents=True)
+    if cfg:
+        (d / "config.yml").write_text(cfg)
+    if meta:
+        (d / "metadata.yaml").write_text(meta)
+    (d / "eval_factory_metrics.json").write_text(
+        json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+    )
+    return d
+
+
+def test_task_name_read_from_config_yml_when_metadata_absent(tmp_path):
+    """The documented rsync copies config.yml but not metadata.yaml."""
+    _mk_run(tmp_path, "inv123.0", cfg=_CFG_ONE.format(n="simple_evals.gpqa"))
+    _mk_run(tmp_path, "inv123.1", cfg=_CFG_ONE.format(n="tau2.telecom"))
+    diag = {}
+    out = harvest(str(tmp_path), diagnostics=diag)
+    assert set(out) == {"simple_evals.gpqa", "tau2.telecom"}
+    assert "collapsed_keys" not in diag
+
+
+def test_multi_task_declaration_is_ambiguous_and_rearms_the_guard(tmp_path):
+    """An invocation-wide task list must not key every job onto tasks[0].name."""
+    _mk_run(tmp_path, "inv9.0", meta=_CFG_MANY)
+    _mk_run(tmp_path, "inv9.1", meta=_CFG_MANY)
+    diag = {}
+    harvest(str(tmp_path), diagnostics=diag)
+    assert diag["collapsed_keys"] == {"inv9": ["inv9.0", "inv9.1"]}
+
+
+def test_task_name_block_is_bounded_by_indentation(tmp_path):
+    """A later top-level `name:` must not be mistaken for the task name."""
+    d = _mk_run(tmp_path, "y.0", cfg=_CFG_ONE.format(n="only_this"))
+    assert _task_from_metadata(str(d)) == "only_this"
 
 
 if __name__ == "__main__":

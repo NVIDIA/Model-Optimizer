@@ -229,23 +229,47 @@ def _matches_exclude(run_dir, exclude):
 
 
 def _task_from_metadata(artifacts_dir):
-    """Task name from NEL's ``metadata.yaml`` (``evaluation.tasks[].name``), or None.
+    """Task name declared next to the artifacts, or None if it is not unambiguous.
 
-    Scoped to the block under ``tasks:``. An unscoped search would take whichever
-    ``name:`` appears first in the file, which is invocation-wide rather than
-    per-task and would therefore *create* the key collapse this exists to prevent.
+    Reads ``metadata.yaml`` then ``config.yml``. Both matter: the documented rsync
+    (``launching-evals``/``analyze-results``) copies ``config.yml`` but not
+    ``metadata.yaml``, so keying off metadata alone leaves the documented layout with
+    no declared name at all.
+
+    Returns None when the ``tasks:`` block lists more than one entry. Such a file is
+    invocation-scoped, so ``tasks[0].name`` is not this directory's task -- taking it
+    would pool every job in the invocation, and a metadata-derived key is exempt from
+    the collapse guard, so the pooling would be silent. Falling back to the directory
+    name re-arms that guard.
+
     Read with a regex rather than a YAML parser to keep these gates stdlib-only.
     """
-    try:
-        with open(os.path.join(artifacts_dir, "metadata.yaml")) as f:
-            text = f.read()
-    except OSError:
-        return None
-    anchor = re.search(r"^\s*tasks:\s*$", text, re.MULTILINE)
-    if not anchor:
-        return None
-    m = re.search(r"^\s*-?\s*name:\s*(\S+)\s*$", text[anchor.end() :], re.MULTILINE)
-    return m.group(1).strip("\"'") if m else None
+    for fname in ("metadata.yaml", "config.yml"):
+        try:
+            with open(os.path.join(artifacts_dir, fname)) as f:
+                text = f.read()
+        except OSError:
+            continue
+        anchor = re.search(r"^(?P<indent>\s*)tasks:\s*$", text, re.MULTILINE)
+        if not anchor:
+            continue
+        # Bound the block by indentation so a later top-level "name:" cannot leak in.
+        depth = len(anchor.group("indent"))
+        block = []
+        for line in text[anchor.end() :].splitlines():
+            stripped = line.lstrip()
+            indent = len(line) - len(stripped)
+            # A YAML block sequence puts its "- " items at the SAME indent as the key,
+            # so only a non-item at that indent (or anything shallower) ends the block.
+            if stripped and (indent < depth or (indent == depth and not stripped.startswith("-"))):
+                break
+            block.append(line)
+        names = re.findall(r"^\s*-?\s*name:\s*(\S+)\s*$", "\n".join(block), re.MULTILINE)
+        if len(names) == 1:
+            return names[0].strip("\"'")
+        if len(names) > 1:
+            return None
+    return None
 
 
 def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
@@ -370,8 +394,11 @@ def main(argv=None):
             dropped.add(entry.split(":", 1)[0])
     dropped -= set(baseline) | set(candidate)
     collapsed = {}
-    for side_diag in diag.values():
-        collapsed.update(side_diag.get("collapsed_keys", {}))
+    for side, side_diag in diag.items():
+        # Namespace by side: a key colliding on both would otherwise report only the
+        # last side's directories.
+        for k, dirs in side_diag.get("collapsed_keys", {}).items():
+            collapsed[f"{side}:{k}"] = dirs
     result = evaluate_verbosity(baseline, candidate, args.threshold, sorted(dropped), collapsed)
     # Anything harvest dropped belongs in the JSON, not only on stderr: a task whose runs
     # were all excluded never reaches per_task, so the verdict would otherwise look
