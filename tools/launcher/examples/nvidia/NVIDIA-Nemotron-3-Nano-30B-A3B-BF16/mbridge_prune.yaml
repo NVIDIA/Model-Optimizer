@@ -3,6 +3,7 @@
 # Slurm:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/mbridge_prune.yaml --yes
 # Local:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/mbridge_prune.yaml hf_local=/mnt/hf-local --yes
 
+# NOTE: This example needs Model-Optimizer 0.46.0 with nemo:26.04 container. Future versions no longer support this model.
 # NOTE: sized for fast CI; bump for production, e.g. --calib_num_samples 1024 --seq_length 8192 --top_k 10.
 #       May need to reduce batch size if running out of memory at large seq_length.
 job_name: Nemotron-3-Nano-30B-A3B_mbridge_prune

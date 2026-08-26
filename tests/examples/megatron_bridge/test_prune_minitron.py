@@ -16,7 +16,6 @@
 
 import pytest
 import torch
-from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_deepseek_v3_dir,
@@ -77,9 +76,8 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
     prune_target_params = int(teacher_params * 0.8)
 
     pruned_path = tmp_path / "pruned"
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_path,
         pp_size=num_gpus,
@@ -127,10 +125,6 @@ def test_prune_minitron(tmp_path, num_gpus, create_teacher, expected_pruned_conf
                 max_position_embeddings=1024,
             ),
             id="qwen3_5_moe_vl",
-            marks=pytest.mark.skipif(
-                not qwen35_moe_bridge_supported(),
-                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
-            ),
         ),
     ],
 )
@@ -143,9 +137,8 @@ def test_prune_minitron_vlm(tmp_path, num_gpus, create_teacher):
     prune_target_params = int(language_model_params * 0.7)
 
     pruned_model_path = tmp_path / "pruned"
-    # TODO: Dont enable grouped GEMM for MoE models until nemo:26.08 container
     prune_command_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py", "--no_moe_grouped_gemm"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "prune_minitron.py"],
         hf_model_name_or_path=teacher_hf_path,
         output_hf_path=pruned_model_path,
         pp_size=num_gpus,
