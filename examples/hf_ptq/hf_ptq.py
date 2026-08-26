@@ -78,6 +78,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import MTP_EXTRA_STATE_ATTR
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -771,7 +772,7 @@ def mono_quantize(
         warnings.warn("Skipping quantization: model is already quantized.")
 
 
-def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> None:
+def assert_layerwise_export_compatible(args, full_model) -> None:
     """Refuse layerwise export before calibration starts, not after it writes a checkpoint.
 
     Layerwise export writes the finished checkpoint during calibration, so anything that
@@ -784,13 +785,6 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
             "extracted language model, so the shards and config.json would describe that "
             "submodel rather than the full VLM, and the VLM export path would then "
             "overwrite config.json with the unquantized source config."
-        )
-
-    if mtp_layer_prefixes:
-        raise NotImplementedError(
-            f"layerwise.export_dir does not support models with MTP layers {mtp_layer_prefixes}: "
-            "their exclusions and any orphaned MTP weights are applied after calibration, by "
-            "which point every shard and the quant config are already written."
         )
 
     if has_spec_opt(full_model):
@@ -933,12 +927,13 @@ def export_quantized(
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
                 if args.layerwise_export:
-                    if mtp_state_dict:
+                    staged = getattr(full_model, MTP_EXTRA_STATE_ATTR, None) or {}
+                    if mtp_state_dict.keys() - staged.keys():
                         raise NotImplementedError(
-                            "layerwise.export_dir does not support models with MTP weights: "
-                            "they are loaded after calibration has already written every "
-                            "shard, so they would be missing from the checkpoint. Export "
-                            "without layerwise.export_dir."
+                            "layerwise.export_dir found MTP weights it did not stage before "
+                            f"calibration: {sorted(mtp_state_dict.keys() - staged.keys())[:4]}. "
+                            "Every shard is already written, so they cannot be added now. "
+                            "Export without layerwise.export_dir."
                         )
                     # Calibration already wrote every shard, the index and the configs.
                     print(f"Layerwise export already wrote the checkpoint to {export_path}")
@@ -1353,10 +1348,20 @@ def quantize_main(
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
+        if args.layerwise_export and mtp_layer_prefixes:
+            # Per-layer export writes the checkpoint *during* calibration, so the MTP
+            # weights have to be in place first. load_mtp_weights only fills existing slots
+            # and hands back the rest, so running it early is safe; the orphans are stashed
+            # for finalize(), which owns the tail shard.
+            _, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+            if mtp_state_dict:
+                setattr(full_model, MTP_EXTRA_STATE_ATTR, mtp_state_dict)
+                print(f"Layerwise export: staged {len(mtp_state_dict)} orphaned MTP tensors")
+
         # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
         # still in it, two --export_path values would share one checkpoint dir.
         if args.layerwise_export:
-            assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
+            assert_layerwise_export_compatible(args, full_model)
             quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
             print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
             # The shards are only a resume artifact if the manifest that names the resume

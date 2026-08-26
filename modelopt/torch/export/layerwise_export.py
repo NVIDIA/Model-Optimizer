@@ -60,6 +60,12 @@ SUPPORTED_FORMATS = FUSION_FREE_FORMATS | _PER_LAYER_FUSABLE_FORMATS
 _TAIL_SHARD = "model-tail.safetensors"
 _INDEX_FILE = "model.safetensors.index.json"
 
+#: Set by the caller on the model, holding MTP tensors that have no slot in
+#: ``state_dict()``. finalize() runs inside calibration, so the caller cannot pass them as
+#: an argument; this follows the ``_mtp_layer_prefixes`` convention already used to hand
+#: MTP information across the same boundary.
+MTP_EXTRA_STATE_ATTR = "_mtp_extra_state_dict"
+
 
 def layer_shard_name(layer_idx: int) -> str:
     """Shard filename for one decoder layer, keyed by index so a re-export overwrites."""
@@ -353,6 +359,13 @@ class LayerwiseExporter:
             if name.startswith(skip_prefixes) or name in seen_keys:
                 continue
             self._collect(tail, name, tensor)
+
+        # Tensors the model never held (e.g. orphaned MTP weights), already in export
+        # form, so only the hub-name reversal applies. The stash is the layerwise route:
+        # calibration owns the finalize() call, so the caller cannot pass them directly.
+        for name, tensor in (getattr(model, MTP_EXTRA_STATE_ATTR, None) or {}).items():
+            mapped = self._name_mapper(name) if self._name_mapper is not None else name
+            tail.setdefault(mapped, tensor.detach().contiguous().cpu())
 
         save_file(tail, str(self._export_dir / _TAIL_SHARD))
         self._write_index()

@@ -26,7 +26,11 @@ from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
+from modelopt.torch.export.layerwise_export import (
+    MTP_EXTRA_STATE_ATTR,
+    LayerwiseExporter,
+    layer_shard_name,
+)
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -427,6 +431,32 @@ def test_moe_export_matches(tmp_path):
 
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
     _assert_same_quant_config(baseline_dir, export_dir)
+
+
+def test_orphaned_mtp_tensors_reach_the_tail_shard(tmp_path):
+    """MTP weights with no slot in state_dict() must still land in the checkpoint.
+
+    finalize() runs inside calibration, so hf_ptq cannot pass them as an argument; it
+    stashes them on the model and the exporter picks them up. Without that they are
+    silently absent from a checkpoint that otherwise looks complete.
+    """
+    export_dir = tmp_path / "fused"
+    model = _build_model()
+    orphans = {
+        "mtp.layers.0.weight": torch.ones(4, 4, dtype=torch.bfloat16),
+        "mtp.norm.weight": torch.ones(4, dtype=torch.bfloat16),
+    }
+    setattr(model, MTP_EXTRA_STATE_ATTR, orphans)
+
+    mtq.quantize(model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+
+    exported = _load_checkpoint(export_dir)
+    for key, value in orphans.items():
+        assert key in exported, f"{key} missing from the exported checkpoint"
+        assert torch.equal(exported[key].cpu(), value)
+
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    assert set(orphans) <= set(weight_map), "orphans written but left out of the index"
 
 
 def test_export_consumes_the_model_without_affecting_the_checkpoint(tmp_path):
