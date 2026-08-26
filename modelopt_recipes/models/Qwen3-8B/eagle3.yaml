@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-model EAGLE3 training recipe for Qwen3-8B.
+# Used by both online and offline EAGLE3 pipelines; the launcher YAML supplies
+# data.data_path (online) or data.offline_data_path (offline).
+
+metadata:
+  recipe_type: speculative_eagle
+  description: EAGLE3 training recipe for Qwen3-8B.
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path: Qwen/Qwen3-8B
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  data_path:
+  offline_data_path:
+
+# maps to TrainingArguments (main.py)
+training:
+  output_dir:
+  training_seq_len: 4096
+
+# maps to EagleConfig (modelopt/torch/speculative/config.py).
+# Qwen3 uses the llama-family decoder, which is the EagleConfig default.
+eagle: {}

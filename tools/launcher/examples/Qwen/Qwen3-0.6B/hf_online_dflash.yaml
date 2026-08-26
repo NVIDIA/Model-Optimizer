@@ -29,22 +29,17 @@ pipeline:
   task_0:
     script: common/specdec/dflash_online_training.sh
     args:
-      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dflash.yaml
+      - --config modules/Model-Optimizer/modelopt_recipes/models/Qwen3-0.6B/dflash.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
       - data.data_path=modules/Model-Optimizer/examples/dataset/synthetic_conversations_1k.jsonl
-      - data.chat_template=examples/Qwen/Qwen3-0.6B/chat_template_train.jinja
+      - data.chat_template=modules/Model-Optimizer/modelopt_recipes/models/Qwen3-0.6B/chat_template_train.jinja
       - training.output_dir=/scratchspace/dflash_qwen3_0.6b
       - training.num_train_epochs=3
-      - training.training_seq_len=512
       - training.per_device_train_batch_size=2
       - training.save_steps=500
       - training.logging_steps=100
       - training.disable_tqdm=true
-      - training.answer_only_loss=true
-      - dflash.dflash_block_size=8
-      - dflash.dflash_mask_token_id=151669
       - dflash.dflash_use_torch_compile=False
-      - dflash.dflash_architecture_config.num_hidden_layers=2
     environment:
       - MAX_FINAL_LOSS: "2.0"
       - MIN_FINAL_ACC: "0.40"
