@@ -15,7 +15,10 @@
 
 """Tests for Puzzletron AIPerf context-capacity handling."""
 
+import importlib.machinery
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,6 +67,58 @@ def test_aiperf_server_environment_uses_the_active_vllm_package_source(monkeypat
 
     paths = env["PYTHONPATH"].split(":")
     assert paths[1] == str(active_source)
+
+
+@pytest.mark.parametrize(
+    ("extension_names", "expect_stub"),
+    [
+        pytest.param(("_C_stable_libtorch",), True, id="stable-only"),
+        pytest.param(("_C", "_C_stable_libtorch"), False, id="native-plus-stable"),
+        pytest.param((), False, id="neither"),
+    ],
+)
+def test_vllm_compat_stubs_c_only_for_stable_libtorch_layout(
+    monkeypatch, tmp_path, extension_names, expect_stub
+):
+    """Install an empty ``vllm._C`` companion only for the stable-only layout."""
+
+    extension_suffix = importlib.machinery.EXTENSION_SUFFIXES[0]
+    vllm_package = tmp_path / "vllm"
+    vllm_package.mkdir()
+    for extension_name in extension_names:
+        (vllm_package / f"{extension_name}{extension_suffix}").touch()
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name):
+        if name == "vllm":
+            return SimpleNamespace(submodule_search_locations=[str(vllm_package)])
+        if name == "torch._opaque_base":
+            return SimpleNamespace()
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    missing_module = object()
+    previous_module = sys.modules.pop("vllm._C", missing_module)
+    compatibility_path = (
+        Path(__file__).parents[4]
+        / "modelopt/torch/puzzletron/benchmarks/vllm_compat/sitecustomize.py"
+    )
+    module_spec = importlib.util.spec_from_file_location(
+        f"_test_vllm_compat_{len(extension_names)}", compatibility_path
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    compatibility = importlib.util.module_from_spec(module_spec)
+    try:
+        module_spec.loader.exec_module(compatibility)
+
+        assert ("vllm._C" in sys.modules) is expect_stub
+        if expect_stub:
+            assert sys.modules["vllm._C"].__package__ == "vllm"
+    finally:
+        sys.modules.pop("vllm._C", None)
+        if previous_module is not missing_module:
+            sys.modules["vllm._C"] = previous_module
 
 
 def test_exact_length_defaults_to_ignore_eos_without_overriding_policy():

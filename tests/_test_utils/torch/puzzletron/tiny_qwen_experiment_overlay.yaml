@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Keep the generated smoke campaign small while exercising its complete DAG.
+tokenize_data:
+  workers: 1
+
+replacement_scoring:
+  automodel:
+    lm_head_backend: streaming
+
+post_mip:
+  flows:
+    params-90:
+      nodes:
+        online_eval:
+          config:
+            eval_samples: 2
+        best_lm:
+          top_k: 3
+        serving:
+          config:
+            request_count: 4
+            allow_aiperf_v011_online_tokenizer_resolution: true
+            topology:
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --max-num-batched-tokens
+                - "128"
+                - --max-num-seqs
+                - "4"
+                - --gpu-memory-utilization
+                - "0.5"
+        fastest:
+          top_k: 2
+        short_kd:
+          config:
+            max_steps: 2
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 2
+        final_eval:
+          config:
+            eval_samples: 2
