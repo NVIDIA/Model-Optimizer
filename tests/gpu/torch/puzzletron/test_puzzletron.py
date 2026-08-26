@@ -158,29 +158,33 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
     assert score_tensors
     assert all(tensor.numel() and torch.isfinite(tensor).all() for tensor in score_tensors)
 
-    replacement_summary = _json(root / "artifacts/replacement_scoring/summary.json")
+    replacement_summary_path = root / "artifacts/replacement_scoring/summary.json"
+    replacement_summary = _json(replacement_summary_path)
     assert replacement_summary["widths"] == [256]
     assert replacement_summary["scenario_count"] == 1
-    replacement_results = [
-        _json(path)
-        for path in root.glob(
+    replacement_result_paths = list(
+        root.glob(
             "scenarios/width-*/depth-*/distributed_eval/replacement_scoring/results/**/*.json"
         )
-    ]
+    )
+    replacement_results = [_json(path) for path in replacement_result_paths]
     assert replacement_results
     provenances = [result["provenance"] for result in replacement_results]
     assert {provenance["score_device_type"] for provenance in provenances} == {"cuda"}
     assert {provenance["visible_cuda_device_count"] for provenance in provenances} == {1}
 
-    candidate_library = _json(root / "candidate_library.json")
+    candidate_library_path = root / "candidate_library.json"
+    candidate_library = _json(candidate_library_path)
     assert 256 in _nested_values(candidate_library, "intermediate_size")
     assert 512 in _nested_values(candidate_library, "intermediate_size")
-    active_profiles = _json(root / "mip/active_profiles.json")
+    active_profiles_path = root / "mip/active_profiles.json"
+    active_profiles = _json(active_profiles_path)
     assert active_profiles["status"] == "success"
-    grids = [
-        _json(root / "mip" / "profiles" / profile_id / "mip_grid.json")
+    grid_paths = [
+        root / "mip" / "profiles" / profile_id / "mip_grid.json"
         for profile_id in active_profiles["profile_ids"]
     ]
+    grids = [_json(path) for path in grid_paths]
     assert all(grid["status"] == "success" for grid in grids)
     solution_paths = [
         Path(scenario["solution_path"])
@@ -196,7 +200,16 @@ def _assert_pruning_and_mip_artifacts(campaign: TinyQwenCampaign) -> list[Path]:
         for width in _nested_values(solution["chosen_block_configs"], "intermediate_size")
     }
     assert solution_ffn_widths.intersection({256, 512})
-    return [*pass_manifests, *score_files, *solution_paths]
+    return [
+        *pass_manifests,
+        *score_files,
+        replacement_summary_path,
+        *replacement_result_paths,
+        candidate_library_path,
+        active_profiles_path,
+        *grid_paths,
+        *solution_paths,
+    ]
 
 
 def _assert_post_mip_and_final_checkpoint(
