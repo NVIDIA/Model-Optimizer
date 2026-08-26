@@ -271,7 +271,7 @@ Map a gate's `failure_class` to the next action:
 | `INFRA_TRANSIENT` | Retry the stage once; if it recurs, `SYSTEMIC`. |
 | `MODEL_UNSUPPORTED` | PATCH: fix the recipe pattern / add model support (ptq skill owns the patch loop), then retry. If unpatchable, `POINT_INFEASIBLE`. |
 | `QUANT_COVERAGE_FAILURE` | PATCH: fix the recipe wildcard so intended layers are covered; re-run PTQ. |
-| `SIZE_NOT_REDUCED` | The output is not smaller than the source. If the source was already 4-bit (so it cannot shrink further), record `source_precision` in the validation summary and re-run the gate — that states *why* the growth is expected. Otherwise treat it as a real compression failure: check that the recipe matched the intended parameter mass and that the exporter did not retain the original tensors. `accept_size_growth: true` waives it unconditionally (no growth bound) and is a last resort, not the fix — it records no reason, so prefer `source_precision` where the claim is checkable. |
+| `SIZE_NOT_REDUCED` | The output is not smaller than the source. If the recipe cannot shrink the source (e.g. mxfp4 under nvfp4, or fp8 under fp8), record `source_precision` in the validation summary and re-run the gate — that states *why* the growth is expected. Otherwise treat it as a real compression failure: check that the recipe matched the intended parameter mass and that the exporter did not retain the original tensors. `accept_size_growth: true` waives it unconditionally (no growth bound) and is a last resort, not the fix — it records no reason, so prefer `source_precision` where the claim is checkable. |
 | `CHECKPOINT_NOT_SERVABLE` | The Step 2b canary could not load/generate. Usually a tensor-naming or config-schema mismatch between the exporter and the serving stack, or missing/dangling auxiliary files (tokenizer). Fix the export; do not evaluate. |
 | `VERBOSITY_EXCEEDED` | Re-check run hygiene first (mixed reasoning effort, partial runs, unequal sample counts) — that has explained every false positive so far. If the delta survives matched, complete runs, it is a real behavioural change; do not publish on accuracy alone. |
 | `DEPLOYMENT_HEALTH_FAILED` | Drop to the **deployment** skill: reproduce serving standalone (`/health` + one generation), debug flags / image / TP / env, then carry the working command into NEL's `deployment.command` and retry the eval. If it can't serve, `POINT_INFEASIBLE`. |
@@ -283,7 +283,7 @@ Map a gate's `failure_class` to the next action:
 
 `gate_ptq.py` also emits non-blocking `notes` (present on every result). Size growth is
 **blocking by default**, waived to a note only when the validation summary's `source_precision`
-shows an already-sub-8-bit source and the growth is within what that explains. Recording
+is already at or below the recipe's target bits and the growth is within what that explains. Recording
 `source_precision` is part of the ptq skill's validation table, so the waiver is reachable from the
 normal pipeline. A BF16 source that failed to compress still fails, which is the case this check
 exists for.

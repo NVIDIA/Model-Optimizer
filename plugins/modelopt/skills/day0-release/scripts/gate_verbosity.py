@@ -51,6 +51,17 @@ _SHORT_OUTPUT_TOKENS = 1000
 _SAMPLE_COUNT_TOL = 0.01
 
 
+def _coverage_caveat(dropped_tasks):
+    """Suffix naming tasks harvest discarded, appended to every verdict's ``detail``.
+
+    The hygiene evidence matters most on the failure paths: a caller told the gate
+    failed also needs to know the run did not cover the whole task set.
+    """
+    if not dropped_tasks:
+        return ""
+    return f"; {len(dropped_tasks)} task(s) DROPPED BEFORE COMPARISON: {sorted(dropped_tasks)}"
+
+
 def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), collapsed_keys=None):
     """Decide the verbosity gate from harvested per-run token counts.
 
@@ -166,7 +177,8 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
         return {
             "pass": False,
             "failure_class": "VERBOSITY_EXCEEDED",
-            "detail": f"tasks exceeding threshold ({threshold}): {exceeded}",
+            "detail": f"tasks exceeding threshold ({threshold}): {exceeded}"
+            + _coverage_caveat(dropped_tasks),
             "per_task": per_task,
             "not_comparable": [
                 t for t, v in per_task.items() if v.get("status") == "not_comparable"
@@ -177,7 +189,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
         return {
             "pass": False,
             "failure_class": "SAMPLE_ACCOUNTING_FAILED",
-            "detail": "no task had comparable runs on both sides",
+            "detail": "no task had comparable runs on both sides" + _coverage_caveat(dropped_tasks),
             "per_task": per_task,
             "not_comparable": sorted(per_task) if per_task else [],
             "max_abs_delta": None,
@@ -186,9 +198,7 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), co
     skipped = [t for t, v in per_task.items() if v.get("status") == "not_comparable"]
     detail = f"all {n_cmp} comparable task(s) within threshold {threshold}"
     if dropped_tasks:
-        detail += (
-            f"; {len(dropped_tasks)} task(s) DROPPED BEFORE COMPARISON: {sorted(dropped_tasks)}"
-        )
+        detail += _coverage_caveat(dropped_tasks)
     if skipped:
         # Not a failure -- a task can be legitimately incomparable (different sample sets).
         # But it must not be silently absorbed by a passing sibling: the gate is unmeasured
@@ -241,7 +251,7 @@ def _task_from_metadata(artifacts_dir):
 def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
     """Collect ``{task: [(avg_completion_tokens, successful_count), ...]}`` from NEL artifacts."""
     out, unreadable, excluded, no_metric = {}, [], [], []
-    source_dirs, excluded_tasks = {}, set()
+    source_dirs, excluded_tasks, metadata_keys = {}, set(), set()
     # Depth-agnostic: repo-documented trees put <harness>.<task>/artifacts/ directly under the
     # run dir, while NEL invocations add an invocation level. Hard-coding either one silently
     # harvests nothing (or, worse, only the subset at the matching depth).
@@ -267,6 +277,7 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
         # the trailing number enumerates TASKS, not repeats, so stripping it collapses
         # every task in an invocation onto one key and pools unrelated means.
         task = _task_from_metadata(os.path.dirname(path))
+        from_metadata = task is not None
         if task is None:
             # Fall back to "<harness>.<task>[.<run_index>]": strip the run index only
             # when the trailing segment is numeric, and KEEP the harness, since two
@@ -274,7 +285,11 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             name = parts[-3]
             head, _, tail = name.rpartition(".")
             task = head if head and re.fullmatch(r"\d+", tail) else name
-        source_dirs.setdefault(task, set()).add(parts[-3])
+        if from_metadata:
+            # A declared task name is authoritative: sibling dirs sharing it are repeats.
+            metadata_keys.add(task)
+        else:
+            source_dirs.setdefault(task, set()).add(parts[-3])
         try:
             with open(path) as f:
                 stats = json.load(f).get("response_stats", {})
@@ -289,7 +304,15 @@ def harvest(side, glob="eval_*", exclude="_high", diagnostics=None):
             # otherwise a schema rename. Record it either way -- a silently vanished run
             # makes the remaining pass look more complete than it is.
             no_metric.append(f"{task}: avg_completion_tokens={tokens!r} successful_count={count!r}")
-    collapsed = {k: sorted(v) for k, v in source_dirs.items() if len(v) > 1}
+    # Only the directory fallback can be ambiguous, and only when the key does not look
+    # like "<harness>.<task>": "h.task.1" + "h.task.2" are repeats of one task, whereas
+    # "inv.0" + "inv.1" are distinct tasks of one invocation collapsing onto the
+    # invocation id. Flagging repeats would make this mandatory gate unpassable.
+    collapsed = {
+        k: sorted(v)
+        for k, v in source_dirs.items()
+        if len(v) > 1 and k not in metadata_keys and "." not in k
+    }
     if diagnostics is not None:
         if collapsed:
             diagnostics["collapsed_keys"] = collapsed

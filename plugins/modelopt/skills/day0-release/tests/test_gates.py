@@ -666,5 +666,43 @@ def test_exclude_supports_multi_token_values():
     assert not _matches_exclude("eval_sglang_gpqa", "high_effort")
 
 
+def test_collapse_guard_does_not_flag_repeats(tmp_path):
+    """Repeat dirs of one task must not read as collapse -- that blocks a mandatory gate."""
+
+    def mk(leaf, name=None):
+        d = tmp_path / "eval_x" / "inv" / leaf / "artifacts"
+        d.mkdir(parents=True)
+        if name:
+            (d / "metadata.yaml").write_text(f"evaluation:\n  tasks:\n    - name: {name}\n")
+        (d / "eval_factory_metrics.json").write_text(
+            json.dumps({"response_stats": {"avg_completion_tokens": 10.0, "successful_count": 2}})
+        )
+
+    mk("h.task.1")
+    mk("h.task.2")
+    diag = {}
+    out = harvest(str(tmp_path), diagnostics=diag)
+    assert list(out) == ["h.task"] and len(out["h.task"]) == 2
+    assert "collapsed_keys" not in diag
+
+
+def test_coverage_caveat_appears_on_failure_paths_too():
+    """A caller told the gate failed also needs to know coverage was incomplete."""
+    d = ["gone"]
+    fail = evaluate_verbosity({"t": [(100.0, 10)]}, {"t": [(200.0, 10)]}, dropped_tasks=d)
+    nocmp = evaluate_verbosity({"t": [(100.0, 10)]}, {"t": [(100.0, 99)]}, dropped_tasks=d)
+    assert not fail["pass"] and "DROPPED BEFORE COMPARISON" in fail["detail"]
+    assert not nocmp["pass"] and "DROPPED BEFORE COMPARISON" in nocmp["detail"]
+
+
+def test_ptq_unknown_recipe_does_not_claim_a_comparison():
+    """An unrecognised recipe must not be reported as a compression failure."""
+    r = evaluate_checkpoint(
+        _ckpt(recipe="bogus_recipe", output_bytes=16_800_000_000, source_precision="bf16")
+    )
+    assert not r["pass"]
+    assert "no known target precision" in r["detail"] or r["failure_class"] == "USER_CONFIG_ERROR"
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

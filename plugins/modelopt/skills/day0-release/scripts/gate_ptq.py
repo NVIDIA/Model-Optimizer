@@ -43,9 +43,10 @@ Validation summary shape:
       "metadata_diffs": [str, ...],  # unexpected diffs only; [] if clean
 
       # Optional. Precision of the SOURCE checkpoint's weights. Required to waive the
-      # size check: a source already at 4 bits cannot shrink further under a 4-bit
-      # recipe. Matched against a CLOSED vocabulary (_SUB8_SOURCE_PRECISIONS) -- any
-      # other value, including a free-form description, blocks like an absent field.
+      # size check: a recipe can only shrink a source wider than its target, so an fp8
+      # source under an fp8 recipe cannot shrink either. Matched against a CLOSED
+      # vocabulary (_PRECISION_BITS) -- any other value, including a free-form
+      # description, blocks like an absent field.
       # Mixed-precision sources: record the precision of the DOMINANT weight mass, since
       # that is what decides whether the checkpoint can shrink (e.g. a model with MXFP4
       # experts at ~96% of bytes and BF16 attention is "mxfp4", not "mixed").
@@ -79,14 +80,6 @@ _RECIPE_EXPECTED_PRECISION = {
 # scale bytes double; published checkpoints land near 1.06x. Beyond this, suspect a real
 # problem rather than an inherent one.
 _INHERENT_GROWTH_MAX = 1.10
-
-# Source precisions that cannot shrink further under a 4-bit recipe. Growth is only
-# excused when the summary declares one of these (or sets accept_size_growth).
-_SUB8_SOURCE_PRECISIONS = frozenset({"mxfp4", "nvfp4", "fp4", "int4", "w4a16", "awq", "4bit"})
-
-# Recognised tokens that are NOT sub-8-bit. Kept separate so a source that simply should
-# have compressed gets told that, rather than being handed the list of waiving values.
-_OTHER_SOURCE_PRECISIONS = frozenset({"bf16", "fp16", "fp32", "fp8", "int8"})
 
 # Bits per weight, used to decide whether a recipe can shrink a given source at all.
 _PRECISION_BITS = {
@@ -140,7 +133,8 @@ def evaluate_checkpoint(summary):
     # correctly treated as unable to shrink, instead of being told it "should compress".
     src_bits = _PRECISION_BITS.get(source_precision)
     tgt_bits = _recipe_bits(recipe)
-    source_cannot_shrink = src_bits is not None and tgt_bits is not None and src_bits <= tgt_bits
+    bits_known = src_bits is not None and tgt_bits is not None
+    source_cannot_shrink = bits_known and src_bits <= tgt_bits
     counts = summary.get("layer_precision_counts") or {}
     metadata_diffs = summary.get("metadata_diffs") or []
 
@@ -189,9 +183,15 @@ def evaluate_checkpoint(summary):
                     else (
                         f"declared {source_precision!r} source should compress under this "
                         "recipe, so growth is not explained"
-                        if source_precision in _PRECISION_BITS
-                        else f"source_precision={source_precision or None!r} is not a recognised "
-                        f"precision token (see ptq/references/checkpoint-validation.md)"
+                        if bits_known
+                        else (
+                            f"source_precision={source_precision or None!r} is not a "
+                            "recognised precision token"
+                            if tgt_bits is not None
+                            else f"recipe {recipe!r} has no known target precision, so "
+                            "growth cannot be assessed"
+                        )
+                        + " (see ptq/references/checkpoint-validation.md)"
                     )
                 )
                 failures.append(("SIZE_NOT_REDUCED", f"output {ratio:.3f}x source, {why}"))
