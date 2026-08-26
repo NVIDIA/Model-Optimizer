@@ -71,6 +71,16 @@ def test_recipe_rejects_algorithm_drift():
         k3_cast._conversion_settings_from_quantize_config(quantize)
 
 
+def test_recipe_accepts_additional_algorithm_defaults():
+    quantize = copy.deepcopy(k3_cast.load_recipe(k3_cast._PUBLISHED_RECIPE).quantize.model_dump())
+    quantize["algorithm"]["future_default"] = False
+    quantize["algorithm"]["layerwise"]["future_default"] = None
+
+    settings = k3_cast._conversion_settings_from_quantize_config(quantize)
+
+    assert settings["cast_mxfp4_to_nvfp4"] is True
+
+
 def test_recipe_rejects_explicit_input_scale(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         sys,

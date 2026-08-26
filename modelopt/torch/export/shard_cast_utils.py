@@ -44,14 +44,9 @@ __all__ = [
     "build_w13_amax_overrides",
     "build_w13_kmax_overrides",
     "dequantize_mxfp4_to_bf16",
-    "link_aux_files",
-    "link_or_copy",
-    "log",
     "mxfp4_kmax",
-    "prepare_output_dir",
     "quantize_mxfp4_to_nvfp4",
     "quantize_mxfp4_to_nvfp4_lossless",
-    "validate_paths",
 ]
 
 _MXFP4_BLOCK = 32
@@ -197,16 +192,31 @@ def link_or_copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def link_aux_files(
+def _is_relative_to(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _snapshot_blob_root(source_root: Path) -> Path | None:
+    if source_root.parent.name != "snapshots":
+        return None
+    blob_root = source_root.parent.parent / "blobs"
+    return blob_root.resolve(strict=True) if blob_root.is_dir() else None
+
+
+def _collect_aux_files(
     src_dir: Path,
-    dst_dir: Path,
     *,
     skip_top_level: Collection[str] = (),
     skip_dir_names: Collection[str] = (),
     skip_file: Callable[[Path], bool] | None = None,
-) -> None:
-    """Recursively link checkpoint sidecars while applying model-specific skips."""
+) -> tuple[list[Path], list[tuple[Path, Path]]]:
     source_root = src_dir.resolve(strict=True)
+    allowed_roots = [source_root]
+    if blob_root := _snapshot_blob_root(source_root):
+        allowed_roots.append(blob_root)
+
+    destination_dirs: list[Path] = []
+    sources: list[tuple[Path, Path]] = []
     for root, dirs, files in os.walk(src_dir):
         root_path = Path(root)
         rel = root_path.relative_to(src_dir)
@@ -220,7 +230,7 @@ def link_aux_files(
             source_dir = root_path / name
             if source_dir.is_symlink() or not source_dir.is_dir():
                 raise ValueError(f"source must be a regular directory: {source_dir}")
-        (dst_dir / rel).mkdir(parents=True, exist_ok=True)
+        destination_dirs.append(rel)
         for name in files:
             relative_path = rel / name
             if at_top_level and name in skip_top_level:
@@ -228,15 +238,54 @@ def link_aux_files(
             if skip_file is not None and skip_file(relative_path):
                 continue
             src = src_dir / relative_path
-            if src.is_symlink():
-                raise ValueError(f"source must be a regular file: {src}")
             resolved_src = src.resolve(strict=True)
-            if source_root not in resolved_src.parents:
+            if not resolved_src.is_file():
+                raise ValueError(f"source must resolve to a regular file: {src}")
+            if not any(_is_relative_to(resolved_src, root) for root in allowed_roots):
                 raise ValueError(f"source file is outside the checkpoint directory: {src}")
-            dst = dst_dir / relative_path
-            if dst.exists():
-                dst.unlink()
-            link_or_copy(src, dst)
+            sources.append((relative_path, resolved_src))
+    return destination_dirs, sources
+
+
+def validate_aux_files(
+    src_dir: Path,
+    *,
+    skip_top_level: Collection[str] = (),
+    skip_dir_names: Collection[str] = (),
+    skip_file: Callable[[Path], bool] | None = None,
+) -> None:
+    """Validate checkpoint sidecars without writing an output directory."""
+    _collect_aux_files(
+        src_dir,
+        skip_top_level=skip_top_level,
+        skip_dir_names=skip_dir_names,
+        skip_file=skip_file,
+    )
+
+
+def link_aux_files(
+    src_dir: Path,
+    dst_dir: Path,
+    *,
+    skip_top_level: Collection[str] = (),
+    skip_dir_names: Collection[str] = (),
+    skip_file: Callable[[Path], bool] | None = None,
+) -> None:
+    """Recursively link checkpoint sidecars while applying model-specific skips."""
+    destination_dirs, sources = _collect_aux_files(
+        src_dir,
+        skip_top_level=skip_top_level,
+        skip_dir_names=skip_dir_names,
+        skip_file=skip_file,
+    )
+    for relative_dir in destination_dirs:
+        (dst_dir / relative_dir).mkdir(parents=True, exist_ok=True)
+    for relative_path, src in sources:
+        dst = dst_dir / relative_path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            dst.unlink()
+        link_or_copy(src, dst)
 
 
 def log(message: str) -> None:

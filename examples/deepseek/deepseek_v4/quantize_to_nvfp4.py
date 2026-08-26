@@ -109,6 +109,7 @@ from modelopt.torch.export.shard_cast_utils import (
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
     quantize_mxfp4_to_nvfp4_lossless,
+    validate_aux_files,
     validate_paths,
 )
 from modelopt.torch.export.shard_cast_utils import log as _log
@@ -543,6 +544,14 @@ def main():
 
     shards = sorted(args.source_ckpt.glob("model-*-of-*.safetensors"))
     assert shards, f"no HF-style shards in {args.source_ckpt}"
+    validate_aux_files(
+        args.source_ckpt,
+        skip_top_level=_SKIP_TOP_LEVEL,
+        skip_dir_names=_SKIP_SUBDIR_NAMES,
+        skip_file=lambda path: (
+            path.name == "model.safetensors.index.json" or _HF_SHARD_RE.match(path.name) is not None
+        ),
+    )
     prepare_output_dir(args.output_ckpt, args.overwrite)
     _log(f"[config] {len(shards)} input shards  device={args.device}")
 

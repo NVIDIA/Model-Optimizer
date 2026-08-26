@@ -21,12 +21,15 @@ import sys
 import pytest
 import torch
 
+import modelopt.torch.export as modelopt_export
+import modelopt.torch.export.shard_cast_utils as shard_cast_utils
 from modelopt.torch.export.shard_cast_utils import (
     build_w13_kmax_overrides,
     dequantize_mxfp4_to_bf16,
     link_aux_files,
     mxfp4_kmax,
     quantize_mxfp4_to_nvfp4_lossless,
+    validate_aux_files,
 )
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
 
@@ -68,6 +71,18 @@ def test_w13_pair_requires_both_projections():
         )
 
 
+def test_public_api_contains_only_cast_helpers():
+    assert set(shard_cast_utils.__all__) == {
+        "build_w13_amax_overrides",
+        "build_w13_kmax_overrides",
+        "dequantize_mxfp4_to_bf16",
+        "mxfp4_kmax",
+        "quantize_mxfp4_to_nvfp4",
+        "quantize_mxfp4_to_nvfp4_lossless",
+    }
+    assert not hasattr(modelopt_export, "log")
+
+
 def test_link_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     source = tmp_path / "source"
     output = tmp_path / "output"
@@ -92,9 +107,30 @@ def test_link_aux_files_preserves_sidecars_and_applies_skips(tmp_path):
     assert not (output / ".cache").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink support")
+def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
+    repository = tmp_path / "models--moonshotai--Kimi-K3"
+    snapshot = repository / "snapshots" / "revision"
+    blob = repository / "blobs" / "tokenizer-blob"
+    snapshot.mkdir(parents=True)
+    blob.parent.mkdir()
+    blob.write_text("tokenizer")
+    (snapshot / "tokenizer.json").symlink_to(os.path.relpath(blob, snapshot))
+
+    validate_aux_files(snapshot)
+    output = tmp_path / "output"
+    link_aux_files(snapshot, output)
+
+    assert (output / "tokenizer.json").read_text() == "tokenizer"
+    assert not (output / "tokenizer.json").is_symlink()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlink and FIFO support")
-@pytest.mark.parametrize("source_kind", ["symlink", "fifo"])
-def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind):
+@pytest.mark.parametrize(
+    ("source_kind", "message"),
+    [("symlink", "outside the checkpoint directory"), ("fifo", "regular file")],
+)
+def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind, message):
     source = tmp_path / "source"
     source.mkdir()
     unsafe = source / "unsafe"
@@ -105,5 +141,7 @@ def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind):
     else:
         os.mkfifo(unsafe)
 
-    with pytest.raises(ValueError, match="regular file"):
+    with pytest.raises(ValueError, match=message):
         link_aux_files(source, tmp_path / "output")
+
+    assert not (tmp_path / "output").exists()

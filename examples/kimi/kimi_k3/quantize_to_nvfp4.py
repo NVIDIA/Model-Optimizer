@@ -107,6 +107,7 @@ from modelopt.torch.export.shard_cast_utils import (
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
     quantize_mxfp4_to_nvfp4_lossless,
+    validate_aux_files,
     validate_paths,
 )
 from modelopt.torch.export.shard_cast_utils import log as _log
@@ -160,11 +161,6 @@ _FP8_PB_BLOCK = 128
 _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
 
 _PUBLISHED_RECIPE = "huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
-_RECIPE_ALGORITHM = {
-    "method": "max",
-    "layerwise": {"enable": False},
-    "skip_forward_without_activation_calib": True,
-}
 
 
 def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
@@ -175,7 +171,14 @@ def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
 
 def _conversion_settings_from_quantize_config(quantize: dict[str, Any]) -> dict[str, Any]:
     """Validate the complete recipe contract and return converter settings."""
-    if quantize.get("algorithm") != _RECIPE_ALGORITHM:
+    algorithm = quantize.get("algorithm")
+    if (
+        not isinstance(algorithm, dict)
+        or algorithm.get("method") != "max"
+        or not isinstance(algorithm.get("layerwise"), dict)
+        or algorithm["layerwise"].get("enable") is not False
+        or algorithm.get("skip_forward_without_activation_calib") is not True
+    ):
         raise ValueError("recipe must use the calibration-free max algorithm")
 
     quant_cfg = quantize["quant_cfg"]
@@ -957,6 +960,12 @@ def main():
     assert shards, f"no HF-style shards in {args.source_ckpt}"
     if args.limit_shards:
         shards = shards[: args.limit_shards]
+    validate_aux_files(
+        args.source_ckpt,
+        skip_top_level=_SKIP_TOP_LEVEL,
+        skip_dir_names=_SKIP_SUBDIR_NAMES | _SKIP_TOP_LEVEL,
+        skip_file=lambda path: path.suffix == ".safetensors",
+    )
     fingerprint = _conversion_fingerprint(args, shards)
 
     marker_dir = args.output_ckpt / ".kimi_k3_conversion"
