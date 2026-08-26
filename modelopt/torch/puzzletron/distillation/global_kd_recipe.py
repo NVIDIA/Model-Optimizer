@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -13,11 +28,13 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import types
 from collections import deque
 from contextlib import nullcontext
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 import torch
 from nemo_automodel.components.distributed.config import DistributedSetup
@@ -61,6 +78,7 @@ from torch.utils.checkpoint import checkpoint
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
+from ..security_policy import require_boolean_policy
 from .flash_kld import TrainingFlashKLD
 
 
@@ -109,9 +127,7 @@ def _global_kd_checkpoint_adapter_context(model_parts, descriptor_name: str | No
                 block_configs = _config_value(text_config, "block_configs")
             if not block_configs:
                 continue
-            active_descriptor = descriptor_name or _config_value(
-                config, "anymodel_descriptor"
-            )
+            active_descriptor = descriptor_name or _config_value(config, "anymodel_descriptor")
             if not active_descriptor:
                 continue
             descriptor = AutoModelDescriptorFactory.get(str(active_descriptor))
@@ -159,13 +175,17 @@ def install_pp_checkpoint_state_dict_support() -> None:
                 and len(args) >= 2
             ):
                 model, optimizer = args[:2]
-                model_parameters = {id(parameter): fqn for fqn, parameter in model.named_parameters()}
+                model_parameters = {
+                    id(parameter): fqn for fqn, parameter in model.named_parameters()
+                }
                 unmatched = []
                 for group_index, group in enumerate(optimizer.param_groups):
                     for parameter_index, parameter in enumerate(group["params"]):
                         if id(parameter) in model_parameters:
                             continue
-                        local = parameter.to_local() if isinstance(parameter, DTensor) else parameter
+                        local = (
+                            parameter.to_local() if isinstance(parameter, DTensor) else parameter
+                        )
                         unmatched.append(
                             {
                                 "group": group_index,
@@ -174,7 +194,9 @@ def install_pp_checkpoint_state_dict_support() -> None:
                                 "local_shape": tuple(local.shape),
                                 "requires_grad": bool(parameter.requires_grad),
                                 "has_grad": parameter.grad is not None,
-                                "state": sorted(str(key) for key in optimizer.state.get(parameter, {})),
+                                "state": sorted(
+                                    str(key) for key in optimizer.state.get(parameter, {})
+                                ),
                             }
                         )
                 if unmatched:
@@ -185,7 +207,7 @@ def install_pp_checkpoint_state_dict_support() -> None:
                     )
             return _original(*args, options=relaxed(options), **kwargs)
 
-        non_strict._puzzletron_pp_non_strict = True
+        setattr(non_strict, "_puzzletron_pp_non_strict", True)
         setattr(stateful_wrappers, name, non_strict)
 
 
@@ -213,23 +235,23 @@ def _attach_global_kd_gdn_traces(parts, *, prefix: str, trace_backward: bool = F
             def _forward_end(_module, _args, output, *, layer_idx=layer_idx):
                 _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_forward_end")
                 if trace_backward and isinstance(output, torch.Tensor) and output.requires_grad:
-                    output.register_hook(
-                        lambda grad, layer_idx=layer_idx: (
-                            _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_backward_begin"),
-                            grad,
-                        )[1]
-                    )
+
+                    def trace_backward_begin(grad, *, layer_idx=layer_idx):
+                        _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_backward_begin")
+                        return grad
+
+                    output.register_hook(trace_backward_begin)
 
             module.register_forward_hook(_forward_end)
             if trace_backward:
                 parameter = next(module.parameters(), None)
                 if parameter is not None and parameter.requires_grad:
-                    parameter.register_hook(
-                        lambda grad, layer_idx=layer_idx: (
-                            _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_parameter_grad"),
-                            grad,
-                        )[1]
-                    )
+
+                    def trace_parameter_grad(grad, *, layer_idx=layer_idx):
+                        _trace_global_kd_phase(f"{prefix}_gdn_{layer_idx}_parameter_grad")
+                        return grad
+
+                    parameter.register_hook(trace_parameter_grad)
 
 
 def _instantiate(node):
@@ -312,9 +334,7 @@ def _project_teacher_hidden_on_reference_mesh(hidden, teacher_head, reference_lo
         return projection(hidden) if projection is not None else teacher_head(hidden)
     local_hidden = hidden.to_local() if isinstance(hidden, DTensor) else hidden
     reference_local = (
-        reference_logits.to_local()
-        if isinstance(reference_logits, DTensor)
-        else reference_logits
+        reference_logits.to_local() if isinstance(reference_logits, DTensor) else reference_logits
     )
     expected_vocab = int(reference_local.shape[-1])
 
@@ -550,9 +570,7 @@ def _set_teacher_mtp_enabled(teacher):
 
 def _split_output(output, model):
     seq_idx = None
-    main_is_hidden = bool(
-        getattr(model, "_puzzletron_distillation_hidden_output", False)
-    )
+    main_is_hidden = bool(getattr(model, "_puzzletron_distillation_hidden_output", False))
     if isinstance(output, tuple):
         values = list(output)
         if values and isinstance(values[-1], torch.Tensor) and values[-1].dtype == torch.int32:
@@ -577,6 +595,23 @@ def _split_output(output, model):
 
 
 class _WeightedObjectiveMixin:
+    """Objective behavior shared by the LLM and VLM AutoModel recipe bases."""
+
+    cfg: Any
+    checkpointer: Any
+    device_mesh: Any
+    dist_env: Any
+    loss_fn: Any
+    metric_logger_train: Any
+    model_parts: Any
+    optimizer: Any
+    pp: Any
+    pp_enabled: bool
+    teacher_model: Any
+    _ce_loss_buffer: list[torch.Tensor]
+    _kd_loss_buffer: list[torch.Tensor]
+    _dp_allreduce: Callable[..., torch.Tensor]
+
     def _configure_objective(self):
         objective = self.cfg.get("objective", {})
         self.objective = {
@@ -595,8 +630,7 @@ class _WeightedObjectiveMixin:
         self._objective_step_cursor = {name: 0 for name in self.objective}
         self._loss_topology_logged = False
         self._gradient_squared = {
-            name: torch.tensor(0.0)
-            for name in ("vision", "projector", "language", "mtp")
+            name: torch.tensor(0.0) for name in ("vision", "projector", "language", "mtp")
         }
         self._gradient_hook_handles = []
         self._vision_monitors = []
@@ -619,25 +653,74 @@ class _WeightedObjectiveMixin:
     ):
         """Publish a completion marker only after model and optimizer DCP succeed."""
 
-        result = super().save_checkpoint(
-            epoch,
-            step,
-            train_loss,
-            val_loss,
-            best_metric_key=best_metric_key,
-        )
-        checkpoint_path = (
-            os.path.join(
-                str(self.checkpointer.config.checkpoint_dir),
-                f"epoch_{epoch}_step_{step}",
+        result = None
+        publication_error: Exception | None = None
+        publication_error_text: str | None = None
+        try:
+            result = super().save_checkpoint(  # type: ignore[misc]
+                epoch,
+                step,
+                train_loss,
+                val_loss,
+                best_metric_key=best_metric_key,
             )
+        except Exception as error:  # noqa: BLE001 - all ranks must reach the collective
+            publication_error = error
+            publication_error_text = f"{type(error).__name__}: {error}"
+        distributed = torch.distributed.is_initialized()
+        if distributed:
+            parent_save_errors: list[str | None] = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(parent_save_errors, publication_error_text)
+            parent_save_failure = next(
+                (
+                    (rank, error)
+                    for rank, error in enumerate(parent_save_errors)
+                    if error is not None
+                ),
+                None,
+            )
+            if parent_save_failure is not None:
+                failing_rank, error_text = parent_save_failure
+                publication_error_text = f"parent save failed on rank {failing_rank}: {error_text}"
+        checkpoint_path = os.path.join(
+            str(self.checkpointer.config.checkpoint_dir),
+            f"epoch_{epoch}_step_{step}",
         )
-        if self.dist_env.is_main:
-            from pathlib import Path
+        if publication_error_text is None and self.dist_env.is_main:
+            try:
+                consolidated = Path(checkpoint_path, "model", "consolidated")
+                config_path = consolidated / "config.json"
+                config = json.loads(config_path.read_text()) if config_path.is_file() else {}
+                text_config = config.get("text_config")
+                if config.get("block_configs") or (
+                    isinstance(text_config, dict) and text_config.get("block_configs")
+                ):
+                    from ..utils.vllm_adapter import refresh_realized_checkpoint_config
 
-            Path(checkpoint_path, "saving_completed").touch()
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+                    model_config = _config_value(getattr(self, "cfg", None), "model")
+                    configured_trust = _config_value(model_config, "trust_remote_code")
+                    refresh_realized_checkpoint_config(
+                        consolidated,
+                        trust_remote_code=require_boolean_policy(
+                            configured_trust,
+                            path="model.trust_remote_code",
+                            default=False,
+                        ),
+                    )
+                Path(checkpoint_path, "saving_completed").touch()
+            except Exception as error:  # noqa: BLE001 - all ranks must reach the collective
+                publication_error = error
+                publication_error_text = (
+                    f"publication failed on rank 0: {type(error).__name__}: {error}"
+                )
+        if distributed:
+            publication_status = [publication_error_text]
+            torch.distributed.broadcast_object_list(publication_status, src=0)
+            publication_error_text = publication_status[0]
+        if publication_error is not None:
+            raise publication_error
+        if publication_error_text is not None:
+            raise RuntimeError(f"global KD checkpoint {publication_error_text}")
         return result
 
     def _install_vision_observers(self, parts, *, role: str):
@@ -692,26 +775,23 @@ class _WeightedObjectiveMixin:
         }
         if not torch.distributed.is_initialized():
             return local
-        gathered = [None] * torch.distributed.get_world_size()
+        gathered: list[dict[str, Any] | None] = [None] * torch.distributed.get_world_size()
         torch.distributed.all_gather_object(gathered, local)
-        roles = set().union(*(item["vision_by_role"] for item in gathered))
+        observations = [item for item in gathered if item is not None]
+        if len(observations) != len(gathered):
+            raise RuntimeError("Missing global KD observability metadata from a distributed rank")
+        roles = set().union(*(item["vision_by_role"] for item in observations))
         return {
-            "vision_forward_count": sum(item["vision_forward_count"] for item in gathered),
+            "vision_forward_count": sum(item["vision_forward_count"] for item in observations),
             "vision_by_role": {
-                role: sum(item["vision_by_role"].get(role, 0) for item in gathered)
+                role: sum(item["vision_by_role"].get(role, 0) for item in observations)
                 for role in sorted(roles)
             },
             "vision_output_checksums": sorted(
-                checksum
-                for item in gathered
-                for checksum in item["vision_output_checksums"]
+                checksum for item in observations for checksum in item["vision_output_checksums"]
             ),
             "media_input_checksums": sorted(
-                set(
-                    checksum
-                    for item in gathered
-                    for checksum in item["media_input_checksums"]
-                )
+                set(checksum for item in observations for checksum in item["media_input_checksums"])
             ),
         }
 
@@ -765,7 +845,9 @@ class _WeightedObjectiveMixin:
 
         if not inactive_ids:
             return
-        optimizers = self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        optimizers = (
+            self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        )
         removed = 0
         for optimizer in optimizers:
             for group in optimizer.param_groups:
@@ -792,7 +874,7 @@ class _WeightedObjectiveMixin:
             return None
         if getattr(self, "_puzzletron_global_kd_domain", None) == "llm":
             self._remove_text_inactive_optimizer_parameters()
-        return super().load_checkpoint(restore_from or "LATEST")
+        return super().load_checkpoint(restore_from or "LATEST")  # type: ignore[misc]
 
     def _install_gradient_norm_observers(self):
         self._gradient_squared = {
@@ -818,11 +900,11 @@ class _WeightedObjectiveMixin:
                         continue
                     gradient = parameter.grad
                     value = gradient.to_local() if isinstance(gradient, DTensor) else gradient
-                    self._gradient_squared[group].add_(
-                        value.detach().float().square().sum()
-                    )
+                    self._gradient_squared[group].add_(value.detach().float().square().sum())
 
-        optimizers = self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        optimizers = (
+            self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        )
         for optimizer in optimizers:
             self._gradient_hook_handles.append(
                 optimizer.register_step_pre_hook(observe_optimizer_step)
@@ -852,12 +934,12 @@ class _WeightedObjectiveMixin:
                 seen.add(id(parameter))
                 current_parameters.append(parameter)
 
-        optimizers = self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        optimizers = (
+            self.optimizer if isinstance(self.optimizer, (list, tuple)) else [self.optimizer]
+        )
         for optimizer in optimizers:
             optimizer_parameters = [
-                parameter
-                for group in optimizer.param_groups
-                for parameter in group["params"]
+                parameter for group in optimizer.param_groups for parameter in group["params"]
             ]
             current_ids = {id(parameter) for parameter in current_parameters}
             if all(id(parameter) in current_ids for parameter in optimizer_parameters):
@@ -994,9 +1076,7 @@ class _WeightedObjectiveMixin:
         if teacher_pp is None:
             return self.teacher_model
         return next(
-            part
-            for part, stage in zip(teacher_pp.parts, teacher_pp.info.stages)
-            if stage.is_last
+            part for part, stage in zip(teacher_pp.parts, teacher_pp.info.stages) if stage.is_last
         )
 
     @staticmethod
@@ -1159,9 +1239,7 @@ class _WeightedObjectiveMixin:
 
         student_head = _get_lm_head_module(student_model) if student_is_hidden else None
         teacher_head = (
-            _get_lm_head_module(teacher_model)
-            if needs_mtp_kd and teacher_is_hidden
-            else None
+            _get_lm_head_module(teacher_model) if needs_mtp_kd and teacher_is_hidden else None
         )
         if student_is_hidden and student_head is None:
             raise ValueError("MTP losses require an accessible student lm_head")
@@ -1187,9 +1265,7 @@ class _WeightedObjectiveMixin:
                 depth_labels = torch.where(rolled == seq_idx, depth_labels, -100)
 
             flat_student = self._flatten_tokens(student_value)
-            flat_teacher = (
-                self._flatten_tokens(teacher_values[depth]) if needs_mtp_kd else None
-            )
+            flat_teacher = self._flatten_tokens(teacher_values[depth]) if needs_mtp_kd else None
             flat_labels = depth_labels.reshape(-1)
             for start in range(0, flat_student.shape[0], chunk_size):
                 stop = min(start + chunk_size, flat_student.shape[0])
@@ -1205,8 +1281,12 @@ class _WeightedObjectiveMixin:
                     phase = f"mtp_depth_{depth}_chunk_{start}_{stop}"
                     _trace_global_kd_phase(f"{phase}_student_head_begin")
                     if student_is_hidden:
+                        if student_head is None:
+                            raise RuntimeError("MTP hidden-state projection is missing its lm_head")
                         s_chunk = _align_dtensor_to_module_mesh(s_chunk, student_head)
-                    s_logits = student_head(s_chunk) if student_is_hidden else s_chunk
+                        s_logits = student_head(s_chunk)
+                    else:
+                        s_logits = s_chunk
                     _trace_global_kd_phase(f"{phase}_student_head_end")
                     zero = self._local_zero(s_logits)
                     _trace_global_kd_phase(f"{phase}_ce_begin")
@@ -1273,7 +1353,10 @@ class _WeightedObjectiveMixin:
             rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
             if rank == 0:
                 placements = (
-                    tuple(type(item).__name__ + f"({getattr(item, 'dim', '')})" for item in student_logits.placements)
+                    tuple(
+                        type(item).__name__ + f"({getattr(item, 'dim', '')})"
+                        for item in student_logits.placements
+                    )
                     if isinstance(student_logits, DTensor)
                     else ("replicated_tensor",)
                 )
@@ -1387,9 +1470,7 @@ class _WeightedObjectiveMixin:
                 if teacher_out is None:
                     raise RuntimeError("Teacher PP output queue is empty")
             model = next(
-                part
-                for part, stage in zip(self.model_parts, self.pp.info.stages)
-                if stage.is_last
+                part for part, stage in zip(self.model_parts, self.pp.info.stages) if stage.is_last
             )
             # PP schedules rescale by the optimizer-step label count after
             # backward, so every microbatch loss must remain an unnormalized sum.
@@ -1401,9 +1482,7 @@ class _WeightedObjectiveMixin:
         return loss_wrapper
 
 
-class KnowledgeDistillationRecipeForNextTokenPrediction(
-    _WeightedObjectiveMixin, _AutoModelLLMKD
-):
+class KnowledgeDistillationRecipeForNextTokenPrediction(_WeightedObjectiveMixin, _AutoModelLLMKD):
     """AutoModel LLM KD with independently weighted main/MTP objectives."""
 
     def setup(self):
@@ -1476,7 +1555,9 @@ class KnowledgeDistillationRecipeForNextTokenPrediction(
                 is_train=is_train,
                 loss_buffer=loss_buffer,
             )
-        batch = {key: value.to(self.dist_env.device, non_blocking=True) for key, value in batch.items()}
+        batch = {
+            key: value.to(self.dist_env.device, non_blocking=True) for key, value in batch.items()
+        }
         # Current AutoModel CP owns label sharding through the batch mapping.
         # Keep labels present until CP has padded/sharded every sequence tensor,
         # then remove the CP-local labels for the weighted objective.
@@ -1496,7 +1577,9 @@ class KnowledgeDistillationRecipeForNextTokenPrediction(
             teacher_out = None
             if self.needs_teacher:
                 with ScopedModuleOffloading(self.teacher_model, enabled=False), torch.no_grad():
-                    teacher_out = self.teacher_model(**filter_forward_kwargs(self.teacher_model, batch))
+                    teacher_out = self.teacher_model(
+                        **filter_forward_kwargs(self.teacher_model, batch)
+                    )
             student_out = model(**filter_forward_kwargs(model, batch))
             total, terms = self._objective_loss(
                 student_out, teacher_out, labels, model, num_label_tokens
@@ -1739,7 +1822,9 @@ class KnowledgeDistillationRecipeForVLM(_WeightedObjectiveMixin, _AutoModelVLMKD
             with torch.no_grad():
                 prepared = model(_pre_embed_only=True, **media)
             if self.needs_teacher and "inputs_embeds" in prepared:
-                _validate_cp_pre_embed_teacher_compatibility(prepared["inputs_embeds"], self.teacher_model)
+                _validate_cp_pre_embed_teacher_compatibility(
+                    prepared["inputs_embeds"], self.teacher_model
+                )
             for key in VLM_INPUT_KEYS:
                 batch.pop(key, None)
             batch.update(prepared)
@@ -1796,9 +1881,7 @@ class KnowledgeDistillationRecipeForVLM(_WeightedObjectiveMixin, _AutoModelVLMKD
 
         batch = prepare_cp_inputs(self.pp, self.model_parts, batch)
         if self.needs_teacher:
-            teacher_batch = prepare_cp_inputs(
-                self.teacher_pp, self.teacher_pp.parts, teacher_batch
-            )
+            teacher_batch = prepare_cp_inputs(self.teacher_pp, self.teacher_pp.parts, teacher_batch)
         train_ctx, batch = make_cp_batch_and_ctx(self.device_mesh, batch)
         labels = batch.pop("labels")
         model_input_key = "inputs_embeds" if "inputs_embeds" in batch else "input_ids"
@@ -1824,9 +1907,7 @@ class KnowledgeDistillationRecipeForVLM(_WeightedObjectiveMixin, _AutoModelVLMKD
         if self.needs_teacher:
             teacher_ctx, teacher_batch = make_cp_batch_and_ctx(self.device_mesh, teacher_batch)
             teacher_labels = teacher_batch.pop("labels")
-            teacher_input_key = (
-                "inputs_embeds" if "inputs_embeds" in teacher_batch else "input_ids"
-            )
+            teacher_input_key = "inputs_embeds" if "inputs_embeds" in teacher_batch else "input_ids"
             teacher_input = teacher_batch.pop(teacher_input_key)
             with teacher_ctx():
                 teacher_targets = (
@@ -1837,8 +1918,9 @@ class KnowledgeDistillationRecipeForVLM(_WeightedObjectiveMixin, _AutoModelVLMKD
                 set_pp_vlm_chunk_specs(self.teacher_pp.info.schedule, teacher_batch)
                 capture = self.teacher_model._teacher_logits_capture
                 capture.clear()
-                with torch.no_grad(), stage_vlm_media_for_pp(
-                    self.teacher_pp, self.teacher_pp.parts, teacher_batch
+                with (
+                    torch.no_grad(),
+                    stage_vlm_media_for_pp(self.teacher_pp, self.teacher_pp.parts, teacher_batch),
                 ):
                     teacher_losses = [] if self.teacher_pp.info.has_last_stage else None
                     if self.teacher_pp.info.has_first_stage:
@@ -1880,9 +1962,7 @@ class KnowledgeDistillationRecipeForVLM(_WeightedObjectiveMixin, _AutoModelVLMKD
         )
 
     def _run_train_optim_step(self, batches, max_grad_norm=None):
-        log_data = FinetuneRecipeForVLM._run_train_optim_step(
-            self, batches, max_grad_norm
-        )
+        log_data = FinetuneRecipeForVLM._run_train_optim_step(self, batches, max_grad_norm)
 
         # The shared publisher normalizes last-stage PP microbatch sums and
         # forwards every objective term to rank zero.

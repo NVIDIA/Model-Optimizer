@@ -1,5 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Future-stage configuration and artifact-selection contracts."""
 
 import json
 from pathlib import Path
@@ -7,41 +21,40 @@ from pathlib import Path
 import pytest
 import torch
 
+from modelopt.torch.puzzletron.manifest import StageManifest
+from modelopt.torch.puzzletron.security_policy import require_boolean_policy
+from modelopt.torch.puzzletron.stages import future
 
-def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
-    from modelopt.torch.puzzletron.stages.future import _distillation_dataset_source
-
-    cache = tmp_path / "train.tokens"
-    assert _distillation_dataset_source(
-        {"packed_token_cache_path": str(cache)},
-        {},
-    ) == ("", str(cache))
+# Security-policy validation
 
 
-def test_distillation_sanity_requires_raw_dataset_or_packed_cache():
-    from modelopt.torch.puzzletron.stages.future import _distillation_dataset_source
-
-    with pytest.raises(ValueError, match="dataset_path or packed_token_cache_path"):
-        _distillation_dataset_source({}, {})
+def test_security_policy_rejects_non_boolean_values():
+    with pytest.raises(ValueError, match="^policy must be a boolean$"):
+        require_boolean_policy("false", path="policy")
 
 
-def test_distributed_barrier_propagates_failure_with_stage_context(monkeypatch):
-    from modelopt.torch.puzzletron.stages.future import _distributed_barrier
+def test_security_policy_resolves_none_only_with_an_explicit_default():
+    assert require_boolean_policy(None, path="policy", default=False) is False
+    assert require_boolean_policy(None, path="policy", default=True) is True
+    with pytest.raises(ValueError, match="^policy must be a boolean$"):
+        require_boolean_policy(None, path="policy")
 
-    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
 
-    def fail():
-        raise RuntimeError("peer exited")
-
-    monkeypatch.setattr(torch.distributed, "barrier", fail)
-    with pytest.raises(RuntimeError, match="global distillation publication.*peer exited"):
-        _distributed_barrier("global distillation publication")
+def test_evaluation_stage_rejects_scalar_checkpoints():
+    config = {
+        "zero_shot_evaluation": {
+            "enabled": True,
+            "checkpoints": "/checkpoint",
+        }
+    }
+    with pytest.raises(
+        ValueError,
+        match=r"^zero_shot_evaluation\.checkpoints must be a list or tuple$",
+    ):
+        future.evaluation_stage(config, object())
 
 
 def test_evaluation_descriptor_is_inferred_from_checkpoint(monkeypatch, tmp_path):
-    from modelopt.torch.puzzletron.stages import future
-
     sentinel = object()
     calls = []
 
@@ -56,13 +69,12 @@ def test_evaluation_descriptor_is_inferred_from_checkpoint(monkeypatch, tmp_path
 
     checkpoint = tmp_path / "solution_0"
     config = {"model": {"trust_remote_code": True}}
+
     assert future._resolve_evaluation_descriptor(config, checkpoint) is sentinel
     assert calls == [(str(checkpoint), True)]
 
 
 def test_evaluation_descriptor_honors_explicit_legacy_override(monkeypatch, tmp_path):
-    from modelopt.torch.puzzletron.stages import future
-
     sentinel = object()
     monkeypatch.setattr(future.ModelDescriptorFactory, "get", lambda name: (name, sentinel))
 
@@ -72,11 +84,59 @@ def test_evaluation_descriptor_honors_explicit_legacy_override(monkeypatch, tmp_
     )
 
 
-def test_scenario_grid_kd_builds_one_isolated_config_per_realized_checkpoint(
-    monkeypatch, tmp_path
-):
-    from modelopt.torch.puzzletron.stages import future
+# Global-distillation selection and publication
 
+
+def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
+    cache = tmp_path / "train.tokens"
+    assert future._distillation_dataset_source(
+        {"packed_token_cache_path": str(cache)},
+        {},
+    ) == ("", str(cache))
+
+
+def test_distillation_sanity_requires_raw_dataset_or_packed_cache():
+    with pytest.raises(ValueError, match="dataset_path or packed_token_cache_path"):
+        future._distillation_dataset_source({}, {})
+
+
+def test_distillation_tournament_publishes_mapping_result(tmp_path, monkeypatch):
+    """Persist the tournament's mapping result without object conversion."""
+
+    outputs = {"summary_path": str(tmp_path / "summary.json"), "finalists": []}
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.tournament.run_global_kd_tournament",
+        lambda *_args, **_kwargs: outputs,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.pipeline_config.load_runtime_hydra_config",
+        lambda _config: object(),
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "global_distillation": {"tournament": {"enabled": True}},
+    }
+    manifest = StageManifest(stage="global_distillation", config=config)
+
+    result = future.distillation_stage(config, manifest)
+
+    assert result.status == "success"
+    assert json.loads(result.manifest_path.read_text())["outputs"] == outputs
+
+
+def test_distributed_barrier_propagates_failure_with_stage_context(monkeypatch):
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    def fail():
+        raise RuntimeError("peer exited")
+
+    monkeypatch.setattr(torch.distributed, "barrier", fail)
+    with pytest.raises(RuntimeError, match="global distillation publication.*peer exited"):
+        future._distributed_barrier("global distillation publication")
+
+
+def test_scenario_grid_kd_builds_one_isolated_config_per_realized_checkpoint(monkeypatch, tmp_path):
     puzzle_dir = tmp_path / "model"
     checkpoints = []
     for width, depth in ((512, 0), (1024, 1)):
@@ -122,8 +182,6 @@ def test_scenario_grid_kd_builds_one_isolated_config_per_realized_checkpoint(
 
 
 def test_scenario_grid_kd_checkpoints_select_latest_consolidated(tmp_path):
-    from modelopt.torch.puzzletron.stages import future
-
     puzzle_dir = tmp_path / "model"
     for width, depth in ((512, 0), (1024, 1)):
         root = (
@@ -151,8 +209,6 @@ def test_scenario_grid_kd_checkpoints_select_latest_consolidated(tmp_path):
 
 
 def test_profile_solution_checkpoints_use_selected_mip_registry(tmp_path):
-    from modelopt.torch.puzzletron.stages import future
-
     puzzle_dir = tmp_path / "model"
     profile_root = puzzle_dir / "mip/profiles/params-090"
     profile_root.mkdir(parents=True)
@@ -183,8 +239,6 @@ def test_profile_solution_checkpoints_use_selected_mip_registry(tmp_path):
 
 
 def test_global_kd_checkpoints_include_canonical_distillation_exports(tmp_path):
-    from modelopt.torch.puzzletron.stages import future
-
     puzzle_dir = tmp_path / "model"
     run = (
         puzzle_dir
@@ -209,35 +263,28 @@ def test_global_kd_checkpoints_include_canonical_distillation_exports(tmp_path):
     assert checkpoints == [("latency-095__h4096-d4", checkpoint)]
 
 
-def test_aiperf_executable_prefers_config_then_environment(monkeypatch):
-    from modelopt.torch.puzzletron.stages import future
+# AIPerf execution
 
+
+def test_aiperf_executable_prefers_config_then_environment(monkeypatch):
     monkeypatch.setenv("AIPERF_EXECUTABLE", "/shared/aiperf")
     assert future._aiperf_executable({}) == "/shared/aiperf"
     assert future._aiperf_executable({"executable": "/configured/aiperf"}) == "/configured/aiperf"
 
 
 def test_bounded_map_does_not_queue_work_after_failure():
-    from modelopt.torch.puzzletron.stages import future
-
     observed = []
 
     def fail_first(value):
         observed.append(value)
         raise RuntimeError("stop")
 
-    try:
+    with pytest.raises(RuntimeError, match="^stop$"):
         future._bounded_map(fail_first, range(5), max_workers=1)
-    except RuntimeError as error:
-        assert str(error) == "stop"
-    else:
-        raise AssertionError("worker failure must propagate")
     assert observed == [0]
 
 
 def test_aiperf_checkpoint_work_keeps_concurrencies_serial_per_checkpoint():
-    from modelopt.torch.puzzletron.stages import future
-
     work = future._aiperf_checkpoint_work(
         [("teacher", Path("/teacher")), ("student", Path("/student"))], [1, 2]
     )

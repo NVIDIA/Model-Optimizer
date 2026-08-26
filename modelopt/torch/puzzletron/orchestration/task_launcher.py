@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Dependency-light launcher for one task in an orchestration attempt."""
 
@@ -22,6 +34,7 @@ __all__ = [
     "TaskBinding",
     "build_task_command",
     "main",
+    "rendezvous_endpoint",
     "rendezvous_port",
     "resolve_task_binding",
 ]
@@ -38,6 +51,7 @@ TASK_IDENTITY_ENV_KEYS = frozenset(
         "PUZZLETRON_LOCAL_TASK_INDEX",
         "PUZZLETRON_MASTER_ADDR",
         "PUZZLETRON_MASTER_PORT",
+        "PUZZLETRON_RENDEZVOUS_ENDPOINT",
         "PUZZLETRON_RENDEZVOUS_ID",
         "PUZZLETRON_TASK_HOSTS",
         "PUZZLETRON_TASK_INDEX",
@@ -74,6 +88,14 @@ def rendezvous_port(attempt_id: str, group_index: int, group_count: int) -> int:
         raise ValueError(f"group_count={group_count} exceeds rendezvous port span={port_span}")
     seed = int(hashlib.sha256(attempt_id.encode()).hexdigest()[:8], 16)
     return port_start + (seed % (port_span - group_count + 1)) + group_index
+
+
+def rendezvous_endpoint(binding: TaskBinding) -> str:
+    """Return a collision-free local endpoint or the shared multi-node endpoint."""
+
+    if binding.group_size == 1:
+        return "localhost:0"
+    return f"{binding.master_addr}:{binding.master_port}"
 
 
 def resolve_task_binding(
@@ -131,7 +153,7 @@ def build_task_command(
     command = tuple(str(part) for part in payload)
     if launcher is TaskLauncher.DIRECT:
         return command
-    rendezvous_host = "localhost" if binding.group_size == 1 else binding.master_addr
+    endpoint = rendezvous_endpoint(binding)
     return (
         "python",
         "-m",
@@ -139,7 +161,7 @@ def build_task_command(
         f"--nnodes={binding.group_size}",
         f"--nproc-per-node={gpus_per_task}",
         "--rdzv-backend=c10d",
-        f"--rdzv-endpoint={rendezvous_host}:{binding.master_port}",
+        f"--rdzv-endpoint={endpoint}",
         f"--rdzv-id={binding.rendezvous_id}",
         "--no-python",
         *command,
@@ -203,9 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"task {task_index} expected {args.gpus_per_task} visible GPUs, got {visible_gpus}"
         )
     tasks_per_node = (
-        args.task_count
-        if args.gpus_per_task == 0
-        else args.gpus_per_node // args.gpus_per_task
+        args.task_count if args.gpus_per_task == 0 else args.gpus_per_node // args.gpus_per_task
     )
     expected_hosts = math.ceil(args.task_count / tasks_per_node)
     if expected_hosts > args.nodes:
@@ -234,6 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         PUZZLETRON_GROUP_SIZE=str(binding.group_size),
         PUZZLETRON_MASTER_ADDR=binding.master_addr,
         PUZZLETRON_MASTER_PORT=str(binding.master_port),
+        PUZZLETRON_RENDEZVOUS_ENDPOINT=rendezvous_endpoint(binding),
         PUZZLETRON_RENDEZVOUS_ID=binding.rendezvous_id,
     )
     print(
@@ -241,7 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"host={binding.hostname} task={binding.task_index} "
         f"local={binding.local_task_index} gpus={','.join(visible_gpus)} "
         f"group={binding.group_index} rank={binding.group_rank}/{binding.group_size} "
-        f"endpoint={binding.master_addr}:{binding.master_port} "
+        f"endpoint={rendezvous_endpoint(binding)} "
         f"rdzv_id={binding.rendezvous_id}",
         flush=True,
     )
@@ -251,8 +272,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         binding=binding,
         gpus_per_task=args.gpus_per_task,
     )
-    os.execvpe(command[0], command, env)
-    return 0
+    # The command is explicit argv from the compiled campaign plan, and no shell
+    # is involved. The payload inherits this task's process group so scheduler
+    # group signals reach both launcher and payload.
+    pid = os.posix_spawnp(command[0], command, env)
+    _, status = os.waitpid(pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+    return exit_code if exit_code >= 0 else 128 - exit_code
 
 
 if __name__ == "__main__":

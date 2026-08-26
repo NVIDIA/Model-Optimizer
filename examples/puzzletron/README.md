@@ -85,6 +85,21 @@ The defaults file is loaded only when passed explicitly and takes precedence
 over the selected profile. To expose every per-section and nested setting, use
 the advanced flow explicitly:
 
+Automation can use the same setup entry point without answering prompts. The
+defaults file must provide every required value that has no resolved default:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults /path/to/setup-v2-defaults.yaml \
+  --campaign-dir /path/to/campaign \
+  --profile smoke \
+  --non-interactive
+```
+
+Non-interactive setup fails instead of guessing when a required answer has no
+resolved default. It generates and validates the same smoke and production
+bundles as the interactive wizard.
+
 ```bash
 python examples/puzzletron/puzzletron_setup_v2.py --full
 ```
@@ -269,12 +284,14 @@ git -C "${AUTOMODEL_ROOT}" rev-parse HEAD
 ```
 
 ```bash
-python - <<'PY'
+PYTHONPATH="${MODEL_OPT_ROOT}" python - <<'PY'
 import importlib.metadata as metadata
 import json
 import os
 
 from packaging.version import Version
+
+from examples.puzzletron.ci_environment import verify_installed_vcs_source
 
 import aiperf
 import lmms_eval
@@ -307,10 +324,17 @@ assert Version(metadata.version("torchvision")).release == Version(
     ci_environment["torchvision"]
 ).release
 assert transformers.__version__ == ci_environment["transformers"]
-assert metadata.version("lmms-eval") == ci_environment["lmms_eval"]
+assert Version(metadata.version("lmms-eval")).base_version == (
+    ci_environment["lmms_eval"]["base_version"]
+)
 assert Version(metadata.version("nemo-automodel")).base_version == (
     ci_environment["nemo_automodel"]["base_version"]
 )
+for package, source in (
+    ("lmms-eval", ci_environment["lmms_eval"]),
+    ("nemo-automodel", ci_environment["nemo_automodel"]),
+):
+    verify_installed_vcs_source(package, source)
 assert torch.version.cuda == "12.9"
 assert torch.cuda.is_available()
 PY
@@ -491,6 +515,11 @@ without submitting work, or select one stage while iterating, for example
 The setup wizard can also add downstream evaluation for materialized campaign
 candidates. See [post-MIP pipelines](docs/post_mip_pipeline.md) to configure it
 or add it to an existing campaign.
+
+Remote model code and AIPerf v0.11 online tokenizer resolution are disabled by
+default. Enable remote code only for a trusted model source. The tokenizer
+compatibility option permits the AIPerf child process to resolve its tokenizer
+online even when the surrounding campaign is configured for offline loading.
 
 ### Legacy checked-in Nano campaign
 

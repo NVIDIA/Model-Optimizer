@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Tests for scheduler-neutral configs emitted by the Puzzletron setup wizard."""
 
 import pytest
@@ -37,63 +34,6 @@ from puzzletron_setup.wizard import (
     _downstream_evaluation_metric_suggestions,
     _resource_rows,
 )
-
-
-class _NormalMipPrompts:
-    def __init__(self) -> None:
-        self.messages: list[str] = []
-
-    def begin(self, state, section: str) -> None:
-        self.messages.append(f"begin:{section}")
-
-    def checkpoint(self) -> int:
-        return len(self.messages)
-
-    def rewind(self, checkpoint: int) -> None:
-        self.messages = self.messages[:checkpoint]
-
-    def select(self, message: str, choices, *, default=None, description=None):
-        self.messages.append(message)
-        return default
-
-    def integer(self, message: str, *, default: int, **kwargs) -> int:
-        self.messages.append(message)
-        return default
-
-    def confirm(self, message: str, *, default: bool, **kwargs) -> bool:
-        self.messages.append(message)
-        return False if message == "Add another independent MIP run?" else default
-
-    def text(self, message: str, *, default=None, **kwargs) -> str:
-        self.messages.append(message)
-        if message == "Embedding widths for this MIP run (all or YAML list):":
-            return "[1024, 768]"
-        return str(default or "")
-
-
-class _MeshPrompts:
-    def __init__(self) -> None:
-        self.messages: list[str] = []
-
-    def integer(self, message: str, *, default: int, **kwargs) -> int:
-        self.messages.append(message)
-        return default
-
-
-class _ServingPrompts:
-    def __init__(self, values: dict[str, int]) -> None:
-        self.values = values
-        self.messages: list[str] = []
-
-    def checkpoint(self) -> int:
-        return len(self.messages)
-
-    def rewind(self, checkpoint: int) -> None:
-        self.messages = self.messages[:checkpoint]
-
-    def integer(self, message: str, *, default: int, **kwargs) -> int:
-        self.messages.append(message)
-        return self.values.get(message, default)
 
 
 def test_serving_parallel_treats_vllm_expert_parallelism_as_boolean_mode() -> None:
@@ -120,72 +60,6 @@ def test_serving_parallel_treats_vllm_expert_parallelism_as_boolean_mode() -> No
     topology["expert_parallel_size"] = 4
     with pytest.raises(SetupError, match=r"expected 1 or TP \* DP=8"):
         _serving_parallel(topology)
-
-
-def _nemotron_render_state(*, latent_moe: bool) -> dict:
-    axes = {
-        "hidden_width": {
-            "enabled": True,
-            "teacher_value": 2688,
-            "values": [2688, 2560],
-            "alignment": 128,
-        }
-    }
-    if latent_moe:
-        axes["moe_latent_dim"] = {
-            "enabled": True,
-            "teacher_value": 1024,
-            "values": [1024, 896],
-            "alignment": 128,
-        }
-    return {
-        "model": {
-            "source": "nvidia/NVIDIA-Nemotron-3",
-            "resolved_revision": "revision",
-            "config": {"moe_latent_size": 1024 if latent_moe else None},
-        },
-        "inventory": {
-            "family": "nemotron3",
-            "descriptor": "nemotron_h",
-            "family_config": "examples/puzzletron/configs/families/nemotron3/family.yaml",
-            "model_type": "nemotron_h",
-            "architectures": ["NemotronHForCausalLM"],
-            "num_layers": 4,
-            "num_sublayers": 4,
-            "facts": {"hidden_size": 2688},
-        },
-        "answers": {
-            "data": {
-                "source": "/dataset",
-                "modality": "text",
-                "layout": "fixed",
-                "sequence_length": 2048,
-            },
-            "pruning": {
-                "width_importance_samples": 128,
-                "replacement_samples": 16,
-                "depth_remove": 0,
-                "axes": axes,
-                "bypass": {"enabled": False},
-            },
-            "runtime": {
-                "vllm_enabled": False,
-                "isl": 2048,
-                "osl": 256,
-                "concurrency": 1,
-            },
-            "mip": {"runs": {}},
-            "post_mip": {"flows": {}},
-            "infrastructure": {
-                "meshes": {
-                    "common": {},
-                    "bypass": {},
-                    "global_kd": {},
-                }
-            },
-            "output": {"result_root": "/results"},
-        },
-    }
 
 
 def test_batch_alignment_preserves_hydra_references() -> None:
@@ -256,6 +130,13 @@ def test_custom_dataset_rendering_does_not_add_acquisition_fields() -> None:
     experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
 
     assert "acquisition" not in experiment["data"]
+
+
+def test_rendered_data_keeps_controller_and_worker_sequence_length_in_sync() -> None:
+    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
+
+    assert experiment["data"]["sequence_length"] == 2048
+    assert experiment["data"]["sequence_length"] == experiment["data"]["max_sample_length"]
 
 
 def test_packed_text_uses_native_automodel_data_instead_of_fixed_token_memmaps() -> None:
@@ -1161,3 +1042,132 @@ def test_dense_mesh_explains_that_ep_is_fixed(capsys) -> None:
     assert mesh["ep"] == 1
     assert not any("Expert parallel" in message for message in prompts.messages)
     assert "Expert parallel (EP): 1 (not applicable to dense models)." in capsys.readouterr().out
+
+
+class _NormalMipPrompts:
+    """Prompt double that records the normal MIP setup interaction."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def begin(self, state, section: str) -> None:
+        self.messages.append(f"begin:{section}")
+
+    def checkpoint(self) -> int:
+        return len(self.messages)
+
+    def rewind(self, checkpoint: int) -> None:
+        self.messages = self.messages[:checkpoint]
+
+    def select(self, message: str, choices, *, default=None, description=None):
+        self.messages.append(message)
+        return default
+
+    def integer(self, message: str, *, default: int, **kwargs) -> int:
+        self.messages.append(message)
+        return default
+
+    def confirm(self, message: str, *, default: bool, **kwargs) -> bool:
+        self.messages.append(message)
+        return False if message == "Add another independent MIP run?" else default
+
+    def text(self, message: str, *, default=None, **kwargs) -> str:
+        self.messages.append(message)
+        if message == "Embedding widths for this MIP run (all or YAML list):":
+            return "[1024, 768]"
+        return str(default or "")
+
+
+class _MeshPrompts:
+    """Prompt double that accepts mesh defaults while recording questions."""
+
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def integer(self, message: str, *, default: int, **kwargs) -> int:
+        self.messages.append(message)
+        return default
+
+
+class _ServingPrompts:
+    """Prompt double that supplies selected serving-topology values."""
+
+    def __init__(self, values: dict[str, int]) -> None:
+        self.values = values
+        self.messages: list[str] = []
+
+    def checkpoint(self) -> int:
+        return len(self.messages)
+
+    def rewind(self, checkpoint: int) -> None:
+        self.messages = self.messages[:checkpoint]
+
+    def integer(self, message: str, *, default: int, **kwargs) -> int:
+        self.messages.append(message)
+        return self.values.get(message, default)
+
+
+def _nemotron_render_state(*, latent_moe: bool) -> dict:
+    axes = {
+        "hidden_width": {
+            "enabled": True,
+            "teacher_value": 2688,
+            "values": [2688, 2560],
+            "alignment": 128,
+        }
+    }
+    if latent_moe:
+        axes["moe_latent_dim"] = {
+            "enabled": True,
+            "teacher_value": 1024,
+            "values": [1024, 896],
+            "alignment": 128,
+        }
+    return {
+        "model": {
+            "source": "nvidia/NVIDIA-Nemotron-3",
+            "resolved_revision": "revision",
+            "config": {"moe_latent_size": 1024 if latent_moe else None},
+        },
+        "inventory": {
+            "family": "nemotron3",
+            "descriptor": "nemotron_h",
+            "family_config": "examples/puzzletron/configs/families/nemotron3/family.yaml",
+            "model_type": "nemotron_h",
+            "architectures": ["NemotronHForCausalLM"],
+            "num_layers": 4,
+            "num_sublayers": 4,
+            "facts": {"hidden_size": 2688},
+        },
+        "answers": {
+            "data": {
+                "source": "/dataset",
+                "modality": "text",
+                "layout": "fixed",
+                "sequence_length": 2048,
+            },
+            "pruning": {
+                "width_importance_samples": 128,
+                "replacement_samples": 16,
+                "depth_remove": 0,
+                "axes": axes,
+                "bypass": {"enabled": False},
+            },
+            "runtime": {
+                "vllm_enabled": False,
+                "isl": 2048,
+                "osl": 256,
+                "concurrency": 1,
+            },
+            "mip": {"runs": {}},
+            "post_mip": {"flows": {}},
+            "infrastructure": {
+                "meshes": {
+                    "common": {},
+                    "bypass": {},
+                    "global_kd": {},
+                }
+            },
+            "output": {"result_root": "/results"},
+        },
+    }

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for Puzzletron AIPerf context-capacity handling."""
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from modelopt.torch.puzzletron.benchmarks.aiperf import (
+    _aiperf_subprocess_environment,
     _canonical_topology,
     _clean_subprocess_environment,
     _exact_length_extra_inputs,
@@ -28,7 +31,10 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _profile_command,
     _server_max_model_len,
     _topology_vllm_args,
+    _vllm_server_command,
 )
+
+# Subprocess environment and request sizing
 
 
 def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch):
@@ -80,6 +86,9 @@ def test_server_context_headroom_cannot_be_negative():
         _server_max_model_len(256, 32, {"server_context_overhead_tokens": -1})
 
 
+# Checkpoint preparation and tokenizer policy
+
+
 def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, tmp_path):
     config = {
         "architectures": ["BaseModel"],
@@ -89,11 +98,27 @@ def test_prepare_vllm_checkpoint_refreshes_heterogeneous_metadata(monkeypatch, t
     observed = []
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
-        lambda path: observed.append(path),
+        lambda path, **kwargs: observed.append((path, kwargs)),
     )
 
     assert _prepare_vllm_checkpoint(tmp_path) is True
-    assert observed == [tmp_path]
+    assert observed == [(tmp_path, {"trust_remote_code": False})]
+
+
+def test_prepare_vllm_checkpoint_preserves_explicit_remote_code_trust(monkeypatch, tmp_path):
+    config = {
+        "architectures": ["BaseModel"],
+        "text_config": {"per_layer_config": {"0": {"intermediate_size": 8}}},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    observed = []
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda path, **kwargs: observed.append((path, kwargs)),
+    )
+
+    assert _prepare_vllm_checkpoint(tmp_path, trust_remote_code=True) is True
+    assert observed == [(tmp_path, {"trust_remote_code": True})]
 
 
 def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
@@ -101,6 +126,29 @@ def test_prepare_vllm_checkpoint_leaves_native_teacher_unchanged(tmp_path):
         json.dumps({"architectures": ["BaseModel"], "text_config": {}})
     )
     assert _prepare_vllm_checkpoint(tmp_path) is False
+
+
+def test_aiperf_online_tokenizer_relaxation_is_explicit_and_non_mutating():
+    expected_source = _offline_environment()
+    source = dict(expected_source)
+
+    default_environment = _aiperf_subprocess_environment(source)
+    resolved = _aiperf_subprocess_environment(
+        source,
+        allow_aiperf_v011_online_tokenizer_resolution=True,
+    )
+
+    assert default_environment == source
+    assert default_environment is not source
+    assert "HF_HUB_OFFLINE" not in resolved
+    assert "TRANSFORMERS_OFFLINE" not in resolved
+    assert resolved["HF_DATASETS_OFFLINE"] == "1"
+    assert resolved["HF_HOME"] == "/cache/huggingface"
+    assert resolved["UNCHANGED"] == "value"
+    assert source == expected_source
+
+
+# vLLM topology and policy-owned arguments
 
 
 def test_canonical_topology_covers_tp_pp_dp_effective_ep_and_context_parallel():
@@ -155,6 +203,70 @@ def test_vllm_topology_args_enable_dp_and_expert_parallel_only_when_requested():
     assert "--expert-parallel-size" not in ep_args
 
 
+def test_vllm_server_command_applies_explicit_remote_code_policy(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint: [],
+    )
+
+    default_command = _vllm_server_command(
+        checkpoint_dir=tmp_path,
+        port=8000,
+        model_name="served-model",
+        input_tokens=32,
+        output_tokens=8,
+        topology={"gpu_group_size": 1},
+        trust_remote_code=False,
+    )
+    trusted_command = _vllm_server_command(
+        checkpoint_dir=tmp_path,
+        port=8000,
+        model_name="served-model",
+        input_tokens=32,
+        output_tokens=8,
+        topology={"gpu_group_size": 1},
+        trust_remote_code=True,
+    )
+
+    assert "--trust-remote-code" not in default_command
+    assert "--trust-remote-code" in trusted_command
+
+
+@pytest.mark.parametrize(
+    "extra_arg",
+    [
+        "--trust-remote-code",
+        "--trust-remote-code=true",
+        "--trust_remote_code",
+        "--trust_remote_code=true",
+        "--trust-rem",
+        "--trust_rem",
+        "--config",
+        "--config=policy.yaml",
+        "--conf",
+    ],
+)
+def test_vllm_server_command_rejects_remote_code_policy_override(monkeypatch, tmp_path, extra_arg):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint: [],
+    )
+
+    with pytest.raises(ValueError, match="cannot set policy-owned vLLM options"):
+        _vllm_server_command(
+            checkpoint_dir=tmp_path,
+            port=8000,
+            model_name="served-model",
+            input_tokens=32,
+            output_tokens=8,
+            topology={"gpu_group_size": 1, "extra_vllm_args": [extra_arg]},
+            trust_remote_code=False,
+        )
+
+
+# AIPerf command and result mapping
+
+
 def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
     command = _profile_command(
         executable=Path("/opt/aiperf/bin/aiperf"),
@@ -179,6 +291,7 @@ def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
     assert command[command.index("--synthetic-input-tokens-stddev") + 1] == "0"
     assert command[command.index("--output-tokens-mean") + 1] == "128"
     assert command[command.index("--output-tokens-stddev") + 1] == "0"
+    assert command[command.index("--tokenizer") + 1] == str(tmp_path / "tokenizer")
     assert "--use-server-token-count" in command
 
 
@@ -212,3 +325,13 @@ def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
     assert metrics["total_gpu_power_w"] == 900.0
     assert metrics["total_gpu_energy_j"] == 4500.0
     assert metrics["output_tokens_per_joule"] == 64.0
+
+
+def _offline_environment() -> dict[str, str]:
+    return {
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1",
+        "HF_DATASETS_OFFLINE": "1",
+        "HF_HOME": "/cache/huggingface",
+        "UNCHANGED": "value",
+    }

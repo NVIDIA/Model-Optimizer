@@ -34,6 +34,9 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MoEConfig,
 )
+from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
+    AutoModelReplaceBlockExecutor,
+)
 from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
     _can_skip_parent_model_load,
@@ -62,6 +65,7 @@ from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTar
 from modelopt.torch.puzzletron.pruning.gated_delta_net import GDNShape
 from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
 from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
+from modelopt.torch.utils import distributed as dist
 
 
 def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
@@ -254,9 +258,6 @@ def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch,
 
 
 def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
-    from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
-        AutoModelReplaceBlockExecutor,
-    )
     from modelopt.torch.puzzletron.distributed_eval.schema import EvaluationRequest
 
     teacher_blocks = [
@@ -289,6 +290,8 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
     executor.params = {"micro_batch_size": 4}
     executor.sliced_teacher_baseline = {"lm_loss": {"avg": 0.0}}
     executor.latest_observability = None
+    executor.latest_score_device_type = "cpu"
+    executor.visible_cuda_device_count = 0
     monkeypatch.setattr(
         executor,
         "_score",
@@ -309,6 +312,43 @@ def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
     assert result.metrics["lm_loss"]["avg"] == 1.0
     assert [target["layer_idx"] for target in captured[0]] == [0, 1]
     assert result.provenance["micro_batch_size"] == 4
+    assert result.provenance["score_device_type"] == "cpu"
+    assert result.provenance["visible_cuda_device_count"] == 0
+
+
+def test_rpc_executor_non_output_pipeline_rank_reaches_collective(monkeypatch):
+    class NonOutputRecipe:
+        has_outputs = False
+        _groups = None
+
+        @staticmethod
+        def tensor_parallel_group():
+            return None
+
+        @staticmethod
+        def iterate_captures():
+            yield None, None
+
+        @staticmethod
+        def context_parallel_group():
+            return None
+
+        @staticmethod
+        def observability_metadata():
+            return {"pipeline_role": "non_output"}
+
+    barriers = []
+    executor = AutoModelReplaceBlockExecutor.__new__(AutoModelReplaceBlockExecutor)
+    executor.recipe = NonOutputRecipe()
+    executor.cache = object()
+    executor.params = {}
+    executor.bypass_checkpoint_dir = None
+    executor.latest_score_device_type = None
+    monkeypatch.setattr(dist, "barrier", lambda: barriers.append(True))
+
+    assert executor._score(None) is None
+    assert barriers == [True]
+    assert executor.latest_observability == {"pipeline_role": "non_output"}
 
 
 def test_runtime_fingerprint_ignores_distributed_compute_dtype_transition():
