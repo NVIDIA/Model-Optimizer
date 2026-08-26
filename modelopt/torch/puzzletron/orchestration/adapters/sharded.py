@@ -139,7 +139,7 @@ def _run_local_aggregate(
     """Run a controller-side merge through the reviewed local executor."""
 
     attempt_id = str(uuid.uuid4())
-    log_path = plan.puzzle_dir / "logs" / f"{node.stage_id}_merge_{attempt_id}.log"
+    log_path = plan.log_dir / f"{node.stage_id}_merge_{attempt_id}.log"
     attempt = AttemptSpec(
         attempt_id=attempt_id,
         work_id=f"{node.stage_id}:aggregate",

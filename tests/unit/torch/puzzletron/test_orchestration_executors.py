@@ -498,6 +498,7 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     runner = RunnerEnvironment(
         kind="local",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="test", log_dir="shared-logs"),
     )
     node = StagePlanNode(
         stage_id="aiperf",
@@ -565,6 +566,8 @@ def test_aiperf_aggregation_uses_reviewed_local_executor(tmp_path: Path, monkeyp
     attempt = submitted[0]
     assert attempt.allocation_gpus == 0
     assert attempt.command.cwd == str(tmp_path)
+    assert attempt.command.log_path is not None
+    assert Path(attempt.command.log_path).parent == tmp_path / "run" / "shared-logs"
     assert attempt.command.argv[-1] == "--merge"
 
 
