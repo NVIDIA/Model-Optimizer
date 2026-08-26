@@ -51,7 +51,7 @@ _SHORT_OUTPUT_TOKENS = 1000
 _SAMPLE_COUNT_TOL = 0.01
 
 
-def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
+def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=(), collapsed_keys=None):
     """Decide the verbosity gate from harvested per-run token counts.
 
     Args:
@@ -63,6 +63,9 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
             reach ``per_task``, so without this the verdict reads as full coverage over a
             silently smaller task set. Artifacts that failed to parse are reported by path
             in ``harvest_diagnostics.unreadable_metrics``, since no task name exists yet.
+        collapsed_keys: ``{key: [dirs]}`` where distinct artifact dirs landed on one task
+            key. Blocking: the means would pool unrelated tasks, and a pooled delta can
+            fall inside the threshold and report a pass nobody asked for.
 
     Returns:
         dict ``{pass, failure_class, detail, per_task, not_comparable, max_abs_delta}``.
@@ -72,6 +75,20 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
             "pass": False,
             "failure_class": "USER_CONFIG_ERROR",
             "detail": f"no metrics harvested (baseline={len(baseline)}, candidate={len(candidate)})",
+            "per_task": {},
+            "not_comparable": [],
+            "max_abs_delta": None,
+        }
+
+    if collapsed_keys:
+        return {
+            "pass": False,
+            "failure_class": "USER_CONFIG_ERROR",
+            "detail": (
+                f"artifact layout not understood: {len(collapsed_keys)} task key(s) came "
+                f"from multiple directories, so their means would pool unrelated tasks: "
+                f"{collapsed_keys}"
+            ),
             "per_task": {},
             "not_comparable": [],
             "max_abs_delta": None,
@@ -188,24 +205,36 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
 
 
 def _matches_exclude(run_dir, exclude):
-    """True if ``run_dir`` carries ``exclude`` as a whole ``_``-delimited token.
+    """True if ``run_dir`` contains ``exclude`` as a run of whole ``_``-delimited tokens.
 
-    Substring matching would drop unrelated dirs by default: ``eval_highctx`` and
-    ``eval_qwen_highmem`` both contain ``_high`` without being effort variants.
+    Substring matching would drop unrelated dirs by default (``eval_highctx`` contains
+    ``_high``), but a single-token check would make any multi-token value such as
+    ``high_effort`` match nothing at all -- and "matches nothing" fails *open* here.
     """
-    return exclude.strip("_") in run_dir.split("_")
+    want = [t for t in exclude.strip("_").split("_") if t]
+    if not want:
+        return False
+    toks = run_dir.split("_")
+    return any(toks[i : i + len(want)] == want for i in range(len(toks) - len(want) + 1))
 
 
 def _task_from_metadata(artifacts_dir):
     """Task name from NEL's ``metadata.yaml`` (``evaluation.tasks[].name``), or None.
 
-    Read with a narrow regex rather than a YAML parser to keep these gates stdlib-only.
+    Scoped to the block under ``tasks:``. An unscoped search would take whichever
+    ``name:`` appears first in the file, which is invocation-wide rather than
+    per-task and would therefore *create* the key collapse this exists to prevent.
+    Read with a regex rather than a YAML parser to keep these gates stdlib-only.
     """
     try:
         with open(os.path.join(artifacts_dir, "metadata.yaml")) as f:
-            m = re.search(r"^\s*-?\s*name:\s*(\S+)\s*$", f.read(), re.MULTILINE)
+            text = f.read()
     except OSError:
         return None
+    anchor = re.search(r"^\s*tasks:\s*$", text, re.MULTILINE)
+    if not anchor:
+        return None
+    m = re.search(r"^\s*-?\s*name:\s*(\S+)\s*$", text[anchor.end() :], re.MULTILINE)
     return m.group(1).strip("\"'") if m else None
 
 
@@ -298,7 +327,7 @@ def main(argv=None):
     p.add_argument(
         "--exclude",
         default="_high",
-        help="skip run dirs whose name contains this (reasoning-effort mismatch); '' disables",
+        help="skip run dirs carrying this as whole _-delimited token(s) (effort mismatch); '' disables",
     )
     p.add_argument(
         "--threshold", type=float, default=0.05, help="max |delta| fraction (default 0.05)"
@@ -317,7 +346,10 @@ def main(argv=None):
         for entry in side_diag.get("metrics_without_tokens", []):
             dropped.add(entry.split(":", 1)[0])
     dropped -= set(baseline) | set(candidate)
-    result = evaluate_verbosity(baseline, candidate, args.threshold, sorted(dropped))
+    collapsed = {}
+    for side_diag in diag.values():
+        collapsed.update(side_diag.get("collapsed_keys", {}))
+    result = evaluate_verbosity(baseline, candidate, args.threshold, sorted(dropped), collapsed)
     # Anything harvest dropped belongs in the JSON, not only on stderr: a task whose runs
     # were all excluded never reaches per_task, so the verdict would otherwise look
     # complete for a task set smaller than the eval set.

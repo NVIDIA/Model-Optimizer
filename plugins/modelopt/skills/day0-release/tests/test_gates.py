@@ -628,5 +628,43 @@ def test_exclude_matches_a_token_not_a_substring():
     assert not _matches_exclude("eval_sglang_gpqa", "_high")
 
 
+def _ckpt_fp8(**kw):
+    return _ckpt(
+        recipe="fp8",
+        layer_precision_counts={
+            "FP8": 224,
+            "unexpected_unquantized": 0,
+            "declaration_mismatch": 0,
+        },
+        **kw,
+    )
+
+
+def test_ptq_waiver_compares_source_bits_to_recipe_bits():
+    """An fp8 source under an fp8 recipe cannot shrink either -- not just 4-bit sources."""
+    grew = {"output_bytes": 16_800_000_000}
+    assert evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="fp8"))["pass"]
+    assert evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="int8"))["pass"]
+    bf16 = evaluate_checkpoint(_ckpt_fp8(**grew, source_precision="bf16"))
+    assert not bf16["pass"] and "should compress" in bf16["detail"]
+
+
+def test_verbosity_collapsed_keys_block_the_gate():
+    """A pooled mean can land inside threshold; detecting collapse must change the verdict."""
+    r = evaluate_verbosity(
+        {"k": [(100.0, 10)]},
+        {"k": [(101.0, 10)]},
+        collapsed_keys={"inv": ["inv.0", "inv.1"]},
+    )
+    assert not r["pass"] and r["failure_class"] == "USER_CONFIG_ERROR"
+    assert "layout not understood" in r["detail"]
+
+
+def test_exclude_supports_multi_token_values():
+    """A single-token check made any value containing '_' inert, which fails open."""
+    assert _matches_exclude("eval_high_effort_run", "high_effort")
+    assert not _matches_exclude("eval_sglang_gpqa", "high_effort")
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

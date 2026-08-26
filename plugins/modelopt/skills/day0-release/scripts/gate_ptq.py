@@ -16,8 +16,10 @@
 """Day-0 post-quantization checkpoint gate.
 
 Mirrors the required checks in ptq/references/checkpoint-validation.md:
-  1. Output smaller than source. Growth blocks unless the summary declares an
-     already-sub-8-bit source, which cannot shrink further under a 4-bit recipe.
+  1. Output smaller than source. Growth blocks unless either the declared
+     ``source_precision`` is already at or below the recipe's target bits (waived up to
+     ``_INHERENT_GROWTH_MAX``, since scale bytes can still grow), or
+     ``accept_size_growth: true`` overrides it (unbounded, and records no reason).
   2. Quantized-weight coverage matches the requested recipe (no intended layer
      group left unquantized).
   3. No unexpected metadata diffs vs the source.
@@ -86,6 +88,30 @@ _SUB8_SOURCE_PRECISIONS = frozenset({"mxfp4", "nvfp4", "fp4", "int4", "w4a16", "
 # have compressed gets told that, rather than being handed the list of waiving values.
 _OTHER_SOURCE_PRECISIONS = frozenset({"bf16", "fp16", "fp32", "fp8", "int8"})
 
+# Bits per weight, used to decide whether a recipe can shrink a given source at all.
+_PRECISION_BITS = {
+    "fp32": 32,
+    "bf16": 16,
+    "fp16": 16,
+    "fp8": 8,
+    "int8": 8,
+    "mxfp4": 4,
+    "nvfp4": 4,
+    "fp4": 4,
+    "int4": 4,
+    "w4a16": 4,
+    "awq": 4,
+    "4bit": 4,
+}
+
+
+def _recipe_bits(recipe):
+    """Target bits per weight for a recipe name, or None if it is not recognised."""
+    for token, bits in sorted(_PRECISION_BITS.items(), key=lambda kv: -len(kv[0])):
+        if token in recipe:
+            return bits
+    return None
+
 
 def evaluate_checkpoint(summary):
     """Validate an exported quantized checkpoint summary.
@@ -109,7 +135,12 @@ def evaluate_checkpoint(summary):
     # Exact membership, not substring: "not_mxfp4" must not match. And require a real
     # boolean, since a JSON string "false" is truthy and would silently waive the gate.
     accept_growth = summary.get("accept_size_growth") is True
-    source_is_sub8 = source_precision in _SUB8_SOURCE_PRECISIONS
+    # A recipe can only shrink a source that is wider than its target. Comparing bits
+    # rather than testing a fixed 4-bit line means an fp8 source under an fp8 recipe is
+    # correctly treated as unable to shrink, instead of being told it "should compress".
+    src_bits = _PRECISION_BITS.get(source_precision)
+    tgt_bits = _recipe_bits(recipe)
+    source_cannot_shrink = src_bits is not None and tgt_bits is not None and src_bits <= tgt_bits
     counts = summary.get("layer_precision_counts") or {}
     metadata_diffs = summary.get("metadata_diffs") or []
 
@@ -146,7 +177,7 @@ def evaluate_checkpoint(summary):
                     f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth accepted explicitly via "
                     f"accept_size_growth{extra}"
                 )
-            elif source_is_sub8 and ratio <= _INHERENT_GROWTH_MAX:
+            elif source_cannot_shrink and ratio <= _INHERENT_GROWTH_MAX:
                 notes.append(
                     f"SIZE_NOT_REDUCED waived: {ratio:.3f}x growth is inherent for the declared "
                     f"{source_precision!r} source; judge reduction against BF16"
@@ -154,11 +185,11 @@ def evaluate_checkpoint(summary):
             else:
                 why = (
                     f"declared {source_precision!r} source explains at most {_INHERENT_GROWTH_MAX}x"
-                    if source_is_sub8
+                    if source_cannot_shrink
                     else (
                         f"declared {source_precision!r} source should compress under this "
                         "recipe, so growth is not explained"
-                        if source_precision in _OTHER_SOURCE_PRECISIONS
+                        if source_precision in _PRECISION_BITS
                         else f"source_precision={source_precision or None!r} is not a recognised "
                         f"precision token (see ptq/references/checkpoint-validation.md)"
                     )
