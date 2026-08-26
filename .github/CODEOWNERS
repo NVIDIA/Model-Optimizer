@@ -1,23 +1,7 @@
 # GitHub Teams defined at https://github.com/orgs/NVIDIA/teams/modelopt-devs/teams
 
-# Configuration files
-.github @NVIDIA/modelopt-setup-codeowners
-.gitlab @NVIDIA/modelopt-setup-codeowners
-.pre-commit-config.yaml @NVIDIA/modelopt-setup-codeowners
-CONTRIBUTING.md @NVIDIA/modelopt-setup-codeowners
-LICENSE @NVIDIA/modelopt-setup-codeowners
-LICENSE_HEADER @NVIDIA/modelopt-setup-codeowners
-pyproject.toml @NVIDIA/modelopt-setup-codeowners
-SECURITY.md @NVIDIA/modelopt-setup-codeowners
-noxfile.py @NVIDIA/modelopt-setup-codeowners
-uv.lock @NVIDIA/modelopt-setup-codeowners
-
 # Library
 modelopt/torch/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
 
 # Examples
-/README.md @NVIDIA/modelopt-examples-codeowners
 /examples/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
-
-# Requirements files are owned by the setup team regardless of location
-requirements*.txt @NVIDIA/modelopt-setup-codeowners
