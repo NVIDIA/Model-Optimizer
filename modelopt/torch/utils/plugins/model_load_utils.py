@@ -324,6 +324,26 @@ def _group_sources_by_layer(
     return layer_sources, non_layer_sources, unplaced
 
 
+def unplaced_source_keys(model: nn.Module, ckpt_path: str) -> list[str]:
+    """Checkpoint keys the built model has no parameter for.
+
+    The same question :func:`_group_sources_by_layer` asks while loading, exposed for models that
+    were loaded some other way: a plain ``from_pretrained`` drops unexpected keys without recording
+    them, so the caller has no way to know what the checkpoint held and the model did not take.
+
+    Architecture-agnostic by construction -- it asks whether a target parameter exists, not whether
+    the key looks like an MTP head or an auxiliary tower.
+    """
+    weight_map = weight_map_for(ckpt_path)
+    plan = _conversion_plan(model)
+    model_param_names = {n for n, _ in chain(model.named_parameters(), model.named_buffers())}
+    return [
+        ckpt_key
+        for ckpt_key in weight_map
+        if (_resolve_target(plan, ckpt_key)[0] if plan else ckpt_key) not in model_param_names
+    ]
+
+
 def parallel_load_and_prepare_fsdp2(
     ckpt_path: str,
     device: torch.device,

@@ -1555,12 +1555,26 @@ def _carry_over_unplaced_source_weights(model: nn.Module) -> dict[str, torch.Ten
     """
     keys = getattr(model, "_modelopt_unplaced_source_keys", None)
     ckpt = getattr(model, "_modelopt_source_checkpoint", None)
-    if not keys or not ckpt:
-        return {}
     try:
         from safetensors import safe_open
 
-        from modelopt.torch.utils.plugins.model_load_utils import weight_map_for
+        from modelopt.torch.utils.plugins.model_load_utils import (
+            unplaced_source_keys,
+            weight_map_for,
+        )
+
+        if keys is None:
+            # Not loaded by the sharded loader (plain from_pretrained, or a caller-built model), so
+            # nothing was recorded. Fall back to the model's own provenance and ask the same
+            # question directly. `keys is None` rather than `not keys`: a loader that recorded an
+            # EMPTY list has already answered, and re-deriving would be wasted work.
+            ckpt = ckpt or getattr(getattr(model, "config", None), "_name_or_path", None)
+            if not ckpt or not Path(ckpt).is_dir():
+                # A hub id rather than a local path, or no provenance at all -- nothing to read.
+                return {}
+            keys = unplaced_source_keys(model, ckpt)
+        if not keys or not ckpt:
+            return {}
 
         weight_map = weight_map_for(ckpt)
         by_file: dict[str, list[str]] = {}
