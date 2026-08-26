@@ -25,6 +25,7 @@ import pytest
 import examples.puzzletron.finalize_replacement_scoring as replacement_finalizer
 from examples.puzzletron.embedding_pipeline import (
     _project_vllm_stats_to_scenarios,
+    _scenario_overrides,
     _visible_gpu_count,
     finalize_replacement_scoring_diagnostics,
     run_embedding_stage,
@@ -38,6 +39,7 @@ from examples.puzzletron.prepare_width_scenarios import (
 from modelopt.torch.puzzletron.block_config import AttentionConfig, BlockConfig, FFNConfig
 from modelopt.torch.puzzletron.candidates import build_candidate_library, load_stats_identity_cache
 from modelopt.torch.puzzletron.depth.schema import DepthScenario
+from modelopt.torch.puzzletron.orchestration.config import _apply_override
 from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
     build_replacement_library_from_sorted_teacher,
 )
@@ -520,6 +522,8 @@ def test_embedding_build_library_projects_vllm_stats_before_and_after_workers(
 
 
 def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tmp_path):
+    """Build replacement-scoring commands with the current scenario-local config keys."""
+
     _write_scenario_manifest(tmp_path, 768)
     packed_token_cache = tmp_path / "dataset_cache" / "validation.tokens"
     (command,) = scenario_worker_commands(
@@ -541,20 +545,25 @@ def test_embedding_pipeline_uses_public_subblock_replacement_scoring_contract(tm
         command[command.index("--worker-stage") : command.index("--worker-stage") + 2]
     ) == ("--worker-stage", "replacement_scoring")
     overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
-    assert any(
-        override.endswith("/single_subblock_replacement_solutions.json")
-        and override.startswith("replacement_scoring.solutions_path=")
-        for override in overrides
+    overrides_by_key = dict(override.split("=", 1) for override in overrides)
+    assert Path(overrides_by_key["replacement_scoring.solutions_path"]).name == (
+        "single_subblock_replacement_solutions.json"
     )
-    assert any(
-        override.endswith("/single_subblock_replacement_solutions--validation")
-        and override.startswith("replacement_scoring.output_dir=")
-        for override in overrides
+    assert Path(overrides_by_key["replacement_scoring.output_dir"]).name == (
+        "single_subblock_replacement_solutions--validation"
     )
-    assert f"replacement_scoring.packed_token_cache_path={packed_token_cache}" in overrides
+    assert f"++replacement_scoring.packed_token_cache_path={packed_token_cache}" in overrides
+    assert {
+        "++replacement_scoring.source_checkpoint_dir",
+        "++replacement_scoring.target_teacher_dir",
+        "++scoring_diagnostic.scores_dir",
+        "++vllm_stats_diagnostic.stats_path",
+    } <= overrides_by_key.keys()
 
 
 def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
+    """Launch block-library work with one process and current runtime-stat keys."""
+
     _write_scenario_manifest(tmp_path, 768)
     (command,) = scenario_worker_commands(
         config_path="experiment.yaml",
@@ -570,6 +579,90 @@ def test_embedding_pipeline_launches_block_library_with_torchrun(tmp_path):
     assert "--nproc_per_node=1" in command
     overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
     assert "embedding_pruning.enabled=false" in overrides
+    scenario_teacher = tmp_path / "scenarios/width-0768/depth-00/ckpts/sorted_teacher"
+    assert f"build_library.source_checkpoint_dir={scenario_teacher}" in overrides
+    assert "++vllm_stats.runtime_stats.execution=inline" in overrides
+    assert "vllm_stats.runtime_stats.execution=inline" not in overrides
+    assert "calc_subblock_stats.runtime_stats.execution=inline" not in overrides
+
+
+def test_embedding_pipeline_scenario_overrides_compose_with_current_config(tmp_path):
+    """Apply every generated scenario override to a representative current config."""
+
+    scenario = tmp_path / "scenarios" / "width-0768" / "depth-00"
+    scenario.mkdir(parents=True)
+    (scenario / "scenario_manifest.json").write_text(
+        json.dumps({"width": 768, "bypass_checkpoint": str(tmp_path / "accepted-bypass")})
+    )
+    packed_token_cache = tmp_path / "dataset_cache" / "validation.tokens"
+    overrides = _scenario_overrides(
+        {
+            "replacement_scoring": {
+                "granularity": "subblock",
+                "packed_token_cache_path": str(packed_token_cache),
+            }
+        },
+        scenario,
+    )
+
+    config = {
+        "puzzle_dir": "/initial/puzzle",
+        "experiment": {"dir": "/initial/puzzle"},
+        "teacher_dir": "/initial/teacher",
+        "convert": {"teacher_dir": "/initial/teacher"},
+        "bypass": {"enabled": True},
+        "embedding_pruning": {"enabled": True},
+        "replacement_library_path": "/initial/replacement_library.json",
+        "build_library": {"source_checkpoint_dir": "/initial/teacher"},
+        "vllm_stats": {"runtime_stats": {"enabled": True}},
+        "replacement_scoring": {
+            "teacher_dir": "/initial/teacher",
+            "solutions_path": "/initial/solutions.json",
+            "output_dir": "/initial/scores",
+        },
+    }
+    for override in overrides:
+        _apply_override(config, override)
+
+    teacher = scenario / "ckpts" / "sorted_teacher"
+
+    # Scenario workers must use only scenario-local inputs and outputs.
+    assert config["puzzle_dir"] == str(scenario)
+    assert config["experiment"]["dir"] == str(scenario)
+    assert config["teacher_dir"] == str(teacher)
+    assert config["convert"]["teacher_dir"] == str(teacher)
+    assert config["replacement_library_path"] == str(scenario / "replacement_library.json")
+    assert config["build_library"]["source_checkpoint_dir"] == str(teacher)
+
+    # Composite workers disable stages already completed by the parent campaign.
+    assert config["bypass"]["enabled"] is False
+    assert config["embedding_pruning"]["enabled"] is False
+
+    # Runtime-stat and scoring artifacts remain isolated within the scenario.
+    assert config["vllm_stats"]["runtime_stats"]["execution"] == "inline"
+    assert config["replacement_scoring"]["teacher_dir"] == str(teacher)
+    assert config["replacement_scoring"]["source_checkpoint_dir"] == str(teacher)
+    assert config["replacement_scoring"]["target_teacher_dir"] == str(teacher)
+    assert config["replacement_scoring"]["solutions_path"] == str(
+        scenario / "single_subblock_replacement_solutions.json"
+    )
+    assert config["replacement_scoring"]["output_dir"] == str(
+        scenario / "single_subblock_replacement_solutions--validation"
+    )
+    assert config["replacement_scoring"]["packed_token_cache_path"] == str(packed_token_cache)
+    assert config["replacement_scoring"]["bypass_checkpoint_dir"] == str(
+        scenario / "ckpts" / "bypass_overlay"
+    )
+    assert config["vllm_stats_diagnostic"]["stats_path"] == str(scenario / "subblock_stats.json")
+    assert config["vllm_stats_diagnostic"]["output_dir"] == str(
+        scenario / "artifacts/vllm_stats_diagnostic"
+    )
+    assert config["scoring_diagnostic"]["scores_dir"] == str(
+        scenario / "single_subblock_replacement_solutions--validation"
+    )
+    assert config["scoring_diagnostic"]["output_dir"] == str(
+        scenario / "artifacts/scoring_diagnostic"
+    )
 
 
 def test_embedding_pipeline_skips_composite_work_on_nonzero_rank(tmp_path, monkeypatch):
@@ -614,7 +707,7 @@ def test_embedding_pipeline_routes_width_local_bypass_overlay(tmp_path):
 
     overrides = [command[index + 1] for index, value in enumerate(command) if value == "--override"]
     assert (
-        "replacement_scoring.bypass_checkpoint_dir="
+        "++replacement_scoring.bypass_checkpoint_dir="
         f"{tmp_path}/scenarios/width-0768/depth-00/ckpts/bypass_overlay"
     ) in overrides
 
