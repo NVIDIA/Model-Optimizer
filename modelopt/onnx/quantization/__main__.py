@@ -26,6 +26,7 @@ from modelopt.onnx.quantization.autotune.utils import (
     StoreWithExplicitFlag,
     get_node_filter_list,
 )
+from modelopt.onnx.quantization.calib_utils import create_directory_calibration_reader
 from modelopt.onnx.quantization.quantize import quantize
 
 __all__ = ["main"]
@@ -134,7 +135,10 @@ def get_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--calibration_data_path",
         type=str,
-        help="Calibration data in npz/npy format. If None, random data for calibration will be used.",
+        help=(
+            "Calibration data as one npz/npy file or a directory containing one batch per file. "
+            "If None, random data for calibration will be used."
+        ),
     )
     group.add_argument(
         "--trust_calibration_data",
@@ -155,6 +159,12 @@ def get_parser() -> argparse.ArgumentParser:
             "Users should provide the shapes specifically if the model has non-batch dynamic dimensions."
             "Example input shapes spec: input0:1x3x256x256,input1:1x3x128x128"
         ),
+    )
+    argparser.add_argument(
+        "--max_calibration_batches",
+        type=int,
+        default=512,
+        help="Maximum number of batches to stream from a calibration data directory.",
     )
     argparser.add_argument(
         "--calibration_eps",
@@ -497,24 +507,35 @@ def main():
             ) from e
 
     calibration_data = None
+    calibration_data_reader = None
     if args.calibration_data_path:
-        # Security: Disable pickle deserialization for untrusted sources to prevent RCE attacks
-        try:
-            calibration_data = np.load(
-                args.calibration_data_path, allow_pickle=args.trust_calibration_data
+        if os.path.isdir(args.calibration_data_path):
+            calibration_data_reader = create_directory_calibration_reader(
+                args.calibration_data_path,
+                args.onnx_path,
+                max_batches=args.max_calibration_batches,
+                calibration_shapes=args.calibration_shapes,
             )
-            if args.calibration_data_path.endswith(".npz"):
-                # Convert the NpzFile object to a Python dictionary
-                calibration_data = {key: calibration_data[key] for key in calibration_data.files}
-        except ValueError as e:
-            if "allow_pickle" in str(e) and not args.trust_calibration_data:
-                raise ValueError(
-                    "Calibration data file contains pickled objects which pose a security risk. "
-                    "For trusted sources, you may enable pickle deserialization by setting the "
-                    "--trust_calibration_data flag."
-                ) from e
-            else:
-                raise
+        else:
+            # Security: Disable pickle deserialization for untrusted sources to prevent RCE attacks
+            try:
+                calibration_data = np.load(
+                    args.calibration_data_path, allow_pickle=args.trust_calibration_data
+                )
+                if args.calibration_data_path.endswith(".npz"):
+                    # Convert the NpzFile object to a Python dictionary
+                    calibration_data = {
+                        key: calibration_data[key] for key in calibration_data.files
+                    }
+            except ValueError as e:
+                if "allow_pickle" in str(e) and not args.trust_calibration_data:
+                    raise ValueError(
+                        "Calibration data file contains pickled objects which pose a security risk. "
+                        "For trusted sources, you may enable pickle deserialization by setting the "
+                        "--trust_calibration_data flag."
+                    ) from e
+                else:
+                    raise
 
     # Autotune configs
     autotune_enabled = args.autotune is not None
@@ -528,6 +549,7 @@ def main():
         args.onnx_path,
         quantize_mode=args.quantize_mode,
         calibration_data=calibration_data,
+        calibration_data_reader=calibration_data_reader,
         calibration_method=args.calibration_method,
         calibration_cache_path=args.calibration_cache_path,
         calibration_shapes=args.calibration_shapes,

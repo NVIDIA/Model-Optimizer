@@ -41,7 +41,7 @@ PTQ should be done with a calibration dataset. If calibration dataset is not pro
 
 Prepare calibration dataset
 ---------------------------
-ModelOpt supports npz/npy file as calibration data format and that numpy file should be a dictionary with keys as model input names and values as numpy arrays.
+ModelOpt accepts an NPY array for a single-input model or an NPZ archive whose keys match the model input names.
 
 .. code-block:: python
 
@@ -55,21 +55,47 @@ ModelOpt supports npz/npy file as calibration data format and that numpy file sh
         "input_name": np.random.randn(*shape),
         "input_name2": np.random.randn(*shape2),
     }
-    np.savez("calib_data.npz", calib_data)
+    np.savez("calib_data.npz", **calib_data)
 
-
+Large calibration datasets can instead be streamed from a directory. Store one batch per ``.npy`` file for a single-input model or one batch per ``.npz`` file for a single- or multi-input model. A directory cannot mix both formats. Each batch is checked against the ONNX input names, shapes, and dtypes before it is loaded.
 
 Call PTQ function
 -----------------
 .. code-block:: python
 
-    import modelopt.onnx.quantization as moq
+    from pathlib import Path
 
-    calibration_data = np.load(calibration_data_path)
+    import modelopt.onnx.quantization as moq
+    import numpy as np
+
+    calibration_path = Path("calib_data.npz")
+    if calibration_path.suffix == ".npz":
+        with np.load(calibration_path, allow_pickle=False) as archive:
+            calibration_data = {name: archive[name] for name in archive.files}
+    else:
+        calibration_data = np.load(calibration_path, allow_pickle=False)
 
     moq.quantize(
         onnx_path=onnx_path,
         calibration_data=calibration_data,
+        output_path="quant.onnx",
+        quantize_mode="int8",
+    )
+
+To stream directory-backed batches, create a calibration data reader:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization.calib_utils import create_directory_calibration_reader
+
+    calibration_reader = create_directory_calibration_reader(
+        "calibration_batches",
+        onnx_path,
+        max_batches=512,
+    )
+    moq.quantize(
+        onnx_path=onnx_path,
+        calibration_data_reader=calibration_reader,
         output_path="quant.onnx",
         quantize_mode="int8",
     )
@@ -85,6 +111,14 @@ Optionally enable Autotune for more optimized Q/DQ placement. Note that this wil
     )
 
 Alternatively, you can call PTQ function in command line:
+
+.. code-block:: bash
+
+    python -m modelopt.onnx.quantization \
+        --onnx_path=model.onnx \
+        --calibration_data_path=calibration_batches \
+        --max_calibration_batches=512 \
+        --output_path=quant.onnx
 
 .. argparse::
    :module: modelopt.onnx.quantization.__main__

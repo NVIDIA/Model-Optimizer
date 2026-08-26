@@ -18,6 +18,7 @@ FROM nvcr.io/nvidia/pytorch:26.07-py3
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git \
         libgl1 \
         libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
@@ -29,13 +30,25 @@ RUN python -m pip install --no-cache-dir uv==0.12.3 && \
     uv venv --seed --python 3.8.20 /opt/petr
 
 COPY examples/onnx_ptq/petr/requirements*.txt /tmp/petr-requirements/
+COPY examples/onnx_ptq/petr/mmdet3d-nuscenes-only.patch /tmp/petr-requirements/
+# PETR uses nuScenes; remove mmdet3d's eager Lyft integration and unused PLY dependency.
 RUN env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
         -r /tmp/petr-requirements/requirements-torch.txt && \
     env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
         -r /tmp/petr-requirements/requirements.txt && \
+    git clone --branch v1.0.0rc6 --depth 1 \
+        https://github.com/open-mmlab/mmdetection3d.git /tmp/mmdetection3d && \
+    test "$(git -C /tmp/mmdetection3d rev-parse HEAD)" = \
+        47285b3f1e9dba358e98fcd12e523cfd0769c876 && \
+    git -C /tmp/mmdetection3d apply --check --index --unidiff-zero \
+        /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
+    git -C /tmp/mmdetection3d apply --index --unidiff-zero \
+        /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
     env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
         --no-build-isolation \
-        -r /tmp/petr-requirements/requirements-mmdet3d.txt && \
+        /tmp/mmdetection3d && \
+    /opt/petr/bin/python -m pip check && \
+    rm -rf /tmp/mmdetection3d && \
     mkdir -p /opt/petr/lib/python3.8/site-packages/tensorrt && \
     cp /opt/petr/lib/python3.8/site-packages/tensorrt_bindings/__init__.py \
         /opt/petr/lib/python3.8/site-packages/tensorrt/__init__.py && \
