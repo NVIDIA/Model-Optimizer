@@ -567,5 +567,16 @@ def test_verbosity_detail_names_tasks_dropped_before_comparison():
     assert r["pass"] and "DROPPED BEFORE COMPARISON" in r["detail"] and "gone" in r["detail"]
 
 
+def test_verbosity_anchors_on_the_largest_matchable_count_not_min_of_maxes():
+    """b=[294,200] vs c=[280,200] share 200; anchoring on min(max) would discard the task."""
+    r = evaluate_verbosity(
+        {"t": [(1000.0, 294), (1000.0, 200)]},
+        {"t": [(1010.0, 280), (1010.0, 200)]},
+    )
+    t = r["per_task"]["t"]
+    assert t["status"] == "compared" and t["sample_counts"] == [200]
+    assert "n=294" in t["truncated_comparison"]
+
+
 if __name__ == "__main__":
     sys.exit(__import__("pytest").main([__file__, "-q"]))

@@ -85,30 +85,38 @@ def evaluate_verbosity(baseline, candidate, threshold=0.05, dropped_tasks=()):
         # Sample counts must be comparable, not identical. Exact equality is knife-edge:
         # one 5xx'd judge call (294 vs 293) would make a task unmeasurable, and since an
         # unmeasured task still passes, the steady state would be a green gate covering a
-        # shrinking subset of the eval set. Anchor on the smaller side's best run and keep
-        # runs within _SAMPLE_COUNT_TOL of it -- close enough not to bias the mean, far
-        # enough to still reject a genuinely truncated run.
-        target = min(max(n for _, n in b_runs), max(n for _, n in c_runs))
-        near = lambda n: abs(n - target) <= _SAMPLE_COUNT_TOL * target  # noqa: E731
-        b = [t for t, n in b_runs if near(n)]
-        c = [t for t, n in c_runs if near(n)]
-        dropped = (len(b_runs) - len(b)) + (len(c_runs) - len(c))
-        if not b or not c:
+        # shrinking subset of the eval set.
+        #
+        # Anchor on the LARGEST count both sides can match within tolerance -- not on
+        # min(max(b), max(c)), which can name a count neither side pairs at: with
+        # b=[294,200] and c=[280,200] that anchors at 280 and discards the task, even
+        # though both sides have a run at 200.
+        b_ns = {n for _, n in b_runs}
+        c_ns = {n for _, n in c_runs}
+        near = lambda ns, a: any(abs(n - a) <= _SAMPLE_COUNT_TOL * a for n in ns)  # noqa: E731
+        target = next(
+            (a for a in sorted(b_ns | c_ns, reverse=True) if near(b_ns, a) and near(c_ns, a)),
+            None,
+        )
+        if target is None:
             per_task[task] = {
                 "status": "not_comparable",
                 "reason": (
-                    f"no runs within {_SAMPLE_COUNT_TOL:.0%} of a common sample count "
-                    f"(baseline n={sorted({n for _, n in b_runs})}, "
-                    f"candidate n={sorted({n for _, n in c_runs})})"
+                    f"no sample count matchable within {_SAMPLE_COUNT_TOL:.0%} on both sides "
+                    f"(baseline n={sorted(b_ns)}, candidate n={sorted(c_ns)})"
                 ),
             }
             continue
+        keep = lambda n: abs(n - target) <= _SAMPLE_COUNT_TOL * target  # noqa: E731
+        b = [t for t, n in b_runs if keep(n)]
+        c = [t for t, n in c_runs if keep(n)]
+        dropped = (len(b_runs) - len(b)) + (len(c_runs) - len(c))
 
         b_mean, c_mean = statistics.mean(b), statistics.mean(c)
         delta = (c_mean - b_mean) / b_mean
         within = abs(delta) <= threshold
         best = max(n for _, n in b_runs + c_runs)
-        compared_ns = sorted({n for _, n in b_runs + c_runs if near(n)})
+        compared_ns = sorted({n for _, n in b_runs + c_runs if keep(n)})
         entry = {
             "status": "compared",
             "sample_counts": compared_ns,  # always a list, so consumers need no type-switch

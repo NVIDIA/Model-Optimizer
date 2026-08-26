@@ -234,8 +234,9 @@ read +6.10% FAIL in words and +1.32% PASS in tokens.
 The gate is two-sided; a large drop in output length is also a change.
 
 Two filters are mandatory: same reasoning effort (`--exclude _high`) and complete runs only —
-runs within 1% of the largest `successful_count` both sides reach (exact equality would make one
-dropped sample unmeasurable). When that shared count is below a run
+runs within 1% of the largest `successful_count` that **both** sides can match (exact equality
+would make one dropped sample unmeasurable). A task with no such count on both sides is
+`not_comparable`. When the matched count is below a run
 one side has, the task carries `truncated_comparison`.
 
 Tasks sharing no sample count are `not_comparable`, not a delta. Means under
