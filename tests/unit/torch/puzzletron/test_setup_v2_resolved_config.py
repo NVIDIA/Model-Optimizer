@@ -28,6 +28,7 @@ import pytest
 import yaml
 
 import puzzletron_setup.v2.bundle as bundle_module
+from puzzletron_setup import SetupError
 from puzzletron_setup.v2.bundle import (
     build_bundles_v2,
     render_execution_v2,
@@ -401,6 +402,16 @@ def test_stage_resource_accepts_multiple_eligible_partitions(tmp_path: Path) -> 
     execution = render_execution_v2(state, "production")
 
     assert execution["execution"]["stages"]["width_importance"]["partition"] == "gpu-a,gpu-b"
+
+
+def test_stage_resource_reports_invalid_partition_as_setup_error(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+    resources = deepcopy(state.collection("stage_resources"))
+    resources["width_importance"]["partition"] = []
+    state.set_collection("stage_resources", resources)
+
+    with pytest.raises(SetupError, match=r"stages\.width_importance\.partition"):
+        resolve_campaign_config(state)
 
 
 def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) -> None:

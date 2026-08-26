@@ -586,15 +586,19 @@ def _stage_resource(stage_id: str, raw: Mapping[str, Any]) -> ResolvedStageResou
         "parallel",
     }
     parallel = raw.get("parallel")
+    try:
+        partition = normalize_slurm_partition(
+            raw.get("partition"), path=f"stages.{stage_id}.partition"
+        )
+    except (TypeError, ValueError) as error:
+        raise SetupError(str(error)) from error
     return ResolvedStageResource(
         stage_id=stage_id,
         strategy=str(raw.get("strategy", "single")),
         instances=int(raw.get("instances", 1)),
         resource=str(raw.get("resource", "gpu")),
         gpus_per_node=(int(raw["gpus_per_node"]) if raw.get("gpus_per_node") is not None else None),
-        partition=normalize_slurm_partition(
-            raw.get("partition"), path=f"stages.{stage_id}.partition"
-        ),
+        partition=partition,
         profile_name=(str(raw["profile_name"]) if raw.get("profile_name") else None),
         parallel=_mapping(parallel) if isinstance(parallel, Mapping) else None,
         extra={key: value for key, value in raw.items() if key not in known},

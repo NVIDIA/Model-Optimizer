@@ -304,6 +304,25 @@ def test_work_adapters_use_effective_campaign_log_dir(tmp_path: Path, configured
         assert Path(attempt.command.log_path).parent == expected_log_dir
 
 
+def test_campaign_plan_anchors_relative_log_dir_to_puzzle_dir(tmp_path: Path) -> None:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
+        slurm=SlurmRunnerConfig(account="acct", log_dir="shared-logs"),
+    )
+    plan = CampaignPlan(
+        experiment_config_path=str(tmp_path / "experiment.yaml"),
+        puzzle_dir=tmp_path / "run",
+        experiment_config={},
+        runner=runner,
+        execution_defaults={},
+        stages=(),
+        contract_hash="contract",
+    )
+
+    assert plan.log_dir == tmp_path / "run" / "shared-logs"
+
+
 @pytest.mark.parametrize(
     ("slurm_kwargs", "node_partition", "expected_partition", "configured_log_dir"),
     [

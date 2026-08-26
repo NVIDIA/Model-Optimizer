@@ -179,9 +179,7 @@ class PostMIPAdapter(WorkAdapter):
             available = _available_evaluation_candidates(plan, node.stage_id)
             if available is not None:
                 if available < 1:
-                    raise RuntimeError(
-                        f"{node.stage_id} has no candidate architectures to evaluate"
-                    )
+                    raise ValueError(f"{node.stage_id} has no candidate architectures to evaluate")
                 count = min(count, available)
             count = _full_node_instance_count(node, count)
         if count == 1:

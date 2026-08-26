@@ -262,7 +262,8 @@ class CampaignPlan:
         """Return the configured shared log directory for every campaign attempt."""
 
         if self.runner.slurm is not None and self.runner.slurm.log_dir:
-            return Path(self.runner.slurm.log_dir).expanduser()
+            configured = Path(self.runner.slurm.log_dir).expanduser()
+            return configured if configured.is_absolute() else self.puzzle_dir / configured
         return self.puzzle_dir / "logs"
 
 

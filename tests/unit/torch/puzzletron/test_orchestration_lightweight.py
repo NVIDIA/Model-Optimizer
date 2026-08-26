@@ -332,6 +332,7 @@ def test_orchestrator_cli_reports_config_errors_without_traceback(tmp_path: Path
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
 
     assert result.returncode == 2
@@ -399,6 +400,7 @@ def test_orchestrator_cli_reports_dry_run_adapter_errors_without_traceback(
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
 
     assert result.returncode == 2

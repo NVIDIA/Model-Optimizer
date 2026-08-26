@@ -55,7 +55,7 @@ def test_slurm_runner_example_is_portable() -> None:
     assert slurm.slurm.partition == (
         "REPLACE_WITH_PRIMARY_SLURM_PARTITION,REPLACE_WITH_ALTERNATE_SLURM_PARTITION"
     )
-    assert slurm.slurm.log_dir == "puzzle_runs/logs"
+    assert slurm.slurm.log_dir == "logs"
 
 
 def test_baremetal_runner_example_is_portable() -> None:

@@ -135,6 +135,15 @@ def test_post_mip_evaluation_clamps_workers_to_available_candidates(tmp_path: Pa
     assert [item.work_id for item in work_plan.items] == [f"{node.stage_id}:0"]
 
 
+def test_post_mip_evaluation_rejects_empty_candidate_set(tmp_path: Path, monkeypatch):
+    plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
+    identity_api = _candidate_count_api(0)
+    monkeypatch.setattr(post_mip_adapter, "_post_mip_identity_api", lambda: identity_api)
+
+    with pytest.raises(ValueError, match="has no candidate architectures to evaluate"):
+        PostMIPAdapter().plan(plan, node)
+
+
 def test_post_mip_evaluation_uses_torchrun_for_single_gpu_workers(tmp_path: Path):
     plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
     attempt = PostMIPAdapter().command(

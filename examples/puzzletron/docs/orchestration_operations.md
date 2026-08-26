@@ -29,8 +29,10 @@ detach while leaving jobs running, or continue. Non-interactive Ctrl-C and
 SIGTERM cancel active work and quit. A detached controller preserves durable
 handles, so running the same command recovers the active jobs.
 
-Use `--color always` when piping through `tee`, `--color never` for plain logs,
-and `--poll-interval SECONDS` to change the default five-second poll interval.
+Redirect stderr before piping through `tee` (for example, append
+`2>&1 | tee run.log`) so progress output is captured. Use `--color always` for
+colored output, `--color never` for plain logs, and `--poll-interval SECONDS`
+to change the default five-second poll interval.
 
 ## State and execution records
 

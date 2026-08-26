@@ -14,7 +14,7 @@ runner:
       - REPLACE_WITH_PRIMARY_SLURM_PARTITION
       - REPLACE_WITH_ALTERNATE_SLURM_PARTITION
     time_limit: "4:00:00"
-    log_dir: puzzle_runs/logs
+    log_dir: logs
   execution_contract:
     # Required. Use the checkout path visible on every worker and in the container, if used.
     repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT

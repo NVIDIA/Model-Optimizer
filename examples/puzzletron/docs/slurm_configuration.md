@@ -12,7 +12,8 @@ use the site's Slurm default. A stage can set
 
 `runner.slurm.log_dir` sets the directory used for every attempt log, including
 the final-report attempt. When omitted, logs are written below
-`<puzzle_dir>/logs`.
+`<puzzle_dir>/logs`. Relative values are resolved from `puzzle_dir`; absolute
+paths are used as written.
 
 The runner loader accepts `partition_interactive`, `partition_batch`,
 `partition_cpu`, and `interactive_max_nodes` as compatibility fields. They
