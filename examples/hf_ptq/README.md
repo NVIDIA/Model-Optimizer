@@ -429,7 +429,7 @@ KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
 packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
 preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.
-The shipped canary recipe searches calibrated FP8 K/V (8.0 bits/scalar) and packed NVFP4 K/V
+The shipped recipe searches FP8-cast K/V (8.0 bits/scalar) and NVFP4-cast K/V
 (4.5 bits/scalar) at 5.4 bits/scalar. It intentionally excludes FP8-K/NVFP4-V because the
 companion vLLM implementation does not support that asymmetric per-layer format:
 
@@ -441,8 +441,9 @@ python hf_ptq.py \
   --export_path /path/to/qwen3-1.7b-mixed-kv
 ```
 
-Each candidate uses max calibration so its persistent K/V scales are present in the unified HF
-checkpoint. Unified export records the selected formats in `kv_cache_quantized_layers` and writes
+Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
+keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
+formats in `kv_cache_quantized_layers` and writes
 the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
 `--auto_quantize_checkpoint` stores the resumable raw search state.
 

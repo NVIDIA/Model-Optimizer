@@ -1951,13 +1951,14 @@ def test_load_recipe_kv_autoquantize_contract():
     assert aq.auto_quantize_method == "kl_div"
     assert "*mtp*" in aq.disabled_layers
     assert aq.cost_excluded_layers == []
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
     assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
             assert entry.quantizer_name == "*[kv]_bmm_quantizer"
             assert not entry.cfg.use_constant_amax
-            assert entry.cfg.constant_amax is None
-        assert fmt.algorithm == "max"
+            assert entry.cfg.constant_amax == 448.0
+        assert fmt.algorithm is None
 
 
 def test_kv_autoquantize_rejects_cost_excluded_layers():

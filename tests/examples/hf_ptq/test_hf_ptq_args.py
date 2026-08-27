@@ -28,6 +28,7 @@ from _test_utils.torch.transformers_models import get_tiny_qwen3
 from modelopt.recipe import load_recipe
 from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
+from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 
 _EXAMPLES_DIR = Path(__file__).resolve().parents[3] / "examples" / "hf_ptq"
@@ -108,24 +109,13 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
 def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
     hf_ptq = _import_hf_ptq(monkeypatch)
-    model = get_tiny_qwen3(num_hidden_layers=1)
-    aq = AutoQuantizeConfig(
-        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
-        candidate_formats=[
-            QuantizeConfig(
-                quant_cfg=[
-                    {
-                        "quantizer_name": "*[kv]_bmm_quantizer",
-                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-                    }
-                ],
-                algorithm=None,
-                effective_bits=8.0,
-            )
-        ],
-        auto_quantize_method="kl_div",
-        score_size=1,
+    monkeypatch.setattr(
+        tensor_quant,
+        "dynamic_block_quantize_op",
+        lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
     )
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
@@ -139,8 +129,10 @@ def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     hf_ptq.auto_quantize(args, model, data, aq, full_model=model)
 
     attention = model.model.layers[0].self_attn
-    assert attention.k_bmm_quantizer.num_bits == (4, 3)
-    assert attention.v_bmm_quantizer.num_bits == (4, 3)
+    assert attention.k_bmm_quantizer.num_bits == (2, 1)
+    assert attention.v_bmm_quantizer.num_bits == (2, 1)
+    assert attention.k_bmm_quantizer.amax == 448.0
+    assert attention.v_bmm_quantizer.amax == 448.0
 
 
 def test_kv_autoquant_names_asymmetric_export_format(monkeypatch):
