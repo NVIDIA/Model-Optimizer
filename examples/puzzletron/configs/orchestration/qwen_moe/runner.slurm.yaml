@@ -19,10 +19,8 @@ runner:
     container: REPLACE_WITH_SLURM_CONTAINER_IMAGE
     # Replace with the host and container paths required by the campaign.
     container_mounts: "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
-    # Replace these values with the site's setup script and source checkout paths.
+    # Optional site bootstrap needed before starting the runtime container.
     prerun_commands:
       - source REPLACE_WITH_SITE_SETUP_SCRIPT
-      - export VLLM_ROOT=REPLACE_WITH_WORKER_VISIBLE_VLLM_CHECKOUT
-      - export AUTOMODEL_ROOT=REPLACE_WITH_WORKER_VISIBLE_AUTOMODEL_CHECKOUT
     # Optional shell commands run when the stage payload exits.
     postrun_commands: []

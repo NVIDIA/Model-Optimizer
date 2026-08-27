@@ -1,6 +1,7 @@
 docker
 examples/**/.git
 examples/**/saved_models*
+examples/puzzletron/reports
 **/experimental
 
 ##### Copied from .gitignore #####

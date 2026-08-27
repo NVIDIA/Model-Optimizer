@@ -6,7 +6,11 @@ on:
   push:
     branches: [main, release/*, feature/*]
     paths:
+      - ".dockerignore"
+      - ".github/workflows/puzzletron_gpu_tests.yml"
+      - ".github/workflows/puzzletron_runtime_image.yml"
       - ".github/workflows/unit_tests.yml"
+      - "examples/__init__.py"
       - "examples/puzzletron/**"
       - "modelopt/**"
       - "noxfile.py"
@@ -82,7 +86,12 @@ jobs:
         uses: step-security/changed-files@v46.0.5
         with:
           files: |
+            .dockerignore
+            .github/workflows/puzzletron_gpu_tests.yml
+            .github/workflows/puzzletron_runtime_image.yml
             .github/workflows/unit_tests.yml
+            examples/__init__.py
+            examples/puzzletron/Dockerfile
             examples/puzzletron/**/*.html
             examples/puzzletron/**/*.json
             examples/puzzletron/**/*.md

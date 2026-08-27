@@ -21,6 +21,7 @@ checks the returned per-subblock runtime dict and no-block overhead.
 """
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -33,15 +34,19 @@ from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
 
-@pytest.mark.skip(reason="AnyModel is not supported in vLLM yet")
+@pytest.mark.skipif(
+    os.environ.get("PUZZLETRON_VLLM_ANYMODEL") != "1",
+    reason="requires the Puzzletron runtime image with AnyModel-enabled vLLM",
+)
+@pytest.mark.timeout(600)
 def test_calc_runtime_for_subblocks(tmp_path: Path):
     """End-to-end: a tiny subblock set yields a runtime dict + positive no-block overhead."""
     tokenizer = get_tiny_tokenizer()
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer.save_pretrained(str(tokenizer_dir))
 
-    attn = AttentionConfig(no_op=False, num_key_value_heads=2)
-    ffn = FFNConfig(no_op=False, intermediate_size=256, moe=None)
+    attn = AttentionConfig(no_op=False, num_kv_heads=2)
+    ffn = FFNConfig(no_op=False, intermediate_size=256)
     attn_noop = AttentionConfig(no_op=True)
     subblock_set = {attn, ffn, attn_noop}
 
