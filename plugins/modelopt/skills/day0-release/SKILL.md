@@ -92,20 +92,18 @@ unvalidated checkpoint.
 
 #### Step 2b — serving canary (MANDATORY before Step 3)
 
-`gate_ptq.py` checks size, coverage and metadata, not whether the checkpoint
-*loads* — an export can score perfect coverage and still be unservable.
-
-Stand it up once via the **deployment** skill and require `/health` plus one
-coherent generation. This costs ~15 min and protects a multi-hour evaluation;
-skipping it has cost a full baseline eval against a checkpoint vLLM could never
-load (exporter wrote transformers-canonical tensor names, loader expected the
-native layout).
+The canary itself is **already specified** by the ptq skill: see
+`ptq/references/checkpoint-validation.md` (required gate, canary query and the
+`Serving canary` row of its report table) and `ptq/SKILL.md`. Run it there rather
+than re-deriving it here — `gate_ptq.py` checks size, coverage and metadata, not
+whether the checkpoint *loads*, and skipping the canary has cost a full baseline
+eval against a checkpoint the serving stack could never load.
 
 On failure use `failure_class: CHECKPOINT_NOT_SERVABLE` and drop to the
 **deployment** skill; do not proceed to Step 3.
 
-**Write the canary so it cannot lie.** Both of these produced wrong verdicts on a
-large MoE:
+**What that spec does not cover: writing a canary that cannot lie.** Both of these
+produced a wrong verdict on a large MoE, in opposite directions:
 
 - **Poll ceiling > load time**, with headroom. A 50 min poll against a 51 min load
   reported failure for a checkpoint that serves fine. Large MoE loads are
@@ -175,14 +173,15 @@ mark it `INDETERMINATE` rather than reporting a pass/fail.
 
 For example, on a 1 % gate on DeepSeek-V4-Pro, both tasks that originally failed passed once measured properly:
 
-| task | repeats | drop | verdict |
+| task | runs pooled | drop | verdict |
 | --- | --- | --- | --- |
 | SciCode | 1 | 2.96 pp | REGRESSION |
 | SciCode | 8 | **-0.96 pp** | PASS |
 | IFBench | 5 | 2.73 pp | REGRESSION |
 | IFBench | 16 | **0.63 pp** | PASS |
 
-`recipes/tasks/aa/scicode.md` ships `num_repeats: 1`, unsuitable for gating as-is.
+Add precision by submitting the benchmark **more times**, not by raising
+`num_repeats` within a run — see `recipes/tasks/aa/scicode.md` for why.
 
 **Re-running does not guarantee fresh samples.** With a warm NEL response cache a "re-run" can
 replay cached responses — two runs came back bit-identical to 16 digits. Confirm the score
