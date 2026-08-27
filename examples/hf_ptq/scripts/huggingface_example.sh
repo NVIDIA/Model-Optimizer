@@ -318,16 +318,17 @@ if [[ $TASKS =~ "mmlu" ]]; then
     fi
     if [[ ! -d "$MMLU_DATA_PATH" ]] || [[ ! $(ls -A $MMLU_DATA_PATH) ]]; then
         echo "Preparing the MMLU test data"
-        # HuggingFace mirror of the original Berkeley tarball (people.eecs.berkeley.edu), which is
-        # intermittently unreachable. Bound the retries: wget's defaults keep trying for far longer
-        # than the callers' timeouts, turning an unreachable host into an unexplained hang.
-        wget --timeout=20 --tries=3 \
-            https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar -O /tmp/mmlu.tar || {
+        MMLU_TAR="$(mktemp "${TMPDIR:-/tmp}/mmlu.XXXXXX")" || exit 1
+        trap 'rm -f "$MMLU_TAR"' EXIT
+        # HuggingFace mirror of the Berkeley tarball, which is intermittently unreachable. Bound
+        # the retries (wget's defaults outlast the callers' timeouts); -c resumes a stalled transfer.
+        wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+            https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar -O "$MMLU_TAR" || {
             echo "[ERROR] Could not download the MMLU test data. Set MMLU_DATA_PATH to a local copy."
             exit 1
         }
         mkdir -p data
-        tar -xf /tmp/mmlu.tar -C data && mv data/data $MMLU_DATA_PATH
+        tar -xf "$MMLU_TAR" -C data && mv data/data $MMLU_DATA_PATH
     fi
 
     mmlu_flags=""
