@@ -129,7 +129,7 @@ def get_weights_scaling_factor_2(input: np.ndarray):
     if per_block_quant_scale == 0:
         per_block_quant_scale = 1.0
     if not np.isfinite(per_block_quant_scale):
-        raise ValueError("NVFP4 per-tensor scales must be finite and positive.")
+        raise ValueError("NVFP4 per-tensor scales must be finite.")
     return np.float32(per_block_quant_scale)
 
 

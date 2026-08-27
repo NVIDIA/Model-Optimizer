@@ -55,7 +55,7 @@ def test_nvfp4_scaling_factors_handle_zero_and_nonfinite_amax():
         np.ones((2, 1), dtype=np.float32),
     )
 
-    with pytest.raises(ValueError, match="finite and positive"):
+    with pytest.raises(ValueError, match="must be finite"):
         get_weights_scaling_factor_2(np.array([np.inf], dtype=np.float32))
 
 
