@@ -284,6 +284,22 @@ def test_reused_parent_sweep_rejects_non_object_sort_artifacts(tmp_path, invalid
     assert not reuse_summary_path.exists()
 
 
+def test_reused_parent_sweep_rejects_oversized_sort_artifact(tmp_path):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    sort_summary_path.write_bytes(b"{}" + b" " * (1 << 20))
+
+    with pytest.raises(ValueError, match="exceeds metadata size limit"):
+        _write_reused_sort_equivalence(
+            sort_summary_path,
+            reuse_summary_path,
+            {"passed": True, "reused_parent_sweep": True},
+        )
+
+    assert not reuse_summary_path.exists()
+
+
 def test_parent_sweep_sort_miss_is_blocking_but_width_miss_remains_advisory():
     verdict = _parent_sweep_sanity_verdict(
         {

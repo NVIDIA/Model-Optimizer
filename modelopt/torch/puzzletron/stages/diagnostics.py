@@ -115,6 +115,7 @@ _PRIMARY_METRICS = (
     "token_accuracy_top_10_consistency",
 )
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|blocks)\.(\d+)(?:\.|$)")
+_MAX_REUSED_SORT_SUMMARY_BYTES = 1 << 20
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -1639,11 +1640,16 @@ def _write_reused_sort_equivalence(
 ) -> dict[str, Any]:
     """Write width-owned reuse evidence without mutating the completed sort artifact."""
 
-    existing = (
-        json.loads(sort_summary_path.read_text(encoding="utf-8"))
-        if sort_summary_path.is_file()
-        else {}
-    )
+    if sort_summary_path.is_file():
+        with sort_summary_path.open("rb") as stream:
+            summary_bytes = stream.read(_MAX_REUSED_SORT_SUMMARY_BYTES + 1)
+        if len(summary_bytes) > _MAX_REUSED_SORT_SUMMARY_BYTES:
+            raise ValueError(
+                f"invalid sort sanity artifact at {sort_summary_path}: exceeds metadata size limit"
+            )
+        existing = json.loads(summary_bytes)
+    else:
+        existing = {}
     if not isinstance(existing, dict):
         raise ValueError(
             f"invalid sort sanity artifact at {sort_summary_path}: expected a JSON object"
