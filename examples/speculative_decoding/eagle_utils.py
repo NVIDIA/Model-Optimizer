@@ -59,12 +59,16 @@ def make_speculative_data_module(
     train_len=None,
     answer_only_loss=False,
     shift_labels=True,
+    final_aux_is_base_hidden=False,
 ) -> dict:
     """Create data module for speculative decoding training.
 
     Args:
         shift_labels: If True, labels are shifted by 1 for autoregressive training (EAGLE3).
             If False, labels are unshifted for diffusion-style training (DFlash).
+        final_aux_is_base_hidden: Streaming only. True when the draft's top aux layer is the
+            base's final layer, so the last captured plane is both the final aux feature and
+            the base (KD-target) hidden instead of an extra dedicated plane.
     """
     # Load chat template from file if provided
     chat_template = None
@@ -78,13 +82,32 @@ def make_speculative_data_module(
     if mode == "streaming":
         # ``train_len`` right-truncates during tokenization and is also the collator's
         # pad target; caller must ensure ``train_len <= vllm.max_model_len``.
+        # The streaming dataset tokenizes via ``tokenizer.apply_chat_template`` (no
+        # chat_template arg), so a custom template (e.g. one carrying {% generation %}
+        # tags for answer_only_loss) must be installed on the tokenizer here — unlike
+        # the online path, which threads ``chat_template`` straight into the collator.
+        if chat_template is not None:
+            tokenizer.chat_template = chat_template
+            print_rank_0("Installed custom chat template on tokenizer for streaming.")
         print_rank_0(f"Streaming hidden states from {data_args.streaming_server_url}")
         from modelopt.torch.speculative.plugins.hf_streaming_dataset import (
             EagleVllmStreamingConfig,
             EagleVllmStreamingDataset,
         )
 
-        ds = load_dataset("json", data_files=data_args.data_path, split="train")
+        # data_path may be a single jsonl, a glob string, or a directory of shards.
+        # HF load_dataset's data_files takes a file/glob/list but NOT a bare directory,
+        # so expand a directory into its sorted *.jsonl files (avoids physically
+        # concatenating large multi-shard corpora and shell-glob fragility).
+        _dp = data_args.data_path
+        if Path(_dp).is_dir():
+            _data_files = sorted(str(p) for p in Path(_dp).glob("*.jsonl"))
+            if not _data_files:
+                raise ValueError(f"No .jsonl files found in directory {_dp}")
+            print_rank_0(f"Loading {len(_data_files)} jsonl shards from directory {_dp}")
+        else:
+            _data_files = _dp
+        ds = load_dataset("json", data_files=_data_files, split="train")
         if data_args.sample_size > 0:
             ds = ds.select(range(data_args.sample_size))
         # Map-style dataset: each rank fetches its own DistributedSampler shard.
@@ -96,6 +119,7 @@ def make_speculative_data_module(
             model=data_args.streaming_model_name,
             max_seq_len=train_len,
             answer_only_loss=answer_only_loss,
+            final_aux_is_base_hidden=final_aux_is_base_hidden,
         )
         train_dataset = EagleVllmStreamingDataset(
             entries=ds,
@@ -122,6 +146,9 @@ def make_speculative_data_module(
                 train_len=train_len,
                 local_image_path=data_args.vlm_img_dir,
                 return_labels=True,
+                answer_only_loss=answer_only_loss,
+                shift_labels=shift_labels,
+                chat_template=chat_template,
             )
 
     else:
@@ -227,6 +254,110 @@ class LoRAWarmupCallback(TrainerCallback):
                     f"Step {state.global_step}: LoRA warmup complete, enabling co-training."
                 )
             self._activated = True
+        return control
+
+
+class DFlashFSDP2ShardedSDExportCallback(TrainerCallback):
+    """Export the DFlash draft module after each checkpoint save, for FSDP2 sharded runs.
+
+    Applicable range: this is needed only under FSDP2 ``SHARDED_STATE_DICT``, where the
+    checkpoint holds distributed shards (``pytorch_model_fsdp_0/``) and no consolidated
+    ``model.safetensors`` — so the post-training ``export_hf_checkpoint.py`` pass can't read
+    it. It gathers just the small draft submodule and writes the deployable export.
+
+    Gating is the caller's responsibility: ``main.py`` adds this callback only when the
+    accelerator's FSDP state dict type is ``SHARDED_STATE_DICT`` (full-state-dict runs —
+    DDP, single-device, FSDP2 FULL_STATE_DICT — use the launcher's post-run export instead).
+    """
+
+    def on_save(self, args, state, control, **kwargs):
+        """Export DFlash draft module weights + config after checkpoint save."""
+        import json
+        import os
+
+        from safetensors.torch import save_file
+
+        model = kwargs["model"]
+        if not hasattr(model, "dflash_module"):
+            return control
+
+        step = state.global_step
+        export_dir = os.path.join(args.output_dir, f"exported-checkpoint-{step}")
+
+        # All ranks participate in the state_dict gather (FSDP2 collective op). Only the
+        # dflash_module submodule is gathered (~328 MB for MiniMax-M2.7), not the 229B base.
+        try:
+            from torch.distributed.checkpoint.state_dict import (
+                StateDictOptions,
+                get_model_state_dict,
+            )
+
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            try:
+                raw_sd = get_model_state_dict(
+                    model, submodules={model.dflash_module}, options=options
+                )
+            except TypeError:
+                # Older PyTorch without the submodules= parameter: this gathers the FULL
+                # model (the entire base, e.g. ~229B for MiniMax-M2.7), defeating the
+                # submodule-only design and risking OOM. Warn loudly — upgrade PyTorch.
+                print_rank_0(
+                    "WARNING: DFlash export: get_model_state_dict lacks submodules= on this "
+                    "PyTorch — gathering the FULL base model (slow / may OOM). Upgrade PyTorch "
+                    "for the submodule-only gather."
+                )
+                raw_sd = get_model_state_dict(model, options=options)
+        except ImportError:
+            # Non-distributed / single-GPU fallback
+            raw_sd = model.state_dict()
+
+        # Reuse the exporter's extraction (strips the dflash_module prefix, drops rotary
+        # buffers) for the common full-model key layout. Some PyTorch versions return the
+        # submodule gather with keys already stripped of the prefix — handle that directly.
+        exporter = model.get_exporter()
+        drafter_sd = exporter._extract_state_dict(raw_sd)
+        if not drafter_sd:
+            # Fallback for the already-stripped-key layout: a denylist heuristic rather than
+            # the prefix-based extractor. Warn, since a key-naming change upstream could let
+            # a malformed draft ship and only fail at vLLM load time.
+            print_rank_0(
+                "WARNING: DFlash export: prefix-based extraction found no dflash_module keys; "
+                "falling back to a denylist heuristic on already-stripped keys. Verify the "
+                "exported draft loads in vLLM."
+            )
+            drafter_sd = {
+                k: v
+                for k, v in raw_sd.items()
+                if "rotary_emb" not in k
+                and not any(p in k for p in ("model.", "lm_head.", "embed_tokens."))
+            }
+        del raw_sd
+        # Coerce to CPU for save_file (the distributed gather uses cpu_offload, but the
+        # single-GPU fallback may return CUDA tensors).
+        drafter_sd = {k: (v.cpu() if v.device.type != "cpu" else v) for k, v in drafter_sd.items()}
+
+        if not drafter_sd:
+            print_rank_0(f"Warning: No dflash_module weights found at step {step}, skipping export")
+            return control
+
+        # Only rank 0 writes files
+        if is_master():
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+                save_file(drafter_sd, os.path.join(export_dir, "model.safetensors"))
+
+                config = exporter._export_config()
+                with open(os.path.join(export_dir, "config.json"), "w") as f:
+                    json.dump(config, f, indent=2)
+
+                total_mb = sum(v.nbytes for v in drafter_sd.values()) / 1024 / 1024
+                print_rank_0(
+                    f"Exported DFlash draft ({len(drafter_sd)} tensors, {total_mb:.0f}MB) "
+                    f"to {export_dir}"
+                )
+            except Exception as e:
+                print_rank_0(f"Warning: DFlash export failed at step {step}: {e}")
+
         return control
 
 
@@ -392,8 +523,9 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
                 raise RuntimeError(
                     f"Failed to capture loop variables in patched _templated_ring_attention: {e}"
                 ) from e
-            # Set attn mask to permuted TTT mask
-            if "attn_bias" in kwargs:
+            # Set attn mask to permuted TTT mask. Newer torch omits the attn_bias kwarg on the
+            # forward call, so key off grad_out instead to tell forward from backward.
+            if patch_enbabled and "grad_out" not in kwargs:
                 kwargs["attn_bias"] = _get_sharded_ttt_msk(
                     i, rank, size, query.shape[2], ttt_step, query.dtype
                 )

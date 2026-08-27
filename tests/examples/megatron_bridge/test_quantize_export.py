@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for quantize.py and export.py scripts."""
+"""Tests for quantize.py and export_quantized_megatron_to_hf.py scripts."""
 
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
+# NOTE: Qwen3.5-VL covered by test_qad.py
 def test_quantize_and_export(tmp_path: Path, num_gpus):
     """Quantize a tiny Qwen3 via a YAML recipe and export it to a unified HF checkpoint."""
     # Use a vLLM-friendly head_dim (64) since the default tiny config (head_dim=2) is unsupported.
@@ -56,7 +57,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
 
     # Step 2: export to HF
     export_cmd = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "export.py"],
+        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
         hf_model_name_or_path=hf_model_path,
         megatron_path=megatron_path,
         export_unified_hf_path=hf_export_path,

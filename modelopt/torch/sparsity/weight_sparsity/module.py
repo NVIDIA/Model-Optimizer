@@ -17,6 +17,7 @@
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from modelopt.torch.opt.hparam import Hparam
@@ -34,7 +35,22 @@ class SparseModule(DynamicModule):
     @staticmethod
     def _get_weight(mod: "SparseModule", weight: torch.Tensor) -> torch.Tensor:
         if mod.is_sparse and mod._weight_mask is not None:
-            masked_weight = weight * mod._weight_mask
+            mask = mod._weight_mask
+            # Under FSDP the weight is sharded into a DTensor while the mask buffer stays a
+            # plain tensor; align the mask to the weight's sharding so the elementwise multiply
+            # does not mix DTensor and torch.Tensor operands. The distributed mask is cached and
+            # only rebuilt when the sharding changes, since re-sharding on every access is costly.
+            if isinstance(weight, DTensor) and not isinstance(mask, DTensor):
+                cached = mod._weight_mask_dtensor
+                if (
+                    cached is None
+                    or cached.device_mesh != weight.device_mesh
+                    or cached.placements != weight.placements
+                ):
+                    cached = distribute_tensor(mask, weight.device_mesh, weight.placements)
+                    mod._weight_mask_dtensor = cached
+                mask = cached
+            masked_weight = weight * mask
             # Quick workaround for the custom attribute for Megatron.
             # TODO: maybe we need a more general way for customized attributes
             if hasattr(weight, "main_grad"):
@@ -50,6 +66,10 @@ class SparseModule(DynamicModule):
 
         # define the sparse mask here (don't pre-allocate memory to maximize memory savings)
         self._register_temp_attribute("_weight_mask", None, lambda m, n, v: m.register_buffer(n, v))
+
+        # cache of the FSDP-sharded (DTensor) mask; rebuilt lazily in _get_weight and invalidated
+        # whenever _weight_mask changes. Not a buffer, so it is never serialized/restored.
+        self._register_temp_attribute("_weight_mask_dtensor", None)
 
         # register dynamic attributes of the class
         self._register_dynamic_attribute("weight", self._get_weight)
@@ -67,6 +87,9 @@ class SparseModule(DynamicModule):
 
     def set_mask(self, value: torch.BoolTensor | None):
         """Set the active sparse mask of the module weights."""
+        # invalidate the cached DTensor mask since the underlying mask is changing
+        self._weight_mask_dtensor = None
+
         if value is None:
             self._weight_mask = None
             return

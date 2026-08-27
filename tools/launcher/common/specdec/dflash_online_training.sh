@@ -42,6 +42,13 @@ pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirement
 pip install huggingface-hub>=1.2.1
 export PATH=$PATH:/workspace/.local/bin
 
+# Some trust_remote_code MoE models pin an older transformers (e.g. MiniMax-M2.7
+# needs 4.57.x; its modeling code is incompatible with the 5.x the recipe defaults
+# pull in). Override here when the model needs it.
+if [ -n "${OVERRIDE_TRANSFORMERS:-}" ]; then
+    pip install "transformers==${OVERRIDE_TRANSFORMERS}"
+fi
+
 ###################################################################################################
 
 trap 'error_handler $0 $LINENO' ERR
@@ -99,9 +106,18 @@ fi
 
 export TOKENIZERS_PARALLELISM=False
 
+# ACCELERATE_CONFIG selects an explicit accelerate config file (e.g. an FSDP2 YAML).
+# Required for trust_remote_code MoE models that need FSDP2 via accelerate config
+# rather than transformers-native ParallelismConfig (MiniMax-M2.7 on transformers 4.57.x).
+ACCEL_CONFIG_ARGS=""
+if [ -n "${ACCELERATE_CONFIG:-}" ] && [ -f "${ACCELERATE_CONFIG}" ]; then
+    ACCEL_CONFIG_ARGS="--config_file ${ACCELERATE_CONFIG}"
+    echo "Using accelerate config: ${ACCELERATE_CONFIG}"
+fi
+
 set -x
 start_time=$(date +%s)
-accelerate launch --mixed_precision bf16 $MULTI_NODE_ARGS $MAIN_PY "$@"
+accelerate launch $ACCEL_CONFIG_ARGS --mixed_precision "${MIXED_PRECISION:-bf16}" $MULTI_NODE_ARGS $MAIN_PY "$@"
 echo "Training time: $(( $(date +%s) - start_time )) seconds"
 set +x
 

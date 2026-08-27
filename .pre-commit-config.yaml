@@ -21,13 +21,11 @@ repos:
       - id: requirements-txt-fixer
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.11
+    rev: v0.15.20
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
-        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
       - id: ruff-format
-        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
 
   - repo: local
     hooks:
@@ -71,24 +69,30 @@ repos:
     hooks:
       - id: normalize-yaml-ext
         name: normalize .yml to .yaml in required places, right now only yaml files in modelopt_recipes
-        entry: python tools/precommit/normalize_yaml_ext.py
+        entry: uv run --frozen --extra dev python tools/precommit/normalize_yaml_ext.py
         language: system
         files: ^modelopt_recipes/.*\.yml$
 
       - id: check-modelopt-recipes
         name: validate modelopt recipes
-        entry: python tools/precommit/check_modelopt_recipes.py
+        entry: uv run --frozen --extra dev python tools/precommit/check_modelopt_recipes.py
         language: system
         files: ^modelopt_recipes/
         # configs/ contains reusable snippets (not full recipes) — skip recipe validation
         exclude: ^modelopt_recipes/configs/
 
       - id: sync-claude-skills
-        name: sync .claude/skills/ symlinks from .agents/skills/
+        name: sync .claude/skills/ symlinks from plugin skills
         entry: bash tools/precommit/sync_claude_skills.sh
         language: system
-        files: ^\.agents/skills/
+        files: ^plugins/modelopt/skills/
         pass_filenames: false
+
+      - id: check-launcher-yaml
+        name: validate launcher YAML references to recipes and templates
+        entry: uv run --frozen --extra dev python tools/precommit/check_launcher_yaml.py
+        language: system
+        files: ^(tools/launcher/examples/.*\.yaml|tools/precommit/check_launcher_yaml\.py)$
 
   # Instructions to change license file if ever needed:
   # https://github.com/Lucas-C/pre-commit-hooks#removing-old-license-and-replacing-it-with-a-new-one
@@ -119,6 +123,12 @@ repos:
               modelopt/torch/quantization/plugins/attention.py|
               modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
               modelopt/torch/speculative/eagle/utils.py|
+              modelopt/torch/speculative/plugins/hf_domino.py|
+              modelopt/torch/speculative/plugins/modeling_domino.py|
+              modelopt/torch/speculative/plugins/hf_dflash.py|
+              modelopt/torch/speculative/plugins/modeling_dflash.py|
+              modelopt/torch/speculative/plugins/hf_dspark.py|
+              modelopt/torch/speculative/plugins/modeling_dspark.py|
               modelopt/torch/speculative/plugins/hf_medusa.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
               examples/deepseek/deepseek_v3/quantize_to_nvfp4.py|
@@ -127,6 +137,7 @@ repos:
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
+              examples/onnx_ptq/far3d/evaluate.py|
               examples/llm_qat/train.py|
               examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
@@ -159,7 +170,7 @@ repos:
     hooks:
       - id: generate-arguments-md
         name: Regenerate examples/llm_qat/ARGUMENTS.md
-        entry: bash -c 'python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md'
+        entry: uv run --frozen --extra dev python examples/llm_qat/arguments.py --generate_docs examples/llm_qat/ARGUMENTS.md
         language: system
         files: >-
           (?x)^(

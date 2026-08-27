@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared `quant_cfg` snippet for the Qwen3.5 family's
+# `w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast` recipe. Imported by both
+# `huggingface/qwen3_5/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.yaml` (dense `qwen3_5`)
+# and `huggingface/qwen3_5_moe/ptq/w4a16_nvfp4_mse-fp8_attn-kv_fp8_cast.yaml` (MoE
+# `qwen3_5_moe`); the two families share the hybrid linear-attention +
+# softmax-attention architecture, so the wildcard rules apply identically.
+# MoE-only patterns inside `default_disabled_quantizers`
+# (`*block_sparse_moe.gate*`, `*mlp.shared_expert_gate.*`, `*router*`) are
+# no-ops on dense.
+#
+# MSE variant of `w4a16_nvfp4-fp8_attn-kv_fp8_cast.quant_cfg.yaml`: the NVFP4
+# MLP/lm_head weight quantizers use static scales (`nvfp4_static`) populated by
+# the MSE FP8-scale sweep (`method: mse`, `fp8_scale_sweep: true` in the parent
+# recipes) instead of dynamic per-call scaling.
+
+# modelopt-schema: modelopt.torch.quantization.config.QuantizerCfgListConfig
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8: configs/numerics/fp8
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_static: configs/numerics/nvfp4_static
+---
+  - $import: base_disable_all
+
+  # W4A16 NVFP4 on MLP projection targets, with static weight scales from the
+  # MSE FP8-scale sweep. The gate/up/down projection patterns cover dense MLPs,
+  # shared experts, and fused MoE expert quantizers
+  # (e.g. gate_up_proj_weight_quantizers.N).
+  - quantizer_name: '*mlp*gate_proj*weight_quantizer*'
+    cfg: {$import: nvfp4_static}
+  - quantizer_name: '*mlp*up_proj*weight_quantizer*'
+    cfg: {$import: nvfp4_static}
+  - quantizer_name: '*mlp*down_proj*weight_quantizer*'
+    cfg: {$import: nvfp4_static}
+
+  # FP8 self-attention projections.
+  - quantizer_name: '*self_attn*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*self_attn*input_quantizer'
+    cfg: {$import: fp8}
+
+  # FP8 large linear-attention projections. in_proj_a and in_proj_b are
+  # re-disabled explicitly below; conv1d stays disabled via base_disable_all
+  # (no rule re-enables it).
+  - quantizer_name: '*linear_attn.in_proj_qkv*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_qkv*input_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_z*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.in_proj_z*input_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.out_proj*weight_quantizer'
+    cfg: {$import: fp8}
+  - quantizer_name: '*linear_attn.out_proj*input_quantizer'
+    cfg: {$import: fp8}
+
+  # FP8 KV cache with constant amax.
+  - $import: kv_fp8_cast
+
+  # Standard exclusions (BatchNorm, LeakyReLU, gates, routers, conv1d, output
+  # heads, etc.). Includes `*lm_head*` disable, which is re-enabled below.
+  - $import: default_disabled_quantizers
+
+  # Qwen-specific exclusions: linear-attention sub-modules that are not in the
+  # reference recipe, and any visual / MTP siblings on multimodal releases.
+  - quantizer_name: '*linear_attn.in_proj_a*'
+    enable: false
+  - quantizer_name: '*linear_attn.in_proj_b*'
+    enable: false
+  - quantizer_name: '*visual*'
+    enable: false
+  - quantizer_name: '*vision_tower*'
+    enable: false
+  # Name-match for "mtp"; complementary runtime path in hf_ptq.py catches
+  # MTP layers identified by index instead.
+  - quantizer_name: '*mtp*'
+    enable: false
+
+  # Re-enable NVFP4 on lm_head weights (static MSE scales). Must come after
+  # default_disabled_quantizers, which disables `*lm_head*`.
+  - quantizer_name: '*lm_head*weight_quantizer'
+    cfg: {$import: nvfp4_static}

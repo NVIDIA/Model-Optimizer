@@ -1,0 +1,90 @@
+# SPEED-Bench run for MiniMax-M2.7 with the trained DFlash draft, via vLLM.
+#
+# Two-task pipeline:
+#   task_0  qualitative split  (nvidia/SPEED-Bench-Internal/qualitative,  80 prompts)
+#   task_1  throughput_32k split (nvidia/SPEED-Bench-Internal/throughput_32k, long context)
+#
+# Both use --speculative_algorithm DFLASH with the exported draft. Acceptance length
+# (AL) is the primary metric; the throughput_32k split checks that AL holds at long
+# context (if it drops, add YaRN/rope_scaling to the draft export).
+#
+# Results write to /scratchspace/minimax_m2.7_dflash_vllm/<split>/. The
+# pensieve-intern specdec_bench workflow's wrap_up stage publishes these to
+# s3://team-specdec-workgroup/results/minimax_m2.7_dflash_vllm/<split>/.
+#
+# Set draft_model to the trained, exported draft checkpoint (an exported-checkpoint-*
+# dir containing model.safetensors), e.g. the output of hf_online_dflash.yaml.
+#
+# Usage:
+#   Edit the two --draft_model_dir args to point at your exported draft checkpoint, then:
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/MiniMax/MiniMax-M2.7-DFlash/specdec_bench.yaml --yes
+#
+# NOTE: the placeholder below is `exported-checkpoint-final` — that dir is written by the
+# training launcher's post-run export (dflash_online_training.sh) for the final model. The
+# per-save DFlashFSDP2ShardedSDExportCallback instead writes `exported-checkpoint-<step>`
+# dirs; to bench a specific intermediate step, point at one of those.
+
+job_name: MiniMax-M2.7-DFlash_specdec_bench
+pipeline:
+  global_vars:
+    hf_model: /hf-local/MiniMaxAI/MiniMax-M2.7
+
+  # Step 1: qualitative split — quality / acceptance-length numbers.
+  task_0:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/qualitative
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir /scratchspace/dflash_minimax_m2.7/exported-checkpoint-final
+      - --block_size 8
+      - --tp_size 4
+      - --ep_size 4
+      - --concurrency 32
+      - --output_length 4096
+      - --trust_remote_code
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/minimax_m2.7_dflash_vllm/qualitative
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:nightly
+
+  # Step 2: throughput_32k split — long-context throughput / AL.
+  # --num_requests 80 caps the 1,536-sample split to fit the time limit; --max_seq_len
+  # 40960 = 32K input + 4K output + 4K headroom so vLLM doesn't auto-cap below 36K.
+  task_1:
+    script: common/specdec_bench/run.sh
+    args:
+      - --dataset speed
+      - --dataset_path /hf-local/nvidia/SPEED-Bench-Internal/throughput_32k
+      - --engine VLLM
+      - --speculative_algorithm DFLASH
+      - --draft_model_dir /scratchspace/dflash_minimax_m2.7/exported-checkpoint-final
+      - --block_size 8
+      - --tp_size 4
+      - --ep_size 4
+      - --concurrency 8
+      - --num_requests 80
+      - --output_length 4096
+      - --max_seq_len 40960
+      - --trust_remote_code
+      - --aa_timing
+      - --show_progress
+      - --save_dir /scratchspace/minimax_m2.7_dflash_vllm/throughput_32k
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_LOCAL: /hf-local
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      container: vllm/vllm-openai:nightly

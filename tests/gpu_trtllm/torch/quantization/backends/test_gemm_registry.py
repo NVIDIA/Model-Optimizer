@@ -141,9 +141,11 @@ def test_gemm_registry_find_match():
     # Register with different availability checks
     registry.register(
         gemm_func=gemm_fp8,
-        availability_check=lambda m, i, a, k: hasattr(m, "input_quantizer")
-        and hasattr(m.input_quantizer, "num_bits")
-        and m.input_quantizer.num_bits == (4, 3),
+        availability_check=lambda m, i, a, k: (
+            hasattr(m, "input_quantizer")
+            and hasattr(m.input_quantizer, "num_bits")
+            and m.input_quantizer.num_bits == (4, 3)
+        ),
     )
 
     # Create test modules

@@ -1,0 +1,62 @@
+# Nemotron-3.5-Lightning-30B-A3B NVFP4 (W4A16 4/6) quantization + unified-HF export via Megatron-Bridge (4 GPUs).
+#
+# Slurm:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/mbridge_quantize.yaml --yes
+# Local:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/mbridge_quantize.yaml hf_local=/mnt/hf-local --yes
+
+# NOTE: sized for fast run; bump for production, e.g. --calib_num_samples 512 --seq_length 8192.
+job_name: Nemotron-3.5-Lightning-30B-A3B_mbridge_quantize
+pipeline:
+  note: "NVFP4 W4A16 PTQ Nemotron-3.5-Lightning-30B-A3B (Megatron-Bridge recipe), then unified-HF export"
+
+  global_vars:
+    # Per-run scratch (fresh cicd_<id> dir) so each run quantizes fresh.
+    output_dir: /scratchspace
+
+  # 1) NVFP4 Quantize via the ptq recipe and export to a deployable unified-HF checkpoint.
+  #    tp_size=1: static-block NVFP4 (MSE) weight quant is unsupported with TP>1.
+  task_0:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+    inline: >-
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/quantize.py
+      --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+      --trust_remote_code
+      --tp_size 1
+      --recipe huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6
+      --calib_batch_size 8
+      --calib_num_samples 256
+      --seq_length 512
+      --skip_generate
+      --export_megatron_path <<global_vars.output_dir>>/Nemotron-3.5-Lightning-30B-A3B-NVFP4-megatron
+      &&
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/export_quantized_megatron_to_hf.py
+      --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+      --megatron_path <<global_vars.output_dir>>/Nemotron-3.5-Lightning-30B-A3B-NVFP4-megatron
+      --trust_remote_code
+      --pp_size 4
+      --export_unified_hf_path <<global_vars.output_dir>>/Nemotron-3.5-Lightning-30B-A3B-NVFP4-hf
+    slurm_config: &sc
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.08
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      docker_user: root
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  # 2) MMLU (10% sample) on the exported NVFP4 checkpoint via vLLM, gated on a lower bound.
+  task_1:
+    reqs_file: modules/Model-Optimizer/examples/llm_eval/requirements.txt
+    inline: >-
+      python modules/Model-Optimizer/examples/llm_eval/lm_eval_hf.py
+      --model vllm
+      --model_args pretrained=<<global_vars.output_dir>>/Nemotron-3.5-Lightning-30B-A3B-NVFP4-hf,tensor_parallel_size=4
+      --trust_remote_code
+      --tasks mmlu
+      --limit 0.1
+      --batch_size auto
+      --output_path /scratchspace/mmlu_results
+      --accuracy_lower_bound 0.75
+    slurm_config:
+      <<: *sc
+      ntasks_per_node: 1

@@ -47,7 +47,7 @@ bash tools/debugger/client.sh handshake
 bash tools/debugger/client.sh run "echo hello"
 
 # Run a test script
-bash tools/debugger/client.sh run "bash llm_ptq/scripts/huggingface_example.sh"
+bash tools/debugger/client.sh run "bash hf_ptq/scripts/huggingface_example.sh"
 
 # Run with a long timeout (default is 600s)
 bash tools/debugger/client.sh --timeout 1800 run "python my_long_test.py"
@@ -66,6 +66,7 @@ The relay uses a directory at `tools/debugger/.relay/` with this structure:
 ```text
 .relay/
 ├── server.ready      # Written by server on startup
+├── owner             # Current relay owner id (host:pid:nanos); newest server wins
 ├── client.ready      # Written by client during handshake
 ├── handshake.done    # Written by server to confirm handshake
 ├── running           # Written by server while a command is executing (cmd_id:pid)
@@ -118,7 +119,9 @@ The relay uses a directory at `tools/debugger/.relay/` with this structure:
 ## Notes
 
 - The `.relay/` directory is in `.gitignore` — it is not checked in.
-- Only one server should run at a time (startup clears the relay directory).
+- Only one server serves at a time. A newly started server claims `.relay/owner`;
+  any older server (even on another host sharing this NFS relay) sees the changed
+  owner on its next poll and exits cleanly, rather than competing for commands.
 - Commands run sequentially in the order the server discovers them.
 - A running command can be cancelled via `client.sh cancel`. Cancelled commands exit with code 130.
 - Client-side timeouts automatically cancel the running command on the server.

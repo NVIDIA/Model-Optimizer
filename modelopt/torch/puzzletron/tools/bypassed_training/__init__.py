@@ -13,6 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for initializing child models from parent models via bypassed training."""
+"""Utilities for initializing child models from parent models."""
 
 from .child_init import *

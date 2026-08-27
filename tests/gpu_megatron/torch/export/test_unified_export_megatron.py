@@ -32,6 +32,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
+import modelopt.torch.export.unified_export_megatron as uem
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.export import KV_CACHE_FP8, export_mcore_gpt_to_hf, import_mcore_gpt_from_hf
@@ -352,6 +353,79 @@ def test_qkv_slicing_gqa_tp2(dist_workers_size_2, tmp_path):
     dist_workers_size_2.run(partial(_test_qkv_slicing_gqa_tp2, tmp_path))
 
 
+def _test_export_pp2_mtp_metadata_matches_shards(tmp_path, model_dir, rank, size):
+    """With PP>1, per-shard JSON keys should exist in the referenced safetensors shard."""
+    config = transformers.AutoConfig.from_pretrained(model_dir)
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=config.num_hidden_layers,
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_query_groups=config.num_key_value_heads,
+        ffn_hidden_size=config.intermediate_size,
+        max_sequence_length=config.max_position_embeddings,
+        vocab_size=config.vocab_size,
+        activation_func="swiglu",
+        normalization="RMSNorm",
+        transformer_impl="modelopt",
+    ).cuda()
+
+    export_dir = tmp_path / "export_pp2"
+    original_get_mtp_state_dict = GPTModelExporter._get_mtp_state_dict
+
+    # Simulate stage-local MTP tensors (only on the last PP rank).
+    def _fake_get_mtp_state_dict(self):
+        if rank != size - 1:
+            return {}
+        return {f"mtp.injected.rank{rank}.weight": torch.ones(8, dtype=torch.bfloat16).cpu()}
+
+    GPTModelExporter._get_mtp_state_dict = _fake_get_mtp_state_dict
+
+    try:
+        export_mcore_gpt_to_hf(
+            model,
+            model_dir,
+            dtype=torch.bfloat16,
+            export_dir=str(export_dir),
+        )
+    finally:
+        GPTModelExporter._get_mtp_state_dict = original_get_mtp_state_dict
+
+    if rank == 0:
+        shard_json_files = sorted(export_dir.glob("model-*.json"))
+        assert shard_json_files, "no per-shard metadata json files found"
+
+        shard_keys_cache = {}
+        all_weight_map_keys = set()
+        for shard_json_file in shard_json_files:
+            with open(shard_json_file) as f:
+                shard_meta = json.load(f)
+            for key, shard_file in shard_meta["weight_map"].items():
+                all_weight_map_keys.add(key)
+                if shard_file not in shard_keys_cache:
+                    with safe_open(
+                        str(export_dir / shard_file), framework="pt", device="cpu"
+                    ) as sf:
+                        shard_keys_cache[shard_file] = set(sf.keys())
+                assert key in shard_keys_cache[shard_file], (
+                    f"key '{key}' from {shard_json_file.name} missing in {shard_file}"
+                )
+
+        assert any(key.startswith("mtp.injected.") for key in all_weight_map_keys), (
+            "expected injected mtp.* key missing from shard metadata/index map"
+        )
+
+
+def test_unified_export_megatron_pp2_mtp_metadata_matches_shards(dist_workers_size_2, tmp_path):
+    model_dir = create_tiny_llama_dir(tmp_path)
+    dist_workers_size_2.run(
+        partial(_test_export_pp2_mtp_metadata_matches_shards, tmp_path, model_dir)
+    )
+
+
 def test_qkv_slicing_records_hf_excludes_for_unquantized_fused_qkv():
     """Unquantized fused MCore linear_qkv should become HF q/k/v excludes."""
     exporter = object.__new__(GPTModelExporter)
@@ -467,3 +541,103 @@ def test_mtp_state_dict_index_file(tmp_path):
     assert "mtp.0.hnorm.weight" in mtp_state_dict
     assert torch.allclose(mtp_state_dict["mtp.0.hnorm.weight"], torch.full((32,), 3.0))
     assert "mtp*" in exporter.exclude_modules
+
+
+class _FakeTEGroupedMLP:
+    """Minimal TEGroupedMLP stand-in exposing num_gemms, weight{i}, and state_dict()."""
+
+    def __init__(self, num_gemms: int, hidden: int = 8, ffn: int = 16, local_expert_indices=None):
+        self.num_gemms = num_gemms
+        self._weights = {
+            f"weight{i}": torch.randn(ffn, hidden, dtype=torch.bfloat16) for i in range(num_gemms)
+        }
+        for k, v in self._weights.items():
+            setattr(self, k, v)
+        if local_expert_indices is not None:
+            self.local_expert_indices = local_expert_indices
+
+    def state_dict(self):
+        return dict(self._weights)
+
+
+def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
+    exporter = object.__new__(GPTModelExporter)
+    exporter.dtype = torch.bfloat16
+    exporter._state_dict = {}
+    exporter._get_quantized_state = lambda *a, **k: ({}, None, 0)
+    exporter._get_weight_scales = lambda *a, **k: (None, None)
+    exporter._record_layer_quant_config = lambda *a, **k: None
+    return exporter
+
+
+def test_grouped_mlp_slicing_maps_local_to_global_expert_ids():
+    """EP>1 fix: without global remapping, every EP rank would write experts.0..N-1 and
+    collide on the writer's state_dict.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    # Simulate EP rank 2 of an EP=4 job: this rank owns global experts 4 and 5.
+    module = _FakeTEGroupedMLP(num_gemms=2, local_expert_indices=[4, 5])
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.4.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.5.gate_up_proj.weight" in exporter._state_dict
+    # Local indices 0/1 must NOT leak into the exported state_dict.
+    assert "experts.0.gate_up_proj.weight" not in exporter._state_dict
+    assert "experts.1.gate_up_proj.weight" not in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_normalizes_tensor_local_expert_indices():
+    """local_expert_indices may arrive as a torch.Tensor (Megatron path). It must be
+    normalized to list[int] -- a naive `bool(tensor)` on a multi-element tensor raises.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(
+        num_gemms=2, local_expert_indices=torch.tensor([6, 7], dtype=torch.long)
+    )
+
+    exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    assert "experts.6.gate_up_proj.weight" in exporter._state_dict
+    assert "experts.7.gate_up_proj.weight" in exporter._state_dict
+
+
+def test_grouped_mlp_slicing_collects_all_missing_expert_weights():
+    """New collect-then-raise behavior: the error message must name every missing
+    weight{i}, not just the first one hit.
+    """
+    exporter = _make_exporter_for_grouped_mlp()
+    module = _FakeTEGroupedMLP(num_gemms=3)
+    # Drop weight0 AND weight2; only weight1 remains.
+    module.state_dict = lambda: {"weight1": module.weight1}
+
+    with pytest.raises(ValueError) as exc_info:
+        exporter._grouped_mlp_slicing(module, "experts.{}.gate_up_proj")
+
+    msg = str(exc_info.value)
+    assert "weight0" in msg and "weight2" in msg, (
+        f"error should list all missing weights, got: {msg}"
+    )
+
+
+def test_is_sidecar_writer_rank_pins_to_dp0_ep0(monkeypatch):
+    """DP>1 fix predicate: only the DP0/EP0 rank among is_last_stage_main_rank writes
+    sidecar files. Guards the predicate used at three sites in save_pretrained.
+    """
+    # is_last_stage_main_rank=False is never a writer, regardless of DP/EP.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(False) is False
+
+    # DP0/EP0 is the writer.
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is True
+
+    # DP rank != 0 loses the writer role even if is_last_stage_main_rank.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 1)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 0)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False
+
+    # EP rank != 0 loses the writer role.
+    monkeypatch.setattr(uem, "get_data_parallel_rank", lambda: 0)
+    monkeypatch.setattr(uem, "get_expert_model_parallel_rank", lambda: 1)
+    assert GPTModelExporter._is_sidecar_writer_rank(True) is False

@@ -16,6 +16,7 @@
 """Utils for quantization including scaling factors adjustments."""
 
 import logging
+from collections import defaultdict
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import Any
@@ -70,6 +71,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
+from .model_utils import TiedWeightMap
 
 logger = logging.getLogger(__name__)
 
@@ -749,9 +751,13 @@ def process_layer_quant_config(layer_config_dict):
                 "group_size": block_size_value,
             }
         elif v == "nvfp4_svdquant":
+            # SVDQuant builds on the AWQ-style pre_quant_scale smoothing, so its
+            # config mirrors nvfp4_awq (group_size + pre_quant_scale flag).
             layer_config = {
                 "quant_algo": "NVFP4_SVD",
                 "group_size": block_size_value,
+                "has_zero_point": False,
+                "pre_quant_scale": True,
             }
         elif v == "mxfp8":
             layer_config = {
@@ -955,11 +961,102 @@ def from_quantized_weight(
     raise NotImplementedError(f"quantization format {quantization} not supported")
 
 
+_KV_CACHE_REPLACEMENTS: dict[str, str] = {
+    "k_bmm_quantizer._amax": "k_proj.k_scale",
+    "v_bmm_quantizer._amax": "v_proj.v_scale",
+    "k_bmm_quantizer._bias_value": "k_proj.k_bias",
+    "v_bmm_quantizer._bias_value": "v_proj.v_bias",
+    "input_quantizer._pre_quant_scale": "pre_quant_scale",
+}
+_BASE_SKIP_KEYS: tuple[str, ...] = (
+    "output_quantizer",
+    "_amax",
+    "_bias_value",
+    "input_quantizer._pre_quant_scale",
+    "weight_shape",
+)
+
+
+def _strip_base_layer(key: str, is_modelopt_qlora: bool) -> str:
+    """Drop the `base_layer` component PEFT inserts, which deployment does not expect.
+
+    Stripping generically means new key types (bias, scales) need no enumeration here.
+    """
+    return key.replace(".base_layer.", ".") if is_modelopt_qlora else key
+
+
+def _maybe_squeeze_scale(key: str, value: Any) -> Any:
+    """Squeeze a leading dim=1 from 3-D scale tensors of shape (1, n, m)."""
+    if (
+        "scale" in key
+        and isinstance(value, torch.Tensor)
+        and value.dim() == 3
+        and value.shape[0] == 1
+    ):
+        return value.squeeze(0)
+    return value
+
+
+def _postprocess_single_tensor(
+    key: str,
+    value: torch.Tensor,
+    kv_cache_max_bound: float,
+    kv_cache_format: str | None,
+    is_modelopt_qlora: bool = False,
+) -> tuple[str | None, torch.Tensor | None]:
+    """Per-tensor subset of :func:`postprocess_state_dict`, for streaming export.
+
+    Returns ``(new_key, new_value)`` to emit, or ``(None, None)`` to skip.
+    Tied-weight dedup is NOT performed here; callers should pre-compute alias
+    keys from ``model._tied_weights_keys`` and filter them at the call site.
+    """
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
+
+    # Skip problematic VL model parameters
+    if key == "vision_model.radio_model.summary_idxs":
+        return None, None
+
+    # Skip real quant parameters
+    if any(key.endswith("weight_quantizer." + q) for q in RealQuantLinear.list_of_scale_tensors):
+        return None, None
+
+    # Skip LoRA adapters for QLoRA models
+    if is_modelopt_qlora and "lora" in key:
+        return None, None
+
+    # Keys not related to quantizers: keep as-is
+    if all(sk not in key for sk in skip_keys):
+        new_key = _strip_base_layer(key, is_modelopt_qlora)
+        return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Apply replacements if the key matches any suffix in the replacements dict
+    for old_suffix, new_suffix in replacements.items():
+        if key.endswith(old_suffix):
+            prefix = key[: -len(old_suffix)]
+            if "_amax" in key:
+                assert kv_cache_format in [KV_CACHE_FP8, KV_CACHE_NVFP4, KV_CACHE_NVFP4_AFFINE], (
+                    "Invalid KV cache quantization format."
+                )
+                assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
+                value = value.float() / kv_cache_max_bound
+                if kv_cache_format == KV_CACHE_FP8 and value.item() > 0.5:
+                    logger.warning(
+                        "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
+                    )
+            new_key = _strip_base_layer(prefix + new_suffix, is_modelopt_qlora)
+            return new_key, _maybe_squeeze_scale(new_key, value)
+
+    # Key has a skip_key but no replacement matched — drop it
+    return None, None
+
+
 def postprocess_state_dict(
     state_dict: dict,
     maxbound: float,
     quantization: str | None,
     is_modelopt_qlora: bool = False,
+    tied_map: "TiedWeightMap | None" = None,
 ) -> dict:
     """Filters out keys related to weight quantizers and updates KV cache related keys.
 
@@ -968,35 +1065,22 @@ def postprocess_state_dict(
         maxbound: The maximum bound value for the output quantizer.
         quantization: The KV cache quantization format.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
+        tied_map: Optional :class:`TiedWeightMap`. When provided, tied-weight
+            dedup is authoritative and name-based: a declared alias key whose canonical
+            counterpart is present is dropped, independent of tensor address. This is
+            what makes dedup correct under the FSDP full-state-dict gather (and offload),
+            where tied tensors are materialized at distinct addresses and the address
+            pass below cannot see the tie. The address pass is retained as a backstop for
+            undeclared genuine shares and coincidental collisions.
 
     Returns:
         The filtered state_dict without unnecessary keys like '_amax' and non KV cache output quantizers.
     """
-    replacements = {
-        "k_bmm_quantizer._amax": "k_proj.k_scale",
-        "v_bmm_quantizer._amax": "v_proj.v_scale",
-        "k_bmm_quantizer._bias_value": "k_proj.k_bias",
-        "v_bmm_quantizer._bias_value": "v_proj.v_bias",
-        "input_quantizer._pre_quant_scale": "pre_quant_scale",
-    }
-    skip_keys = [
-        "output_quantizer",
-        "_amax",
-        "_bias_value",
-        "input_quantizer._pre_quant_scale",
-        "weight_shape",
-    ]
+    replacements = _KV_CACHE_REPLACEMENTS
+    skip_keys = _BASE_SKIP_KEYS
 
-    # For modelopt-trained LoRA models, we need to remove the base_layer prefix from the keys for deployment
-    if is_modelopt_qlora:
-        replacements.update(
-            {
-                "base_layer.weight": "weight",
-                "base_layer.input_scale": "input_scale",
-                "base_layer.weight_scale": "weight_scale",
-            }
-        )
-        skip_keys.append("base_layer")
+    def _export_key(key: str) -> str:
+        return _strip_base_layer(key, is_modelopt_qlora)
 
     post_state_dict = {}
 
@@ -1008,7 +1092,7 @@ def postprocess_state_dict(
 
         # Skip keys not related to quantizers
         if all(skip_key not in key for skip_key in skip_keys):
-            post_state_dict[key] = value
+            post_state_dict[_export_key(key)] = value
             continue
 
         # Apply replacements if the key matches any suffix in the replacements dict
@@ -1029,18 +1113,10 @@ def postprocess_state_dict(
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
-                post_state_dict[prefix + new_suffix] = value
+                post_state_dict[_export_key(prefix + new_suffix)] = value
                 break
 
-    # Squeeze scales with a leading dimension of 1
-    for key, value in post_state_dict.items():
-        if (
-            "scale" in key
-            and isinstance(value, torch.Tensor)
-            and value.dim() == 3
-            and value.shape[0] == 1
-        ):
-            post_state_dict[key] = value.squeeze(0)
+    post_state_dict = {k: _maybe_squeeze_scale(k, v) for k, v in post_state_dict.items()}
 
     # remove real quant parameters from the state dict
     keys_to_delete = []
@@ -1056,26 +1132,147 @@ def postprocess_state_dict(
         for key in post_state_dict:
             if "lora" in key and key not in keys_to_delete:
                 keys_to_delete.append(key)
-    # Check for tied weights and remove duplicates
-    seen_tensors = {}
+    # Name-based tied-weight dedup (authoritative, address-independent): for each declared
+    # {alias: canonical} tie, drop the alias's own exported keys when the canonical is present.
+    # Per-parameter (not per-prefix), so an untied sibling (a bias, an untied projection) is kept.
+    # This is what makes it correct under the FSDP gather / offload, where tied tensors land at
+    # distinct addresses.
+    dropped_dense_prefixes: set[str] = set()
+    if tied_map is not None and tied_map.alias_to_canonical:
+        # Expand each tied *pre-pack* parameter name into the concrete keys export produced. If
+        # export starts emitting a new scale companion or fused-projection name, extend
+        # `weight_suffixes` / `proj_splits` here -- nothing else needs to change.
+        # (pre_quant_scale is the AWQ / NVFP4_AWQ / SVDQuant companion, renamed in the KV-cache pass.)
+        weight_suffixes = (
+            "weight",
+            "weight_scale",
+            "weight_scale_2",
+            "input_scale",
+            "pre_quant_scale",
+        )
+        # A tied 3-D fused projection splits into these per-expert 2-D projection names.
+        proj_splits = {
+            "gate_up_proj": ("gate_proj", "up_proj"),
+            "up_proj": ("up_proj",),
+            "down_proj": ("down_proj",),
+        }
 
-    # Remove any tied weights if found.
+        # group name -> [(alias_key, canonical_key), ...], dropped all-or-none.
+        alias_groups: dict[str, list[tuple[str, str]]] = {}
+        # dense group name -> module prefix, for the leftover-companion check below.
+        dense_prefixes: dict[str, str] = {}
+        # fused-MoE container (alias_prefix, canonical_prefix) -> its tied per-expert projection names.
+        moe_containers: dict[tuple[str, str], set[str]] = {}
+
+        for alias, canonical in tied_map.alias_to_canonical.items():
+            a_pre, _, a_name = alias.rpartition(".")
+            c_pre, _, c_name = canonical.rpartition(".")
+            if a_name == c_name == "weight":
+                # Dense tie: the weight and its own scale companions only (never a sibling bias).
+                members = [
+                    (f"{a_pre}.{s}" if a_pre else s, f"{c_pre}.{s}" if c_pre else s)
+                    for s in weight_suffixes
+                ]
+                members = [(ak, ck) for ak, ck in members if ak in post_state_dict]
+                if members:
+                    alias_groups[alias] = members
+                    dense_prefixes[alias] = a_pre
+            elif a_name in proj_splits and a_name == c_name:
+                # Fused-MoE: export splits the 3-D container into per-expert keys; record those names.
+                moe_containers.setdefault((a_pre, c_pre), set()).update(proj_splits[a_name])
+            elif alias in post_state_dict:
+                alias_groups[alias] = [(alias, canonical)]
+
+        for (a_pre, c_pre), tied_proj_names in moe_containers.items():
+            # Rewrite only the tied projections' per-expert keys, so an untied projection (e.g.
+            # down_proj when only gate_up_proj is tied) or a router/bias child is left alone.
+            prefix = f"{a_pre}." if a_pre else ""
+            members = [
+                (key, c_pre + key[len(a_pre) :])
+                for key in post_state_dict
+                if key.startswith(prefix)
+                and any(part in tied_proj_names for part in key[len(prefix) :].split("."))
+            ]
+            if members:
+                # Key by the full (alias, canonical) pair: one alias container's projections may
+                # tie to different canonical containers, and keying by a_pre alone would overwrite.
+                alias_groups[f"{a_pre} -> {c_pre}"] = members
+
+        # Atomic drop: remove a group only when every alias key has its canonical twin present,
+        # so mixed quant state (one side quantized, the other not) never orphans a scale.
+        for gk, members in alias_groups.items():
+            missing = [ak for ak, ck in members if ck not in post_state_dict]
+            if missing:
+                logger.warning(
+                    f"Skipping name-based dedup of '{gk}': tied sides have mismatched keys "
+                    f"(e.g. '{missing[0]}' has no canonical counterpart, likely differing "
+                    f"quantization state); keeping both sides to avoid orphaned tensors."
+                )
+                continue
+            # Safety: a declared tie must export identical bytes on both sides. If quantization
+            # diverged them, dropping the alias would silently corrupt it (HF re-ties canonical over
+            # it on load) -- so raise. Mirrors HF's own torch.equal decline-to-tie.
+            for ak, ck in members:
+                av, cv = post_state_dict[ak], post_state_dict[ck]
+                if (
+                    isinstance(av, torch.Tensor)
+                    and isinstance(cv, torch.Tensor)
+                    and not av.is_meta
+                    and not cv.is_meta
+                    and not torch.equal(av, cv)
+                ):
+                    raise RuntimeError(
+                        f"Tied-weight export mismatch: '{ak}' differs from its canonical '{ck}'. "
+                        f"The tie is declared but the two sides quantized to different values, so "
+                        f"deduplicating would corrupt '{ak}'. Ensure both tied modules use the same "
+                        f"quantization format/config."
+                    )
+            for ak, _ in members:
+                keys_to_delete.append(ak)
+            if gk in dense_prefixes:
+                dropped_dense_prefixes.add(dense_prefixes[gk])
+            logger.warning(
+                f"Tied weight (declared): dropping {len(members)} alias key(s) for '{gk}'; "
+                f"canonical kept."
+            )
+
+    # Apply the name drops first so the address pass below runs on the reduced dict and never
+    # re-processes a declared alias. dict.fromkeys dedups the delete list while preserving order.
+    for key in dict.fromkeys(keys_to_delete):
+        post_state_dict.pop(key, None)
+
+    # Address backstop (pre-existing, unchanged): drop any remaining keys that still share a
+    # data_ptr. Declared ties are already gone above, so this only catches an undeclared
+    # same-address share (an unquantized/unpacked tie); a quantized tie packs to distinct storage
+    # and never reaches here. Zero-pointer (meta) tensors are left to serialization.
+    seen_tensors: dict = {}
+    backstop_delete = []
     for key, value in post_state_dict.items():
-        if isinstance(value, torch.Tensor):
-            # Use tensor data pointer to identify tied weights
+        if isinstance(value, torch.Tensor) and value.data_ptr() != 0:
             tensor_id = value.data_ptr()
             if tensor_id in seen_tensors:
-                # This is a tied weight, mark for deletion and warn
-                keys_to_delete.append(key)
+                backstop_delete.append(key)
                 logger.warning(
                     f"Found tied weight: '{key}' is tied to '{seen_tensors[tensor_id]}'. "
                     f"Removing duplicate '{key}' from the exported state dict."
                 )
             else:
                 seen_tensors[tensor_id] = key
-
-    for key in keys_to_delete:
+    for key in backstop_delete:
         del post_state_dict[key]
+
+    # If a dense tie was dropped but a non-`bias` key still remains under its prefix, it is likely
+    # a new quantizer companion missing from `weight_suffixes` -- warn so it gets added.
+    for pre in dropped_dense_prefixes:
+        leftovers = [
+            k for k in post_state_dict if k.startswith(f"{pre}.") and k.rsplit(".", 1)[-1] != "bias"
+        ]
+        if leftovers:
+            logger.warning(
+                f"Tied weight '{pre}.weight' was deduped but companion key(s) {leftovers} remain "
+                f"under '{pre}.'; likely an un-enumerated quantizer companion -- add its suffix to "
+                f"weight_suffixes in postprocess_state_dict so it is dropped with the tie."
+            )
 
     return post_state_dict
 
@@ -1257,9 +1454,10 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
-        layernorm_module.weight.device
-    )
+    if not hasattr(modules[0].input_quantizer, "_pre_quant_scale"):
+        return
+
+    pre_quant_scale = modules[0].input_quantizer._pre_quant_scale.to(layernorm_module.weight.device)
     if _layernorm_uses_weight_plus_one(layernorm_module):
         # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
         fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
@@ -1347,6 +1545,39 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
             )
             for module in modules:
                 module.weight_quantizer.amax = weight_amax
+
+
+def _get_unquantized_moe_router_names(model: nn.Module) -> list[str]:
+    """Return the names of MoE router/gate submodules left in original precision.
+
+    A module is added to ``exclude_modules`` during unified HF export only if it carries a
+    quantizer (even a disabled one) -- see :func:`get_quant_config`. MoE routers are kept
+    unquantized on purpose, but on ``transformers>=5.0`` they are no longer ``nn.Linear``
+    modules (e.g. ``TopKRouter``), so ``mtq.quantize`` never attaches a quantizer to them.
+    Without this, the BF16 router weight is written to the checkpoint but omitted from
+    ``exclude_modules``, and deployment frameworks (vLLM / SGLang) then try to load it as a
+    quantized weight -- e.g. ``AssertionError: Tried to load weights of size [E, H] to a
+    parameter of size [E, H/2]`` for Qwen3-MoE.
+
+    Routers are detected structurally: an MoE block exposes an ``experts`` container plus a
+    ``gate`` / ``router`` (or ``shared_expert_gate``) submodule that owns a weight tensor.
+    Routers that the user opted to quantize (a non-NONE format) are skipped.
+    """
+    router_attrs = ("gate", "router", "shared_expert_gate")
+    router_names = []
+    for name, module in model.named_modules():
+        if not hasattr(module, "experts"):
+            continue
+        for attr in router_attrs:
+            router = getattr(module, attr, None)
+            if not isinstance(router, nn.Module):
+                continue
+            if not isinstance(getattr(router, "weight", None), torch.Tensor):
+                continue
+            if get_quantization_format(router) != QUANTIZATION_NONE:
+                continue
+            router_names.append(f"{name + '.' if name else ''}{attr}")
+    return router_names
 
 
 def get_quant_config(
@@ -1457,6 +1688,14 @@ def get_quant_config(
                     "Do not support mixed precision kv cache quantization"
                 )
 
+    # MoE routers/gates are intentionally kept in original precision. On transformers>=5.0 they
+    # are not nn.Linear modules (e.g. TopKRouter), never receive a quantizer, and would otherwise
+    # be missing from exclude_modules even though their BF16 weight is exported -- causing
+    # deployment frameworks to load them as quantized weights. Record them explicitly as
+    # unquantized so they land in exclude_modules.
+    for router_name in _get_unquantized_moe_router_names(model):
+        layer_config_dict.setdefault(router_name + ".quantization", QUANTIZATION_NONE)
+
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
@@ -1479,3 +1718,90 @@ def has_quantized_modules(model: nn.Module) -> bool:
         get_quantization_format(sub_module) != QUANTIZATION_NONE
         for _, sub_module in model.named_modules()
     )
+
+
+def sync_tied_input_amax(model: nn.Module, tied_map: "TiedWeightMap | None" = None) -> int:
+    """Max-merge ``input_quantizer`` amaxes across modules that share a weight, in place.
+
+    Tied modules whose forward paths see different activation ranges (encoder vs decoder in
+    YOCO-style models) must end up with one ``input_scale`` covering every side. Run BEFORE
+    per-module export so the merged amax flows into ``input_scale`` derivation; the model is
+    not expected to be reused afterward.
+
+    Declared ties are grouped by name via :class:`TiedWeightMap` (dense Linears and fused-MoE
+    containers). A physically shared but *undeclared* weight is grouped by ``id(weight)`` as a
+    fallback, so the side the address backstop later drops still had its amax merged in here.
+    Returns the number of groups merged; pass ``tied_map`` to reuse one, else it is built here.
+    """
+    if tied_map is None:
+        tied_map = TiedWeightMap(model)
+
+    by_group: dict = defaultdict(list)
+    for name, m in model.named_modules():
+        # Fused MoE: 3-D source tensors with shared input quantizers
+        first_proj_attr = getattr(m, "_first_proj_attr", "gate_up_proj")
+        first_proj = getattr(m, first_proj_attr, None)
+        first_proj_input_quantizer_attr = f"{first_proj_attr}_input_quantizer"
+        if (
+            hasattr(m, first_proj_input_quantizer_attr)
+            and first_proj is not None
+            and hasattr(m, "down_proj")
+            and first_proj.dim() == 3
+        ):
+            gk = tied_map.container_group_key(name, first_proj_attr)
+            if gk is not None:
+                by_group[("moe", gk)].append(m)
+            else:
+                # Undeclared share: group by projection identity so its amaxes still merge
+                # (symmetric with the dense fallback below).
+                by_group[("moe_shared", id(first_proj))].append(m)
+        # Dense quantized Linear with an input_quantizer
+        elif (
+            hasattr(m, "input_quantizer")
+            and hasattr(m, "weight")
+            and isinstance(m.weight, torch.nn.Parameter)
+        ):
+            gk = tied_map.group_key(f"{name}.weight" if name else "weight")
+            if gk is not None:
+                by_group[("dense", gk)].append(m)
+            else:
+                # Undeclared share: group by object identity so its amaxes still merge.
+                by_group[("dense_shared", id(m.weight))].append(m)
+
+    def _merge(quantizers: list) -> bool:
+        """Max-merge amaxes across the quantizer list. Returns True on merge."""
+        valid = [
+            q
+            for q in quantizers
+            if q is not None
+            and getattr(q, "is_enabled", False)
+            and getattr(q, "_amax", None) is not None
+            and not q._amax.is_meta
+        ]
+        if len(valid) < 2:
+            return False
+        # Require scalar (per-tensor) amax — matches preprocess_linear_fusion.
+        if any(q._amax.numel() != 1 for q in valid):
+            warn(
+                "sync_tied_input_amax: non-scalar input_quantizer amax encountered "
+                "in a tied group; skipping. Only per-tensor input quantizers are "
+                "supported for tied-modules merging."
+            )
+            return False
+        merged = torch.max(torch.stack([q.amax for q in valid]))
+        for q in valid:
+            q.amax = merged.clone()
+        return True
+
+    synced = 0
+    for key, modules in by_group.items():
+        if len(modules) < 2:
+            continue
+        if key[0] == "moe":
+            first_proj_attr = getattr(modules[0], "_first_proj_attr", "gate_up_proj")
+            for q_name in (f"{first_proj_attr}_input_quantizer", "down_proj_input_quantizer"):
+                if _merge([getattr(m, q_name, None) for m in modules]):
+                    synced += 1
+        elif _merge([m.input_quantizer for m in modules]):
+            synced += 1
+    return synced

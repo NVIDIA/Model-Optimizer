@@ -16,6 +16,7 @@
 """Configurations for speculative decoding modes."""
 
 from copy import deepcopy
+from typing import Literal
 
 from pydantic import model_validator
 
@@ -103,7 +104,23 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_loss_decay_factor: float = ModeloptField(
         default=0.0,
         description="Gamma for exponential loss decay weighting (paper Eq.4). "
-        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables.",
+        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables. "
+        "Only used when dflash_loss_objective='decay'.",
+    )
+
+    dflash_loss_objective: Literal["decay", "dpace"] = ModeloptField(
+        default="dpace",
+        description="Block-position loss weighting objective. 'decay' uses the static "
+        "exponential decay of dflash_loss_decay_factor (DFlash, arXiv:2602.06036 Eq.4). "
+        "'dpace' uses dynamic, confidence-derived per-position weights "
+        "(D-PACE, arXiv:2605.18810 Eq.8).",
+    )
+
+    dflash_dpace_alpha: float = ModeloptField(
+        default=0.5,
+        description="D-PACE asymmetric smoothing factor alpha in (0, 1] (paper Eq.7). Used only "
+        "when dflash_loss_objective='dpace'. Stable in [0.3, 0.7]; alpha=0 is degenerate "
+        "(cumulative product vanishes) and alpha->1 removes the adaptive signal.",
     )
 
     dflash_num_anchors: int = ModeloptField(
@@ -131,6 +148,153 @@ class DFlashConfig(ModeloptBaseConfig):
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",
     )
+
+    dflash_swa_window_size: int | None = ModeloptField(
+        default=None,
+        description=(
+            "Sliding-window attention (SWA) window size for the DFlash draft. When set, ALL "
+            "draft layers use sliding-window attention: each draft query attends only to "
+            "context positions within `dflash_swa_window_size` tokens before it. None "
+            "(default) keeps full attention over all context. Must be >= dflash_block_size. "
+            "Exported to the draft config as dflash_config.use_swa/swa_window_size (+ "
+            "top-level sliding_window) so vLLM applies the same window at inference. Whether "
+            "block-internal attention is bidirectional or causal is controlled separately by "
+            "`dflash_draft_attention`."
+        ),
+    )
+
+    dflash_draft_attention: Literal["bidirectional", "causal"] = ModeloptField(
+        default="bidirectional",
+        description=(
+            "Attention pattern *inside* each draft block (context attention is always "
+            "restricted to positions before the block's anchor, and additionally windowed "
+            "when dflash_swa_window_size is set).\n"
+            "- 'bidirectional' (default): every query in a block sees all block_size draft "
+            "positions, including ones after it (MiMo-style). This is what ModelOpt has "
+            "always trained and matches drafts such as XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash "
+            "and z-lab/Qwen3.5-9B-DFlash.\n"
+            "- 'causal': a query at block position i only sees draft positions <= i, so the "
+            "block is predicted autoregressively. Required to faithfully train drafts whose "
+            "config declares dflash_config.causal=true, e.g. "
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark.\n"
+            "Exported verbatim to dflash_config.causal, which vLLM's "
+            "qwen3_dflash._dflash_layer_causal reads as a per-model override."
+        ),
+    )
+
+    dflash_attention_sink: bool = ModeloptField(
+        default=False,
+        description=(
+            "Add a learnable per-head attention sink to every draft attention layer. The "
+            "sink is one extra logit per head appended to the attention logits before the "
+            "softmax and dropped afterwards, letting a head place probability mass nowhere "
+            "instead of being forced to attend within a (possibly short) window — the "
+            "GPT-OSS/Nemotron formulation. Adds one `self_attn.attention_sink_bias` "
+            "parameter of shape [num_attention_heads] per layer. Required to load and "
+            "continue training drafts whose checkpoint carries those weights, e.g. "
+            "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark. Exported to "
+            "dflash_config.attention_sink_bias for vLLM."
+        ),
+    )
+
+    dflash_init_checkpoint: str | None = ModeloptField(
+        default=None,
+        description=(
+            "Path to an exported draft checkpoint to warm-start from, so training continues "
+            "from published weights instead of a fresh random init. Accepts either a "
+            "directory in the deployment layout this repo exports (``model.safetensors`` "
+            "with no ``dflash_module.`` prefix, alongside ``config.json``) or the "
+            "``model.safetensors`` file itself. Weights are loaded into the draft module "
+            "after it is built, so the architecture still comes from "
+            "``dflash_architecture_config`` — the checkpoint must match it. Any mismatch "
+            "(missing, unexpected, or wrong-shaped tensors) raises rather than silently "
+            "leaving part of the draft randomly initialized. ``embed_tokens``/``lm_head`` "
+            "entries are ignored: the draft takes those from the base model. None "
+            "(default) trains from scratch."
+        ),
+    )
+
+    dflash_export_rope_scaling: dict = ModeloptField(
+        default={},
+        description=(
+            "The rope_scaling config to inject into the exported HuggingFace draft config. "
+            "The DFlash draft trains on a short window but must draft for the target at long "
+            "context, so — mirroring published Eagle3 drafts such as nvidia/Kimi-K2.6-Eagle3 — "
+            "a YaRN rope_scaling is injected at export to extend the training window to the "
+            "target's full context. Example: "
+            '{"type": "yarn", "factor": 48.0, "original_max_position_embeddings": 4096, '
+            '"beta_fast": 1.0, "beta_slow": 1.0, "mscale": 1.0, "mscale_all_dim": 1.0}. '
+            "Set to empty dict {} (default) to disable rope scaling injection at export."
+        ),
+    )
+
+    dflash_lambda_base_start: float = ModeloptField(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Domino only: initial weight of the base (backbone-only) loss in the "
+            "loss = (1 - lambda)*final + lambda*base mixture; linearly decayed to 0. "
+            "Ignored unless dflash_architecture_config.projector_type == 'domino'."
+        ),
+    )
+
+    dflash_lambda_base_decay_ratio: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Domino only: fraction of total training steps over which lambda_base "
+            "decays from dflash_lambda_base_start to 0."
+        ),
+    )
+
+    dflash_ce_loss_alpha: float = ModeloptField(
+        default=0.1,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the cross-entropy term in the three-term loss "
+            "(ce_alpha*CE + l1_alpha*TVD + conf_alpha*BCE). "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    dflash_l1_loss_alpha: float = ModeloptField(
+        default=0.9,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the L1/total-variation distribution-matching term "
+            "between the corrected draft and the target distribution. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    dflash_confidence_head_alpha: float = ModeloptField(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "DSpark only: weight of the confidence-head BCE term (predicts the per-position "
+            "acceptance probability). 0 disables the term; requires "
+            "dflash_architecture_config.use_confidence_head=true when > 0. "
+            "Ignored unless dflash_architecture_config.projector_type == 'dspark'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_dpace_alpha(self) -> "DFlashConfig":
+        # Validate at construction regardless of the active objective, so a bad alpha
+        # is rejected even if it only becomes active after a later objective override.
+        if not 0.0 < self.dflash_dpace_alpha <= 1.0:
+            raise ValueError(f"dflash_dpace_alpha must be in (0, 1], got {self.dflash_dpace_alpha}")
+        if self.dflash_swa_window_size is not None:
+            # Block-internal attention is left un-windowed, so the window must cover a full
+            # block; otherwise the effective inference window would differ.
+            if self.dflash_swa_window_size < self.dflash_block_size:
+                raise ValueError(
+                    f"dflash_swa_window_size ({self.dflash_swa_window_size}) must be >= "
+                    f"dflash_block_size ({self.dflash_block_size})."
+                )
+        return self
 
 
 class MedusaConfig(ModeloptBaseConfig):

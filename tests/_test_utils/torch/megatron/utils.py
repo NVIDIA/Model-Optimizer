@@ -43,6 +43,13 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
 )
 from modelopt.torch.utils import to_empty_if_meta_device
 
+try:  # nemo:26.08+: MambaModel is a HybridModel subclass; toy models build HybridModel directly.
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
+
+    _MAMBA_HYBRID_TYPES: tuple[type, ...] = (MambaModel, HybridModel)
+except ImportError:
+    _MAMBA_HYBRID_TYPES = (MambaModel,)
+
 
 @torch.no_grad()
 def run_mcore_inference(
@@ -129,8 +136,8 @@ def get_forward(model, batch_size=2):
     input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model, batch_size)
 
     def forward(model):
-        # MambaModel doesn't accept loss_mask argument
-        if isinstance(model, MambaModel):
+        # Mamba/Hybrid forward doesn't accept loss_mask argument
+        if isinstance(model, _MAMBA_HYBRID_TYPES):
             return model.forward(
                 input_ids=input_ids,
                 position_ids=position_ids,
@@ -350,7 +357,7 @@ def compare_amax_sync_across_expert_parallel(model, compare_across_experts=True)
     # Group ranks by ETP rank for fc1 (ColumnParallel: same output channels should match)
     etp_groups = defaultdict(list)
     for info in all_rank_info:
-        etp_groups[info["etp_rank"] if info["etp_rank"] else 0].append(info["global_rank"])
+        etp_groups[info["etp_rank"] or 0].append(info["global_rank"])
 
     for quantizer_type, rank_values in expert_quantizers.items():
         # Determine which ranks should have same amax

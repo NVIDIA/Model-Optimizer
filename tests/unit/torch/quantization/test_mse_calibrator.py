@@ -26,7 +26,7 @@ from modelopt.torch.quantization.model_calib import (
     _register_fp8_sweep_calibrator,
     mse_calibrate,
 )
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, QuantLinear, TensorQuantizer
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
     _QUANT_FUNCTIONAL_BACKENDS,
     register_quant_backend,
@@ -645,7 +645,7 @@ class TestRegisterFP8SweepCalibrator:
             ),
             amax=torch.tensor([1.0, 2.0]),
         )
-        model = torch.nn.Module()
+        model = QuantLinear(16, 1, bias=False)
         model.weight_quantizer = q
         promote_nvfp4_static_quantizers(model)
 
@@ -685,6 +685,25 @@ class TestRegisterFP8SweepCalibrator:
         )
 
         assert isinstance(cal, calib.MseCalibrator)
+
+    def test_dynamic_mxfp8_skipped_by_mse_calibration(self):
+        q = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(4, 3),
+                block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            ),
+            amax=torch.tensor(2.0),
+        )
+
+        cal = _make_weight_mse_calibrator(
+            q,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=False,
+        )
+
+        assert cal is None
 
     def test_max_calibrate_bootstraps_non_nvfp4_dead_weight_quantizer(self):
         """Non-NVFP4 weights skipped by the forward loop still get weight amax."""
@@ -737,10 +756,9 @@ class TestRegisterFP8SweepCalibrator:
 
 
 class TestStaticNVFP4Promotion:
-    class _LinearLike(torch.nn.Module):
+    class _LinearLike(QuantLinear):
         def __init__(self, amax):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.empty(1, 16))
+            super().__init__(16, 1, bias=False)
             cfg = QuantizerAttributeConfig(
                 num_bits=(2, 1),
                 block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},

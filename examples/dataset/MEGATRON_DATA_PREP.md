@@ -4,6 +4,7 @@
 | :---: | :---: | :---: |
 | From JSONL files | Tokenize local JSONL files | \[[Link](#from-jsonl-files)\] |
 | From Hugging Face Hub | Stream or download HF datasets and tokenize | \[[Link](#from-hugging-face-hub)\] |
+| Token-budgeted data blends | Prepare weighted subsets for fast experiments | \[[Link](#prepare-token-budgeted-data-blends)\] |
 | `reasoning_content` for Post-Training v3 | Control how chain-of-thought traces are handled | \[[Link](#reasoning_content-for-post-training-v3-datasets)\] |
 | Nemotron Pre/Post-Training Datasets | Ready-to-run commands for all Nemotron datasets | \[[Link](#ready-to-run-tokenization-commands)\] |
 
@@ -65,6 +66,111 @@ For very large datasets (tens of millions of documents), or datasets with comple
 > **Performance note:** Non-streaming mode downloads all Parquet shards once and caches them as Arrow files on disk.
 > Re-runs read from cache and are much faster.
 > Streaming re-downloads on every run with no cache, so it is slower for full-dataset processing.
+
+## Prepare token-budgeted data blends
+
+For iterative research, prepare smaller weighted datasets before scaling to a full distillation run.
+Use [`prepare_megatron_data_blend`](../../modelopt/torch/utils/plugins/prepare_megatron_data_blend.py) to
+prepare a weighted blend with a shared token budget. The utility supports Hugging Face configurations and splits
+as well as specific JSONL files stored in a Hugging Face dataset repository.
+
+Define the tokenizer, output directory, and source weights in YAML. Set the optional `target_tokens` field to
+prepare a weighted subset, or omit it to prepare every source in full. This example scales the
+[Nemotron 3 Nano distillation blend](../megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/README.md#1-data-preparation)
+down to one billion tokens while preserving its source weights:
+
+> [!IMPORTANT]
+> When `target_tokens` is set, JSONL records specified with `files` are consumed from the beginning
+> of each file rather than selected randomly. Pre-shuffle JSONL files to obtain a random subset.
+> Hugging Face dataset splits are shuffled deterministically; streaming datasets use an
+> approximate buffer shuffle.
+
+```yaml
+# Nemotron 3 models share this tokenizer, so the tokenized blend can be reused across the family.
+tokenizer: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+output_dir: /path/to/nemotron_3_distillation_blend_1b
+# Optional; omit this field to prepare every source in full.
+target_tokens: 1_000_000_000
+sources:
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-Code
+    split: train
+    max_samples: 10_000_000
+    content_field: text
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-General
+    split: train
+    max_samples: 10_000_000
+    content_field: text
+    weight: 20
+  - hf_dataset: nvidia/Nemotron-Pretraining-SFT-v1
+    config: Nemotron-SFT-MATH
+    split: train
+    max_samples: 10_000_000
+    content_field: text
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Math-v2
+    split: high_part00
+    content_field: messages
+    weight: 10
+  - hf_dataset: nvidia/Nemotron-SFT-Math-v3
+    files:
+      - data/train.jsonl
+    content_field: messages
+    weight: 17
+  - hf_dataset: nvidia/Nemotron-SFT-Competitive-Programming-v2
+    files:
+      - data/competitive_programming_python_00.jsonl
+    content_field: messages
+    weight: 15
+  - hf_dataset: nvidia/Nemotron-SFT-Competitive-Programming-v2
+    files:
+      - data/competitive_programming_cpp_00.jsonl
+    content_field: messages
+    weight: 5
+  - hf_dataset: nvidia/Nemotron-Post-Training-Dataset-v1
+    config: default
+    split: stem
+    max_samples: 5_000_000
+    content_field: messages
+    weight: 8
+  - hf_dataset: nvidia/Nemotron-Science-v1
+    files:
+      - data/MCQ.jsonl
+    content_field: messages
+    weight: 3
+  - hf_dataset: nvidia/Nemotron-Science-v1
+    files:
+      - data/RQA.jsonl
+    content_field: messages
+    weight: 2
+  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    files:
+      - data/reasoning_on.jsonl
+    content_field: messages
+    weight: 3
+  - hf_dataset: nvidia/Nemotron-SFT-Instruction-Following-Chat-v2
+    files:
+      - data/reasoning_off.jsonl
+    content_field: messages
+    weight: 2
+  - hf_dataset: nvidia/Nemotron-Agentic-v1
+    files:
+      - data/tool_calling.jsonl
+    content_field: messages
+    weight: 5
+```
+
+With ModelOpt installed, run:
+
+```bash
+python -m modelopt.torch.utils.plugins.prepare_megatron_data_blend --config blend.yaml
+```
+
+The output contains tokenized Megatron `.bin`/`.idx` files, `data_blend.txt` with the weighted paths for training,
+and `config.yaml` recording how the blend was generated. The final token count can slightly exceed the target
+because the final document from each source is kept whole.
 
 ## `reasoning_content` for Post-Training v3 Datasets
 

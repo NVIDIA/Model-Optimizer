@@ -29,8 +29,7 @@ docs/source/reference/generated
 **/.ipynb_checkpoints
 
 # Environments
-.env
-.env-*
+.env*
 .venv
 env/
 venv/
@@ -72,3 +71,6 @@ AGENTS.override.md
 
 # Ignore SonarQube analysis
 .sonar/
+
+# Claude Code runtime lock (ephemeral process state — never commit)
+.claude/scheduled_tasks.lock

@@ -57,16 +57,25 @@ from ...qtensor import (
 from ...tensor_quant import (
     dynamic_block_quant,
     fake_tensor_quant,
+    fp4_cast_ste,
+    int_cast_ste,
     scaled_e4m3,
     static_blockwise_fp4_fake_quant,
 )
 from ...utils import is_torch_export_mode
+from ...utils.numeric_utils import fp8_max_for_normalization
 from ..functional import normalized_hadamard_transform
 
+# torch.finfo(...).tiny gives the smallest normal E4M3 value; scale clamping needs
+# the smallest positive subnormal value representable by the 3-bit mantissa.
+_FP8_E4M3_MIN_POSITIVE = torch.finfo(torch.float8_e4m3fn).smallest_normal / (2**3)
+
 __all__ = [
+    "GroupedQuantizer",
     "HardDisabledTensorQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
+    "StaticBlockScaleQuantizer",
     "TensorQuantizer",
     "TensorQuantizerCache",
     "is_registered_quant_backend",
@@ -201,6 +210,7 @@ class TensorQuantizer(nn.Module):
             self.amax = amax
 
         self._use_constant_amax = False
+        self._constant_amax = None
         self.set_from_attribute_config(quant_attribute_cfg)
 
         self._if_quant = if_quant
@@ -243,6 +253,13 @@ class TensorQuantizer(nn.Module):
                     self._calibrator._axis = None
             return val
 
+        def _constant_amax_setter(val):
+            if val is not None:
+                # Pin amax to the constant on the _amax buffer so it is used by both the
+                # fake-quant forward pass and export; calibration is skipped in model_calib.
+                self.amax = float(val)
+            return val
+
         # Some attributes need custom handling.
         # By default, attributes from config are mapped to a name ``f"_{attribute}"``
         _custom_setters: dict[str, tuple[str, Callable]] = {
@@ -254,6 +271,7 @@ class TensorQuantizer(nn.Module):
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
             "use_constant_amax": ("_use_constant_amax", lambda val: val),
+            "constant_amax": ("_constant_amax", _constant_amax_setter),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -264,6 +282,9 @@ class TensorQuantizer(nn.Module):
                 attribute, (f"_{attribute}", lambda v: v)
             )
             setattr(self, _tq_attribute_name, _setter(val))
+
+        if isinstance(attribute_cfg, dict) and attribute_cfg == {"enable": False}:
+            self.disable_rotate()
 
         if self.is_mx_format:
             self._pass_through_bwd = True
@@ -530,6 +551,26 @@ class TensorQuantizer(nn.Module):
         )
 
     @property
+    def is_fp8(self):
+        """Check if is per-tensor FP8 E4M3 (no block scales, no per-channel axis)."""
+        return self._num_bits == (4, 3) and self._block_sizes is None and self._axis is None
+
+    @property
+    def is_nvfp4_dynamic(self):
+        """Check if is dynamic NVFP4: E2M1 with E4M3 per-block scales computed dynamically.
+
+        Mirror of ``is_nvfp4_static`` for the dynamic-scale layout; like it, this does
+        not constrain the block size. Consumers that require a specific block size
+        (e.g. the block-16 Triton kernels) check ``block_sizes[-1]`` downstream.
+        """
+        return (
+            self._block_sizes is not None
+            and self._block_sizes.get("type", None) == "dynamic"
+            and self._num_bits == (2, 1)
+            and self._block_sizes.get("scale_bits", None) == (4, 3)
+        )
+
+    @property
     def is_nvfp4_static(self):
         """True for E2M1 weights + E4M3 per-block scales in static layout (format-only check)."""
         return (
@@ -597,6 +638,35 @@ class TensorQuantizer(nn.Module):
         if isinstance(self._rotate, dict) and self.rotate_is_enabled:
             return self._rotate.get("block_size", None)
         return None
+
+    @property
+    def rotate_back_is_enabled(self):
+        """Check if inverse rotation should be applied after quantization."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable and self._rotate.mode == "rotate_back"
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("mode", "rotate") == "rotate_back"
+        return False
+
+    def disable_rotate(self):
+        """Disable rotation while preserving the ``_rotate`` field's type.
+
+        Idempotent. Used after folding a weight quantizer so the baked-in rotation is not
+        re-applied on subsequent forwards.
+        """
+        if isinstance(self._rotate, RotateConfig):
+            self._rotate = self._rotate.model_copy(update={"enable": False})
+        elif isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            self._rotate = dict(self._rotate, enable=False)
+        else:
+            self._rotate = False
+
+    def _rotate_inputs(self, inputs):
+        return normalized_hadamard_transform(
+            inputs,
+            rotate_fp32=self.rotate_is_fp32,
+            block_size=self.rotate_block_size,
+        )
 
     def disable_calib(self):
         """Disable calibration."""
@@ -669,6 +739,10 @@ class TensorQuantizer(nn.Module):
             return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
+            # A constant_amax buffer is registered at config time (on CPU) and may not have
+            # followed a later `model.to(device)`; align it with the input device on the fly.
+            if amax.device != inputs.device:
+                amax = amax.to(inputs.device)
         else:
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()
@@ -784,12 +858,20 @@ class TensorQuantizer(nn.Module):
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
+            if self._block_sizes.get("four_over_six", False):
+                raise NotImplementedError(
+                    "NVFP4 Four-Over-Six (4/6) is not supported via mtq.compress: the per-block "
+                    "M=4/M=6 choice baked into the quantizer amax by MSE calibration is not "
+                    "preserved by real quantization. Use mtq.quantize + export for 4/6 instead."
+                )
             outputs, _weights_scaling_factor, _weights_scaling_factor_2 = NVFP4QTensor.quantize(
                 inputs,
                 self._block_sizes[-1],
-                weights_scaling_factor_2=self.amax.float() / (448.0 * 6.0)
-                if self.amax is not None
-                else None,
+                weights_scaling_factor_2=(
+                    NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(self)
+                    if self.amax is not None
+                    else None
+                ),
                 try_tensorrt=True,
             )
             buffer_to_register["_scale"] = _weights_scaling_factor
@@ -946,9 +1028,7 @@ class TensorQuantizer(nn.Module):
 
         quant_axis = [i for i in range(len(quantize_axis)) if quantize_axis[i]]
 
-        slices = (
-            None if all(s is None for s in slices) else [s if s else slice(None) for s in slices]
-        )
+        slices = None if all(s is None for s in slices) else [s or slice(None) for s in slices]
 
         if all(p is None for p in paddings):
             paddings = None
@@ -957,7 +1037,7 @@ class TensorQuantizer(nn.Module):
             for padding in paddings:
                 if not (new_paddings or padding):
                     continue
-                new_paddings.extend(padding if padding else (0, 0))
+                new_paddings.extend(padding or (0, 0))
             paddings = tuple(reversed(new_paddings))
 
         set_quant_params(quant_axis, reshape_size, paddings, slices)
@@ -1063,19 +1143,22 @@ class TensorQuantizer(nn.Module):
         if self.pre_quant_scale is not None:
             inputs = inputs * self.pre_quant_scale
 
+        if self.rotate_back_is_enabled and self._if_quant and not self.fake_quant:
+            raise ValueError("rotate_back mode is only supported with fake_quant=True.")
+
         # Rotating the input
         if self.rotate_is_enabled:
-            inputs = normalized_hadamard_transform(
-                inputs,
-                rotate_fp32=self.rotate_is_fp32,
-                block_size=self.rotate_block_size,
-            )
+            inputs = self._rotate_inputs(inputs)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
             # TODO: This is a temporary solution and needs to be removed once megatron supports
             # non-homogeneous layers
             self._input_dtype = inputs.dtype if hasattr(inputs, "dtype") else None
+            # Even when quantization is disabled, honor rotate_back so a rotate/rotate_back
+            # pair stays a no-op roundtrip instead of leaving the tensor rotated.
+            if self.rotate_back_is_enabled:
+                inputs = self._rotate_inputs(inputs)
             return inputs
 
         if (
@@ -1132,6 +1215,9 @@ class TensorQuantizer(nn.Module):
         if self.is_static_block_quant:
             outputs = self._reset_to_original_shape(outputs)
 
+        if self.rotate_back_is_enabled and isinstance(outputs, torch.Tensor):
+            outputs = self._rotate_inputs(outputs)
+
         return outputs
 
     def _short_amax(self, fmt=".2e"):
@@ -1144,6 +1230,8 @@ class TensorQuantizer(nn.Module):
         """
         if self.is_mx_format:
             return "None"
+        if self._use_constant_amax:
+            return f"{torch.finfo(torch.float8_e4m3fn).max:{fmt}}(const)"
         if not hasattr(self, "_amax"):
             return "dynamic"
         if self._amax is None:
@@ -1158,6 +1246,14 @@ class TensorQuantizer(nn.Module):
             return f"{tensor.item():{fmt}}"
         return f"[{tensor.min().item():{fmt}}, {tensor.max().item():{fmt}}]({tensor.numel()})"
 
+    def _rotation_extra_repr(self):
+        s = " rotated" if self.rotate_is_enabled else ""
+        s += " (rotate_back)" if self.rotate_back_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
+        return s
+
     def extra_repr(self):
         """Set the extra information about this module."""
         if self._disabled:
@@ -1167,7 +1263,8 @@ class TensorQuantizer(nn.Module):
                 if self.pre_quant_scale is not None
                 else ""
             )
-            return "disabled"
+            s += self._rotation_extra_repr()
+            return s
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
         s += " fake" if (self._fake_quant) else ""
@@ -1181,10 +1278,7 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += " rotated" if self.rotate_is_enabled else ""
-        s += " (fp32)" if self.rotate_is_fp32 else ""
-        if self.rotate_block_size is not None:
-            s += f" (block={self.rotate_block_size})"
+        s += self._rotation_extra_repr()
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
@@ -1363,19 +1457,57 @@ class HardDisabledTensorQuantizer(TensorQuantizer):
         self._disabled = True
 
 
-class NVFP4StaticQuantizer(TensorQuantizer):
-    """TensorQuantizer for NVFP4 static block quantization with two-level scaling.
+def _clamp_scale(scale: torch.Tensor, min_value: float | torch.Tensor = 1e-8) -> torch.Tensor:
+    """Clamp per-block scale to guard against small/zero values."""
+    return torch.where(scale <= min_value, min_value, scale)
 
-    Uses _global_amax and inherited _amax for per-block amax values.
-    Preserves both amax states in fp32.
+
+def _amax_to_scale(
+    amax: torch.Tensor, max_bound: float, min_value: float | torch.Tensor = 1e-8
+) -> torch.Tensor:
+    """Convert amax to per-block scale, guarding against small/zero values."""
+    return _clamp_scale(amax.float() / max_bound, min_value)
+
+
+def _to_local(t: torch.Tensor) -> torch.Tensor:
+    """Convert DTensor to local tensor (no-op for regular tensors).
+
+    Under FSDP2, learnable parameters are DTensors but the quantizer forward
+    operates on local tensors (see TensorQuantizer.forward DTensor handling).
+    to_local() preserves autograd so gradients flow back to the DTensor parameter.
     """
+    if DTensor is not None and isinstance(t, DTensor):
+        return t.to_local()
+    return t
+
+
+class StaticBlockScaleQuantizer(TensorQuantizer):
+    """TensorQuantizer for static block quantization with two-level scaling.
+
+    Supports both FP4 (E2M1) and INT block quantization formats with configurable
+    block_size and optional FP8 scale quantization.
+    Uses _global_amax and inherited _amax for per-block amax values.
+    Preserves static amax states in fp32.
+    """
+
+    _lsq: bool = False
+    _learnable_amax: list = []
+    _tied_amax: bool = False
+    # FP4 default; overwritten on promotion with the format-specific bound, including INT.
+    _quant_max_bound: float = 6.0
+    _quantize_scales: bool = True
+    _quantize_pre_scale: bool = True
 
     def _preserve_amax_in_fp32(self):
         amax = getattr(self, "_amax", None)
-        if amax is not None:
+        if amax is not None and not isinstance(amax, nn.Parameter):
             self._amax = amax.to(dtype=torch.float32)
         global_amax = getattr(self, "_global_amax", None)
-        if global_amax is not None and global_amax.dtype != torch.float32:
+        if (
+            global_amax is not None
+            and not isinstance(global_amax, nn.Parameter)
+            and global_amax.dtype != torch.float32
+        ):
             if "_global_amax" in self.__dict__.get("_shared_quant_tied_attrs", set()):
                 global_amax.data = global_amax.to(dtype=torch.float32)
             else:
@@ -1388,8 +1520,8 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     @classmethod
     def from_tensor_quantizer(
         cls, tq: TensorQuantizer, global_amax: torch.Tensor | None = None
-    ) -> "NVFP4StaticQuantizer":
-        """Convert a TensorQuantizer to NVFP4StaticQuantizer in-place.
+    ) -> "StaticBlockScaleQuantizer":
+        """Convert a TensorQuantizer to StaticBlockScaleQuantizer in-place.
 
         Args:
             tq: The TensorQuantizer to convert.
@@ -1404,10 +1536,47 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         if isinstance(tq, cls):
             _preserve_and_set_global_amax(tq)
             return tq
+        is_nvfp4_static = getattr(tq, "is_nvfp4_static", False)
         tq.__class__ = cls
-        tq._is_nvfp4_static_quantizer = True
+        tq._is_static_block_scale_quantizer = True
+        if is_nvfp4_static:
+            tq._is_nvfp4_static_quantizer = True
+        tq._quant_max_bound = float(tq.maxbound)
         _preserve_and_set_global_amax(tq)
         return tq
+
+    @property
+    def amax_pre(self):
+        """Pre (quantization) amax. Returns _amax_post when tied."""
+        if self._tied_amax:
+            return self._amax_post
+        return self._amax_pre
+
+    @property
+    def amax_post(self):
+        """Post (dequantization) amax."""
+        return self._amax_post
+
+    @property
+    def amax(self):
+        """Return amax, derived from learnable amax parameters if in LSQ mode."""
+        if self._lsq and not self._tied_amax:
+            raise RuntimeError(
+                "LSQ with untied amaxes has separate pre and post parameters. "
+                "Access them via amax_pre / amax_post."
+            )
+        if self._lsq:
+            return self._amax_post
+        if not hasattr(self, "_amax"):
+            return None
+        return self._amax
+
+    @amax.setter
+    def amax(self, value):
+        assert value is not None, "amax cannot be set to None."
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+        self._amax_setter_helper(value)
 
     @property
     def global_amax(self):
@@ -1433,6 +1602,11 @@ class NVFP4StaticQuantizer(TensorQuantizer):
             global_amax.data.copy_(value.clone().detach().to(global_amax.device))
         self._preserve_amax_in_fp32()
 
+    @property
+    def has_quantized_block_scale(self):
+        """True when per-block scales are FP8 (E4M3) quantized (format-only check)."""
+        return self._block_sizes is not None and self._block_sizes.get("scale_bits") == (4, 3)
+
     def _apply(self, fn, recurse=True):
         """Apply module transforms without rounding static scale state."""
         amax = getattr(self, "_amax", None)
@@ -1440,27 +1614,187 @@ class NVFP4StaticQuantizer(TensorQuantizer):
 
         module = super()._apply(fn, recurse=recurse)
         self._preserve_amax_in_fp32()
-        if amax is not None:
+        if amax is not None and amax.device.type != "meta":
             self.amax = amax
-        if global_amax is not None:
+        if global_amax is not None and global_amax.device.type != "meta":
             self.global_amax = global_amax
         return module
 
+    def _short_amax(self, fmt=".4f"):
+        """Short description of amax, accounting for LSQ mode."""
+        if not self._lsq:
+            return super()._short_amax(fmt)
+        learn = self._learnable_amax
+        learn_str = "frozen" if not learn else f"learn=[{','.join(learn)}]"
+        if self._tied_amax:
+            return f"LSQ(tied={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
+        return (
+            f"LSQ(pre={self._short_tensor(self._amax_pre.data, fmt)}, "
+            f"post={self._short_tensor(self._amax_post.data, fmt)}, {learn_str})"
+        )
+
+    def enable_lsq(
+        self,
+        quantize_scales: bool | None = None,
+        learnable_amax: list | str = ("post",),
+        tied_amax: bool = False,
+        quantize_pre_scale: bool = True,
+        dtype: torch.dtype | None = None,
+    ):
+        """LSQ mode with configurable learnable/frozen amax tensors.
+
+        The per-block amax params are initialized from the calibrated ``_amax``. The
+        per-tensor scale is derived from ``global_amax`` at runtime so shared-group
+        updates are always reflected.
+
+        Args:
+            quantize_scales: Whether to FP8-quantize per-block scales (NVFP4). When None,
+                defaults to ``has_quantized_block_scale``.
+            learnable_amax: Which amax params are learnable: 'pre', 'post',
+                ['pre', 'post'], or [].
+            tied_amax: If True, pre and post share a single tensor.
+            quantize_pre_scale: Whether to FP8-quantize the LSQ pre scale.
+            dtype: Optional dtype for the amax params. Kept at weight dtype for FSDP2
+                mixed-precision support (see TODO below).
+        """
+        assert hasattr(self, "_amax"), "enable_lsq requires a calibrated _amax."
+        if quantize_scales is None:
+            quantize_scales = self.has_quantized_block_scale
+        if quantize_scales:
+            assert self.global_amax is not None, (
+                "enable_lsq(quantize_scales=True) requires global_amax to be set."
+            )
+
+        # TODO: Support fp32 learnable amax values once a stable PyTorch release
+        # includes FSDP2 mixed-precision parameter dtype support.
+        amax = self._amax.float()
+        if dtype is not None:
+            amax = amax.to(dtype)
+        delattr(self, "_amax")
+        learn = {learnable_amax} if isinstance(learnable_amax, str) else set(learnable_amax)
+
+        if "post" in learn:
+            self._amax_post = nn.Parameter(amax.clone(), requires_grad=True)
+        else:
+            self.register_buffer("_amax_post", amax.clone())
+
+        if not tied_amax:
+            if "pre" in learn:
+                self._amax_pre = nn.Parameter(amax.clone(), requires_grad=True)
+            else:
+                self.register_buffer("_amax_pre", amax.clone())
+
+        self._quantize_scales = quantize_scales
+        self._quantize_pre_scale = quantize_pre_scale
+        self._lsq = True
+        self._learnable_amax = sorted(learn)
+        self._tied_amax = tied_amax
+
+    def _cast_ste(self, inputs):
+        """Cast inputs to quantized representable values (no scaling)."""
+        if isinstance(self._num_bits, tuple):
+            return fp4_cast_ste(inputs)
+        return int_cast_ste(inputs, self._num_bits, self._unsigned, self._narrow_range)
+
+    def _block_scale_from_amax(self, amax: torch.Tensor, quantize: bool) -> torch.Tensor:
+        """Compute the per-block scale from a per-block amax, optionally FP8-quantizing it."""
+        if quantize:
+            per_tensor_scale = _amax_to_scale(self.global_amax, self._quant_max_bound)
+            min_value = _FP8_E4M3_MIN_POSITIVE * per_tensor_scale.view(-1)
+            scale = _amax_to_scale(amax, self._quant_max_bound, min_value=min_value)
+            return scaled_e4m3(scale, per_tensor_scale, None, 4, 3)
+        return _amax_to_scale(amax, self._quant_max_bound, min_value=1e-8)
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
-        if self.amax is not None:
+        if self._lsq:
+            scale_post = self._block_scale_from_amax(
+                _to_local(self.amax_post), self._quantize_scales
+            )
+            scale_pre = self._block_scale_from_amax(
+                _to_local(self.amax_pre), self._quantize_scales and self._quantize_pre_scale
+            )
+            quant_input = inputs.float() / scale_pre.float().view(-1, 1)
+            w_cast = self._cast_ste(quant_input)
+            return (w_cast * scale_post.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
+
+        if self.amax is not None and self.is_nvfp4_static:
             return static_blockwise_fp4_fake_quant(
                 inputs,
                 self.amax,
-                self.global_amax,  # Can be None, will be computed internally
-                True,  # quantize_block_scales
+                self.global_amax,
+                True,
+                fp8_max_for_normalization(self),
                 inputs.dtype,
                 self._pass_through_bwd,
             )
         return super()._fake_quantize(inputs)
 
 
-class SequentialQuantizer(nn.Sequential):
+NVFP4StaticQuantizer = StaticBlockScaleQuantizer
+
+
+class _QuantizerContainerBase:
+    """Shared delegation helpers for quantizer containers."""
+
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
+    _delegated_methods = [
+        "reset_amax",
+        "disable",
+        "disable_rotate",
+        "enable",
+        "load_calib_amax",
+        "load_calib_bias",
+    ]
+
+    def __getitem__(self, idx) -> Any:
+        return super().__getitem__(idx)  # type: ignore[misc]
+
+    def __iter__(self):
+        return super().__iter__()  # type: ignore[misc]
+
+    def __getattr__(self, name):
+        """Delegate configured properties and methods to contained quantizers."""
+        if name in self._delegated_properties:
+            return getattr(self[0], name)
+
+        if name in self._delegated_methods:
+
+            def method_wrapper(*args, **kwargs):
+                outputs = [getattr(quantizer, name)(*args, **kwargs) for quantizer in self]
+                return self._format_delegated_method_outputs(outputs)
+
+            return method_wrapper
+
+        return super().__getattr__(name)  # type: ignore[misc]
+
+    def __setattr__(self, name, value) -> None:
+        if name in self._delegated_properties:
+            for quantizer in self:
+                setattr(quantizer, name, value)
+        else:
+            super().__setattr__(name, value)
+
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> Any:
+        """Preserve each container's existing delegated-method return convention."""
+        raise NotImplementedError
+
+    def _validate_broadcast_attribute_config(self, attributes) -> None:
+        """Validate a single config before broadcasting it to all members."""
+
+    def set_from_attribute_config(
+        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
+    ) -> None:
+        """Set the attributes of contained quantizers from one or more configs."""
+        if not isinstance(attributes, (list, tuple)):
+            self._validate_broadcast_attribute_config(attributes)
+            attributes = [attributes] * len(self)
+
+        for attribute, quantizer in zip(attributes, self):
+            quantizer.set_from_attribute_config(attribute)
+
+
+class SequentialQuantizer(_QuantizerContainerBase, nn.Sequential):
     """A sequential container for  :class:`TensorQuantizer` modules.
 
     This modules is used to quantize a tensor in multiple formats sequentially. It takes as input
@@ -1479,15 +1813,6 @@ class SequentialQuantizer(nn.Sequential):
 
     """
 
-    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
-    _delegated_methods = [
-        "reset_amax",
-        "disable",
-        "enable",
-        "load_calib_amax",
-        "load_calib_bias",
-    ]
-
     def __init__(self, *quantizers: TensorQuantizer):
         """Initialize SequentialQuantizer module."""
         super().__init__(*quantizers)
@@ -1495,48 +1820,17 @@ class SequentialQuantizer(nn.Sequential):
             "All quantizers must be a TensorQuantizer."
         )
 
-    def __getattr__(self, name):
-        """Delegate properties and methods to all contained quantizers."""
-        if name in self._delegated_properties:
-            # Return the property of the first quantizer
-            return getattr(self[0], name)
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> Any:
+        return outputs[-1]
 
-        if name in self._delegated_methods:
-
-            def method_wrapper(*args, **kwargs):
-                outputs = getattr(self[0], name)(*args, **kwargs)
-                for quantizer in self[1:]:
-                    outputs = getattr(quantizer, name)(*args, **kwargs)
-                return outputs
-
-            return method_wrapper
-
-        # Defer to super class for attributes not handled here
-        return super().__getattr__(name)
-
-    def __setattr__(self, name, value):
-        if name in self._delegated_properties:
-            for quantizer in self:
-                setattr(quantizer, name, value)
-        else:
-            super().__setattr__(name, value)
+    def _validate_broadcast_attribute_config(self, attributes) -> None:
+        assert isinstance(attributes, (dict, QuantizerAttributeConfig)), (
+            "attributes must be a list or a dict."
+        )
 
     def get_modelopt_state(self) -> dict[str, Any]:
         """Get meta state to be saved in checkpoint."""
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
-
-    def set_from_attribute_config(
-        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
-    ):
-        """Set the attributes of contained quantizers from a list of attribute_dicts."""
-        if not isinstance(attributes, (list, tuple)):
-            assert isinstance(attributes, (dict, QuantizerAttributeConfig)), (
-                "attributes must be a list or a dict."
-            )
-            attributes = [attributes] * len(self)
-
-        for attribute, quantizer in zip(attributes, self):
-            quantizer.set_from_attribute_config(attribute)
 
     @staticmethod
     @contextlib.contextmanager
@@ -1566,3 +1860,33 @@ class SequentialQuantizer(nn.Sequential):
         ) in original_sequential_quantizers.items():
             for name, sequential_quantizer in sequential_quantizers_list:
                 setattr(parent_module, name, sequential_quantizer)
+
+
+class GroupedQuantizer(_QuantizerContainerBase, nn.ModuleList):
+    """A container for per-group :class:`TensorQuantizer` modules.
+
+    Used when a single linear holds several independently-quantized weights — e.g. the
+    fused experts of a TEGroupedLinear, where each of the ``num_gemms`` weights needs its
+    own ``amax``. Unlike :class:`SequentialQuantizer` (an ``nn.Sequential`` that *chains*
+    quantizers over one tensor), the contained quantizers act on *different* tensors, so
+    there is no inherent forward path: index in with ``grouped[i](weight_i)``.
+
+    Property reads (``amax``, ``is_enabled``) delegate to the first quantizer — all members
+    share one config, so the first is representative for "is this calibrated/enabled"
+    checks; the real per-group values live on the members and are used via indexing.
+    Lifecycle/config methods broadcast to every member.
+    """
+
+    def __init__(self, *quantizers: "TensorQuantizer | SequentialQuantizer"):
+        """Initialize GroupedQuantizer module."""
+        super().__init__(quantizers)
+        assert all(isinstance(q, (TensorQuantizer, SequentialQuantizer)) for q in self), (
+            "All quantizers must be a TensorQuantizer or SequentialQuantizer."
+        )
+
+    def forward(self, inputs):
+        """Apply the representative quantizer for single-weight compatibility paths."""
+        return self[0](inputs)
+
+    def _format_delegated_method_outputs(self, outputs: list[Any]) -> list[Any]:
+        return outputs
