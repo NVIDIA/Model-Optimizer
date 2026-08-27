@@ -64,8 +64,10 @@ def extend_cmd_parts(cmd_parts: list[str], **kwargs):
     return cmd_parts
 
 
-# Grace period for descendants to flush and close the inherited output pipe after the command exits.
+# Grace period for descendants to flush and close the inherited output pipe after the command exits,
+# then a short bound on the post-SIGKILL drain (the fds close as the kernel tears the group down).
 _ORPHAN_PIPE_TIMEOUT_S = 30
+_KILLED_PIPE_TIMEOUT_S = 5
 
 
 def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
@@ -90,7 +92,10 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
 
     def _kill_process_group():
         with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(pgid, signal.SIGKILL)
+            if os.name == "posix":
+                os.killpg(pgid, signal.SIGKILL)
+            else:  # no process groups; the command itself is the best we can reach
+                process.kill()
 
     def _drain():
         with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
@@ -101,7 +106,9 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        returncode = process.wait()
+        # Wait *without* reaping (WNOWAIT): a reaped pid can be recycled, and pgid == the child's
+        # pid, so reaping before the kill below would risk signalling an unrelated group.
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
     except BaseException:
         # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
         # not swept up with pytest's, so take the descendants down rather than leak them.
@@ -111,11 +118,13 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
 
     if reader.is_alive():
         warnings.warn(
-            f"{cmd_parts[0]} exited with {returncode} but left descendants holding its output "
-            "pipe open; killing the process group. Output may be truncated."
+            f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
+            "group. Output may be truncated."
         )
         _kill_process_group()
-        reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+        reader.join(_KILLED_PIPE_TIMEOUT_S)
+
+    returncode = process.wait()
 
     with contextlib.suppress(Exception):
         process.stdout.close()  # type: ignore[union-attr]

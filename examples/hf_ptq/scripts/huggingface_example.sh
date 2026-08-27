@@ -320,15 +320,18 @@ if [[ $TASKS =~ "mmlu" ]]; then
         echo "Preparing the MMLU test data"
         MMLU_TAR="$(mktemp "${TMPDIR:-/tmp}/mmlu.XXXXXX")" || exit 1
         trap 'rm -f "$MMLU_TAR"' EXIT
-        # HuggingFace mirror of the Berkeley tarball, which is intermittently unreachable. Bound
-        # the retries (wget's defaults outlast the callers' timeouts); -c resumes a stalled transfer.
+        # Revision-pinned HuggingFace mirror of the Berkeley tarball, which is unreachable. Bound
+        # the retries, which otherwise outlast the callers' timeouts, and resume rather than refetch.
         wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
-            https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar -O "$MMLU_TAR" || {
+            https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar \
+            -O "$MMLU_TAR" || {
             echo "[ERROR] Could not download the MMLU test data. Set MMLU_DATA_PATH to a local copy."
             exit 1
         }
         mkdir -p data
         tar -xf "$MMLU_TAR" -C data && mv data/data $MMLU_DATA_PATH
+        rm -f "$MMLU_TAR"  # 166MB; do not hold it for the rest of the eval
+        trap - EXIT
     fi
 
     mmlu_flags=""
