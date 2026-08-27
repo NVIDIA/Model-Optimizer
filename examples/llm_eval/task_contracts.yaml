@@ -59,6 +59,8 @@ tasks:
             extra:
               num_repeats: 8
               dataset_split: test_v6_2408_2505
+              use_sandbox: true
+              args: ++eval_config.timeout_buffer=300
 
   ns_scicode:
     contract:

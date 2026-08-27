@@ -84,6 +84,12 @@ def test_cli_adds_default_tasks_without_changing_the_base(tmp_path, task_catalog
         *base["evaluation"]["tasks"],
         *[task_catalog["tasks"][name]["contract"] for name in task_catalog["default_tasks"]],
     ]
+    livecodebench = next(
+        task for task in compiled["evaluation"]["tasks"] if task["name"] == "ns_livecodebench"
+    )
+    livecodebench_extra = livecodebench["nemo_evaluator_config"]["config"]["params"]["extra"]
+    assert livecodebench_extra["use_sandbox"] is True
+    assert livecodebench_extra["args"] == "++eval_config.timeout_buffer=300"
 
 
 def test_cli_preserves_requested_task_order(tmp_path):
