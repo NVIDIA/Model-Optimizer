@@ -450,10 +450,8 @@ def test_vlm_parser_defaults_to_short_suite():
 
 
 def test_huggingface_dependency_supports_range_metadata_api():
-    requirements = (
-        checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements-vlm.txt"
-    ).read_text()
-    assert "huggingface_hub>=1.2.0" in requirements.splitlines()
+    pyproject = (checkpoint.REPOSITORY_ROOT / "pyproject.toml").read_text()
+    assert '"huggingface_hub>=0.30.0",' in pyproject
 
 
 def test_credential_scope_restores_inherited_values(monkeypatch):

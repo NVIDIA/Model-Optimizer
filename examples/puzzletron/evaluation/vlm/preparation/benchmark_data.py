@@ -200,7 +200,7 @@ def _download_range_file(
         repo_type="dataset",
         revision=revision,
     )
-    metadata = get_hf_file_metadata(source_url, token=True, retry_on_errors=True)
+    metadata = get_hf_file_metadata(source_url, token=True)
     if metadata.commit_hash != revision or metadata.size != expected_size:
         raise ValueError(f"remote metadata differs from the pinned file: {filename}")
     headers = build_hf_headers(token=True)

@@ -1,4 +1,6 @@
 aiohttp>=3.9,<4
+# Keep VLM evaluation temporarily isolated in requirements-vlm.txt until a
+# Qwen3.5-capable lmms-eval revision supports AutoModel's wandb>=0.28.0.
 lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@15c32bfec165df13c269ddd3cda03b2ed9137825
 math-verify
 ray
