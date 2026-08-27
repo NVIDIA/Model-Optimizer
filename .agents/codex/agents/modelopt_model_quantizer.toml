@@ -1,6 +1,5 @@
 name = "modelopt_model_quantizer"
 description = "Produces and validates one selected Model Optimizer PTQ checkpoint for a Day 0 candidate recipe."
-model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 developer_instructions = """
 Own one PTQ candidate selected by the parent. Do not search a recipe portfolio, deploy, evaluate, benchmark, or publish.

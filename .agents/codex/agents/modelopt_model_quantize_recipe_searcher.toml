@@ -1,6 +1,5 @@
 name = "modelopt_model_quantize_recipe_searcher"
 description = "Selects the next evidence-backed Model Optimizer quantization candidate for a Day 0 search loop."
-model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
