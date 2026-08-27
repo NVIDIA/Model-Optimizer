@@ -860,6 +860,8 @@ class GPTModelImporter:
                         )
 
                     layer_id += 1
+
+                self.rules["mtp.final_layernorm"](mtp.final_layernorm, layer_id - 1)
             else:  # non-repeated MTP
                 # MTP is the last layer in DeepSeek V3/R1
                 layer_id += 1
