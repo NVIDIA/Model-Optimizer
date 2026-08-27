@@ -17,6 +17,8 @@ import logging
 import sys
 import types
 
+import pytest
+
 from modelopt.onnx.quantization import ort_utils
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile
 
@@ -166,3 +168,81 @@ def test_create_inference_session_filters_profile_with_disabled_ep(monkeypatch):
 
     assert captured_kwargs["providers"] == ["CPUExecutionProvider"]
     assert "provider_options" not in captured_kwargs
+
+
+def test_prepare_ep_list_registers_missing_trt_rtx_abi_provider(monkeypatch):
+    register_calls = []
+    fake_plugin = types.SimpleNamespace(
+        get_ep_name=lambda: "nv_tensorrt_rtx",
+        get_library_path=lambda: "trt_rtx.dll",
+    )
+    monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "register_execution_provider_library",
+        lambda *args: register_calls.append(args),
+    )
+
+    providers = ort_utils._prepare_ep_list(
+        ["NvTensorRtRtx", "cpu"],
+        [{"nv_profile_min_shapes": "input:1x1"}, {}],
+        trt_rtx_backend="abi",
+    )
+
+    assert providers == [
+        ("nv_tensorrt_rtx", {"nv_profile_min_shapes": "input:1x1"}),
+        "CPUExecutionProvider",
+    ]
+    assert register_calls == [("nv_tensorrt_rtx", "trt_rtx.dll")]
+
+
+def test_prepare_ep_list_reuses_registered_trt_rtx_abi_provider(monkeypatch):
+    fake_plugin = types.SimpleNamespace(
+        get_ep_name=lambda: "nv_tensorrt_rtx",
+        get_library_path=lambda: "trt_rtx.dll",
+    )
+    monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider", "nv_tensorrt_rtx"],
+    )
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "register_execution_provider_library",
+        lambda *args: pytest.fail("The registered ABI EP should not be registered again"),
+    )
+
+    assert ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="abi") == [
+        "nv_tensorrt_rtx"
+    ]
+
+
+def test_trt_rtx_backend_validation_is_deferred_until_session_creation(monkeypatch):
+    monkeypatch.setattr(
+        ort_utils,
+        "_check_for_nv_tensorrt_rtx_libs",
+        lambda: pytest.fail("Legacy TensorRT-RTX setup should not run for an invalid backend"),
+    )
+
+    assert ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="invalid") == []
+    with pytest.raises(ValueError, match="trt_rtx_backend must be 'legacy' or 'abi'"):
+        ort_utils.create_inference_session(
+            "model.onnx", ["NvTensorRtRtx"], trt_rtx_backend="invalid"
+        )
+
+
+def test_custom_ops_do_not_force_classic_tensorrt_when_trt_rtx_is_selected():
+    calibration_eps = ["NvTensorRtRtx", "cpu"]
+
+    plugins = ort_utils.update_trt_ep_support(
+        calibration_eps, has_dds_op=False, has_custom_op=True, trt_plugins=[]
+    )
+
+    assert calibration_eps == ["NvTensorRtRtx", "cpu"]
+    assert plugins == []

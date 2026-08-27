@@ -292,6 +292,10 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
     model_path = kwargs.get("model_path")
     logger.debug("Creating inference session with Execution Provider configuration")
 
+    trt_rtx_backend = kwargs.get("trt_rtx_backend", "legacy")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+
     sess_options = ort.SessionOptions()
     sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
     sess_options.add_session_config_entry("session.use_device_allocator_for_initializers", "1")
@@ -302,8 +306,7 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
 
     # Note. This path can be an empty string, which denotes that the model has custom ops and TRT EP is needed.
     calibrator.trt_extra_plugin_lib_paths = kwargs.get("trt_extra_plugin_lib_paths")
-
-    if calibrator.trt_extra_plugin_lib_paths is not None:
+    if trt_rtx_backend != "abi" and calibrator.trt_extra_plugin_lib_paths is not None:
         logger.debug(f"TRT extra plugin paths: {calibrator.trt_extra_plugin_lib_paths}")
         if "TensorrtExecutionProvider" not in ort.get_available_providers():
             raise RuntimeError(
@@ -336,20 +339,12 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
                 providers[i], {"arena_extend_strategy": "kSameAsRequested"}
             )
 
-    if model_path is None:
-        # Create the inference session with EP configuration on augmented_model
-        calibrator.infer_session = ort.InferenceSession(
-            calibrator.augmented_model_path,
-            sess_options=sess_options,
-            providers=providers,
-        )
-    else:
-        # Create the inference session with EP configuration on provided model path
-        calibrator.infer_session = ort.InferenceSession(
-            model_path,
-            sess_options=sess_options,
-            providers=providers,
-        )
+    session_path = calibrator.augmented_model_path if model_path is None else model_path
+    calibrator.infer_session = ort.InferenceSession(
+        session_path,
+        sess_options=sess_options,
+        providers=providers,
+    )
 
     # Group qdq tensors will have the same scaling factor.
     calibrator.group_qdq_tensors = kwargs.get("group_qdq_tensors")
@@ -1568,6 +1563,8 @@ def _quantize_static(
             ExecutionProviders = list[string] :
                 Default is [("CUDAExecutionProvider", {"device_id": 0}), "CPUExecutionProvider",
                 "TensorrtExecutionProvider"]
+            TrtRtxBackend = string :
+                Selects the legacy or ABI TensorRT-RTX execution provider implementation.
     """
     logger.info("Starting static quantization")
     logger.debug(f"Quantization format: {quant_format}")
@@ -1607,6 +1604,7 @@ def _quantize_static(
         # ====================== Modification ======================
         ("TrtExtraPluginLibraryPaths", "trt_extra_plugin_lib_paths"),
         ("ExecutionProviders", "execution_providers"),
+        ("TrtRtxBackend", "trt_rtx_backend"),
         ("group_qdq_tensors", "group_qdq_tensors"),
         ("QDQDisableWeightAdjustForInt32Bias", "disable_int32_weight_adjustment"),
         # ==========================================================
