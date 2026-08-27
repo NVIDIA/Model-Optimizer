@@ -15,6 +15,7 @@
 """Tests for the example-command runner shared by the example tests."""
 
 import os
+import signal
 import time
 
 import pytest
@@ -26,15 +27,27 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
 ):
     """A killed command whose descendant inherited the output pipe must not hang the caller."""
     monkeypatch.setattr(run_command, "_ORPHAN_PIPE_TIMEOUT_S", 1)
+    pid_file = tmp_path / "survivor.pid"
 
     started = time.monotonic()
     with pytest.warns(UserWarning, match="descendants holding its output pipe"):
         returncode, output = run_command._run_capturing(
-            ["bash", "-c", "sleep 60 & echo launcher output; sleep 0.3; kill -9 $$"],
+            ["bash", "-c", f"sleep 60 & echo $! > {pid_file}; echo out; sleep 0.3; kill -9 $$"],
             tmp_path,
             os.environ.copy(),
         )
 
     assert returncode == -9
-    assert "launcher output" in output  # captured despite the survivor
+    assert "out" in output  # captured despite the survivor
     assert time.monotonic() - started < 30
+
+    survivor = int(pid_file.read_text())
+    for _ in range(50):  # the group kill is asynchronous
+        try:
+            os.kill(survivor, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(survivor, signal.SIGKILL)
+        pytest.fail(f"survivor {survivor} outlived _run_capturing")
