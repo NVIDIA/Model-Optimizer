@@ -104,6 +104,55 @@ def test_resolve_task_topology_accepts_one_cpu_task() -> None:
     assert resolved.unused_gpus == 0
 
 
+def test_cpu_task_launcher_exports_single_process_group_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("PUZZLETRON_TASK_INDEX", "0")
+    monkeypatch.setenv("PUZZLETRON_LOCAL_TASK_INDEX", "0")
+    monkeypatch.setenv("PUZZLETRON_TASK_HOSTS", "node-a")
+
+    def fake_posix_spawnp(executable, command, env) -> int:
+        captured.update(executable=executable, command=command, env=env)
+        return 123
+
+    monkeypatch.setattr(task_launcher.os, "posix_spawnp", fake_posix_spawnp)
+    monkeypatch.setattr(task_launcher.os, "waitpid", lambda pid, _options: (pid, 0))
+
+    assert (
+        task_launcher.main(
+            [
+                "--attempt-id",
+                "attempt-a",
+                "--nodes",
+                "1",
+                "--gpus-per-node",
+                "0",
+                "--task-count",
+                "1",
+                "--gpus-per-task",
+                "0",
+                "--tasks-per-group",
+                "1",
+                "--launcher",
+                "direct",
+                "--",
+                "python",
+                "worker.py",
+            ]
+        )
+        == 0
+    )
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["CUDA_VISIBLE_DEVICES"] == ""
+    assert env["RANK"] == "0"
+    assert env["WORLD_SIZE"] == "1"
+    assert env["LOCAL_RANK"] == "0"
+    assert env["LOCAL_WORLD_SIZE"] == "1"
+    assert env["MASTER_ADDR"] == "127.0.0.1"
+    assert env["MASTER_PORT"] == str(task_launcher.rendezvous_port("attempt-a", 0, 1))
+
+
 @pytest.mark.parametrize(
     (
         "task_count",

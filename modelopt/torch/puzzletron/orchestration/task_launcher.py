@@ -42,6 +42,11 @@ __all__ = [
 TASK_IDENTITY_ENV_KEYS = frozenset(
     {
         "CUDA_VISIBLE_DEVICES",
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "RANK",
         "SLURM_LOCALID",
         "SLURM_NTASKS",
         "SLURM_PROCID",
@@ -56,6 +61,7 @@ TASK_IDENTITY_ENV_KEYS = frozenset(
         "PUZZLETRON_TASK_HOSTS",
         "PUZZLETRON_TASK_INDEX",
         "PUZZLETRON_TASK_LAUNCHER",
+        "WORLD_SIZE",
     }
 )
 
@@ -257,6 +263,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         PUZZLETRON_RENDEZVOUS_ENDPOINT=rendezvous_endpoint(binding),
         PUZZLETRON_RENDEZVOUS_ID=binding.rendezvous_id,
     )
+    if args.launcher == TaskLauncher.DIRECT.value and binding.group_size == 1:
+        env.update(
+            RANK="0",
+            WORLD_SIZE="1",
+            LOCAL_RANK="0",
+            LOCAL_WORLD_SIZE="1",
+            MASTER_ADDR="127.0.0.1",
+            MASTER_PORT=str(binding.master_port),
+        )
     print(
         "puzzletron binding "
         f"host={binding.hostname} task={binding.task_index} "
