@@ -1,0 +1,30 @@
+# FSDP2 counterpart to the example's zero3.yaml, for plan item 2's parallelism
+# requirement. Mirrors the ZeRO-3 setup so the two are comparable:
+#   - transformer_cls_names_to_wrap: GptOssDecoderLayer is the FSDP analogue of
+#     zero3.yaml's deepspeed_moe_layer_cls_names, and matters for the same reason:
+#     the whole MoE block must be one wrap unit so the expert weights are fully
+#     unsharded inside its forward, where fake-quant needs them.
+#   - FULL_STATE_DICT so save_model produces a consolidated checkpoint.
+#   - bf16 mixed precision, matching the ZeRO-3 runs.
+compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+machine_rank: 0
+main_training_function: main
+mixed_precision: bf16
+num_machines: 1
+num_processes: gpu
+rdzv_backend: static
+same_network: true
+use_cpu: false
+fsdp_config:
+  fsdp_version: 2
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+  fsdp_transformer_layer_cls_to_wrap: GptOssDecoderLayer
+  fsdp_reshard_after_forward: true
+  fsdp_state_dict_type: FULL_STATE_DICT
+  fsdp_cpu_ram_efficient_loading: false
+  fsdp_offload_params: false
+  fsdp_activation_checkpointing: false

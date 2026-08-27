@@ -1,0 +1,30 @@
+# 3-bit CSX QAT for GPT-OSS-20B on tulu@8k.
+# Hyperparameters are examples/gpt-oss/configs/sft_full.yaml verbatim except for
+# the dataset, so results are comparable with the MXFP4 baseline there.
+model_name_or_path: openai/gpt-oss-20b
+attn_implementation: kernels-community/vllm-flash-attn3
+dtype: bfloat16
+
+# Built by examples/csx_qat/prepare_tulu8k.py -- override on the CLI.
+dataset_name: /scratch/tulu8k
+dataset_num_proc: 8
+dataset_test_split: test
+
+learning_rate: 2.0e-5
+gradient_checkpointing: true
+num_train_epochs: 1.0
+logging_steps: 1
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 2        # 2 x 2 x 8 GPUs = effective batch 32
+max_length: 4096
+warmup_steps: 0.03
+lr_scheduler_type: cosine_with_min_lr
+lr_scheduler_kwargs:
+  min_lr_rate: 0.1
+output_dir: out/gptoss20b-csx3-qat
+report_to: []
+seed: 42
+eval_on_start: true
+eval_strategy: steps
+eval_steps: 50
