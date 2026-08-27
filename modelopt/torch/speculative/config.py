@@ -144,7 +144,12 @@ class DFlashConfig(ModeloptBaseConfig):
         default=None,
         description=(
             "Base-model layer ids whose hidden states are concatenated into the draft's "
-            "``fc`` input, in capture order. Only meaningful for STREAMING/offline runs, "
+            "``fc`` input, in capture order, in DFLASH semantics -- the same convention "
+            "``build_target_layer_ids()`` returns, which is the PRODUCER's capture id minus "
+            "one. vLLM reads a producer capture list verbatim but adds 1 to "
+            "``target_layer_ids``, and matches both against ``layer_idx + 1``. Passing raw "
+            "capture ids here shifts serving one layer deeper than training. "
+            "Only meaningful for STREAMING/offline runs, "
             "where the producer (vLLM ``eagle_aux_hidden_state_layer_ids``) decides which "
             "layers are captured and the trainer merely consumes ``aux_hidden_states`` "
             "verbatim -- it has no way to know which layers those were. Left unset, "

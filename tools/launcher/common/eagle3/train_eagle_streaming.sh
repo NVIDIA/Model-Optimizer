@@ -135,9 +135,17 @@ import json, sys
 ids = json.loads(sys.argv[1])
 if len(ids) < 2:
     raise SystemExit("EAGLE_CAPTURE_IDS needs at least one aux id plus the final KD id")
-print(json.dumps(ids[:-1]))' "$EAGLE_CAPTURE_IDS")" || {
+# Drop the KD target, then convert capture ids -> DFlash ids by subtracting 1. vLLM
+# reads EAGLE_CAPTURE_IDS verbatim (eagle_aux_hidden_state_layer_ids, the highest-
+# priority branch) but adds 1 to target_layer_ids, and both are matched against
+# ``layer_idx + 1``. So capture id N and target_layer_id N-1 name the same layer;
+# forwarding the capture ids unconverted would shift serving one layer deeper.
+aux = [i - 1 for i in ids[:-1]]
+if min(aux) < 0:
+    raise SystemExit("EAGLE_CAPTURE_IDS are 1-based; id 0 has no DFlash equivalent")
+print(json.dumps(aux))' "$EAGLE_CAPTURE_IDS")" || {
     echo "ERROR: could not parse EAGLE_CAPTURE_IDS=$EAGLE_CAPTURE_IDS" >&2; exit 1; }
-echo "Trainer aux layer ids (capture ids minus KD target): $AUX_IDS_JSON"
+echo "Trainer aux layer ids (capture ids minus KD target, minus 1): $AUX_IDS_JSON"
 
 # Forwarded verbatim to the trainer; capture before the helpers below run.
 SCRIPT_ARGS=("$@")
