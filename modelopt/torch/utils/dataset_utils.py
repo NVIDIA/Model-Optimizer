@@ -1260,7 +1260,7 @@ def model_type_is_enc_dec(model):
     # `model.generate` to run the full denoising loop.
     #
     # Note: this list intentionally diverges from ``is_enc_dec`` in
-    # ``examples/llm_ptq/example_utils.py`` (which keys by ``model_type``
+    # ``examples/hf_ptq/example_utils.py`` (which keys by ``model_type``
     # string and is used for preview-decode slicing). DiffusionGemma is
     # included here so calibration uses ``.generate()`` end-to-end, but
     # deliberately excluded there so the preview decode treats its

@@ -155,14 +155,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import (
-    AliasChoices,
-    Field,
-    ValidationInfo,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -774,15 +767,7 @@ class LayerwiseConfig(ModeloptBaseConfig):
 
 
 def _coerce_layerwise_input(value):
-    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
-    if isinstance(value, bool):
-        warnings.warn(
-            "Passing the layerwise field as a bool is deprecated; use a dict, "
-            "e.g. `{'enable': True}`.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return {"enable": value}
+    """Normalize a raw ``layerwise`` value to a dict."""
     if value is None:
         return {}
     if isinstance(value, LayerwiseConfig):
@@ -822,50 +807,17 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     layerwise: LayerwiseConfig = Field(
         default_factory=LayerwiseConfig,
-        validation_alias=AliasChoices("layerwise", "use_sequential"),
         title="Layerwise calibration configuration.",
         description=(
             "Nested config controlling layer-by-layer calibration. Pass a dict, "
-            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
-            "accepted for backward compatibility but deprecated."
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_layerwise_checkpoint_dir(cls, data):
-        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
-
-        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
-        """
-        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
-            return data
-        warnings.warn(
-            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
-            "nest it under `layerwise.checkpoint_dir` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        data = dict(data)
-        flat_dir = data.pop("layerwise_checkpoint_dir")
-        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
-        # otherwise the alias value is silently dropped when AliasChoices picks the
-        # newly-written ``layerwise`` key over ``use_sequential``.
-        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
-        layerwise = _coerce_layerwise_input(raw_layerwise)
-        existing = layerwise.get("checkpoint_dir")
-        if existing is not None and existing != flat_dir:
-            raise ValueError(
-                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
-                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
-            )
-        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
-        return data
 
     @field_validator("layerwise", mode="before")
     @classmethod
     def _coerce_layerwise(cls, value):
-        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
 
     @model_validator(mode="after")
@@ -963,8 +915,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
-            "GEMM with one weight quantizer, so this flag is irrelevant there."
+            "one effective weight amax. TEGroupedMLP keeps a per-expert weight quantizer "
+            "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
         ),
     )
 

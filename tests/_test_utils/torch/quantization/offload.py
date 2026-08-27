@@ -56,18 +56,18 @@ def make_cpu_offloaded_model(tmp_path, num_hidden_layers=3):
 
 
 def make_layerwise_cfg(base_cfg):
-    """Copy of ``base_cfg`` with ``layerwise=True`` set on its algorithm field."""
+    """Copy of ``base_cfg`` with layerwise calibration enabled on its algorithm field."""
     cfg = copy.deepcopy(base_cfg)
     algo = cfg.get("algorithm", "max")
     if isinstance(algo, str):
-        cfg["algorithm"] = {"method": algo, "layerwise": True}
+        cfg["algorithm"] = {"method": algo, "layerwise": {"enable": True}}
     else:
-        algo["layerwise"] = True
+        algo["layerwise"] = {"enable": True}
     return cfg
 
 
 def make_layerwise_checkpoint_cfg(base_cfg, checkpoint_dir):
-    """``make_layerwise_cfg`` plus a ``layerwise_checkpoint_dir``."""
+    """``make_layerwise_cfg`` plus a ``layerwise.checkpoint_dir``."""
     cfg = make_layerwise_cfg(base_cfg)
-    cfg["algorithm"]["layerwise_checkpoint_dir"] = checkpoint_dir
+    cfg["algorithm"]["layerwise"]["checkpoint_dir"] = checkpoint_dir
     return cfg

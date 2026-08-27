@@ -15,10 +15,12 @@
 
 """Hugging Face checkpoint utility."""
 
+import fnmatch
 import json
 import os
 import shutil
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -253,25 +255,50 @@ def load_multimodal_components(
     return multimodal_state_dict
 
 
-def copy_non_safetensor_files_from_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
+def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(file_name, pattern) for pattern in patterns)
+
+
+def copy_non_safetensor_files_from_ckpt(
+    src: str | os.PathLike,
+    dst: str | os.PathLike,
+    *,
+    exclude_files: Iterable[str] | None = None,
+    exclude_patterns: Iterable[str] | None = None,
+) -> list[str]:
     """Copy every non-safetensors file from a local HF checkpoint dir verbatim.
 
     Use as a baseline so tokenizer files, remote_code ``*.py``, README, LICENSE, etc.
-    are preserved from the source. The caller is expected to overwrite the files
-    modelopt owns (``config.json``, ``generation_config.json``, ``hf_quant_config.json``,
-    ``preprocessor_config.json``) after this step.
+    are preserved from the source. Callers can exclude additional files or patterns when
+    copying after export-owned metadata has already been written.
 
     Args:
         src: Source HF checkpoint directory. Must be a local path.
         dst: Destination directory; created if missing.
+        exclude_files: Exact file names to skip.
+        exclude_patterns: Glob patterns for additional files to skip.
+
+    Returns:
+        File names copied into ``dst``.
     """
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
+    exclude_files = set(exclude_files or ())
+    exclude_patterns = tuple(exclude_patterns or ())
+    copied_files = []
     os.makedirs(dst, exist_ok=True)
-    for entry in os.listdir(src):
+    for entry in sorted(os.listdir(src)):
+        if entry in exclude_files or _matches_any_pattern(entry, exclude_patterns):
+            continue
         sp = os.path.join(src, entry)
         if not os.path.isfile(sp):
             continue
         if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
             continue
-        shutil.copy2(sp, dst)
+        try:
+            shutil.copy2(sp, dst)
+        except OSError as error:
+            warnings.warn(f"Failed to copy checkpoint sidecar {entry}: {error}")
+            continue
+        copied_files.append(entry)
+    return copied_files

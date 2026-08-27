@@ -391,47 +391,6 @@ def _mtq_inputs_from_auto_quantize_config(
     }
 
 
-def _auto_quantize_config_from_cli(args: argparse.Namespace):
-    """Convert the deprecated ``--auto_quantize_*`` flags into an AutoQuantizeConfig on the fly.
-
-    Backward-compat shim: old CLI invocations are turned into the same config object the recipe
-    path consumes, so the rest of the flow is recipe-driven. Layer patterns come from the shared
-    base sets loaded once in modelopt.recipe.config (no model introspection, no new CLI flags): the
-    base disabled set, and the base cost-excluded set — the latter is appended unconditionally
-    because it is harmless on non-VL models (nothing matches → cost_weight 0 is a no-op) and correct
-    on VL models.
-    """
-    from modelopt.recipe.config import (
-        AUTOQUANT_BASE_COST_EXCLUDED_LAYERS,
-        AUTOQUANT_BASE_DISABLED_LAYERS,
-        AutoQuantizeConfig,
-        AutoQuantizeConstraints,
-        AutoQuantizeCost,
-    )
-    from modelopt.torch.quantization.config import QuantizeConfig
-
-    disabled_layers = list(AUTOQUANT_BASE_DISABLED_LAYERS)
-    cost_excluded_layers = list(AUTOQUANT_BASE_COST_EXCLUDED_LAYERS)
-
-    cost = (
-        AutoQuantizeCost(active_moe_expert_ratio=args.auto_quantize_active_moe_expert_ratio)
-        if args.auto_quantize_cost_model == "active_moe"
-        else None
-    )
-    return AutoQuantizeConfig(
-        constraints=AutoQuantizeConstraints(
-            effective_bits=args.auto_quantize_bits,
-            cost_model=args.auto_quantize_cost_model,
-            cost=cost,
-        ),
-        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES[q]) for q in args.qformat.split(",")],
-        auto_quantize_method=args.auto_quantize_method,
-        score_size=args.auto_quantize_score_size,
-        disabled_layers=disabled_layers,
-        cost_excluded_layers=cost_excluded_layers,
-    )
-
-
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -625,15 +584,13 @@ def load_model(args: argparse.Namespace):
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    # Default to image-text calibration for VLM models. Skip for either AutoQuantize path (recipe or
-    # the deprecated --auto_quantize_bits CLI), whose text-only path does not support image-text
-    # calibration yet (auto_quantize() would raise); auto-enabling it here would make Nemotron-VL
-    # AutoQuantize fail unconditionally.
+    # Default to image-text calibration for VLM models. Skip for the AutoQuantize recipe path, whose
+    # text-only path does not support image-text calibration yet (auto_quantize() would raise);
+    # auto-enabling it here would make Nemotron-VL AutoQuantize fail unconditionally.
     if (
         is_nemotron_vl_model
         and not args.calib_with_images
         and not _recipe_is_auto_quantize(args.recipe)
-        and args.auto_quantize_bits is None
     ):
         print("Nemotron VL model detected. Enabling image-text calibration by default.")
         args.calib_with_images = True
@@ -686,11 +643,11 @@ def load_model(args: argparse.Namespace):
                 : len(args.dataset)
             ]
 
-            # Plain PTQ quantizes only the extracted language model. Recipe and AutoQuantize paths
-            # (incl. the deprecated --auto_quantize_bits CLI) keep the outer CausalLM so recipes /
-            # search can see the Qwen3.5/3.6-MoE VLM lm_head; extracting here would leave modelopt
-            # state on the ancestors and make auto_quantize() fail with "multiple modelopt states".
-            if args.recipe is None and args.auto_quantize_bits is None:
+            # Plain PTQ quantizes only the extracted language model. The recipe path keeps the outer
+            # CausalLM so recipes / search can see the Qwen3.5/3.6-MoE VLM lm_head; extracting here
+            # would leave modelopt state on the ancestors and make auto_quantize() fail with
+            # "multiple modelopt states".
+            if args.recipe is None:
                 extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
                     full_model
                 )
@@ -704,9 +661,6 @@ def load_model(args: argparse.Namespace):
         default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
-
-    if model_type == "phi4mm":
-        warnings.warn("Please set the default input_mode to InputMode.LANGUAGE before quantizing.")
 
     return (
         full_model,
@@ -864,11 +818,12 @@ def export_quantized(
                 print("This is normal for some VLM architectures that don't use AutoProcessor")
 
         start_time = time.time()
-        if (
+        is_tensorrt_llm_export = (
             model_type in ["t5", "bart", "whisper"]
             or args.sparsity_fmt != "dense"
-            or "int8_sq" in args.qformat
-        ):
+            or "int8_smoothquant" in args.qformat
+        )
+        if is_tensorrt_llm_export:
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
@@ -940,7 +895,13 @@ def export_quantized(
         # from the source checkpoint take precedence over regenerated ones (which may
         # differ in format due to newer transformers versions).
         if args.dist_state.is_main:
-            copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
+            exclude_files = None if is_tensorrt_llm_export else {"generation_config.json"}
+            copy_custom_model_files(
+                args.pyt_ckpt_path,
+                export_path,
+                args.trust_remote_code,
+                exclude_files=exclude_files,
+            )
 
         end_time = time.time()
         print_rank_0(
@@ -1159,19 +1120,10 @@ def quantize_main(
                 f"from {args.recipe}"
             )
 
-    # Resolve the AutoQuantizeConfig from either source: a recipe, or the deprecated
-    # --auto_quantize_* CLI flags converted on the fly. Everything downstream is recipe-driven.
+    # AutoQuantize is recipe-driven: everything downstream reads the resolved AutoQuantizeConfig.
     if isinstance(recipe, ModelOptAutoQuantizeRecipe):
         aq_config = recipe.auto_quantize
         fixed_quantize_config = recipe.quantize
-    elif args.recipe is None and args.auto_quantize_bits is not None:
-        warnings.warn(
-            "The --auto_quantize_* CLI flags are deprecated; use an AutoQuantize --recipe instead. "
-            "They are converted to an AutoQuantizeConfig on the fly for now.",
-            DeprecationWarning,
-        )
-        aq_config = _auto_quantize_config_from_cli(args)
-        fixed_quantize_config = None
     else:
         aq_config = None
         fixed_quantize_config = None
@@ -1210,7 +1162,9 @@ def quantize_main(
             # Calibration/sparsification will actually take much more memory than regular inference
             # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
             # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            sample_memory_usage_ratio = (
+                2 if "awq" in args.qformat or "smoothquant" in args.qformat else 1.1
+            )
             # Whisper model expects mel-spectrogram input features of length 3000
             # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
             # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
@@ -1260,9 +1214,9 @@ def quantize_main(
     )
 
     if aq_config is not None:
-        # AutoQuantize (recipe or the deprecated --auto_quantize_* CLI, converted on the fly). For
-        # VL models the search walks the OUTER CausalLM (which carries lm_head and the LM-head
-        # forward path); architecture-specific exclusions come from aq_config.disabled_layers.
+        # AutoQuantize (recipe-driven). For VL models the search walks the OUTER CausalLM (which
+        # carries lm_head and the LM-head forward path); architecture-specific exclusions come
+        # from aq_config.disabled_layers.
         auto_quantize(
             args,
             full_model,
@@ -1559,46 +1513,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to checkpoint file for saving/restoring auto_quantize search state "
-            "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe or the "
-            "deprecated --auto_quantize_bits CLI path."
+            "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe."
         ),
-    )
-    # Deprecated AutoQuantize CLI flags: kept as a backward-compat shim that converts them into an
-    # AutoQuantizeConfig on the fly (see _auto_quantize_config_from_cli). Prefer --recipe. The old
-    # CLI also lives on the 0.45 branch.
-    parser.add_argument(
-        "--auto_quantize_bits",
-        type=float,
-        default=None,
-        help="[Deprecated: use an AutoQuantize --recipe] Effective-bits target; also enables the "
-        "AutoQuantize CLI path. Candidate formats are taken from --qformat (comma-separated).",
-    )
-    parser.add_argument(
-        "--auto_quantize_method",
-        type=str,
-        default="gradient",
-        choices=["gradient", "kl_div"],
-        help="[Deprecated: use an AutoQuantize --recipe] Sensitivity scoring method.",
-    )
-    parser.add_argument(
-        "--auto_quantize_score_size",
-        type=int,
-        default=128,
-        help="[Deprecated: use an AutoQuantize --recipe] Number of samples for sensitivity scoring.",
-    )
-    parser.add_argument(
-        "--auto_quantize_cost_model",
-        type=str,
-        default="weight",
-        choices=["weight", "active_moe"],
-        help="[Deprecated: use an AutoQuantize --recipe] Cost model for the effective-bits search.",
-    )
-    parser.add_argument(
-        "--auto_quantize_active_moe_expert_ratio",
-        type=float,
-        default=None,
-        help="[Deprecated: use an AutoQuantize --recipe] Routed-expert active ratio for the "
-        "'active_moe' cost model.",
     )
     parser.add_argument(
         "--moe_calib_experts_ratio",
@@ -1680,10 +1596,10 @@ def parse_args() -> argparse.Namespace:
     # via init_quantized_weights(), so it cannot honor a --recipe (which is authoritative
     # for the quant layout in quantize_main). Reject the combination rather than silently
     # instrumenting a layout that diverges from the recipe.
-    if args.low_memory_mode and (args.recipe is not None or args.auto_quantize_bits is not None):
+    if args.low_memory_mode and args.recipe is not None:
         parser.error(
-            "--low_memory_mode does not support --recipe or AutoQuantize (--auto_quantize_bits); "
-            "the low-memory loader initializes quantizers from --qformat/--kv_cache_qformat."
+            "--low_memory_mode does not support --recipe; the low-memory loader initializes "
+            "quantizers from --qformat/--kv_cache_qformat."
         )
     if args.use_fsdp2 and args.use_seq_device_map:
         warnings.warn("--use_seq_device_map is ignored when --use_fsdp2 is set.")

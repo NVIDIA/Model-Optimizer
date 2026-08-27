@@ -59,6 +59,7 @@ import vllm
 from packaging import version
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm_mlflow_utils import MLFLOW_ENV_VARS, add_mlflow_args, resolve_mlflow_args
 
 vllm_version = version.parse(vllm.__version__)
 if vllm_version <= version.parse("0.11.0"):
@@ -68,6 +69,8 @@ else:
 
 
 # Env vars to copy from the driver to Ray workers (must match fakequant_worker / vllm_ptq_utils).
+# The MLflow ones are settled by resolve_mlflow_args() below, after this list is published:
+# Ray reads the values when it creates the actors, so naming them here is enough.
 additional_env_vars = {
     "QUANT_DATASET",
     "QUANT_CALIB_SIZE",
@@ -78,6 +81,7 @@ additional_env_vars = {
     "CALIB_BATCH_SIZE",
     "RECIPE_PATH",
     "TRUST_REMOTE_CODE",
+    *MLFLOW_ENV_VARS,
 }
 
 try:
@@ -102,6 +106,7 @@ def main():
     parser = FlexibleArgumentParser(description="vLLM model server with quantization support")
     parser.add_argument("model", type=str, help="The path or name of the model to serve")
     parser = make_arg_parser(parser)
+    add_mlflow_args(parser)
     # Ensure workers can import our custom worker module when using spawn
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
@@ -116,6 +121,9 @@ def main():
 
     # Parse arguments
     args = parser.parse_args()
+    # Settled before the engine starts, so an unusable tracking URI fails here rather than
+    # in a worker that has already loaded the weights.
+    resolve_mlflow_args(args, parser)
     # Run the server
     uvloop.run(run_server(args))
 

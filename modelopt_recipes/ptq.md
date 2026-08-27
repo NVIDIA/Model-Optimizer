@@ -29,7 +29,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 22 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 24 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -55,6 +55,8 @@ supported combinations.
 | `nvfp4_weight_only-kv_fp16` | NVFP4 W4A16, weights only | none (BF16/FP16) | max |
 | `nvfp4_weight_only-kv_fp8_cast` | NVFP4 W4A16, weights only | FP8 (constant amax) | max |
 | `int4_blockwise_weight_only` | INT4 W4A16, block 128, weights only | none | max |
+| `nvfp4_mlp_weight_only` | NVFP4 W4A16 (block 32), MLP + MoE weights only | none | max |
+| `mxfp4_mlp_weight_only` | MXFP4 W4A16, MLP + MoE weights only | none | none (no calibration) |
 
 </details>
 
@@ -128,6 +130,11 @@ activations and tensor-core math are what deliver the throughput.
 - **`int4_blockwise_weight_only`** — INT4 weights, block size 128, BF16
   activations. Classic W4A16 weight compression; works without NVFP4-class
   hardware.
+- **`nvfp4_mlp_weight_only`** — NVFP4 (block size 32) weights on MLP/MoE layers
+  only, BF16 activations.
+- **`mxfp4_mlp_weight_only`** — MXFP4 weights on MLP/MoE layers only, BF16
+  activations. Needs no calibration forward pass; the QAT starting point for the
+  GPT-OSS family (see `examples/gpt-oss`).
 
 ---
 
@@ -234,8 +241,8 @@ that baseline. The deviations come in four kinds:
 |------|-------------------------------------|----------|
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
-| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `phi4mm`, `diffusion_gemma` |
-| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/nvidia/Mistral-Medium-3.5-128B-NVFP4` |
+| **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
+| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
@@ -314,7 +321,7 @@ These quantize the **same layers** as the general recipes; only the
 *Why special:* identical scope/numerics to a general scheme, but a general
 recipe's default algorithm would overflow or regress here.
 
-### Extra exclusions — `nemotron_vl`, `phi4mm`, `diffusion_gemma`
+### Extra exclusions — `nemotron_vl`, `diffusion_gemma`
 
 Each of these is **numerically identical** to a general recipe. What makes them
 special is a model-local `disabled_quantizers.yaml` unit that *extends* the
@@ -324,8 +331,6 @@ standard exclusions so a model-specific branch stays in full precision:
   `nvfp4_default-kv_fp8_cast` numerics, adding `*vision*`, `*image*`, `*radio*`,
   `*visual*`, `*encoder*`, `*model_encoder*` so only the language decoder is
   quantized.
-- **`phi4mm`** (Phi-4-Multimodal) — general `nvfp4_default-kv_fp8_cast`
-  numerics, adding `*speech*`, `*audio*`, `*image*`, `*vision*`.
 - **`diffusion_gemma`** (block-diffusion encoder-decoder text LLM on a Gemma4
   MoE backbone) — general `nvfp4_experts_only-kv_fp8_cast` numerics, adding
   `*self_conditioning*`: the self-conditioning network is text-only and never
@@ -337,16 +342,16 @@ encoders (or the never-calibrated self-conditioning branch), regressing those
 modalities or crashing export. The extra patterns keep them in full precision;
 everything else matches the general recipe.
 
-### Checkpoint mirrors — `models/nvidia/<checkpoint>`
+### Checkpoint mirrors — `models/<org>/<checkpoint>`
 
 The `huggingface/models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
-- **`Mistral-Medium-3.5-128B-NVFP4/ptq/nvfp4-max-calib`** mirrors
+- **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
-- **`Nemotron-3-Super-120B-A12B/ptq/nvfp4-mse`** mirrors
+- **`Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
   - MoE routed experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
@@ -357,13 +362,17 @@ checkpoint's** quant config verbatim:
   `nvfp4-mse.yaml` uses MSE calibration with an FP8-scale sweep (matches the
   release); `nvfp4-max-calib.yaml` is the identical layer map under plain `max`
   calibration, kept for comparison.
-- **`Nemotron-3-Ultra-550B-A55B/ptq/nvfp4-4o6`** follows the same Super-style
+- **`Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
   component map (routed experts NVFP4 W4A4 block-16; shared experts + Mamba
   `in/out_proj` + KV cache FP8; everything else BF16), but the routed-expert
   weights use **Four-over-Six (4/6)** NVFP4: an MSE search picks each weight's
   amax multiplier from `[1.0, 1.5]` (M=6 vs. M=4). Activations stay dynamic
   NVFP4 (not MSE-calibrated).
-- **`Nemotron-3-Nano-4B/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
+- **`Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
+  Four-over-Six NVFP4 W4A16 to routed experts, shared experts, and the language
+  model head; Mamba `in/out_proj` weights and inputs plus the KV cache use FP8,
+  while attention remains BF16.
+- **`Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
   allocation of the Nemotron-H hybrid, mapped onto NVFP4/FP8 **per layer**:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
