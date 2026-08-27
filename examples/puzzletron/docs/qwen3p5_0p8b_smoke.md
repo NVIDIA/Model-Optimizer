@@ -19,6 +19,7 @@ EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_s
 EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_smoke.yaml
 RUNNER_TEMPLATE=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml
 CAMPAIGN_DIR=/path/to/qwen3p5_0p8b_full_smoke
+export PUZZLETRON_RUN_ROOT="$CAMPAIGN_DIR"
 RUNNER="$CAMPAIGN_DIR/runner.slurm.yaml"
 
 mkdir -p "$CAMPAIGN_DIR"

@@ -1639,7 +1639,15 @@ def _write_reused_sort_equivalence(
 ) -> dict[str, Any]:
     """Write width-owned reuse evidence without mutating the completed sort artifact."""
 
-    existing = json.loads(sort_summary_path.read_text()) if sort_summary_path.is_file() else {}
+    existing = (
+        json.loads(sort_summary_path.read_text(encoding="utf-8"))
+        if sort_summary_path.is_file()
+        else {}
+    )
+    if not isinstance(existing, dict):
+        raise ValueError(
+            f"invalid sort sanity artifact at {sort_summary_path}: expected a JSON object"
+        )
     merged = _merge_reused_sort_equivalence(existing, reuse)
     reuse_summary_path.parent.mkdir(parents=True, exist_ok=True)
     reuse_summary_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")

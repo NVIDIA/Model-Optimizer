@@ -203,6 +203,19 @@ def test_clean_completion_regenerates_tampered_final_report(tmp_path: Path):
     assert result["report_status"] == "completed"
 
 
+def test_clean_completion_regenerates_oversized_completion_record(tmp_path: Path):
+    plan = _plan(tmp_path)
+    executor = _ReportExecutor(JobState.COMPLETED)
+    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+    completion_path = plan.puzzle_dir / "artifacts/campaign_report/completion.json"
+    completion_path.write_bytes(completion_path.read_bytes() + b" " * (1 << 20))
+
+    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+
+    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
+    assert result["report_status"] == "completed"
+
+
 def test_final_report_failure_is_nonfatal(tmp_path: Path):
     plan = _plan(tmp_path)
     executor = _ReportExecutor(JobState.FAILED)

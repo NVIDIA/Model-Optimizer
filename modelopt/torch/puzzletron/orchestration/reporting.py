@@ -35,6 +35,8 @@ __all__ = [
     "record_completed_final_report",
 ]
 
+_MAX_COMPLETION_RECORD_BYTES = 1 << 20
+
 
 @dataclass(frozen=True)
 class FinalReportResult:
@@ -100,7 +102,11 @@ def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
 
     report_path, manifest_path = final_report_paths(plan)
     try:
-        payload = json.loads(_completion_path(plan).read_text(encoding="utf-8"))
+        with _completion_path(plan).open("rb") as stream:
+            record_bytes = stream.read(_MAX_COMPLETION_RECORD_BYTES + 1)
+        if len(record_bytes) > _MAX_COMPLETION_RECORD_BYTES:
+            return None
+        payload = json.loads(record_bytes)
         log_paths = payload["log_paths"]
         if (
             payload["schema_version"] != 1
@@ -111,7 +117,7 @@ def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
             or not all(isinstance(path, str) for path in log_paths)
         ):
             return None
-    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (KeyError, OSError, TypeError, ValueError):
         return None
     return FinalReportResult(
         status="completed",
