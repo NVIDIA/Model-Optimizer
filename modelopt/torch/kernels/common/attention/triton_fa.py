@@ -87,7 +87,6 @@ _FWD_CONFIGS = [
 ]
 
 _MEASURE_BLOCK_M = 128
-_P_QDQ_MEASURE_BLOCK_M = 16
 # 128 so the kernel sparsity-measurement block matches the PyTorch
 # calibration/reference granularity. This is deliberately independent of the
 # autotuned compute tile.
@@ -944,6 +943,16 @@ class _Attention(torch.autograd.Function):
         else:
             apply_skip = False
             skip_threshold_log2 = 0.0
+        if apply_skip and (p_qdq_mode or v_qdq_mode):
+            # Quantized operands change what the calibrated skip thresholds mean,
+            # and P-QDQ additionally uses a different measurement tile geometry.
+            # The vLLM installers reject this composition at plan time; the raw
+            # kernel API rejects it here so no path can serve it.
+            raise ValueError(
+                "skip-softmax cannot be combined with attention quantization "
+                "(P/V QDQ): the calibrated tile-skip contract does not hold "
+                "under quantized operands"
+            )
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -1030,17 +1039,40 @@ class _Attention(torch.autograd.Function):
         # kernel dereferences the right pointers instead of triggering an
         # illegal memory access.
         with torch.cuda.device(q.device):
-            if do_measure:
-                # Runtime counters mutate global tensors, so do not run them through
-                # autotune candidate trials. Use one stable config for measurement.
-                _attn_fwd.fn[grid](
-                    *fwd_args,
-                    **fwd_kwargs,
-                    BLOCK_M=_P_QDQ_MEASURE_BLOCK_M if p_qdq_mode else _MEASURE_BLOCK_M,
-                    BLOCK_N=_MEASURE_BLOCK_N,
-                    num_warps=_MEASURE_NUM_WARPS,
-                    num_stages=_MEASURE_NUM_STAGES,
-                )
+            if do_measure or apply_skip:
+                # Fixed-tile launches, bypassing autotune:
+                # - Measurement: runtime counters mutate global tensors, so they
+                #   must not run through autotune candidate trials.
+                # - Active skip-softmax: the tile-skip decision depends on the
+                #   (BLOCK_M, BLOCK_N) geometry, and thresholds are calibrated at
+                #   the 128x128 measurement granularity (attention_calibrate and
+                #   flash_skip_softmax both use 128x128 blocks). Autotuned tiles
+                #   (e.g. BLOCK_N=32) would realize a different sparsity than
+                #   calibrated, so skip launches always use the calibration tile.
+                #
+                # The tile is a contract, not a preference: configurations that
+                # cannot compile it (e.g. fp32 inputs on ~100KB-shared-memory
+                # GPUs) are rejected rather than re-tiled, because a different
+                # tile realizes a different sparsity than was calibrated.
+                try:
+                    # P/V QDQ is rejected above when skip is active, so the tile
+                    # here is unconditionally the 128x128 calibration geometry.
+                    _attn_fwd.fn[grid](
+                        *fwd_args,
+                        **fwd_kwargs,
+                        BLOCK_M=_MEASURE_BLOCK_M,
+                        BLOCK_N=_MEASURE_BLOCK_N,
+                        num_warps=_MEASURE_NUM_WARPS,
+                        num_stages=_MEASURE_NUM_STAGES,
+                    )
+                except triton.runtime.errors.OutOfResources as err:
+                    raise RuntimeError(
+                        "skip-softmax requires the fixed 128x128 calibration tile, "
+                        f"which exceeds this GPU's shared memory for {q.dtype} "
+                        f"inputs ({err}). Use fp16/bf16 inputs or a device with "
+                        "more shared memory; re-tiling would change the "
+                        "calibrated sparsity contract."
+                    ) from err
             else:
                 _attn_fwd[grid](
                     *fwd_args,
