@@ -6,20 +6,11 @@
 
 ## Params
 
-## YAML Fragment
+## Contract Source
 
-Use this inside the top-level `evaluation.tasks` list:
-
-```yaml
-- name: ns_livecodebench
-  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
-  nemo_evaluator_config:
-    config:
-      params:
-        extra:
-          num_repeats: 8
-          dataset_split: test_v6_2408_2505
-```
+Select `ns_livecodebench` through `examples/llm_eval/nel_config.py`. Its
+container, repeat count, and pinned dataset split live only in
+`examples/llm_eval/task_contracts.yaml`.
 
 ## Score Extraction
 

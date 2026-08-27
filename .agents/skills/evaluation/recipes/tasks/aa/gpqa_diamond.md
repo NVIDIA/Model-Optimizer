@@ -6,19 +6,11 @@
 
 ## Params
 
-## YAML Fragment
+## Contract Source
 
-Use this inside the top-level `evaluation.tasks` list:
-
-```yaml
-- name: gpqa_diamond_aa_v3
-  container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
-  nemo_evaluator_config:
-    config:
-      params:
-        extra:
-          n_samples: 16
-```
+Select `gpqa_diamond_aa_v3` through `examples/llm_eval/nel_config.py`. Its
+container and sample count are defined only in
+`examples/llm_eval/task_contracts.yaml`.
 
 ## Score Extraction from mlflow
 

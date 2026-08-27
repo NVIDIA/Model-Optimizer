@@ -8,6 +8,40 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
 
+### Maintained NeMo Evaluator task definitions
+
+Use `nel_config.py` to add maintained text benchmark definitions to an existing
+NeMo Evaluator Launcher config. `task_contracts.yaml` is their machine-readable
+source:
+
+```sh
+python nel_config.py \
+    --base-config path/to/base_nel_config.yaml \
+    --output path/to/text_benchmarks.yaml
+```
+
+Puzzletron uses this same compiler rather than maintaining a second copy of the
+task contracts:
+
+```sh
+python -m examples.puzzletron.evaluation.text --backend nemo \
+    --base-config path/to/base_nel_config.yaml \
+    --output path/to/text_benchmarks.yaml
+```
+
+LiveCodeBench, SciCode, and IFBench are the defaults because they are missing
+from Puzzletron's pinned `lmms-eval` revision. Other tasks are selected
+explicitly. Run `python nel_config.py --help` for the full list and required
+external-model options. See the [NeMo text benchmark guide](NEMO_EVALUATOR.md)
+for config generation, credentials, validation, task-specific checks, and
+result recording.
+
+Puzzletron defaults to `lmms-eval` and uses these NeMo contracts for missing
+benchmarks or an explicitly requested alternate contract. See its
+[text evaluation guide](../puzzletron/evaluation/text/README.md) for the routing
+table. When both routes exist, keep their results separate and label each result
+with the evaluator, exact task contract, and pinned revision or container tag.
+
 ## LM-Eval-Harness
 
 [LM-Eval-Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides a unified framework to test generative language models on a large number of different evaluation tasks.
@@ -27,6 +61,8 @@ python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or mode
 ```sh
 python lm_eval_hf.py --model hf --model_args pretrained=<HF model folder or model card>,parallelize=True --tasks <comma separated tasks> --batch_size 4
 ```
+
+> **Note (Slurm interactive nodes):** On Slurm interactive nodes, `WORLD_SIZE` is set to the number of available GPUs in the shell environment. Running `python` directly causes `lm_eval` to hang waiting for peer ranks that were never spawned. Prepend `WORLD_SIZE=1` to the `python` commands above to fix this. This does not limit GPU usage, `parallelize=True` independently enables model parallelism across all available GPUs within the single process. The `accelerate launch` command manages `WORLD_SIZE` itself and does not require this workaround.
 
 - For data-parallel evaluation with model-sharding:
 
@@ -115,6 +151,32 @@ If `trust_remote_code` needs to be true, please append the command with the `--t
 ```sh
 python lm_eval_tensorrt_llm.py --model trt-llm --model_args tokenizer=<HF model folder>,checkpoint_dir=<Quantized checkpoint dir> --tasks <comma separated tasks> --batch_size <max batch size>
 ```
+
+> **_NOTE:_** Loglikelihood tasks (mmlu, hellaswag, arc, ...) need **TensorRT-LLM >=
+> 1.3.0rc11**, which is when the engine started returning the requested token in every
+> `prompt_logprobs` entry. Earlier releases return only the top-1 token per position, so a
+> continuation token's logprob cannot be recovered and the run aborts with a clear error.
+> Generative tasks (gsm8k, ifeval) are unaffected.
+
+> **_NOTE:_** Set `max_input_len` and `max_output_len` explicitly. They default to 2048 and
+> 512, and prompts longer than `max_input_len` are silently truncated, 5-shot MMLU or
+> gsm8k prompts exceed 2048 tokens. `max_seq_len` of the engine is their sum.
+
+> **_NOTE:_** `tensor_parallel_size` defaults to 1; set it to the number of GPUs the
+> checkpoint needs. `pipeline_parallel_size` is also supported.
+
+> **_NOTE:_** Use `lm_eval_trtllm.py` rather than the plain `lm_eval` CLI. lm-eval 0.4.12's
+> `trtllm` backend misaligns TensorRT-LLM's `prompt_logprobs` by one position, so every
+> loglikelihood task (hellaswag, mmlu, arc, ...) fails with a `KeyError`;
+> `lm_eval_trtllm.py` overrides the alignment. It goes away once the fix lands upstream.
+
+> **_NOTE:_** The backend forwards only a fixed set of arguments to TensorRT-LLM, so the
+> tuning the old `lm_eval_tensorrt_llm.py` applied is not reachable: expert parallelism is
+> left at the TensorRT-LLM default (MoE checkpoints can fail in DeepEP kernels on some
+> GPUs, e.g. SM 12.0) and the KV cache uses 90% of free GPU memory rather than 70%. Lower
+> `tensor_parallel_size` if you hit either.
+
+`lm_eval_tensorrt_llm.py` (`--model trt-llm`) has been removed; use the command above.
 
 ## MMLU
 

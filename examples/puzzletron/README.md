@@ -144,33 +144,32 @@ selection, materialization, and report lineage remain connected. Configure
 that route with the
 [post-MIP pipeline guide](docs/post_mip_pipeline.md#downstream-evaluation).
 
-To evaluate a compatible local text checkpoint without creating a campaign,
-run the default one-GPU smoke in the Puzzletron worker environment:
+To evaluate a compatible local Hugging Face checkpoint without creating a
+campaign, run the default one-GPU smoke in the Puzzletron worker environment:
 
 ```bash
-python examples/puzzletron/evaluate_lmms_checkpoint.py \
+python -m examples.puzzletron.evaluation.text \
   --checkpoint /path/to/checkpoint \
   --output-dir /path/to/results/checkpoint-smoke
 ```
 
 The smoke evaluates eight samples each from IFEval and GSM8K. See
-[text checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
+[checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
 full evaluation, model detection, runtime options, results, and troubleshooting.
 
-For a Qwen 3.5 0.8B vision-language checkpoint, use the separate pinned image
-and video benchmark workflow:
+Puzzletron uses `lmms-eval` as the default text evaluator. For benchmarks that
+are missing from the pinned revision, or for an explicitly requested alternate
+task contract, select the NeMo backend through the same entry point:
 
 ```bash
-python -m examples.puzzletron.evaluation.vlm.run \
-  --checkpoint /path/to/checkpoint \
-  --output-dir /path/to/results/vlm-smoke \
-  --hf-home /path/to/huggingface-cache \
-  --suite short
+python -m examples.puzzletron.evaluation.text --backend nemo \
+  --base-config path/to/base_nel_config.yaml \
+  --output path/to/text_benchmarks.yaml
 ```
 
-See [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) for the
-available smoke, quick, and full suites, pinned data preparation, evaluator
-compatibility, video requirements, and result interpretation.
+The NeMo route prepares configuration but does not launch an evaluation. See
+the [text evaluation guide](evaluation/text/README.md) for benchmark routing,
+available alternatives, and result-labeling requirements.
 
 ## Configure a campaign
 

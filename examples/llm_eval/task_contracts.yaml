@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: 1
+
+default_tasks:
+  - ns_livecodebench
+  - ns_scicode
+  - ns_ifbench
+
+tasks:
+  gpqa_diamond_aa_v3:
+    contract:
+      name: gpqa_diamond_aa_v3
+      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              n_samples: 16
+
+  mmlu_pro_aa_v3:
+    contract:
+      name: mmlu_pro_aa_v3
+      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+
+  AIME_2025_aa_v2:
+    contract:
+      name: AIME_2025_aa_v2
+      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
+      env_vars:
+        JUDGE_API_KEY: host:JUDGE_API_KEY
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              n_samples: 64
+              judge:
+                model_id:
+                url:
+                api_key: JUDGE_API_KEY
+    bindings:
+      - value: aime_judge_model_id
+        option: --aime-judge-model-id
+        path: [nemo_evaluator_config, config, params, extra, judge, model_id]
+      - value: aime_judge_url
+        option: --aime-judge-url
+        path: [nemo_evaluator_config, config, params, extra, judge, url]
+        validator: endpoint
+        suffix: /v1
+
+  ns_livecodebench:
+    contract:
+      name: ns_livecodebench
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 8
+              dataset_split: test_v6_2408_2505
+
+  ns_scicode:
+    contract:
+      name: ns_scicode
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              args: ++prompt_config=eval/scicode/default ++with_background=true
+              num_repeats: 8
+
+  ns_ifbench:
+    contract:
+      name: ns_ifbench
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              num_repeats: 5
+
+  ns_hle_aa:
+    contract:
+      name: ns_hle_aa
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+      env_vars:
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
+      nemo_evaluator_config:
+        config:
+          params:
+            extra:
+              judge:
+                model_id:
+                url:
+                api_key: INFERENCE_API_KEY
+    bindings:
+      - value: hle_judge_model_id
+        option: --hle-judge-model-id
+        path: [nemo_evaluator_config, config, params, extra, judge, model_id]
+      - value: ns_judge_url
+        option: --ns-judge-url
+        path: [nemo_evaluator_config, config, params, extra, judge, url]
+        validator: endpoint
+        suffix: /v1
+
+  ns_aa_lcr:
+    contract:
+      name: ns_aa_lcr
+      container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
+      env_vars:
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
+        LOG_LEVEL: lit:WARNING
+      nemo_evaluator_config:
+        target:
+          api_endpoint:
+            adapter_config:
+              use_request_logging: false
+              use_response_logging: false
+        config:
+          params:
+            parallelism:
+            extra:
+              num_repeats: 16
+              judge:
+                model_id:
+                url:
+                api_key: INFERENCE_API_KEY
+    bindings:
+      - value: lcr_parallelism
+        option: --lcr-parallelism
+        path: [nemo_evaluator_config, config, params, parallelism]
+        validator: positive_integer
+      - value: lcr_judge_model_id
+        option: --lcr-judge-model-id
+        path: [nemo_evaluator_config, config, params, extra, judge, model_id]
+      - value: ns_judge_url
+        option: --ns-judge-url
+        path: [nemo_evaluator_config, config, params, extra, judge, url]
+        validator: endpoint
+        suffix: /v1
+
+  tau2_bench_telecom:
+    contract:
+      name: tau2_bench_telecom
+      container: nvcr.io/nvidia/eval-factory/tau2-bench:26.03
+      env_vars:
+        INFERENCE_API_KEY: host:INFERENCE_API_KEY
+      nemo_evaluator_config:
+        config:
+          params:
+            parallelism:
+            extra:
+              cache:
+                cache_dir: /results/native_cache
+                enabled: true
+              skip_failed_samples: true
+              n_samples: 8
+              user:
+                model_id:
+                url:
+                api_key: INFERENCE_API_KEY
+              judger:
+                model_id:
+                url:
+                api_key: INFERENCE_API_KEY
+    bindings:
+      - value: tau2_parallelism
+        option: --tau2-parallelism
+        path: [nemo_evaluator_config, config, params, parallelism]
+        validator: positive_integer
+        maximum: 512
+      - value: tau2_user_model_id
+        option: --tau2-user-model-id
+        path: [nemo_evaluator_config, config, params, extra, user, model_id]
+      - value: tau2_endpoint_url
+        option: --tau2-endpoint-url
+        path: [nemo_evaluator_config, config, params, extra, user, url]
+        validator: endpoint
+        suffix: /v1/chat/completions
+      - value: tau2_judge_model_id
+        option: --tau2-judge-model-id
+        path: [nemo_evaluator_config, config, params, extra, judger, model_id]
+      - value: tau2_endpoint_url
+        option: --tau2-endpoint-url
+        path: [nemo_evaluator_config, config, params, extra, judger, url]
+        validator: endpoint
+        suffix: /v1/chat/completions

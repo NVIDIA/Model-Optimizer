@@ -8,19 +8,11 @@
 
 MMMU-Pro is a multimodal task. Use a multimodal-capable endpoint.
 
-## YAML Fragment
+## Contract Source
 
-Use this inside the top-level `evaluation.tasks` list:
-
-```yaml
-- name: ns_mmmu_pro
-  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
-  nemo_evaluator_config:
-    config:
-      params:
-        extra:
-          num_repeats: 1
-```
+This multimodal task is outside the text compiler's catalog. Use the
+Puzzletron VLM evaluation path and its maintained harness contract; do not add a
+second task definition here.
 
 ## Score Extraction from mlflow
 
