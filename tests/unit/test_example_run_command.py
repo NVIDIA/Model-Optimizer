@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for the example-command runner shared by the example tests."""
 
+import contextlib
 import os
 import signal
 import time
@@ -37,17 +38,20 @@ def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
             os.environ.copy(),
         )
 
-    assert returncode == -9
-    assert "out" in output  # captured despite the survivor
-    assert time.monotonic() - started < 30
-
     survivor = int(pid_file.read_text())
-    for _ in range(50):  # the group kill is asynchronous
-        try:
-            os.kill(survivor, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(survivor, signal.SIGKILL)
-        pytest.fail(f"survivor {survivor} outlived _run_capturing")
+    try:
+        assert returncode == -9
+        assert "out" in output  # captured despite the survivor
+        assert time.monotonic() - started < 10  # the patched grace period is 1s
+
+        for _ in range(50):  # the group kill is asynchronous
+            try:
+                os.kill(survivor, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"survivor {survivor} outlived _run_capturing")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(survivor, signal.SIGKILL)

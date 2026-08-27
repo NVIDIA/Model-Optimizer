@@ -155,7 +155,8 @@ Download data
 
 ```bash
 mkdir -p data
-wget https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar -O data/mmlu.tar
+wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+    https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar -O data/mmlu.tar
 tar -xf data/mmlu.tar -C data && mv data/data data/mmlu
 cd ..
 ```
