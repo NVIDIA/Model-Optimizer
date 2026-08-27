@@ -21,7 +21,9 @@ import pytest
 from _test_utils.examples import run_command
 
 
-def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(monkeypatch, tmp_path):
+def test_run_capturing_does_not_block_on_a_survivor_holding_the_pipe(
+    skip_on_windows, monkeypatch, tmp_path
+):
     """A killed command whose descendant inherited the output pipe must not hang the caller."""
     monkeypatch.setattr(run_command, "_ORPHAN_PIPE_TIMEOUT_S", 1)
 
