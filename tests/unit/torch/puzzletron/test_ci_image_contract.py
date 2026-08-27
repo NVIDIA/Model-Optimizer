@@ -206,7 +206,11 @@ def test_gpu_nox_session_overlays_before_verification_and_lifecycle():
     )
     lifecycle = next(event for event in events if event[:3] == ("python", "-m", "pytest"))
     assert events.index(install) < events.index(verify) < events.index(lifecycle)
-    assert lifecycle[-1].endswith("test_tiny_qwen_campaign_uses_current_public_route")
+    lifecycle_test = (
+        "tests/gpu/torch/puzzletron/test_puzzletron.py::"
+        "test_tiny_qwen_campaign_uses_current_public_route"
+    )
+    assert lifecycle_test in lifecycle
 
 
 def test_image_workflow_builds_once_and_exercises_lifecycle_ci(project_root_path):
@@ -364,9 +368,10 @@ def test_image_excludes_checked_in_reports(project_root_path):
 
 def test_cpu_contract_lane_watches_all_image_contract_inputs(project_root_path):
     workflow_path = project_root_path / ".github/workflows/unit_tests.yml"
-    workflow = yaml.load(workflow_path.read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.safe_load(workflow_path.read_text())
 
-    push_paths = workflow["on"]["push"]["paths"]
+    # PyYAML applies YAML 1.1 boolean resolution to GitHub's unquoted `on` key.
+    push_paths = workflow[True]["push"]["paths"]
     changed_files_step = next(
         step
         for step in workflow["jobs"]["check-file-changes"]["steps"]

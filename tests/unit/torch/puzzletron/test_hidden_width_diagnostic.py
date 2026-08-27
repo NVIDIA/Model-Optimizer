@@ -15,14 +15,22 @@
 
 import json
 
+import pytest
+
+from modelopt.torch.puzzletron.manifest import (
+    StageManifest,
+    validate_stage_execution_record,
+    write_stage_manifest,
+)
+from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import (
     _diagnostic_checkpoint_needs_rebuild,
     _hidden_only_diagnostic_ready,
     _hidden_width_ranking_verdict,
     _hidden_width_result_metrics,
-    _merge_reused_sort_equivalence,
     _near_teacher_axis_targets,
     _parent_sweep_sanity_verdict,
+    _publish_parent_sweep_sanity,
     _ratio_aligned_hidden_widths,
     _select_diagnostic_hidden_width,
     _select_layers,
@@ -135,14 +143,10 @@ def test_hidden_only_guard_allows_nonmaster_rank_without_summary():
         axes=["hidden_width"], hidden_width_summary=None, is_master=False
     )
 
-    try:
+    with pytest.raises(RuntimeError, match="rank 0"):
         _hidden_only_diagnostic_ready(
             axes=["hidden_width"], hidden_width_summary=None, is_master=True
         )
-    except RuntimeError as error:
-        assert "rank 0" in str(error)
-    else:
-        raise AssertionError("master rank without a width verdict should fail")
 
 
 def test_diagnostic_retry_rebuilds_partial_indexed_checkpoint(tmp_path):
@@ -223,25 +227,38 @@ def test_hidden_width_diagnostic_preserves_all_available_solution_metrics():
     assert all(metrics[name] == raw[name]["avg"] for name in metric_names)
 
 
-def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
-    existing = {
-        "passed": True,
-        "teacher": {"lm_loss": 1.2},
-        "sorted_teacher": {"lm_loss": 1.2001},
-        "reverse_sorted": {"lm_loss": 1.5},
-    }
-    reuse = {
+def test_parent_sweep_keeps_sort_evidence_immutable(monkeypatch, tmp_path):
+    sort_summary_path = tmp_path / "artifacts" / "sort_sanity" / "summary.json"
+    sort_summary_path.parent.mkdir(parents=True)
+    sort_summary_path.write_text('{"passed": true, "delta": 0.0001}\n')
+    manifest = StageManifest(stage="sort_sanity", config={"puzzle_dir": str(tmp_path)})
+    manifest.complete(outputs={"summary_path": str(sort_summary_path)})
+    manifest_path = tmp_path / "manifests" / "sort_sanity.json"
+    write_stage_manifest(manifest_path, manifest)
+    original_summary = sort_summary_path.read_bytes()
+
+    sort_equivalence = {
         "passed": True,
         "reused_parent_sweep": True,
         "equivalence": {"passed": True},
     }
+    monkeypatch.setattr(
+        diagnostics,
+        "aggregate_parent_sweep_sanity",
+        lambda *_args, **_kwargs: ({"findings": []}, {"findings": []}, ["ffn_intermediate"]),
+    )
 
-    merged = _merge_reused_sort_equivalence(existing, reuse)
+    width_path, _ = _publish_parent_sweep_sanity(
+        puzzle_dir=tmp_path,
+        parent_summary={},
+        hidden_width_summary=None,
+        diag_cfg={},
+        sort_equivalence=sort_equivalence,
+    )
 
-    assert merged["teacher"] == existing["teacher"]
-    assert merged["sorted_teacher"] == existing["sorted_teacher"]
-    assert merged["reverse_sorted"] == existing["reverse_sorted"]
-    assert merged["reused_parent_sweep"] is True
+    assert sort_summary_path.read_bytes() == original_summary
+    validate_stage_execution_record(manifest_path, expected_stage="sort_sanity")
+    assert json.loads(width_path.read_text())["sort_equivalence"] == sort_equivalence
 
 
 def test_parent_sweep_sort_miss_is_blocking_but_width_miss_remains_advisory():

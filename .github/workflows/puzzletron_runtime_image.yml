@@ -116,9 +116,11 @@ jobs:
       - name: Report intentionally scoped runtime-image validation
         if: needs.pr-gate.outputs.run_tests != 'true'
         run: |
-          echo "## Puzzletron runtime image validation was not required" >> "${GITHUB_STEP_SUMMARY}"
-          echo >> "${GITHUB_STEP_SUMMARY}"
-          echo "No standalone runtime-image contract changed in this pull request." >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "## Puzzletron runtime image validation was not required"
+            echo
+            echo "No standalone runtime-image contract changed in this pull request."
+          } >> "${GITHUB_STEP_SUMMARY}"
       - name: Required runtime-image validation did not succeed
         if: >-
           ${{ needs.pr-gate.result != 'success' ||

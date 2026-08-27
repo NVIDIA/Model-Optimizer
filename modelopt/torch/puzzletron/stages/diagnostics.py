@@ -1606,16 +1606,6 @@ def _hidden_width_result_metrics(raw: dict[str, Any]) -> dict[str, float | None]
     return {metric: _metric_avg(raw, metric) for metric in metric_names}
 
 
-def _merge_reused_sort_equivalence(
-    existing: dict[str, Any], reuse: dict[str, Any]
-) -> dict[str, Any]:
-    """Add parent-sweep provenance without discarding an earlier rich diagnosis."""
-
-    merged = dict(existing)
-    merged.update(reuse)
-    return merged
-
-
 def _parent_sweep_sanity_verdict(width_summary: dict[str, Any], sort_summary: dict[str, Any]):
     """Combine advisory width quality with blocking reused-sort correctness."""
 
@@ -2019,6 +2009,7 @@ def _publish_parent_sweep_sanity(
     parent_summary: dict[str, Any],
     hidden_width_summary: dict[str, Any] | None,
     diag_cfg: dict[str, Any],
+    sort_equivalence: dict[str, Any],
 ) -> tuple[Path, Path]:
     """Publish scalable width and physical-equivalence summaries from one sweep."""
 
@@ -2054,6 +2045,7 @@ def _publish_parent_sweep_sanity(
         hidden_width_summary,
         metric_specs=metric_specs,
     )
+    width_summary["sort_equivalence"] = canonicalize(sort_equivalence)
     provenance = {
         "backend": "distributed_parent_sweep",
         "axes": axes,
@@ -2665,17 +2657,6 @@ def _activation_diagnostic_parent_sweep(
                 "selection_basis": "original_order_prefix",
                 "is_seeded_random_permutation": False,
             }
-            summary_path = artifacts_dir / "activation_diagnostic_summary.json"
-            summary_path.write_text(
-                json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
-            )
-            _publish_parent_sweep_sanity(
-                puzzle_dir=puzzle_dir,
-                parent_summary=summary,
-                hidden_width_summary=hidden_width_summary,
-                diag_cfg=diag_cfg,
-            )
-
             activation_equivalence = (
                 (sweep_manifest.get("parents") or {}).get("activation") or {}
             ).get("equivalence") or {}
@@ -2684,12 +2665,6 @@ def _activation_diagnostic_parent_sweep(
                 for finding in activation_equivalence.get("findings") or ()
             ]
             sort_passed = activation_equivalence.get("passed") is True
-            sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
-            sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
-            sort_summary_path = sort_equivalence_dir / "summary.json"
-            existing_sort_summary = (
-                json.loads(sort_summary_path.read_text()) if sort_summary_path.is_file() else {}
-            )
             reuse_sort_summary = {
                 "passed": sort_passed,
                 "reused_parent_sweep": True,
@@ -2701,16 +2676,17 @@ def _activation_diagnostic_parent_sweep(
                 "verdict": "passed" if sort_passed else "failed",
                 "parent_sweep_manifest": str(load_manifest_path),
             }
-            sort_summary_path.write_text(
-                json.dumps(
-                    _merge_reused_sort_equivalence(
-                        existing_sort_summary,
-                        reuse_sort_summary,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
+            summary["sort_equivalence"] = reuse_sort_summary
+            summary_path = artifacts_dir / "activation_diagnostic_summary.json"
+            summary_path.write_text(
+                json.dumps(canonicalize(summary), indent=2, sort_keys=True) + "\n"
+            )
+            _publish_parent_sweep_sanity(
+                puzzle_dir=puzzle_dir,
+                parent_summary=summary,
+                hidden_width_summary=hidden_width_summary,
+                diag_cfg=diag_cfg,
+                sort_equivalence=reuse_sort_summary,
             )
 
             cleanup_reverse = bool(diag_cfg.get("cleanup_reverse_on_success", True))
@@ -2731,8 +2707,7 @@ def _activation_diagnostic_parent_sweep(
 
     width_summary_path = puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
     width_verdict = json.loads(width_summary_path.read_text(encoding="utf-8"))
-    sort_summary_path = puzzle_dir / "artifacts" / "sort_sanity" / "summary.json"
-    sort_verdict = json.loads(sort_summary_path.read_text(encoding="utf-8"))
+    sort_verdict = dict(width_verdict.get("sort_equivalence") or {})
 
     return complete_sanity_stage(
         config,

@@ -30,8 +30,9 @@ def _environment():
 
 
 def _metadata(environment, *, grouped_name="nv_grouped_gemm", lmms_wandb="wandb>=0.16.0"):
+    grouped_metadata_path = environment["runtime_image"]["grouped_gemm"]["metadata_path"]
     sources = {
-        environment["runtime_image"]["grouped_gemm"]["metadata_path"]: f'''
+        grouped_metadata_path: f'''
 PACKAGE_NAME = "{grouped_name}"
 setup(name=PACKAGE_NAME)
 ''',
@@ -49,12 +50,50 @@ dependencies = ["wandb>=0.28.0"]
 
     def fetch(url):
         if "grouped_gemm" in url:
-            return sources["setup.py"]
+            return sources[grouped_metadata_path]
         if "lmms-eval" in url:
             return sources["lmms"]
         return sources["automodel"]
 
     return fetch
+
+
+def test_metadata_fetch_uses_fixed_https_host_and_timeout(monkeypatch):
+    calls = []
+
+    class Response:
+        status = 200
+
+        def read(self):
+            return b"metadata"
+
+    class Connection:
+        def __init__(self, host, *, timeout):
+            calls.append(("connect", host, timeout))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def request(self, method, path):
+            calls.append(("request", method, path))
+
+        def getresponse(self):
+            return Response()
+
+    monkeypatch.setattr(preflight_dependency_metadata, "HTTPSConnection", Connection)
+    url = "https://raw.githubusercontent.com/owner/repository/revision/pyproject.toml"
+
+    assert preflight_dependency_metadata._fetch_url(url) == "metadata"
+    assert calls == [
+        ("connect", "raw.githubusercontent.com", 30),
+        ("request", "GET", "/owner/repository/revision/pyproject.toml"),
+    ]
+
+    with pytest.raises(ValueError, match="unsupported pinned metadata URL"):
+        preflight_dependency_metadata._fetch_url("https://example.com/pyproject.toml")
 
 
 def test_preflight_accepts_pinned_distribution_names_and_compatible_dependencies():

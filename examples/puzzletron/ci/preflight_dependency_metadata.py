@@ -21,9 +21,11 @@ import argparse
 import ast
 import json
 import re
+from http import HTTPStatus
+from http.client import HTTPSConnection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.request import urlopen
+from urllib.parse import urlsplit
 
 import tomllib
 from packaging.requirements import Requirement
@@ -39,6 +41,7 @@ __all__ = ["validate_pinned_metadata"]
 
 _GITHUB_REPOSITORY = re.compile(r"https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)\.git")
 _REVISION = re.compile(r"[0-9a-f]{40}")
+_RAW_GITHUB_HOST = "raw.githubusercontent.com"
 
 
 def _raw_url(source: dict[str, Any]) -> str:
@@ -78,6 +81,26 @@ def _read_setup_name(text: str) -> str:
         if isinstance(name, ast.Name) and name.id in constants:
             return constants[name.id]
     raise ValueError("setup.py does not declare a statically inspectable distribution name")
+
+
+def _fetch_url(url: str) -> str:
+    """Fetch metadata only from the raw GitHub host emitted by ``_raw_url``."""
+
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != _RAW_GITHUB_HOST
+        or not parsed.path.startswith("/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"unsupported pinned metadata URL: {url!r}")
+    with HTTPSConnection(_RAW_GITHUB_HOST, timeout=30) as connection:
+        connection.request("GET", parsed.path)
+        response = connection.getresponse()
+        if response.status != HTTPStatus.OK:
+            raise ValueError(f"pinned metadata request failed with HTTP status {response.status}")
+        return response.read().decode()
 
 
 def _parse_metadata(metadata_path: str, text: str) -> tuple[str, list[str]]:
@@ -135,12 +158,7 @@ def validate_pinned_metadata(
     """Validate VCS distribution names and directly declared exact-pin compatibility."""
     validate_environment_contract(environment)
     if fetch_text is None:
-
-        def fetch_url(url: str) -> str:
-            with urlopen(url, timeout=30) as response:  # nosec B310
-                return response.read().decode()
-
-        fetch_text = fetch_url
+        fetch_text = _fetch_url
 
     sources = {
         "grouped_gemm": environment["runtime_image"]["grouped_gemm"],

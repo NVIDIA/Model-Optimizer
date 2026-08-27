@@ -44,7 +44,7 @@ def test_parent_sweep_resume_rejects_repeated_checkpoint_load():
 
 @pytest.mark.parametrize(
     ("config", "metric", "expected"),
-    (
+    [
         ({}, "raw_replacement_loss", 0.0),
         ({"comparison_tolerance": 1.0e-5}, "raw_replacement_loss", 1.0e-5),
         (
@@ -63,7 +63,7 @@ def test_parent_sweep_resume_rejects_repeated_checkpoint_load():
             "raw_replacement_loss",
             2.0e-3,
         ),
-    ),
+    ],
 )
 def test_hidden_width_realization_uses_physical_tolerance(config, metric, expected):
     assert _hidden_width_realization_tolerance(config, metric) == pytest.approx(expected)
@@ -229,6 +229,7 @@ def test_parent_sweep_publication_accepts_per_metric_physical_tolerances(tmp_pat
             },
             "require_physical_equivalence": True,
         },
+        sort_equivalence={"passed": True},
     )
 
     summary = json.loads(slicing_path.read_text())
@@ -263,6 +264,7 @@ def test_parent_sweep_physical_miss_is_published_as_correctness_failure(tmp_path
         parent_summary=parent_summary,
         hidden_width_summary=None,
         diag_cfg={"physical_equivalence_tolerance": 1.0e-3},
+        sort_equivalence={"passed": True},
     )
 
     summary = json.loads(slicing_path.read_text())

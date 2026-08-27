@@ -71,9 +71,12 @@ def test_calc_runtime_for_subblocks(tmp_path: Path):
     )
 
     assert set(runtime_by_subblock) == subblock_set
-    assert runtime_by_subblock[attn_noop] == 0.0
-    assert math.isfinite(runtime_by_subblock[attn])
-    assert math.isfinite(runtime_by_subblock[ffn])
+    assert runtime_by_subblock[attn_noop].total_ms == 0.0
+    assert runtime_by_subblock[attn_noop].prefill_ms == 0.0
+    for runtime in (runtime_by_subblock[attn], runtime_by_subblock[ffn]):
+        assert math.isfinite(runtime.total_ms)
+        assert math.isfinite(runtime.prefill_ms)
     # The 1-block model is always slower than the per-block extrapolation from
     # the 10-block model, so the (embedding + LM-head) overhead is positive.
-    assert no_block_runtime_ms > 0
+    assert no_block_runtime_ms.total_ms > 0
+    assert math.isfinite(no_block_runtime_ms.prefill_ms)
