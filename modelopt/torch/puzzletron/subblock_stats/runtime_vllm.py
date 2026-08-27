@@ -27,6 +27,7 @@ Usage:
 """
 
 import json
+import os
 import subprocess  # nosec B404
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,12 +80,19 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         str(runtime_config.num_iters),
         "--max-num-seqs",
         "1",
+        "--data-parallel-size",
+        str(runtime_config.data_parallel_size),
+        "--prefill-context-parallel-size",
+        str(runtime_config.prefill_context_parallel_size),
+        "--decode-context-parallel-size",
+        str(runtime_config.decode_context_parallel_size),
+        "--enable-expert-parallel"
+        if runtime_config.enable_expert_parallel
+        else "--no-enable-expert-parallel",
         "--tensor-parallel-size",
-        "1",
-        "--pipeline-parallel-size",
-        "1",
+        str(runtime_config.tensor_parallel_size),
         "--distributed-executor-backend",
-        "external_launcher",
+        "mp",  # "external_launcher",
         # Cap GPU memory so vLLM's startup free-memory check passes while the
         # parent puzzletron process is co-resident on the same GPU.
         "--gpu-memory-utilization",
@@ -93,6 +101,26 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
         "--optimization-level",
         "0",
     ]
+    if runtime_config.extra_args:
+        cmd.extend(runtime_config.extra_args.split(" "))
+
+    # Strip torchrun-injected distributed vars so vLLM's mp workers don't
+    # inherit an outer process group's rendezvous state, which causes a
+    # deadlock when vLLM tries to create its own Gloo CPU group.
+    _TORCHRUN_VARS = {
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_MAX_RESTARTS",
+        "TORCHELASTIC_RUN_ID",
+        "TORCHELASTIC_USE_AGENT_STORE",
+        "TORCHELASTIC_ERROR_FILE",
+    }
+    env = {k: v for k, v in os.environ.items() if k not in _TORCHRUN_VARS}
 
     # cmd is a fixed list of strings (no shell, no untrusted input).
     try:
@@ -101,7 +129,8 @@ def run_vllm_latency_benchmark(model_path: Path, runtime_config: RuntimeConfig) 
             check=True,
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minutes
+            timeout=3600,  # 1 hour
+            env=env,
         )  # nosec B603
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError("vLLM latency benchmark timed out") from exc
