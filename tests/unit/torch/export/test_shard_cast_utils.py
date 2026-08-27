@@ -29,6 +29,7 @@ from modelopt.torch.export.shard_cast_utils import (
     link_aux_files,
     mxfp4_kmax,
     quantize_mxfp4_to_nvfp4_lossless,
+    resolve_checkpoint_file,
     validate_aux_files,
 )
 from modelopt.torch.quantization.qtensor import MXFP4QTensor, NVFP4QTensor
@@ -117,6 +118,7 @@ def test_link_aux_files_accepts_huggingface_snapshot_blobs(tmp_path):
     blob.write_text("tokenizer")
     (snapshot / "tokenizer.json").symlink_to(os.path.relpath(blob, snapshot))
 
+    assert resolve_checkpoint_file(snapshot, "tokenizer.json") == blob.resolve()
     validate_aux_files(snapshot)
     output = tmp_path / "output"
     link_aux_files(snapshot, output)
@@ -142,6 +144,17 @@ def test_link_aux_files_rejects_unsafe_sources(tmp_path, source_kind, message):
         os.mkfifo(unsafe)
 
     with pytest.raises(ValueError, match=message):
+        resolve_checkpoint_file(source, unsafe.name)
+    with pytest.raises(ValueError, match=message):
         link_aux_files(source, tmp_path / "output")
 
     assert not (tmp_path / "output").exists()
+
+
+def test_resolve_checkpoint_file_rejects_oversized_metadata(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("12345")
+
+    with pytest.raises(ValueError, match="4-byte size limit"):
+        resolve_checkpoint_file(source, "config.json", max_bytes=4)

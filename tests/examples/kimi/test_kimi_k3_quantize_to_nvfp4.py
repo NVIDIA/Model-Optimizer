@@ -415,7 +415,7 @@ def test_manifest_and_index_replace_source_mxfp4_schema(tmp_path):
         hf_quant_config,
         attn_fp8=True,
     )
-    k3_cast._rewrite_config_json(source, output, hf_quant_config)
+    k3_cast._rewrite_config_json(source / "config.json", output, hf_quant_config)
 
     index = json.loads((output / "model.safetensors.index.json").read_text())
     weight_map = index["weight_map"]

@@ -52,6 +52,7 @@ __all__ = [
 _MXFP4_BLOCK = 32
 _MXFP4_BYTES_PER_BLOCK = 16
 _NVFP4_BLOCK = 16
+_MAX_CHECKPOINT_METADATA_BYTES = 128 * 1024 * 1024
 
 
 def dequantize_mxfp4_to_bf16(
@@ -203,6 +204,35 @@ def _snapshot_blob_root(source_root: Path) -> Path | None:
     return blob_root.resolve(strict=True) if blob_root.is_dir() else None
 
 
+def _allowed_source_roots(src_dir: Path) -> list[Path]:
+    source_root = src_dir.resolve(strict=True)
+    allowed_roots = [source_root]
+    if blob_root := _snapshot_blob_root(source_root):
+        allowed_roots.append(blob_root)
+    return allowed_roots
+
+
+def resolve_checkpoint_file(
+    src_dir: Path,
+    relative_path: str | Path,
+    *,
+    max_bytes: int | None = _MAX_CHECKPOINT_METADATA_BYTES,
+) -> Path:
+    """Resolve a contained regular checkpoint file and optionally bound its size."""
+    src = src_dir / relative_path
+    try:
+        resolved_src = src.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"checkpoint source is not a readable regular file: {src}") from exc
+    if not resolved_src.is_file():
+        raise ValueError(f"checkpoint source must resolve to a regular file: {src}")
+    if not any(_is_relative_to(resolved_src, root) for root in _allowed_source_roots(src_dir)):
+        raise ValueError(f"checkpoint source is outside the checkpoint directory: {src}")
+    if max_bytes is not None and resolved_src.stat().st_size > max_bytes:
+        raise ValueError(f"checkpoint source exceeds the {max_bytes}-byte size limit: {src}")
+    return resolved_src
+
+
 def _collect_aux_files(
     src_dir: Path,
     *,
@@ -210,11 +240,6 @@ def _collect_aux_files(
     skip_dir_names: Collection[str] = (),
     skip_file: Callable[[Path], bool] | None = None,
 ) -> tuple[list[Path], list[tuple[Path, Path]]]:
-    source_root = src_dir.resolve(strict=True)
-    allowed_roots = [source_root]
-    if blob_root := _snapshot_blob_root(source_root):
-        allowed_roots.append(blob_root)
-
     destination_dirs: list[Path] = []
     sources: list[tuple[Path, Path]] = []
     for root, dirs, files in os.walk(src_dir):
@@ -237,12 +262,7 @@ def _collect_aux_files(
                 continue
             if skip_file is not None and skip_file(relative_path):
                 continue
-            src = src_dir / relative_path
-            resolved_src = src.resolve(strict=True)
-            if not resolved_src.is_file():
-                raise ValueError(f"source must resolve to a regular file: {src}")
-            if not any(_is_relative_to(resolved_src, root) for root in allowed_roots):
-                raise ValueError(f"source file is outside the checkpoint directory: {src}")
+            resolved_src = resolve_checkpoint_file(src_dir, relative_path, max_bytes=None)
             sources.append((relative_path, resolved_src))
     return destination_dirs, sources
 

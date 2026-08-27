@@ -109,6 +109,7 @@ from modelopt.torch.export.shard_cast_utils import (
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
     quantize_mxfp4_to_nvfp4_lossless,
+    resolve_checkpoint_file,
     validate_aux_files,
     validate_paths,
 )
@@ -420,7 +421,7 @@ def _build_nvfp4_config_groups() -> dict[str, Any]:
 
 
 def _rewrite_config_json(
-    src_dir: Path,
+    src: Path,
     dst_dir: Path,
     quantized_layer_names: list[str],
 ) -> None:
@@ -431,7 +432,6 @@ def _rewrite_config_json(
     into ``quantization_config`` for loaders that prefer config.json over the
     sibling ``hf_quant_config.json``.
     """
-    src = src_dir / "config.json"
     dst = dst_dir / "config.json"
     cfg = json.loads(src.read_text())
     quant_cfg = cfg.get("quantization_config")
@@ -533,11 +533,11 @@ def main():
 
     validate_paths(args.source_ckpt, args.output_ckpt)
 
-    src_index_path = args.source_ckpt / "model.safetensors.index.json"
-    assert src_index_path.exists(), (
-        f"{src_index_path} not found — --source_ckpt must be the original "
-        f"HF 64-shard release, not the MP-sharded derivative"
+    src_index_path = resolve_checkpoint_file(
+        args.source_ckpt,
+        "model.safetensors.index.json",
     )
+    src_config_path = resolve_checkpoint_file(args.source_ckpt, "config.json")
     src_index = json.loads(src_index_path.read_text())
 
     amax, input_fallback = _load_merged_amax(args.amax_path, world_size=args.world_size)
@@ -598,7 +598,7 @@ def main():
     )
     _log("[config] rewriting config.json (marking moe_quant_algo=NVFP4)")
     _rewrite_config_json(
-        args.source_ckpt,
+        src_config_path,
         args.output_ckpt,
         sorted(quantized),
     )

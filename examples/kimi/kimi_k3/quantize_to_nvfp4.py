@@ -107,6 +107,7 @@ from modelopt.torch.export.shard_cast_utils import (
     prepare_output_dir,
     quantize_mxfp4_to_nvfp4,
     quantize_mxfp4_to_nvfp4_lossless,
+    resolve_checkpoint_file,
     validate_aux_files,
     validate_paths,
 )
@@ -654,7 +655,7 @@ def _build_hf_quant_config(
     }
 
 
-def _rewrite_config_json(src_dir: Path, dst_dir: Path, hf_quant_config: dict[str, Any]) -> None:
+def _rewrite_config_json(src: Path, dst_dir: Path, hf_quant_config: dict[str, Any]) -> None:
     """Copy ``config.json`` and replace the source MXFP4 manifest.
 
     The source ``quantization_config`` is compressed-tensors ``mxfp4-pack-quantized``
@@ -662,7 +663,7 @@ def _rewrite_config_json(src_dir: Path, dst_dir: Path, hf_quant_config: dict[str
     would make a loader dequantize the NVFP4 experts as MXFP4. It is replaced
     wholesale by the ModelOpt mixed-precision manifest.
     """
-    cfg = json.loads((src_dir / "config.json").read_text())
+    cfg = json.loads(src.read_text())
     quant_cfg = convert_hf_quant_config_format(hf_quant_config)
     # ``convert_hf_quant_config_format`` targets the llm-compressor layout and
     # stamps ``quant_method="modelopt"``. Loaders gate their mixed-precision
@@ -952,8 +953,11 @@ def main():
         p.error("--device cuda requires --jobs 1 so workers do not contend for one GPU")
 
     validate_paths(args.source_ckpt, args.output_ckpt)
-    src_index_path = args.source_ckpt / "model.safetensors.index.json"
-    assert src_index_path.exists(), f"{src_index_path} not found"
+    src_index_path = resolve_checkpoint_file(
+        args.source_ckpt,
+        "model.safetensors.index.json",
+    )
+    src_config_path = resolve_checkpoint_file(args.source_ckpt, "config.json")
     src_index = json.loads(src_index_path.read_text())
 
     shards = sorted(args.source_ckpt.glob("model-*-of-*.safetensors"))
@@ -1119,7 +1123,7 @@ def main():
         f"[config] rewriting config.json "
         f"(MIXED_PRECISION: NVFP4 experts + {attention_algo} attention)"
     )
-    _rewrite_config_json(args.source_ckpt, args.output_ckpt, hf_quant_config)
+    _rewrite_config_json(src_config_path, args.output_ckpt, hf_quant_config)
     _log(f"[aux] linking ancillary files from {args.source_ckpt}")
     link_aux_files(
         args.source_ckpt,
