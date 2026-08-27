@@ -93,7 +93,7 @@ def _read_npy_header(array_file, batch_path):
         raise ValueError(f"{batch_path} uses unsupported NPY version {version}")
     if dtype.hasobject:
         raise ValueError(f"{batch_path} contains an object array")
-    return tuple(shape), np.dtype(dtype)
+    return shape, dtype
 
 
 def _validate_array(
@@ -140,17 +140,14 @@ def _onnx_inputs(graph, calibration_shapes=None):
         if value.name in initializer_names:
             continue
         tensor_type = value.type.tensor_type
-        inputs[value.name] = (
-            (
-                tuple(
-                    dim.dim_value if dim.HasField("dim_value") else None
-                    for dim in tensor_type.shape.dim
-                )
-                if tensor_type.HasField("shape")
-                else None
-            ),
-            np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type)),
-        )
+        input_shape = None
+        if tensor_type.HasField("shape"):
+            input_shape = tuple(
+                dim.dim_value if dim.HasField("dim_value") else None
+                for dim in tensor_type.shape.dim
+            )
+        dtype = np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type))
+        inputs[value.name] = (input_shape, dtype)
 
     shape_overrides = {} if calibration_shapes is None else parse_shapes_spec(calibration_shapes)
     unknown_inputs = shape_overrides.keys() - inputs.keys()

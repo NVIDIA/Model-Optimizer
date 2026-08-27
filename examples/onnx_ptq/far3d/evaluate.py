@@ -49,7 +49,7 @@ STATE_NAMES = (
 
 class Far3DDecoderRunner(TensorRTRunner):
     def __init__(self, engine_path, input_callback=None):
-        super().__init__(engine_path, STATE_NAMES, input_callback)
+        super().__init__(engine_path, state_names=STATE_NAMES, input_callback=input_callback)
         self.scene_token = None
         self.timestamp_offset = None
 

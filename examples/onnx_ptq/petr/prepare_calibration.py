@@ -89,13 +89,12 @@ def main():
         model,
         args.backbone_engine,
         args.head_engine,
-        (backbone_writer, head_writer),
+        backbone_input_callback=backbone_writer,
+        head_input_callback=head_writer,
     )
     stream = torch.cuda.Stream()
     for data in loader:
         pipeline(stream, data)
-        if backbone_writer.saved == args.num_samples:
-            break
     if backbone_writer.saved != args.num_samples or head_writer.saved != args.num_samples:
         raise RuntimeError(
             f"Prepared {backbone_writer.saved} backbone and {head_writer.saved} head batches; "

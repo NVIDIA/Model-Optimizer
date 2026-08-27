@@ -534,8 +534,7 @@ def main():
                         "For trusted sources, you may enable pickle deserialization by setting the "
                         "--trust_calibration_data flag."
                     ) from e
-                else:
-                    raise
+                raise
 
     # Autotune configs
     autotune_enabled = args.autotune is not None

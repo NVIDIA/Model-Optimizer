@@ -29,7 +29,10 @@ def parse_args():
     parser.add_argument("--encoder-onnx", required=True, help="Path to far3d.encoder.onnx")
     parser.add_argument("--decoder-onnx", required=True, help="Path to far3d.decoder.onnx")
     parser.add_argument(
-        "--calibration-dir", required=True, help="Directory created by prepare_calibration.py"
+        "--calibration-dir",
+        required=True,
+        type=Path,
+        help="Directory created by prepare_calibration.py",
     )
     parser.add_argument("--quantization-mode", choices=("int8", "fp8"), default="int8")
     parser.add_argument(
@@ -49,7 +52,7 @@ def parse_args():
 
 
 def quantize_encoder(args):
-    encoder_dir = Path(args.calibration_dir)
+    encoder_dir = args.calibration_dir
     if (encoder_dir / "encoder").is_dir():
         encoder_dir /= "encoder"
     excluded_nodes = find_vovnet_nodes_to_exclude(args.encoder_onnx)
@@ -72,7 +75,7 @@ def quantize_encoder(args):
 
 
 def quantize_decoder(args):
-    decoder_dir = Path(args.calibration_dir) / "decoder"
+    decoder_dir = args.calibration_dir / "decoder"
     calibration_reader = NpzCalibrationReader(
         decoder_dir,
         args.decoder_onnx,

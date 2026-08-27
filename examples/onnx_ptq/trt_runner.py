@@ -100,17 +100,10 @@ class TensorRTRunner:
         for tensor in self.state.values():
             tensor.zero_()
 
-    @staticmethod
-    def input_key(name, inputs):
-        if name in inputs:
-            return name
-        base_name = _base_tensor_name(name)
-        if base_name in inputs:
-            return base_name
-        raise KeyError(f"Missing TensorRT input {name}")
-
     def prepare_input(self, name, inputs):
-        input_key = self.input_key(name, inputs)
+        input_key = name if name in inputs else _base_tensor_name(name)
+        if input_key not in inputs:
+            raise KeyError(f"Missing TensorRT input {name}")
         shape = self.input_shapes[name]
         value = inputs[input_key].to(device="cuda", dtype=self.tensor_dtypes[name])
         if tuple(value.shape) != shape:
@@ -125,7 +118,7 @@ class TensorRTRunner:
         return input_key, value
 
     def __call__(self, stream, **inputs):
-        input_buffers = {}
+        input_buffers = []
         callback_inputs = {}
         for name, shape in self.input_shapes.items():
             if name in self.state:
@@ -135,7 +128,7 @@ class TensorRTRunner:
             input_key, value = self.prepare_input(name, inputs)
             buffer = aligned_tensor(shape, value.dtype, value.device)
             buffer.copy_(value)
-            input_buffers[name] = buffer
+            input_buffers.append(buffer)
             callback_inputs[input_key] = buffer
             self.context.set_tensor_address(name, buffer.data_ptr())
 

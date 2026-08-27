@@ -58,16 +58,10 @@ def add_frame(nuscenes, data_root, sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_m
         "calibrated_sensor", sample_data["calibrated_sensor_token"]
     )
 
-    sweep_cam["ego2global_translation"] = pose_record["translation"]
-    sweep_cam["ego2global_rotation"] = pose_record["rotation"]
-    sweep_cam["sensor2ego_translation"] = calibrated_sensor_record["translation"]
-    sweep_cam["sensor2ego_rotation"] = calibrated_sensor_record["rotation"]
-    sweep_cam["cam_intrinsic"] = calibrated_sensor_record["camera_intrinsic"]
-
-    l2e_r_s_mat = Quaternion(sweep_cam["sensor2ego_rotation"]).rotation_matrix
-    e2g_r_s_mat = Quaternion(sweep_cam["ego2global_rotation"]).rotation_matrix
-    e2g_t_s = sweep_cam["ego2global_translation"]
-    l2e_t_s = sweep_cam["sensor2ego_translation"]
+    l2e_r_s_mat = Quaternion(calibrated_sensor_record["rotation"]).rotation_matrix
+    e2g_r_s_mat = Quaternion(pose_record["rotation"]).rotation_matrix
+    e2g_t_s = pose_record["translation"]
+    l2e_t_s = calibrated_sensor_record["translation"]
     rotation = (l2e_r_s_mat.T @ e2g_r_s_mat.T) @ (
         np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
     )
@@ -86,28 +80,18 @@ def add_frame(nuscenes, data_root, sample_data, e2g_t, l2e_t, l2e_r_mat, e2g_r_m
     lidar2cam_rt = np.eye(4)
     lidar2cam_rt[:3, :3] = lidar2cam_r.T
     lidar2cam_rt[3, :3] = -lidar2cam_t
-    intrinsic = np.array(sweep_cam["cam_intrinsic"])
+    intrinsic = np.array(calibrated_sensor_record["camera_intrinsic"])
     viewpad = np.eye(4)
     viewpad[: intrinsic.shape[0], : intrinsic.shape[1]] = intrinsic
     sweep_cam["intrinsics"] = viewpad.astype(np.float32)
     sweep_cam["extrinsics"] = lidar2cam_rt.astype(np.float32)
     sweep_cam["lidar2img"] = (viewpad @ lidar2cam_rt.T).astype(np.float32)
 
-    for key in (
-        "ego2global_translation",
-        "ego2global_rotation",
-        "sensor2ego_translation",
-        "sensor2ego_rotation",
-        "cam_intrinsic",
-    ):
-        sweep_cam.pop(key)
-
     return sweep_cam
 
 
 def add_sweeps(key_infos, nuscenes, data_root):
-    for current_id in tqdm.tqdm(range(len(key_infos["infos"]))):
-        info = key_infos["infos"][current_id]
+    for info in tqdm.tqdm(key_infos["infos"]):
         e2g_t = info["ego2global_translation"]
         l2e_t = info["lidar2ego_translation"]
         l2e_r_mat = Quaternion(info["lidar2ego_rotation"]).rotation_matrix

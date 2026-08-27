@@ -29,12 +29,14 @@ RUN python -m pip install --no-cache-dir uv==0.12.3 && \
     uv python install 3.8.20 && \
     uv venv --seed --python 3.8.20 /opt/petr
 
-COPY examples/onnx_ptq/petr/requirements*.txt /tmp/petr-requirements/
-COPY examples/onnx_ptq/petr/mmdet3d-nuscenes-only.patch /tmp/petr-requirements/
+COPY examples/onnx_ptq/petr/requirements*.txt \
+    examples/onnx_ptq/petr/mmdet3d-nuscenes-only.patch \
+    /tmp/petr-requirements/
 # PETR uses nuScenes; remove mmdet3d's eager Lyft integration and unused PLY dependency.
-RUN env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
+RUN unset PIP_CONSTRAINT && \
+    /opt/petr/bin/python -m pip install --no-cache-dir \
         -r /tmp/petr-requirements/requirements-torch.txt && \
-    env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
+    /opt/petr/bin/python -m pip install --no-cache-dir \
         -r /tmp/petr-requirements/requirements.txt && \
     git clone --branch v1.0.0rc6 --depth 1 \
         https://github.com/open-mmlab/mmdetection3d.git /tmp/mmdetection3d && \
@@ -44,7 +46,7 @@ RUN env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
         /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
     git -C /tmp/mmdetection3d apply --index --unidiff-zero \
         /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
-    env -u PIP_CONSTRAINT /opt/petr/bin/python -m pip install --no-cache-dir \
+    /opt/petr/bin/python -m pip install --no-cache-dir \
         --no-build-isolation \
         /tmp/mmdetection3d && \
     /opt/petr/bin/python -m pip check && \

@@ -77,11 +77,19 @@ def build_runtime(config_path, checkpoint_path, cfg_options=None):
 
 
 class PETRPipeline:
-    def __init__(self, version, model, backbone_engine, head_engine, callbacks=(None, None)):
+    def __init__(
+        self,
+        version,
+        model,
+        backbone_engine,
+        head_engine,
+        backbone_input_callback=None,
+        head_input_callback=None,
+    ):
         self.version = version
         self.model = model
-        self.backbone = TensorRTRunner(backbone_engine, input_callback=callbacks[0])
-        self.head = TensorRTRunner(head_engine, input_callback=callbacks[1])
+        self.backbone = TensorRTRunner(backbone_engine, input_callback=backbone_input_callback)
+        self.head = TensorRTRunner(head_engine, input_callback=head_input_callback)
 
     @staticmethod
     def masks(features, img_metas):

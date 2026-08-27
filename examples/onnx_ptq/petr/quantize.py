@@ -81,7 +81,7 @@ def main():
         args.calibration_dir / "backbone",
         args.precision,
         backbone_output,
-        excluded,
+        nodes_to_exclude=excluded,
         max_calibration_batches=args.max_calibration_batches,
     )
     if args.quantize_head:
