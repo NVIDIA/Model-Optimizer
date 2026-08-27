@@ -3,6 +3,8 @@
 This example exports BEVFormer-tiny to ONNX, prepares temporal calibration data, quantizes the model to INT8 or FP8 with Model Optimizer, builds TensorRT engines, and evaluates NDS and mAP on the nuScenes validation set. It extends the [NVIDIA DL4AGX BEVFormer INT8 workflow](https://github.com/NVIDIA/DL4AGX/tree/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq) with FP8 and reuses the calibration reader shared by the Model Optimizer FAR3D and PETR examples.
 
 The container pins [BEVFormer_tensorrt](https://github.com/DerryHub/BEVFormer_tensorrt/tree/303d3140c14016047c07f9db73312af364f0dd7c) and applies the TensorRT 10 compatibility patch from DL4AGX. The exported model uses custom TensorRT plugins, so export, calibration, engine building, and evaluation must use the plugin library built in the container.
+The Docker build also pins TensorRT, MMCV, and MMDetection sources. These projects and the
+downloaded checkpoint and dataset remain subject to their upstream licenses and terms.
 
 ## 1. Build and start the container
 
@@ -13,6 +15,17 @@ docker build \
   -f examples/onnx_ptq/bevformer/Dockerfile \
   -t bevformer-modelopt .
 ```
+
+The CUDA 13-compatible ONNX Runtime package comes from a nightly feed whose older builds may
+be pruned. If the pinned build is no longer available, choose an available CUDA 13 nightly and
+override the version without editing the Dockerfile:
+
+```bash
+docker build --build-arg ORT_VERSION=<available-version> \
+  -f examples/onnx_ptq/bevformer/Dockerfile -t bevformer-modelopt .
+```
+
+Rebuild the engines and revalidate calibration, accuracy, and latency after changing this pin.
 
 Download the nuScenes v1.0 trainval set and CAN bus expansion data. Use the dataset, CAN bus data, and checkpoint only under their upstream terms, including the [nuScenes terms of use](https://www.nuscenes.org/terms-of-use). Start the container with the dataset and an artifact directory mounted:
 

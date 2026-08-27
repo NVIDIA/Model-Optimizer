@@ -16,6 +16,7 @@
 FROM nvcr.io/nvidia/pytorch:26.01-py3
 
 ARG NUM_JOBS=8
+ARG ORT_VERSION=1.24.0.dev20260123002
 ARG DL4AGX_COMMIT=9f7b29104c253d5bc68334e7b83b3eecb72d4572
 ARG BEVFORMER_TRT_COMMIT=303d3140c14016047c07f9db73312af364f0dd7c
 ARG TENSORRT_COMMIT=3b4ddc1d45f11167f2ea53dc6046bba8df800e2d
@@ -43,7 +44,7 @@ RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
     env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --pre \
         --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/ \
         --force-reinstall --no-deps \
-        onnxruntime-gpu==1.24.0.dev20260123002 && \
+        onnxruntime-gpu==${ORT_VERSION} && \
     env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
         -r /tmp/bevformer-requirements.txt
 
@@ -58,7 +59,8 @@ RUN git clone https://github.com/NVIDIA/DL4AGX.git /workspace/DL4AGX && \
 RUN git clone https://github.com/NVIDIA/TensorRT.git /workspace/TensorRT && \
     git -C /workspace/TensorRT checkout ${TENSORRT_COMMIT} && \
     cd /workspace/TensorRT/tools/pytorch-quantization && \
-    MAX_JOBS=${NUM_JOBS} env -u PIP_CONSTRAINT python setup.py install
+    MAX_JOBS=${NUM_JOBS} env -u PIP_CONSTRAINT python -m pip install \
+        --no-cache-dir . --no-build-isolation
 
 RUN git clone https://github.com/open-mmlab/mmcv.git \
         /workspace/BEVFormer_tensorrt/third_party/mmcv && \

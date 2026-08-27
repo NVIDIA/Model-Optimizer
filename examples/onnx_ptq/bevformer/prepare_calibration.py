@@ -1,6 +1,21 @@
 # Adapted from https://github.com/NVIDIA/DL4AGX/blob/9f7b29104c253d5bc68334e7b83b3eecb72d4572/AV-Solutions/bevformer-int8-eq/tools/calib_data_prep.py.
 #
-# SPDX-FileCopyrightText: Copyright (c) 2024, 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +32,7 @@
 
 import argparse
 import copy
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +81,7 @@ def build_inputs(data, prev_bev, previous_frame):
     else:
         metadata["can_bus"][:3] = 0
         metadata["can_bus"][-1] = 0
+        prev_bev = np.zeros_like(prev_bev)
 
     inputs = {
         "image": image,
@@ -80,7 +97,30 @@ def build_inputs(data, prev_bev, previous_frame):
     return inputs
 
 
+def prepare_batches(loader, session, output_names, prev_bev_shape, output_dir, num_samples):
+    prev_bev = np.zeros(prev_bev_shape, dtype=np.float32)
+    previous_frame = {"scene_token": None, "position": 0, "angle": 0}
+    saved = 0
+    with tempfile.TemporaryDirectory(dir=output_dir) as staging_dir:
+        staging_dir = Path(staging_dir)
+        for data in loader:
+            inputs = build_inputs(data, prev_bev, previous_frame)
+            outputs = dict(zip(output_names, session.run(output_names, inputs), strict=True))
+            np.savez(staging_dir / f"batch_{saved:04d}.npz", **inputs)
+            prev_bev = outputs["bev_embed"]
+            saved += 1
+            if saved == num_samples:
+                break
+
+        if saved != num_samples:
+            raise RuntimeError(f"Prepared {saved} of {num_samples} requested samples")
+        for batch_path in sorted(staging_dir.glob("*.npz")):
+            batch_path.replace(output_dir / batch_path.name)
+    return saved
+
+
 def main():
+    # Keep optional BEVFormer dependencies out of CPU-only unit test imports.
     from mmcv import Config
     from third_party.bev_mmdet3d.datasets.builder import build_dataloader, build_dataset
 
@@ -115,20 +155,14 @@ def main():
     if "bev_embed" not in output_names:
         raise ValueError("ONNX model has no bev_embed output")
 
-    prev_bev = np.zeros((config.bev_h_ * config.bev_w_, 1, config._dim_), dtype=np.float32)
-    previous_frame = {"scene_token": None, "position": 0, "angle": 0}
-    saved = 0
-    for data in loader:
-        inputs = build_inputs(data, prev_bev, previous_frame)
-        outputs = dict(zip(output_names, session.run(output_names, inputs), strict=True))
-        np.savez(args.output_dir / f"batch_{saved:04d}.npz", **inputs)
-        prev_bev = outputs["bev_embed"]
-        saved += 1
-        if saved == args.num_samples:
-            break
-
-    if saved != args.num_samples:
-        raise RuntimeError(f"Prepared {saved} of {args.num_samples} requested samples")
+    saved = prepare_batches(
+        loader,
+        session,
+        output_names,
+        (config.bev_h_ * config.bev_w_, 1, config._dim_),
+        args.output_dir,
+        args.num_samples,
+    )
     print(f"Saved {saved} calibration batches to {args.output_dir}")
 
 

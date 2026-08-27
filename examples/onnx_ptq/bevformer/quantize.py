@@ -14,16 +14,13 @@
 # limitations under the License.
 
 import argparse
-import sys
 from pathlib import Path
 
 from modelopt.onnx.quantization import quantize
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from examples.onnx_ptq.quantization_utils import NpzCalibrationReader
+from modelopt.onnx.quantization.calib_utils import NpzCalibrationReader
 
 
-def parse_args():
+def parse_args(arguments=None):
     parser = argparse.ArgumentParser(description="Quantize the BEVFormer ONNX model")
     parser.add_argument("--onnx", required=True, type=Path)
     parser.add_argument("--calibration-dir", required=True, type=Path)
@@ -32,11 +29,11 @@ def parse_args():
     parser.add_argument("--calibration-method", choices=("entropy", "max"))
     parser.add_argument("--max-batches", type=int, default=600)
     parser.add_argument("--output", type=Path)
-    return parser.parse_args()
+    return parser.parse_args(arguments)
 
 
-def main():
-    args = parse_args()
+def main(arguments=None):
+    args = parse_args(arguments)
     if not args.onnx.is_file():
         raise FileNotFoundError(args.onnx)
     for plugin in args.trt_plugins:
