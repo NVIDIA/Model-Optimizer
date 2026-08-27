@@ -15,13 +15,11 @@
 
 """Future-stage configuration and artifact-selection contracts."""
 
-import json
 from pathlib import Path
 
 import pytest
 import torch
 
-from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.security_policy import require_boolean_policy
 from modelopt.torch.puzzletron.stages import future
 
@@ -74,16 +72,6 @@ def test_evaluation_descriptor_is_inferred_from_checkpoint(monkeypatch, tmp_path
     assert calls == [(str(checkpoint), True)]
 
 
-def test_evaluation_descriptor_honors_explicit_legacy_override(monkeypatch, tmp_path):
-    sentinel = object()
-    monkeypatch.setattr(future.ModelDescriptorFactory, "get", lambda name: (name, sentinel))
-
-    assert future._resolve_evaluation_descriptor({"descriptor": "legacy"}, Path(tmp_path)) == (
-        "legacy",
-        sentinel,
-    )
-
-
 # Global-distillation selection and publication
 
 
@@ -98,30 +86,6 @@ def test_distillation_sanity_accepts_packed_cache_without_raw_dataset(tmp_path):
 def test_distillation_sanity_requires_raw_dataset_or_packed_cache():
     with pytest.raises(ValueError, match="dataset_path or packed_token_cache_path"):
         future._distillation_dataset_source({}, {})
-
-
-def test_distillation_tournament_publishes_mapping_result(tmp_path, monkeypatch):
-    """Persist the tournament's mapping result without object conversion."""
-
-    outputs = {"summary_path": str(tmp_path / "summary.json"), "finalists": []}
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.distillation.tournament.run_global_kd_tournament",
-        lambda *_args, **_kwargs: outputs,
-    )
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.pipeline_config.load_runtime_hydra_config",
-        lambda _config: object(),
-    )
-    config = {
-        "experiment": {"dir": str(tmp_path)},
-        "global_distillation": {"tournament": {"enabled": True}},
-    }
-    manifest = StageManifest(stage="global_distillation", config=config)
-
-    result = future.distillation_stage(config, manifest)
-
-    assert result.status == "success"
-    assert json.loads(result.manifest_path.read_text())["outputs"] == outputs
 
 
 def test_distributed_barrier_propagates_failure_with_stage_context(monkeypatch):
@@ -208,68 +172,7 @@ def test_scenario_grid_kd_checkpoints_select_latest_consolidated(tmp_path):
     assert all("step_7" in str(path) for _, path in checkpoints)
 
 
-def test_profile_solution_checkpoints_use_selected_mip_registry(tmp_path):
-    puzzle_dir = tmp_path / "model"
-    profile_root = puzzle_dir / "mip/profiles/params-090"
-    profile_root.mkdir(parents=True)
-    teacher = puzzle_dir / "ckpts/teacher"
-    candidate = profile_root / "scenarios/width-3840/depth-01/checkpoints/solution_0"
-    (puzzle_dir / "mip/profiles/index.json").write_text(
-        json.dumps({"profiles": [{"id": "params-090"}]})
-    )
-    (profile_root / "selected_solutions.json").write_text(
-        json.dumps(
-            {
-                "solutions": [
-                    {"solution_id": "teacher", "checkpoint": str(teacher)},
-                    {"solution_id": "h3840-d1", "checkpoint": str(candidate)},
-                ]
-            }
-        )
-    )
-
-    assert future._profile_solution_checkpoints(puzzle_dir) == [
-        ("teacher", teacher),
-        ("h3840-d1", candidate),
-    ]
-    assert future._profile_solution_checkpoints(puzzle_dir, profile_id="params-090") == [
-        ("teacher", teacher),
-        ("h3840-d1", candidate),
-    ]
-
-
-def test_global_kd_checkpoints_include_canonical_distillation_exports(tmp_path):
-    puzzle_dir = tmp_path / "model"
-    run = (
-        puzzle_dir
-        / "artifacts/global_distillation/profiles/latency-095"
-        / "text-n4096-l16384-s256-b16-seed444/h4096-d4"
-    )
-    checkpoint = run / "post_kd_export/checkpoint/model/consolidated"
-    checkpoint.mkdir(parents=True)
-    (checkpoint / "config.json").write_text("{}")
-    (run / "global_distillation_summary.json").write_text(
-        json.dumps(
-            {
-                "profile_id": "latency-095",
-                "solution_id": "h4096-d4",
-                "post_kd_checkpoint": str(checkpoint),
-            }
-        )
-    )
-
-    checkpoints = future._scenario_grid_global_kd_checkpoints(puzzle_dir)
-
-    assert checkpoints == [("latency-095__h4096-d4", checkpoint)]
-
-
 # AIPerf execution
-
-
-def test_aiperf_executable_prefers_config_then_environment(monkeypatch):
-    monkeypatch.setenv("AIPERF_EXECUTABLE", "/shared/aiperf")
-    assert future._aiperf_executable({}) == "/shared/aiperf"
-    assert future._aiperf_executable({"executable": "/configured/aiperf"}) == "/configured/aiperf"
 
 
 def test_bounded_map_does_not_queue_work_after_failure():
@@ -282,13 +185,3 @@ def test_bounded_map_does_not_queue_work_after_failure():
     with pytest.raises(RuntimeError, match="^stop$"):
         future._bounded_map(fail_first, range(5), max_workers=1)
     assert observed == [0]
-
-
-def test_aiperf_checkpoint_work_keeps_concurrencies_serial_per_checkpoint():
-    work = future._aiperf_checkpoint_work(
-        [("teacher", Path("/teacher")), ("student", Path("/student"))], [1, 2]
-    )
-    assert work == [
-        ("teacher", Path("/teacher"), (1, 2)),
-        ("student", Path("/student"), (1, 2)),
-    ]

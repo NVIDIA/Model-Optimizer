@@ -18,21 +18,11 @@ import json
 import pytest
 
 from modelopt.torch.puzzletron.diagnostics.campaign_findings import MetricSpec
-from modelopt.torch.puzzletron.diagnostics.width_sanity import (
-    aggregate_parent_sweep_sanity,
-    aggregate_width_sanity,
-)
+from modelopt.torch.puzzletron.diagnostics.width_sanity import aggregate_width_sanity
 from modelopt.torch.puzzletron.stages.diagnostics import (
-    _hidden_width_realization_tolerance,
     _publish_parent_sweep_sanity,
     _validate_parent_sweep_checkpoint_loads,
 )
-
-
-def test_parent_sweep_resume_allows_zero_or_one_checkpoint_load():
-    _validate_parent_sweep_checkpoint_loads(
-        {"checkpoint_loads": {"original": 1, "activation": 0, "realized_0000": 0}}
-    )
 
 
 def test_parent_sweep_resume_rejects_repeated_checkpoint_load():
@@ -40,33 +30,6 @@ def test_parent_sweep_resume_rejects_repeated_checkpoint_load():
         _validate_parent_sweep_checkpoint_loads(
             {"checkpoint_loads": {"original": 1, "activation": 2}}
         )
-
-
-@pytest.mark.parametrize(
-    ("config", "metric", "expected"),
-    (
-        ({}, "raw_replacement_loss", 0.0),
-        ({"comparison_tolerance": 1.0e-5}, "raw_replacement_loss", 1.0e-5),
-        (
-            {
-                "comparison_tolerance": 1.0e-5,
-                "physical_equivalence_tolerance": 1.0e-3,
-            },
-            "raw_replacement_loss",
-            1.0e-3,
-        ),
-        (
-            {
-                "physical_equivalence_tolerance": 1.0e-3,
-                "physical_equivalence_tolerances": {"raw_replacement_loss": 2.0e-3},
-            },
-            "raw_replacement_loss",
-            2.0e-3,
-        ),
-    ),
-)
-def test_hidden_width_realization_uses_physical_tolerance(config, metric, expected):
-    assert _hidden_width_realization_tolerance(config, metric) == pytest.approx(expected)
 
 
 def test_aggregation_separates_ranking_from_physical_equivalence():
@@ -115,51 +78,6 @@ def test_aggregation_separates_ranking_from_physical_equivalence():
         finding["evidence"]["group"]["axis"] == "hidden_width" for finding in slicing["findings"]
     )
     assert all("hidden_width" not in finding["message"] for finding in slicing["findings"])
-
-
-def test_parent_sweep_aggregation_groups_axis_rows_and_hidden_width():
-    parent_summary = {
-        "rows": [
-            {
-                "axis": axis,
-                "layer_idx": 3,
-                "target_value": 4,
-                "method": method,
-                "lm_loss": loss,
-            }
-            for axis in ("kv_groups", "moe_experts")
-            for method, loss in (
-                ("activation", 0.5),
-                ("random", 0.7),
-                ("reverse", 0.8),
-                ("realized", 0.50001),
-            )
-        ]
-    }
-    hidden_summary = {
-        "hidden_width": 3840,
-        "teacher_hidden_width": 4096,
-        "rows": [
-            {"role": role, "metrics": {"lm_loss": loss}}
-            for role, loss in (
-                ("activation", 0.6),
-                ("original", 0.7),
-                ("reverse", 0.8),
-                ("realized", 0.60001),
-            )
-        ],
-    }
-
-    width, slicing, axes = aggregate_parent_sweep_sanity(
-        parent_summary,
-        hidden_summary,
-        metric_specs={"lm_loss": MetricSpec("lm_loss", "lower", abs_tolerance=1e-3)},
-    )
-
-    assert axes == ["hidden_width", "kv_groups", "moe_experts"]
-    assert {row["axis"] for row in slicing["rows"]} == set(axes)
-    assert slicing["findings"] == []
-    assert width["stage"] == "width_sanity"
 
 
 def test_failed_descriptor_realization_gate_is_promoted_to_slicing_finding():

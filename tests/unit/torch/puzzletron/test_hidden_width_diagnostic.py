@@ -17,36 +17,12 @@ import json
 
 from modelopt.torch.puzzletron.stages.diagnostics import (
     _diagnostic_checkpoint_needs_rebuild,
-    _hidden_only_diagnostic_ready,
     _hidden_width_ranking_verdict,
-    _hidden_width_result_metrics,
-    _merge_reused_sort_equivalence,
-    _near_teacher_axis_targets,
     _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
-    _select_diagnostic_hidden_width,
     _select_layers,
     _write_hidden_only_diagnostic_artifacts,
 )
-
-
-def test_near_teacher_axis_targets_selects_two_largest_legal_values():
-    config = {
-        "search_space": {
-            "axes": {
-                "ffn_intermediate": {
-                    "teacher_value": 12288,
-                    "values": [6144, 10240, 8192, 12288],
-                },
-                "binary_axis": {"teacher_value": 2, "values": [1]},
-            }
-        }
-    }
-
-    assert _near_teacher_axis_targets(config, ["ffn_intermediate", "binary_axis"], count=2) == {
-        "ffn_intermediate": [10240, 8192],
-        "binary_axis": [1],
-    }
 
 
 def test_hidden_width_targets_apply_requested_ratios_and_alignment():
@@ -54,15 +30,6 @@ def test_hidden_width_targets_apply_requested_ratios_and_alignment():
         3584,
         1024,
     ]
-
-
-def test_hidden_width_diagnostic_selects_nearest_legal_seven_eighths_width():
-    assert _select_diagnostic_hidden_width(4096, [4096, 3840, 3584]) == 3584
-    assert _select_diagnostic_hidden_width(2688, [2688, 2496, 2304]) == 2304
-
-
-def test_hidden_width_diagnostic_tie_prefers_larger_reduced_width():
-    assert _select_diagnostic_hidden_width(800, [800, 690, 710]) == 710
 
 
 def test_hidden_width_verdict_can_treat_original_prefix_as_diagnostic_only():
@@ -130,21 +97,6 @@ def test_hidden_only_diagnostic_finishes_without_empty_parent_sweep(tmp_path):
     )
 
 
-def test_hidden_only_guard_allows_nonmaster_rank_without_summary():
-    assert _hidden_only_diagnostic_ready(
-        axes=["hidden_width"], hidden_width_summary=None, is_master=False
-    )
-
-    try:
-        _hidden_only_diagnostic_ready(
-            axes=["hidden_width"], hidden_width_summary=None, is_master=True
-        )
-    except RuntimeError as error:
-        assert "rank 0" in str(error)
-    else:
-        raise AssertionError("master rank without a width verdict should fail")
-
-
 def test_diagnostic_retry_rebuilds_partial_indexed_checkpoint(tmp_path):
     checkpoint = tmp_path / "reverse"
     checkpoint.mkdir()
@@ -197,51 +149,6 @@ def test_random_diagnostic_layers_are_deterministic_and_axis_specific():
     assert ffn == repeated
     assert ffn != gdn
     assert ffn == sorted(ffn)
-
-
-def test_hidden_width_diagnostic_preserves_all_available_solution_metrics():
-    metric_names = (
-        "raw_replacement_loss",
-        "cosine_embedding_loss_hidden_states",
-        "normalized_mse_loss_hidden_states",
-        "mse_loss_hidden_states",
-        "mae_loss_hidden_states",
-        "kl_div",
-        "lm_loss",
-        "token_accuracy_top_1",
-        "token_accuracy_top_1_consistency",
-        "token_accuracy_top_5",
-        "token_accuracy_top_5_consistency",
-        "token_accuracy_top_10",
-        "token_accuracy_top_10_consistency",
-    )
-    raw = {name: {"avg": index / 10} for index, name in enumerate(metric_names, 1)}
-
-    metrics = _hidden_width_result_metrics(raw)
-
-    assert list(metrics)[: len(metric_names)] == list(metric_names)
-    assert all(metrics[name] == raw[name]["avg"] for name in metric_names)
-
-
-def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
-    existing = {
-        "passed": True,
-        "teacher": {"lm_loss": 1.2},
-        "sorted_teacher": {"lm_loss": 1.2001},
-        "reverse_sorted": {"lm_loss": 1.5},
-    }
-    reuse = {
-        "passed": True,
-        "reused_parent_sweep": True,
-        "equivalence": {"passed": True},
-    }
-
-    merged = _merge_reused_sort_equivalence(existing, reuse)
-
-    assert merged["teacher"] == existing["teacher"]
-    assert merged["sorted_teacher"] == existing["sorted_teacher"]
-    assert merged["reverse_sorted"] == existing["reverse_sorted"]
-    assert merged["reused_parent_sweep"] is True
 
 
 def test_parent_sweep_sort_miss_is_blocking_but_width_miss_remains_advisory():

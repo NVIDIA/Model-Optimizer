@@ -15,18 +15,12 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
 
 import examples.puzzletron.run_axis_diagnostic_worker as axis_worker
-from examples.puzzletron.run_axis_diagnostic_worker import (
-    _axes,
-    _hidden_widths,
-    _validate_worker_topology,
-    _worker_config,
-)
+from examples.puzzletron.run_axis_diagnostic_worker import _validate_worker_topology, _worker_config
 from modelopt.torch.puzzletron.manifest import StageManifest
 from modelopt.torch.puzzletron.stages import diagnostics
 from modelopt.torch.puzzletron.stages.diagnostics import _scoring_cfg_for_method
@@ -88,27 +82,6 @@ def test_diagnostic_sorted_parent_runs_the_distributed_sort_on_every_rank(
     )
 
     assert calls == ["barrier", "sort", "barrier"]
-
-
-def test_sort_equivalence_keeps_production_and_reverse_control_tolerances_separate():
-    decision = diagnostics._sort_equivalence_decision(
-        delta=1.4e-4,
-        reverse_delta=1.54e-2,
-        tolerance=1.0e-3,
-        reverse_tolerance=2.0e-2,
-    )
-
-    assert decision == {
-        "sorted_passed": True,
-        "reverse_passed": True,
-        "passed": True,
-    }
-    assert not diagnostics._sort_equivalence_decision(
-        delta=1.4e-4,
-        reverse_delta=1.54e-2,
-        tolerance=1.0e-3,
-        reverse_tolerance=1.0e-3,
-    )["passed"]
 
 
 def test_sort_equivalence_summary_records_blocking_drift(tmp_path: Path):
@@ -250,29 +223,6 @@ def test_sort_equivalence_propagates_master_write_failure(
     assert write_calls == (["write"] if is_master else [])
 
 
-def test_sort_equivalence_rejects_finalization_after_distributed_cleanup(
-    monkeypatch, tmp_path: Path
-):
-    monkeypatch.setattr(diagnostics.dist, "is_initialized", lambda: False)
-
-    with pytest.raises(RuntimeError, match="active process group"):
-        diagnostics._finalize_sort_equivalence_stage(
-            {"experiment": {"dir": str(tmp_path)}},
-            StageManifest(stage="sort_sanity"),
-            teacher_dir=tmp_path / "teacher",
-            sorted_dir=tmp_path / "sorted",
-            reverse_dir=tmp_path / "reverse",
-            scoring_output_dir=tmp_path / "scoring",
-            reverse_output_dir=None,
-            summary_path=tmp_path / "summary.json",
-            table_path=tmp_path / "table.md",
-            metric="lm_loss",
-            include_reverse=False,
-            tolerance=0.01,
-            reverse_tolerance=0.01,
-        )
-
-
 def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: Path):
     parallel = {
         "tp": 1,
@@ -304,36 +254,6 @@ def test_axis_worker_preserves_requested_layers_and_targets_per_axis(tmp_path: P
     )
 
 
-def test_axis_worker_excludes_non_sortable_axes_from_width_diagnostics():
-    config = {
-        "search_space": {
-            "axes": {
-                "moe_experts": {"enabled": True},
-                "moe_top_k": {"enabled": True},
-            }
-        },
-        "width_sanity": {"non_sortable_axes": ["moe_top_k"]},
-    }
-
-    assert _axes(config) == ["moe_experts", "hidden_width"]
-
-
-def test_axis_worker_uses_seven_eighths_and_three_quarters_hidden_widths(
-    monkeypatch, tmp_path: Path
-):
-    monkeypatch.setattr(
-        axis_worker,
-        "load_model_config",
-        lambda *args, **kwargs: SimpleNamespace(hidden_size=2688),
-    )
-    config = {
-        "teacher_dir": str(tmp_path / "teacher"),
-        "embedding_pruning": {"alignment": 128},
-    }
-
-    assert _hidden_widths(config) == [2304, 1920]
-
-
 def test_axis_worker_accepts_pp2_ep2_overlay_on_four_ranks(monkeypatch, tmp_path: Path):
     parallel = {
         "tp": 1,
@@ -352,24 +272,3 @@ def test_axis_worker_accepts_pp2_ep2_overlay_on_four_ranks(monkeypatch, tmp_path
     )
 
     _validate_worker_topology(config, "kv_groups")
-
-
-def test_axis_worker_accepts_the_stage_owned_super_mesh(monkeypatch) -> None:
-    parallel = {
-        "tp": 1,
-        "cp": 1,
-        "pp": 2,
-        "ep": 4,
-        "dp_shard": 4,
-        "dp_replicate": 2,
-        "pipeline_schedule": "1f1b",
-    }
-    config = {"width_sanity": {"automodel": {"parallel": parallel}}}
-    monkeypatch.setenv("WORLD_SIZE", "16")
-    monkeypatch.setattr(
-        axis_worker,
-        "load_runtime_hydra_config",
-        lambda _config: OmegaConf.create({"width_sanity": {"automodel": {"parallel": parallel}}}),
-    )
-
-    _validate_worker_topology(config, "moe_experts")

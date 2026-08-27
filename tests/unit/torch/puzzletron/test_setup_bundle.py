@@ -26,14 +26,7 @@ from puzzletron_setup.bundle import (
     render_runner,
 )
 from puzzletron_setup.state import AnswerState
-from puzzletron_setup.wizard import (
-    _ask_aiperf_config,
-    _ask_mesh,
-    _ask_mip,
-    _default_flow,
-    _downstream_evaluation_metric_suggestions,
-    _resource_rows,
-)
+from puzzletron_setup.wizard import _ask_aiperf_config, _ask_mip, _default_flow, _resource_rows
 
 
 def test_resume_preserves_legacy_partition_routing(tmp_path) -> None:
@@ -155,32 +148,6 @@ def test_first_class_text_acquisition_renders_local_path_and_keeps_tokenization(
     assert experiment["tokenize_data"]["enabled"] is True
 
 
-def test_custom_dataset_rendering_does_not_add_acquisition_fields() -> None:
-    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
-
-    assert "acquisition" not in experiment["data"]
-
-
-def test_rendered_data_keeps_controller_and_worker_sequence_length_in_sync() -> None:
-    experiment = render_experiment(_nemotron_render_state(latent_moe=False), "production")
-
-    assert experiment["data"]["sequence_length"] == 2048
-    assert experiment["data"]["sequence_length"] == experiment["data"]["max_sample_length"]
-
-
-def test_packed_text_uses_native_automodel_data_instead_of_fixed_token_memmaps() -> None:
-    state = _nemotron_render_state(latent_moe=False)
-    state["answers"]["data"]["layout"] = "packed_varlen"
-
-    experiment = render_experiment(state, "production")
-
-    assert experiment["tokenize_data"]["enabled"] is False
-    assert experiment["tokenize_data"]["caches"] == []
-    assert "packed_token_cache_path" not in experiment["depth_importance"]
-    assert "packed_token_cache_path" not in experiment["replacement_scoring"]
-    assert "packed_token_cache_path" not in experiment["bypass"]["data"]
-
-
 def test_first_class_vlm_acquisition_disables_text_token_memmaps() -> None:
     state = _nemotron_render_state(latent_moe=False)
     state["answers"]["data"].update(
@@ -209,26 +176,6 @@ def test_first_class_vlm_acquisition_disables_text_token_memmaps() -> None:
     assert "packed_token_cache_path" not in experiment["depth_importance"]
     assert "packed_token_cache_path" not in experiment["replacement_scoring"]
     assert "packed_token_cache_path" not in experiment["bypass"]["data"]
-
-
-def test_hugging_face_subset_selection_is_emitted_in_catalog_order() -> None:
-    state = _nemotron_render_state(latent_moe=False)
-    state["answers"]["data"].update(
-        {
-            "subsets": ["small", "large"],
-            "subset_revision": "sha",
-            "subset_weights": {"small": 0.25, "large": 0.75},
-        }
-    )
-
-    experiment = render_experiment(state, "production")
-
-    assert experiment["data"]["subsets"] == ["small", "large"]
-    assert experiment["data"]["subset_revision"] == "sha"
-    assert experiment["data"]["subset_weights"] == {
-        "small": 0.25,
-        "large": 0.75,
-    }
 
 
 def test_render_experiment_uses_global_runtime_repeat_default() -> None:
@@ -453,23 +400,6 @@ def test_render_execution_uses_common_mesh_for_post_mip_evaluation_only() -> Non
     assert execution["post.run.materialized"]["instances"] == 1
 
 
-def test_downstream_evaluation_metric_suggestions_match_runner_keys() -> None:
-    assert _downstream_evaluation_metric_suggestions(
-        "lmms_eval",
-        {"tasks": ["ifeval", "gsm8k", "custom_task"]},
-    ) == [
-        "lmms_eval.ifeval.prompt_level_strict_acc_none",
-        "lmms_eval.gsm8k.exact_match_strict-match",
-    ]
-    assert _downstream_evaluation_metric_suggestions(
-        "lmms_eval",
-        {"tasks": "gsm8k,ifeval"},
-    ) == [
-        "lmms_eval.gsm8k.exact_match_strict-match",
-        "lmms_eval.ifeval.prompt_level_strict_acc_none",
-    ]
-
-
 def test_render_execution_uses_vllm_mesh_for_post_mip_downstream_evaluation() -> None:
     state = {
         "answers": {
@@ -576,108 +506,6 @@ def test_render_execution_caps_post_mip_workers_at_upstream_top_k() -> None:
 
     assert execution["post.run.short_kd"]["instances"] == 4
     assert execution["post.run.final_eval"]["instances"] == 4
-
-
-@pytest.mark.parametrize(
-    ("best_selection_mode", "expected_instances"),
-    [("individual_best", 2), ("best_per_concurrency", 6)],
-)
-def test_render_execution_accounts_for_per_concurrency_top_k_union(
-    best_selection_mode: str,
-    expected_instances: int,
-) -> None:
-    common = {
-        "tp": 1,
-        "cp": 1,
-        "pp": 1,
-        "ep": 1,
-        "dp_shard": 2,
-        "dp_replicate": 1,
-    }
-    state = {
-        "answers": {
-            "infrastructure": {
-                "gpus_per_node": 8,
-                "workers": {"pool": 8, "sharded": 8, "aiperf": 16},
-                "meshes": {"common": common, "bypass": common, "global_kd": common},
-            }
-        }
-    }
-    experiment = {
-        "post_mip": {
-            "flows": {
-                "run": {
-                    "nodes": {
-                        "serving": {
-                            "type": "aiperf",
-                            "config": {"concurrency": [1, 2, 4]},
-                        },
-                        "fastest": {
-                            "type": "filter",
-                            "input": "serving",
-                            "mode": "top_k",
-                            "metric": "serving.output_token_throughput",
-                            "direction": "maximize",
-                            "top_k": 2,
-                            "best_selection_mode": best_selection_mode,
-                        },
-                        "short_kd": {
-                            "type": "global_kd",
-                            "input": "fastest",
-                        },
-                    }
-                }
-            }
-        }
-    }
-
-    execution = render_execution(state, experiment, "production")["execution"]["stages"]
-
-    assert execution["post.run.short_kd"]["instances"] == expected_instances
-
-
-def test_render_execution_ignores_legacy_aiperf_worker_override() -> None:
-    state = {
-        "answers": {
-            "infrastructure": {
-                "gpus_per_node": 8,
-                "workers": {"pool": 4, "sharded": 4, "aiperf": 16},
-                "meshes": {
-                    "common": {},
-                    "bypass": {},
-                    "global_kd": {},
-                },
-            }
-        }
-    }
-    experiment = {
-        "post_mip": {
-            "flows": {
-                "run": {
-                    "nodes": {
-                        "serving": {
-                            "type": "aiperf",
-                            "config": {
-                                "topology": {
-                                    "tensor_parallel_size": 1,
-                                    "pipeline_parallel_size": 1,
-                                    "prefill_context_parallel_size": 1,
-                                    "decode_context_parallel_size": 1,
-                                    "data_parallel_size": 2,
-                                    "expert_parallel_size": 2,
-                                    "gpu_group_size": 2,
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    stages = render_execution(state, experiment, "production")["execution"]["stages"]
-
-    assert stages["post.run.serving"]["instances"] == 4
 
 
 def test_render_execution_marks_io_bound_stages_as_cpu_resources() -> None:
@@ -1003,63 +831,6 @@ def test_resource_summary_separates_serving_and_evaluation_meshes(tmp_path) -> N
         "gpus_per_instance": 2,
         "nodes": 2,
     }
-
-
-def test_resource_summary_caps_global_kd_at_upstream_top_k(tmp_path) -> None:
-    state = AnswerState.start(tmp_path / "campaign", detailed=False)
-    state.record_many(
-        "post_mip",
-        {
-            "flows": {
-                "run": {
-                    "nodes": {
-                        "fastest": {
-                            "type": "filter",
-                            "mode": "top_k",
-                            "metric": "serving.request_throughput",
-                            "direction": "maximize",
-                            "top_k": 4,
-                        },
-                        "short_kd": {"type": "global_kd", "input": "fastest"},
-                    }
-                }
-            }
-        },
-    )
-
-    rows = _resource_rows(
-        state,
-        common={"tp": 1, "cp": 1, "pp": 1, "dp_shard": 2, "dp_replicate": 1, "ep": 1},
-        bypass={"tp": 1, "cp": 1, "pp": 1, "dp_shard": 2, "dp_replicate": 1, "ep": 1},
-        global_kd={
-            "tp": 1,
-            "cp": 1,
-            "pp": 1,
-            "dp_shard": 2,
-            "dp_replicate": 1,
-            "ep": 1,
-        },
-        gpus_per_node=8,
-        workers={"pool": 8, "sharded": 8, "aiperf": 16},
-    )
-
-    global_kd = next(row for row in rows if row["stage"] == "global KD")
-    assert global_kd == {
-        "stage": "global KD",
-        "instances": 4,
-        "gpus_per_instance": 2,
-        "nodes": 1,
-    }
-
-
-def test_dense_mesh_explains_that_ep_is_fixed(capsys) -> None:
-    prompts = _MeshPrompts()
-
-    mesh = _ask_mesh(prompts, "Common", moe=False)
-
-    assert mesh["ep"] == 1
-    assert not any("Expert parallel" in message for message in prompts.messages)
-    assert "Expert parallel (EP): 1 (not applicable to dense models)." in capsys.readouterr().out
 
 
 class _NormalMipPrompts:

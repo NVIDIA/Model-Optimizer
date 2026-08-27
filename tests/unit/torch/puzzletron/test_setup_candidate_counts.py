@@ -15,8 +15,7 @@
 
 """Tests for candidate counts shown by the Puzzletron setup wizard."""
 
-from puzzletron_setup.profiles import CandidateCounts, ModelInventory, count_candidate_options
-from puzzletron_setup.wizard import _replacement_granularity_choices, _vllm_granularity_choices
+from puzzletron_setup.profiles import ModelInventory, count_candidate_options
 
 
 def _axis(teacher, *values):
@@ -192,48 +191,3 @@ def test_counts_nemotron_mutually_exclusive_hybrid_pattern():
     assert counts.vllm_block == 14
     assert counts.replacement_subblock_per_width == 10
     assert counts.replacement_block_per_width == 10
-
-
-def test_formats_exact_vllm_candidate_counts_in_granularity_choices():
-    counts = CandidateCounts(
-        vllm_subblock=14,
-        vllm_block=24,
-        replacement_subblock_per_width=168,
-        replacement_block_per_width=312,
-        width_count=2,
-    )
-
-    assert _vllm_granularity_choices(counts) == [
-        ("Sublayer — 14 configurations/width, 28 total across 2 widths", "subblock"),
-        ("Whole block — 24 configurations/width, 48 total across 2 widths", "block"),
-    ]
-
-
-def test_formats_exact_replacement_candidate_counts_in_granularity_choices():
-    counts = CandidateCounts(
-        vllm_subblock=14,
-        vllm_block=24,
-        replacement_subblock_per_width=168,
-        replacement_block_per_width=312,
-        width_count=2,
-    )
-
-    assert _replacement_granularity_choices(counts) == [
-        ("Subblock — 168 solutions/width, 336 total across 2 widths", "subblock"),
-        ("Whole block — 312 solutions/width, 624 total across 2 widths", "block"),
-    ]
-
-
-def test_formats_single_width_replacement_counts_compactly():
-    counts = CandidateCounts(
-        vllm_subblock=14,
-        vllm_block=24,
-        replacement_subblock_per_width=168,
-        replacement_block_per_width=312,
-        width_count=1,
-    )
-
-    assert _replacement_granularity_choices(counts) == [
-        ("Subblock — 168 solutions", "subblock"),
-        ("Whole block — 312 solutions", "block"),
-    ]

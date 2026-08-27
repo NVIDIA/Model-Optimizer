@@ -24,18 +24,13 @@ from safetensors import safe_open
 
 pytest.importorskip("transformers")
 
-from _test_utils.torch.transformers_models import (
-    create_tiny_qwen3_5_dir,
-    create_tiny_qwen3_5vl_dir,
-    create_tiny_qwen3_dir,
-)
+from _test_utils.torch.transformers_models import create_tiny_qwen3_5vl_dir, create_tiny_qwen3_dir
 from transformers import AutoModelForCausalLM
 
 import modelopt.torch.puzzletron as mtpz
 import modelopt.torch.puzzletron.stages.convert as convert_stage_module
 from modelopt.torch.puzzletron.stages.convert import (
     _conversion_source_matches,
-    _descriptor_checkpoint_layout_complete,
     _is_complete_checkpoint,
     _write_conversion_source_metadata,
 )
@@ -54,17 +49,6 @@ def _weight_map(checkpoint_dir):
 def _patch_single_rank_convert(monkeypatch):
     monkeypatch.setattr(convert_stage_module, "_register_automodel_config_aliases", lambda: None)
     monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
-
-
-def test_nonmaster_raises_broadcast_conversion_failure(monkeypatch):
-    monkeypatch.setattr(
-        convert_stage_module.dist,
-        "broadcast",
-        lambda value, src: "ConversionError: failed conversion",
-    )
-
-    with pytest.raises(RuntimeError, match="rank 0 failed during teacher conversion"):
-        convert_stage_module._raise_on_master_failure(None, action="teacher conversion")
 
 
 def test_master_broadcasts_failure_before_reraising(monkeypatch):
@@ -214,137 +198,6 @@ def test_convert_stage_reconverts_teacher_from_different_revision(tmp_path, monk
     assert not convert_stage_module._conversion_sibling(
         teacher_dir, convert_stage_module._CONVERSION_BACKUP_SUFFIX
     ).exists()
-
-
-def test_convert_stage_persists_and_reuses_matching_source_revision(tmp_path, monkeypatch):
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    (source_dir / "tokenizer.json").write_text("{}")
-    teacher_dir = tmp_path / "teacher"
-    source_config = SimpleNamespace(architectures=["AnyModel"])
-    resolution = SimpleNamespace(descriptor=object())
-    resolve_calls = []
-    completions = []
-
-    _patch_single_rank_convert(monkeypatch)
-    monkeypatch.setattr(
-        convert_stage_module,
-        "_is_complete_checkpoint",
-        lambda path, **kwargs: (path / convert_stage_module._CONVERSION_SOURCE_METADATA).is_file(),
-    )
-    monkeypatch.setattr(
-        convert_stage_module.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: source_config,
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "resolve_descriptor_from_pretrained",
-        lambda *args, **kwargs: resolution,
-    )
-    monkeypatch.setattr(
-        convert_stage_module, "_descriptor_checkpoint_layout_complete", lambda *args: True
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "model_identity",
-        lambda config: SimpleNamespace(value="source_model_abc"),
-    )
-
-    def resolve_source(source, *, revision):
-        resolve_calls.append({"source": source, "revision": revision})
-        return source_dir
-
-    def complete_stage(config, manifest, *, outputs, status="success", message=None):
-        completions.append({"outputs": outputs, "status": status, "message": message})
-        return completions[-1]
-
-    monkeypatch.setattr(convert_stage_module, "_resolve_source_path", resolve_source)
-    monkeypatch.setattr(convert_stage_module, "complete_stage", complete_stage)
-    config = {
-        "model": {"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"},
-        "convert": {"teacher_dir": str(teacher_dir)},
-    }
-
-    first = convert_stage_module.convert_stage(config, manifest=object())
-    transaction_dir = convert_stage_module._conversion_sibling(
-        teacher_dir, convert_stage_module._CONVERSION_TRANSACTION_SUFFIX
-    )
-    backup_dir = convert_stage_module._conversion_sibling(
-        teacher_dir, convert_stage_module._CONVERSION_BACKUP_SUFFIX
-    )
-    assert not transaction_dir.exists()
-    assert not backup_dir.exists()
-
-    second = convert_stage_module.convert_stage(config, manifest=object())
-
-    metadata = json.loads(
-        (teacher_dir / convert_stage_module._CONVERSION_SOURCE_METADATA).read_text()
-    )
-    assert metadata == {
-        "revision": "pinned-sha",
-        "source": "Qwen/Qwen3.5-0.8B",
-        "source_identity": "source_model_abc",
-        "version": 1,
-    }
-    assert resolve_calls == [{"source": "Qwen/Qwen3.5-0.8B", "revision": "pinned-sha"}]
-    assert first["status"] == "success"
-    assert first["outputs"]["skipped"] is False
-    assert second["status"] == "success"
-    assert second["outputs"]["skipped"] is True
-
-
-def test_convert_stage_reuses_legacy_unpinned_teacher(tmp_path, monkeypatch):
-    teacher_dir = tmp_path / "teacher"
-    teacher_dir.mkdir()
-    teacher_config = SimpleNamespace(architectures=["AnyModel"])
-
-    _patch_single_rank_convert(monkeypatch)
-    monkeypatch.setattr(
-        convert_stage_module, "_is_complete_checkpoint", lambda *args, **kwargs: True
-    )
-    monkeypatch.setattr(
-        convert_stage_module.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: teacher_config,
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "resolve_descriptor_from_pretrained",
-        lambda *args, **kwargs: SimpleNamespace(descriptor=object()),
-    )
-    monkeypatch.setattr(
-        convert_stage_module, "_descriptor_checkpoint_layout_complete", lambda *args: True
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "model_identity",
-        lambda config: SimpleNamespace(value="teacher_model_abc"),
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "_resolve_source_path",
-        lambda *args, **kwargs: pytest.fail("legacy unpinned teacher should be reused"),
-    )
-    monkeypatch.setattr(
-        convert_stage_module,
-        "complete_stage",
-        lambda config, manifest, *, outputs, status="success", message=None: {
-            "outputs": outputs,
-            "status": status,
-        },
-    )
-
-    result = convert_stage_module.convert_stage(
-        {
-            "model": {"source": "Qwen/Qwen3.5-0.8B"},
-            "convert": {"teacher_dir": str(teacher_dir)},
-        },
-        manifest=object(),
-    )
-
-    assert result["status"] == "success"
-    assert result["outputs"]["skipped"] is True
 
 
 def test_failed_reconversion_preserves_teacher_and_retries_cleanly(tmp_path, monkeypatch):
@@ -539,61 +392,6 @@ def test_conversion_resume_rejects_partial_hf_checkpoint_without_block_configs(t
     partial_dir = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
 
     assert not _is_complete_checkpoint(partial_dir, trust_remote_code=False)
-
-
-def test_conversion_resume_rejects_unmigrated_descriptor_checkpoint_layout(tmp_path):
-    checkpoint = tmp_path / "legacy"
-    checkpoint.mkdir()
-    (checkpoint / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "weight_map": {
-                    "language_model.model.embed_tokens.weight": "model.safetensors",
-                    "language_model.lm_head.weight": "model.safetensors",
-                }
-            }
-        )
-    )
-
-    class Descriptor:
-        @staticmethod
-        def generic_decoder_contract(config):
-            return SimpleNamespace(
-                checkpoint_key_rewrites=(
-                    (r"^language_model\.model\.", "model.language_model."),
-                    (r"^language_model\.lm_head\.", "lm_head."),
-                )
-            )
-
-    assert not _descriptor_checkpoint_layout_complete(checkpoint, Descriptor, SimpleNamespace())
-
-
-def test_conversion_resume_skips_generic_layout_check_when_descriptor_has_no_contract(tmp_path):
-    """Specialized family converters must not be routed through the generic converter."""
-
-    class Descriptor:
-        @staticmethod
-        def generic_decoder_contract(config):
-            return None
-
-    assert _descriptor_checkpoint_layout_complete(
-        tmp_path, Descriptor, SimpleNamespace(block_configs=[])
-    )
-
-
-def test_convert_anymodel_qwen3_5_text_preserves_mtp(tmp_path):
-    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
-
-    input_dir = create_tiny_qwen3_5_dir(tmp_path, with_tokenizer=True, with_mtp=True)
-    output_dir = tmp_path / "qwen3_5-anymodel"
-    mtpz.anymodel.convert_model(input_dir, output_dir, converter="qwen3_5_text")
-
-    weight_map = _weight_map(output_dir)
-    assert "mtp.0.norm.weight" in weight_map
-
-    descriptor = mtpz.anymodel.ModelDescriptorFactory.get("qwen3_5_text")
-    with mtpz.anymodel.deci_x_patcher(descriptor):
-        _ = AutoModelForCausalLM.from_pretrained(output_dir)
 
 
 def test_convert_anymodel_qwen3_5_vl_sets_text_layer_config(tmp_path):

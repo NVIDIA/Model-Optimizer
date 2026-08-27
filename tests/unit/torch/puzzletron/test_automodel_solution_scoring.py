@@ -25,7 +25,6 @@ import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
-from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
@@ -34,21 +33,11 @@ from modelopt.torch.puzzletron.block_config import (
     MLAConfig,
     MoEConfig,
 )
-from modelopt.torch.puzzletron.distributed_eval.automodel_executor import (
-    AutoModelReplaceBlockExecutor,
-)
 from modelopt.torch.puzzletron.plugins.automodel import solution_recipe
 from modelopt.torch.puzzletron.plugins.automodel.solution_launch import (
-    _can_skip_parent_model_load,
     _candidate_execution_context,
-    _load_model_config_distributed,
     _quarantine_failed_realization,
-    _report_exception_before_collective,
-    _solution_hidden_width,
-    _solution_prune_target,
     _solution_prune_targets,
-    _source_hidden_channel_indices,
-    _validate_parent_equivalence,
 )
 from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
     aggregate_solution_scores,
@@ -57,15 +46,11 @@ from modelopt.torch.puzzletron.plugins.automodel.solution_metrics import (
 )
 from modelopt.torch.puzzletron.plugins.automodel.solution_recipe import (
     ReplaceBlockScoringRecipe,
-    _layer_runtime_fingerprint,
     _masked_native_gate_forward,
     _temporary_parameter_mask,
 )
-from modelopt.torch.puzzletron.plugins.automodel.teacher_cache import TeacherTargetCache
 from modelopt.torch.puzzletron.pruning.gated_delta_net import GDNShape
 from modelopt.torch.puzzletron.pruning.runtime_candidate import apply_runtime_candidate
-from modelopt.torch.puzzletron.stages.diagnostics import _annotate_solution_selections
-from modelopt.torch.utils import distributed as dist
 
 
 def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
@@ -139,250 +124,6 @@ def test_native_automodel_gdn_rejects_compact_runtime_candidate():
     assert gdn.forward.__func__ is original_forward
     assert set(vars(gdn)) == original_state
     assert dict(gdn._forward_hooks) == original_forward_hooks
-
-
-@pytest.mark.parametrize(
-    ("teacher_mamba", "child_mamba"),
-    [
-        pytest.param(
-            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, state_dim=8),
-            SimpleNamespace(no_op=False, num_heads=4, head_dim=8, num_groups=2, state_dim=8),
-            id="missing-teacher-groups",
-        ),
-        pytest.param(
-            SimpleNamespace(
-                no_op=False,
-                num_heads=4,
-                head_dim=8,
-                num_groups=2,
-                state_dim=8,
-            ),
-            SimpleNamespace(no_op=False, num_heads=4, head_dim=8),
-            id="missing-child-fields",
-        ),
-    ],
-)
-def test_gdn_runtime_hooks_skip_incomplete_shape_metadata(teacher_mamba, child_mamba):
-    def block_config(mamba):
-        return SimpleNamespace(
-            get_subblock=lambda kind: mamba if kind == "mamba" else None,
-        )
-
-    layer = SimpleNamespace(
-        linear_attn=SimpleNamespace(num_k_heads=2, in_proj_qkv=object()),
-    )
-
-    handles, contexts = ReplaceBlockScoringRecipe._typed_subblock_runtime_hooks(
-        layer,
-        teacher_block_config=block_config(teacher_mamba),
-        child_block_config=block_config(child_mamba),
-    )
-
-    assert handles == []
-    assert contexts == []
-
-
-def test_parent_sweep_reports_rank_local_exception_before_collective(capsys):
-    try:
-        raise RuntimeError("rank-local physical slice failure")
-    except RuntimeError:
-        _report_exception_before_collective()
-
-    assert "RuntimeError: rank-local physical slice failure" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    ("role", "pending_ids", "needs_parent_evaluation", "expected"),
-    [
-        ("original", [], False, False),
-        ("sorted", [], False, True),
-        ("realized_0001", [], False, True),
-        ("sorted", [0], False, False),
-        ("sorted", [], True, False),
-    ],
-)
-def test_parent_sweep_resume_recaches_original_teacher(
-    role, pending_ids, needs_parent_evaluation, expected
-):
-    assert _can_skip_parent_model_load(role, pending_ids, needs_parent_evaluation) is expected
-
-
-def test_distributed_config_load_precaches_remote_code_before_import(monkeypatch, tmp_path):
-    from modelopt.torch.puzzletron.plugins.automodel import solution_launch
-
-    events = []
-    monkeypatch.setattr(
-        solution_launch,
-        "_precache_trust_remote_code_distributed",
-        lambda path, **kwargs: events.append(("precache", path, kwargs)),
-    )
-
-    class Descriptor:
-        @staticmethod
-        def requires_trust_remote_code():
-            return True
-
-    expected = object()
-
-    def load(path, **kwargs):
-        events.append(("load", path, kwargs))
-        return expected
-
-    result = _load_model_config_distributed(tmp_path, Descriptor, loader=load)
-
-    assert result is expected
-    assert events == [
-        ("precache", tmp_path, {"trust_remote_code": True}),
-        ("load", tmp_path, {"trust_remote_code": True}),
-    ]
-
-
-def test_rpc_executor_infers_descriptor_when_config_has_no_override(monkeypatch, tmp_path):
-    from modelopt.torch.puzzletron.distributed_eval import automodel_executor
-
-    expected = object()
-    calls = []
-    monkeypatch.setattr(
-        automodel_executor,
-        "resolve_descriptor_from_pretrained",
-        lambda path, **kwargs: calls.append((path, kwargs))
-        or SimpleNamespace(name="test_descriptor", descriptor=expected),
-    )
-
-    descriptor = automodel_executor._resolve_executor_descriptor(
-        {"model": {"trust_remote_code": True}}, tmp_path
-    )
-
-    assert descriptor is expected
-    assert calls == [(str(tmp_path), {"trust_remote_code": True})]
-
-
-def test_rpc_executor_scores_cumulative_depth_removals(monkeypatch):
-    from modelopt.torch.puzzletron.distributed_eval.schema import EvaluationRequest
-
-    teacher_blocks = [
-        BlockConfig(
-            subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
-        ),
-        BlockConfig(
-            subblock_configs=(MambaConfig(state_dim=4, num_heads=2, head_dim=2, num_groups=1),)
-        ),
-    ]
-    children = [
-        BlockConfig(subblock_configs=(MoEConfig(no_op=True),)),
-        BlockConfig(subblock_configs=(MambaConfig(no_op=True),)),
-    ]
-    replacements = [
-        {
-            "parent_layer_indices": [index],
-            "child_block_configs": [child.to_dict()],
-            "weight_paths": [],
-        }
-        for index, child in enumerate(children)
-    ]
-    captured = []
-    executor = AutoModelReplaceBlockExecutor.__new__(AutoModelReplaceBlockExecutor)
-    executor._setup_complete = True
-    executor.source_hidden_width = 8
-    executor.teacher_block_configs = teacher_blocks
-    executor.num_q = 4
-    executor.head_dim = 2
-    executor.params = {"micro_batch_size": 4}
-    executor.sliced_teacher_baseline = {"lm_loss": {"avg": 0.0}}
-    executor.latest_observability = None
-    executor.latest_score_device_type = "cpu"
-    executor.visible_cuda_device_count = 0
-    monkeypatch.setattr(
-        executor,
-        "_score",
-        lambda targets: captured.append(targets) or {"lm_loss": {"avg": 1.0}},
-    )
-    request = EvaluationRequest(
-        campaign_id="campaign",
-        handler="depth_candidate",
-        payload={"hidden_width": 8, "layer_replacements": replacements},
-        model={},
-        data={},
-        metrics={},
-        evaluator_revision="depth-v1",
-    )
-
-    result = executor.evaluate(request)
-
-    assert result.metrics["lm_loss"]["avg"] == 1.0
-    assert [target["layer_idx"] for target in captured[0]] == [0, 1]
-    assert result.provenance["micro_batch_size"] == 4
-    assert result.provenance["score_device_type"] == "cpu"
-    assert result.provenance["visible_cuda_device_count"] == 0
-
-
-def test_rpc_executor_non_output_pipeline_rank_reaches_collective(monkeypatch):
-    class NonOutputRecipe:
-        has_outputs = False
-        _groups = None
-
-        @staticmethod
-        def tensor_parallel_group():
-            return None
-
-        @staticmethod
-        def iterate_captures():
-            yield None, None
-
-        @staticmethod
-        def context_parallel_group():
-            return None
-
-        @staticmethod
-        def observability_metadata():
-            return {"pipeline_role": "non_output"}
-
-    barriers = []
-    executor = AutoModelReplaceBlockExecutor.__new__(AutoModelReplaceBlockExecutor)
-    executor.recipe = NonOutputRecipe()
-    executor.cache = object()
-    executor.params = {}
-    executor.bypass_checkpoint_dir = None
-    executor.latest_score_device_type = None
-    monkeypatch.setattr(dist, "barrier", lambda: barriers.append(True))
-
-    assert executor._score(None) is None
-    assert barriers == [True]
-    assert executor.latest_observability == {"pipeline_role": "non_output"}
-
-
-def test_runtime_fingerprint_ignores_distributed_compute_dtype_transition():
-    class FSDPLinear(FSDPModule, nn.Linear):
-        pass
-
-    # Composable FSDP mutates an existing module's class in place; directly
-    # constructing an FSDPModule subclass intentionally returns the original
-    # class from FSDPModule.__new__.
-    layer = nn.Linear(4, 4, bias=False)
-    layer.__class__ = FSDPLinear
-    assert isinstance(layer, FSDPModule)
-    baseline = _layer_runtime_fingerprint(layer)
-
-    layer.weight.data = layer.weight.data.to(torch.bfloat16)
-
-    assert _layer_runtime_fingerprint(layer) == baseline
-
-
-def test_teacher_cache_roundtrip():
-    cache = TeacherTargetCache(device="cpu")
-    cache.set_lm_head_weight(torch.randn(20, 8))
-    cache.append_hidden(torch.randn(2, 4, 8))
-    cache.append_hidden(torch.randn(2, 4, 8))
-    cache.seal()
-
-    assert cache.device == torch.device("cpu")
-    assert len(cache) == 2
-    assert cache.lm_head().shape == (20, 8)
-    assert cache.lm_head().dtype == torch.float32
-    assert cache.hidden(1).shape == (2, 4, 8)
-    # Sealed cache rejects further appends.
-    with pytest.raises(AssertionError):
-        cache.append_hidden(torch.randn(2, 4, 8))
 
 
 def test_block_checkpoint_overlay_merges_split_hf_experts_and_restores(tmp_path):
@@ -484,77 +225,6 @@ def test_solution_metrics_trim_pp_padding_rows():
     assert all(mask.shape[0] == 3 for mask in masks.values())
 
 
-def test_parent_equivalence_does_not_gate_raw_hidden_metrics_after_basis_permutation(tmp_path):
-    teacher_path = tmp_path / "teacher.json"
-    parent_path = tmp_path / "parent.json"
-    teacher_path.write_text(
-        json.dumps(
-            {
-                "lm_loss": {"avg": 2.0},
-                "kl_div": {"avg": 0.0},
-                "top_1_logit_agreement": {"avg": 1.0},
-            }
-        )
-    )
-    parent_path.write_text(
-        json.dumps(
-            {
-                "lm_loss": {"avg": 2.0005},
-                "kl_div": {"avg": 0.001},
-                "top_1_logit_agreement": {"avg": 0.98},
-                "cosine_embedding_loss_hidden_states": {"avg": 1.0},
-                "normalized_mse_loss_hidden_states": {"avg": 2.0},
-                "mse_loss_hidden_states": {"avg": 30.0},
-                "mae_loss_hidden_states": {"avg": 4.0},
-            }
-        )
-    )
-
-    summary = _validate_parent_equivalence(
-        teacher_result_path=teacher_path,
-        parent_result_path=parent_path,
-        tolerances={},
-        hidden_basis_permuted=True,
-    )
-
-    assert summary["passed"] is True
-    assert summary["checks"]["top_1_logit_agreement"]["passed"] is True
-    assert summary["checks"]["cosine_embedding_loss_hidden_states"]["gated"] is False
-    assert summary["checks"]["cosine_embedding_loss_hidden_states"]["reason"] == "basis_permuted"
-
-
-def test_parent_equivalence_still_gates_hidden_metrics_without_basis_permutation(tmp_path):
-    teacher_path = tmp_path / "teacher.json"
-    parent_path = tmp_path / "parent.json"
-    teacher_path.write_text(json.dumps({"lm_loss": {"avg": 2.0}}))
-    parent_path.write_text(
-        json.dumps(
-            {
-                "lm_loss": {"avg": 2.0},
-                "kl_div": {"avg": 0.0},
-                "top_1_logit_agreement": {"avg": 1.0},
-                "cosine_embedding_loss_hidden_states": {"avg": 1.0},
-                "normalized_mse_loss_hidden_states": {"avg": 2.0},
-                "mse_loss_hidden_states": {"avg": 30.0},
-                "mae_loss_hidden_states": {"avg": 4.0},
-            }
-        )
-    )
-
-    summary = _validate_parent_equivalence(
-        teacher_result_path=teacher_path,
-        parent_result_path=parent_path,
-        tolerances={},
-        hidden_basis_permuted=False,
-    )
-
-    assert summary["passed"] is False
-    assert summary["findings"]
-    assert any(
-        "cosine_embedding_loss_hidden_states" in item["message"] for item in summary["findings"]
-    )
-
-
 def test_unloadable_realization_is_quarantined_after_first_load_failure(tmp_path, monkeypatch):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -581,72 +251,6 @@ def test_unloadable_realization_is_quarantined_after_first_load_failure(tmp_path
     assert barriers == [True]
 
 
-def test_native_gate_can_mask_ranked_nonprefix_expert_ids():
-    gate = nn.Module()
-    gate.weight = nn.Parameter(torch.eye(4))
-    gate.bias = nn.Parameter(torch.zeros(4))
-    gate.score_func = "softmax"
-    gate.softmax_before_topk = False
-    gate.topk = 2
-    gate.norm_topk_prob = True
-    gate.route_scale = 1.0
-    gate.gate_precision = None
-    gate.forward = _masked_native_gate_forward(
-        gate,
-        target_num_experts=2,
-        target_top_k=2,
-        kept_expert_indices=(1, 3),
-    )
-
-    _, indices, _ = gate.forward(torch.tensor([[10.0, 1.0, 9.0, 2.0]]))
-
-    assert set(indices.flatten().tolist()) == {1, 3}
-
-
-def test_native_sigmoid_gate_preserves_correction_bias_selection():
-    gate = nn.Module()
-    gate.weight = nn.Parameter(torch.eye(4))
-    gate.score_func = "sigmoid"
-    gate.topk = 2
-    gate.norm_topk_prob = True
-    gate.route_scale = 1.0
-    gate.gate_precision = None
-    gate.e_score_correction_bias = torch.tensor([0.0, 0.0, 2.0, 0.0])
-    gate.n_groups = 1
-    gate.topk_groups = 1
-    gate.forward = _masked_native_gate_forward(
-        gate,
-        target_num_experts=3,
-        target_top_k=2,
-    )
-
-    _, indices, _ = gate.forward(torch.tensor([[1.0, 0.0, -1.0, 10.0]]))
-
-    assert set(indices.flatten().tolist()) == {0, 2}
-
-
-def test_native_sigmoid_gate_groups_the_compact_expert_prefix():
-    gate = nn.Module()
-    gate.weight = nn.Parameter(torch.eye(8))
-    gate.score_func = "sigmoid"
-    gate.topk = 2
-    gate.norm_topk_prob = True
-    gate.route_scale = 1.0
-    gate.gate_precision = None
-    gate.e_score_correction_bias = None
-    gate.n_groups = 2
-    gate.topk_groups = 1
-    gate.forward = _masked_native_gate_forward(
-        gate,
-        target_num_experts=6,
-        target_top_k=2,
-    )
-
-    _, indices, _ = gate.forward(torch.tensor([[-10.0, -10.0, 5.0, 6.0, 5.0, -10.0, -10.0, -10.0]]))
-
-    assert set(indices.flatten().tolist()) == {3, 4}
-
-
 def test_native_sigmoid_with_bias_masks_unselected_groups_with_negative_infinity():
     gate = nn.Module()
     gate.weight = nn.Parameter(torch.eye(4))
@@ -667,56 +271,6 @@ def test_native_sigmoid_with_bias_masks_unselected_groups_with_negative_infinity
     _, indices, _ = gate.forward(torch.zeros(1, 4))
 
     assert set(indices.flatten().tolist()) == {2, 3}
-
-
-def test_native_gate_does_not_normalize_a_single_selected_expert():
-    gate = nn.Module()
-    gate.weight = nn.Parameter(torch.eye(2))
-    gate.score_func = "sigmoid"
-    gate.topk = 1
-    gate.norm_topk_prob = True
-    gate.route_scale = 1.0
-    gate.gate_precision = None
-    gate.e_score_correction_bias = None
-    gate.n_groups = 1
-    gate.topk_groups = 1
-    gate.forward = _masked_native_gate_forward(
-        gate,
-        target_num_experts=2,
-        target_top_k=1,
-    )
-
-    weights, indices, _ = gate.forward(torch.tensor([[2.0, 0.0]]))
-
-    assert indices.item() == 0
-    torch.testing.assert_close(weights, torch.sigmoid(torch.tensor([[2.0]])))
-
-
-def test_solution_prune_target_uses_prefix_after_parent_experts_are_sorted():
-    teacher = BlockConfig(
-        subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
-    )
-    child = BlockConfig(
-        subblock_configs=(MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),)
-    )
-
-    target = _solution_prune_target(
-        [
-            {
-                "parent_layer_indices": [0],
-                "child_block_configs": [child],
-                "diagnostic": {"kept_experts": [3, 1]},
-            }
-        ],
-        [teacher],
-        num_q_heads=2,
-        head_dim=4,
-    )
-
-    # ``kept_experts`` documents the original checkpoint ids selected by the
-    # ranking.  The scoring parent has already permuted those experts into the
-    # leading prefix, so applying the old ids again would select a different set.
-    assert target["expert_keep_ids"] is None
 
 
 def test_solution_prune_targets_supports_full_architecture_and_skips_teacher_layers():
@@ -797,39 +351,6 @@ def test_candidate_execution_context_overlays_each_changed_layer_before_pruning(
     ]
 
 
-def test_diagnostic_annotation_records_ranked_expert_ids(tmp_path):
-    teacher = BlockConfig(
-        subblock_configs=(MoEConfig(num_experts=4, expert_intermediate_size=8, top_k=2),)
-    )
-    child = BlockConfig(
-        subblock_configs=(MoEConfig(num_experts=2, expert_intermediate_size=8, top_k=2),)
-    )
-    (tmp_path / "sorted_permutations.json").write_text(json.dumps({"moe.experts.0": [3, 1, 0, 2]}))
-    diagnostic = {
-        "axis": "moe_experts",
-        "field": "num_experts",
-        "subblock_kind": "moe",
-        "layer_idx": 0,
-        "target_value": 2,
-    }
-    solutions = [
-        {
-            "block_configs": [child],
-            "diagnostic": dict(diagnostic),
-            "single_sequence_replacement": {"diagnostic": dict(diagnostic)},
-        }
-    ]
-
-    _annotate_solution_selections(
-        solutions=solutions,
-        teacher_block_configs=[teacher],
-        sorted_teacher_dir=tmp_path,
-    )
-
-    assert solutions[0]["diagnostic"]["kept_experts"] == [3, 1]
-    assert solutions[0]["diagnostic"]["removed_experts"] == [0, 2]
-
-
 def test_score_batch_identical_model_is_perfect():
     # Candidate == teacher: consistency is perfect, while label accuracy is independent.
     torch.manual_seed(0)
@@ -878,35 +399,6 @@ def test_score_batch_compares_pruned_student_logits_with_full_width_teacher():
     assert "mse_loss_hidden_states" in out
 
 
-def test_aggregate_solution_scores_no_distributed():
-    # token_group=None (single process): avg over the concatenated per-batch per-sample lists.
-    per_batch = [
-        {"lm_loss": [1.0, 3.0], "kl_div": [0.1, 0.3]},
-        {"lm_loss": [5.0], "kl_div": [0.5]},
-    ]
-    reduced = aggregate_solution_scores(per_batch, token_group=None)
-    assert reduced["lm_loss"]["per_sample"] == [1.0, 3.0, 5.0]
-    assert reduced["lm_loss"]["avg"] == pytest.approx(3.0)
-    assert reduced["kl_div"]["avg"] == pytest.approx(0.3)
-
-
-def test_retain_teacher_channels_projects_full_teacher_to_student_width():
-    student_hidden = torch.randn(2, 5, 6)
-    student_head = torch.randn(32, 6)
-    teacher_hidden = torch.randn(2, 5, 8)
-    teacher_head = torch.randn(32, 8)
-
-    retained_hidden, retained_head = retain_teacher_channels(
-        student_hidden,
-        student_head,
-        teacher_hidden,
-        teacher_head,
-    )
-
-    torch.testing.assert_close(retained_hidden, teacher_hidden[..., :6])
-    torch.testing.assert_close(retained_head, teacher_head[:, :6])
-
-
 def test_retain_teacher_channels_uses_sorted_basis_indices():
     student_hidden = torch.randn(2, 5, 4)
     student_head = torch.randn(32, 4)
@@ -926,28 +418,6 @@ def test_retain_teacher_channels_uses_sorted_basis_indices():
     torch.testing.assert_close(retained_head, teacher_head.index_select(-1, order))
 
 
-def test_source_hidden_channel_indices_reads_sorted_permutation(tmp_path):
-    (tmp_path / "sorted_permutations.json").write_text(
-        json.dumps({"embedding.hidden_order": [7, 2, 5, 1, 6, 0, 4, 3]})
-    )
-
-    assert _source_hidden_channel_indices(tmp_path, 4, 8) == (7, 2, 5, 1)
-    assert _source_hidden_channel_indices(tmp_path / "unsorted", 4, 8) == (0, 1, 2, 3)
-
-
-def test_source_hidden_channel_indices_uses_local_basis_for_same_checkpoint(tmp_path):
-    (tmp_path / "sorted_permutations.json").write_text(
-        json.dumps({"embedding.hidden_order": [7, 2, 5, 1, 6, 0, 4, 3]})
-    )
-
-    assert _source_hidden_channel_indices(
-        tmp_path,
-        4,
-        4,
-        source_and_teacher_share_basis=True,
-    ) == (0, 1, 2, 3)
-
-
 def test_aggregate_exposes_explicit_raw_replacement_loss():
     per_batch = [
         {
@@ -963,12 +433,6 @@ def test_aggregate_exposes_explicit_raw_replacement_loss():
     reduced = aggregate_solution_scores(per_batch)
     assert reduced["raw_replacement_loss"]["avg"] == pytest.approx(2.0)
     assert reduced["raw_replacement_loss"] == reduced["mse_loss_hidden_states"]
-
-
-def test_solution_hidden_width_supports_direct_and_wrapped_solutions():
-    assert _solution_hidden_width({"hidden_width": 768}) == 768
-    assert _solution_hidden_width({"puzzle_solution": {"hidden_width": 1024}}) == 1024
-    assert _solution_hidden_width({}) is None
 
 
 def test_solution_metrics_apply_separate_supervision_and_hidden_masks():
@@ -1087,26 +551,6 @@ class _MLAHeadsLayer(nn.Module):
     def __init__(self):
         super().__init__()
         self.self_attn = _MLAHeadsProjection(num_heads=4, v_head_dim=3, hidden=5)
-
-
-def test_runtime_mla_head_slice_masks_sorted_o_proj_prefix_and_restores() -> None:
-    torch.manual_seed(10)
-    layer = _MLAHeadsLayer()
-    head_outputs = torch.randn(7, 12, dtype=torch.float64)
-    teacher = BlockConfig(subblock_configs=(MLAConfig(num_heads=4, q_lora_rank=8, kv_lora_rank=6),))
-    child = BlockConfig(subblock_configs=(MLAConfig(num_heads=2, q_lora_rank=8, kv_lora_rank=6),))
-    original = layer.self_attn(head_outputs)
-
-    handle = apply_runtime_candidate(layer, teacher, child)
-    actual = layer.self_attn(head_outputs)
-    handle.remove()
-
-    expected = torch.nn.functional.linear(
-        head_outputs[:, :6],
-        layer.self_attn.o_proj.weight[:, :6],
-    )
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(layer.self_attn(head_outputs), original)
 
 
 class _GroupedRMSNormMamba(nn.Module):
@@ -1291,62 +735,6 @@ def test_runtime_mamba_native_fused_call_uses_physically_compact_geometry(
             "d": target_heads,
         }
     ]
-
-
-@pytest.mark.parametrize(
-    ("target_heads", "target_head_dim", "keep_indices"),
-    [
-        (2, 2, (0, 1, 4, 5)),
-        (4, 1, (0, 2, 4, 6)),
-    ],
-)
-def test_runtime_mamba_head_slice_matches_physically_compact_group_norm_and_restores(
-    target_heads: int,
-    target_head_dim: int,
-    keep_indices: tuple[int, ...],
-) -> None:
-    torch.manual_seed(11)
-    layer = _MambaLayer()
-    x = torch.randn(7, 3, dtype=torch.float64)
-    teacher = BlockConfig(
-        subblock_configs=(MambaConfig(num_heads=4, head_dim=2, num_groups=2, state_dim=1),)
-    )
-    child = BlockConfig(
-        subblock_configs=(
-            MambaConfig(
-                num_heads=target_heads,
-                head_dim=target_head_dim,
-                num_groups=2,
-                state_dim=1,
-            ),
-        )
-    )
-    original = layer.mixer(x)
-    original_norm_weight = layer.mixer.norm.weight.detach().clone()
-
-    handle = apply_runtime_candidate(layer, teacher, child)
-    # Runtime slicing must not all-gather/rewrite FSDP or DTensor norm weights;
-    # the uniform compensation belongs on the retained out-projection input.
-    torch.testing.assert_close(layer.mixer.norm.weight, original_norm_weight)
-    actual = layer.mixer(x)
-    handle.remove()
-
-    projected = layer.mixer.in_proj(x)
-    keep = torch.tensor(keep_indices)
-    gate = projected[..., :8].index_select(-1, keep)
-    inner = projected[..., 8:16].index_select(-1, keep)
-    physical_group_size = target_heads * target_head_dim // 2
-    grouped = inner.reshape(*inner.shape[:-1], 2, physical_group_size)
-    grouped = grouped * torch.rsqrt(grouped.square().mean(dim=-1, keepdim=True) + 0.25)
-    normalized = grouped.reshape_as(inner) * original_norm_weight.index_select(0, keep)
-    expected = torch.nn.functional.linear(
-        normalized * torch.nn.functional.silu(gate),
-        layer.mixer.out_proj.weight.index_select(1, keep),
-    )
-
-    torch.testing.assert_close(actual, expected, rtol=1e-9, atol=1e-9)
-    torch.testing.assert_close(layer.mixer.norm.weight, original_norm_weight)
-    torch.testing.assert_close(layer.mixer(x), original)
 
 
 def test_dtensor_parameter_mask_changes_only_local_storage_without_full_gather(

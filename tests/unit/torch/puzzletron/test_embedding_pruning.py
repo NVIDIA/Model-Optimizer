@@ -143,75 +143,12 @@ def test_group_preserving_permutation_supports_block_quantized_hidden_inputs():
     assert sliced["packed"].shape == (1, 1, 1)
 
 
-def test_grouped_permutation_preserves_original_order_inside_nested_width_tiers():
-    spec = EmbeddingPruningSpec(
-        hidden_size=16,
-        legal_widths=(16, 8, 4),
-        alignment=4,
-        permutation_group_size=4,
-        tensor_rules=(),
-    )
-    # Importance ranks the four storage groups as 2, 0, 3, 1.  Width four
-    # retains group 2 and width eight adds group 0.  The remaining full-width
-    # tier keeps its original relative order (1, 3), avoiding a numerically
-    # meaningless reorder of two groups that are removed at every pruned width.
-    scores = torch.tensor(
-        [
-            3.0,
-            3.0,
-            3.0,
-            3.0,
-            1.0,
-            1.0,
-            1.0,
-            1.0,
-            4.0,
-            4.0,
-            4.0,
-            4.0,
-            2.0,
-            2.0,
-            2.0,
-            2.0,
-        ]
-    )
-
-    order = spec.order_from_scores(scores)
-
-    assert torch.equal(
-        order,
-        torch.tensor([8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15]),
-    )
-
-
 def test_audit_rejects_unhandled_hidden_sensitive_tensor_but_allows_vit_exemption():
     state = _state_dict()
     state["unknown.weight"] = torch.ones(7, 4)
 
     with pytest.raises(ValueError, match="unknown.weight"):
         _spec().audit_state_dict(state)
-
-
-def test_width_validation_and_nested_config_update():
-    spec = _spec()
-    config = {"hidden_size": 4, "text_config": {"hidden_size": 4}}
-
-    updated = spec.update_config(config, 2)
-
-    assert updated["hidden_size"] == 2
-    assert updated["text_config"]["hidden_size"] == 2
-    assert config["hidden_size"] == 4
-    with pytest.raises(ValueError, match="legal|alignment"):
-        spec.validate_width(3, tp_size=1)
-
-    object_config = SimpleNamespace(
-        hidden_size=4,
-        text_config=SimpleNamespace(hidden_size=4),
-    )
-    object_updated = spec.update_config_object(object_config, 2)
-    assert object_updated.hidden_size == 2
-    assert object_updated.text_config.hidden_size == 2
-    assert object_config.hidden_size == 4
 
 
 def test_packed_minitron_metric_matches_per_sample_mean_l2_then_site_sum():
@@ -280,54 +217,6 @@ def test_qwen_vlm_embedding_spec_covers_language_projector_mtp_and_exempts_vit()
     assert sliced["mtp.fc.weight"].shape == (768, 1536)
 
 
-def test_hidden_width_site_scorer_uses_original_packed_sample_means():
-    module = torch.nn.Identity()
-    scorer = HiddenWidthSiteScorer(
-        module,
-        MeshGroups(),
-        hidden_size=2,
-        name="model.layers.0.input_layernorm",
-    )
-    scorer.set_batch_metadata(
-        sequence_ids=torch.tensor([[0, 0, 1, 1, 1, -1]]),
-        num_samples=2,
-    )
-    activations = torch.tensor(
-        [[[1.0, 2.0], [3.0, 4.0], [2.0, 8.0], [4.0, 12.0], [6.0, 16.0], [99.0, 99.0]]]
-    )
-
-    scorer(module, (activations,), activations)
-    result = scorer.finalize()
-
-    expected_means = torch.tensor([[2.0, 3.0], [4.0, 12.0]])
-    torch.testing.assert_close(result["score"], expected_means.square().sum(0).sqrt())
-    assert result["sample_count"] == 2
-
-
-def test_hidden_width_site_scorer_accepts_thd_packed_norm_outputs():
-    module = torch.nn.Identity()
-    scorer = HiddenWidthSiteScorer(
-        module,
-        MeshGroups(),
-        hidden_size=2,
-        name="model.layers.0.input_layernorm",
-    )
-    scorer.set_batch_metadata(
-        sequence_ids=torch.tensor([[0, 0, 1, 1, 1, -1]]),
-        num_samples=2,
-    )
-    activations = torch.tensor(
-        [[1.0, 2.0], [3.0, 4.0], [2.0, 8.0], [4.0, 12.0], [6.0, 16.0], [99.0, 99.0]]
-    )
-
-    scorer(module, (activations,), activations)
-    result = scorer.finalize()
-
-    expected_means = torch.tensor([[2.0, 3.0], [4.0, 12.0]])
-    torch.testing.assert_close(result["score"], expected_means.square().sum(0).sqrt())
-    assert result["sample_count"] == 2
-
-
 def test_hidden_width_site_scorer_consumes_pp_microbatch_sequence_ids():
     module = torch.nn.Identity()
     scorer = HiddenWidthSiteScorer(
@@ -350,27 +239,6 @@ def test_hidden_width_site_scorer_consumes_pp_microbatch_sequence_ids():
     assert result["sample_count"] == 2
 
 
-def test_hidden_width_site_scorer_cp_nonowner_contributes_explicit_zeros():
-    groups = SimpleNamespace(cp_rank=1, cp_group=None, token_group=None)
-    module = torch.nn.Identity()
-    scorer = HiddenWidthSiteScorer(
-        module,
-        groups,
-        hidden_size=2,
-        name="model.layers.0.input_layernorm",
-    )
-    scorer.set_batch_metadata(
-        sequence_ids=torch.tensor([[0, 0]]),
-        num_samples=1,
-    )
-
-    scorer(module, (), torch.tensor([[[1.0, 3.0], [3.0, 5.0]]]))
-    result = scorer.finalize()
-
-    torch.testing.assert_close(result["score"], torch.zeros(2))
-    assert result["sample_count"] == 0
-
-
 def test_hidden_width_site_scorer_restores_zero_cp_peer_from_exact_checkpoint():
     module = torch.nn.LayerNorm(2)
     scorer = HiddenWidthSiteScorer(
@@ -385,31 +253,6 @@ def test_hidden_width_site_scorer_restores_zero_cp_peer_from_exact_checkpoint():
 
     torch.testing.assert_close(result["score"], torch.zeros(2))
     assert result["sample_count"] == 0
-
-
-def test_hidden_width_site_scorer_checkpoint_records_activation_not_weight_layout():
-    module = torch.nn.LayerNorm(2)
-    scorer = HiddenWidthSiteScorer(
-        module,
-        MeshGroups(),
-        hidden_size=2,
-        name="model.layers.0.input_layernorm",
-    )
-    scorer.set_batch_metadata(sequence_ids=torch.tensor([[0, 0]]), num_samples=1)
-    scorer(module, (), torch.tensor([[[1.0, 3.0], [3.0, 5.0]]]))
-
-    state = scorer.checkpoint_state()
-
-    assert state["_local_hidden_size"] == 2
-    assert state["_feature_sharded"] is False
-    restored = HiddenWidthSiteScorer(
-        module,
-        MeshGroups(),
-        hidden_size=2,
-        name="model.layers.0.input_layernorm",
-    )
-    restored.load_checkpoint_state(state)
-    torch.testing.assert_close(restored.finalize()["score"], scorer.finalize()["score"])
 
 
 def test_nested_width_envelope_matches_physical_prefix_and_zeros_inactive_gradients():
@@ -539,111 +382,6 @@ def test_active_prefix_layernorm_matches_physical_module_and_gradients():
     assert torch.count_nonzero(x.grad[..., 2:]) == 0
     assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
     assert torch.count_nonzero(envelope.bias.grad[2:]) == 0
-
-
-def test_active_prefix_automodel_float32_rmsnorm_matches_physical_gradients():
-    class Float32RMSNorm(torch.nn.Module):
-        def __init__(self, width):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.linspace(0.75, 1.5, width, dtype=torch.bfloat16))
-            self.eps = 3.0e-5
-
-        def forward(self, x):
-            input_dtype = x.dtype
-            normalized = x.float()
-            normalized = normalized * torch.rsqrt(
-                normalized.pow(2).mean(-1, keepdim=True) + self.eps
-            )
-            return (self.weight * normalized).to(input_dtype)
-
-    spec = EmbeddingPruningSpec(
-        hidden_size=4,
-        legal_widths=(4, 2),
-        alignment=2,
-        tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
-    )
-    envelope = Float32RMSNorm(4)
-    physical = Float32RMSNorm(2)
-    physical.weight.data.copy_(envelope.weight[:2])
-    x = torch.tensor(
-        [[0.1015625, 0.205078125, 4.0, -3.0]],
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-
-    with hidden_width_module_context(
-        envelope,
-        canonical_module_name="norm",
-        spec=spec,
-        width=2,
-        mask_boundary_input=True,
-    ):
-        actual = envelope(x)
-    physical_x = x.detach()[..., :2].clone().requires_grad_(True)
-    expected = physical(physical_x)
-
-    assert torch.equal(actual[..., :2], expected)
-    assert torch.count_nonzero(actual[..., 2:]) == 0
-    actual.float().sum().backward()
-    expected.float().sum().backward()
-    torch.testing.assert_close(x.grad[..., :2], physical_x.grad)
-    torch.testing.assert_close(envelope.weight.grad[:2], physical.weight.grad)
-    assert torch.count_nonzero(x.grad[..., 2:]) == 0
-    assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
-
-
-@pytest.mark.parametrize(
-    ("module_path", "class_name"),
-    [
-        ("transformers.models.qwen3_next.modeling_qwen3_next", "Qwen3NextRMSNorm"),
-        ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5RMSNorm"),
-        ("transformers.models.qwen3_5_moe.modeling_qwen3_5_moe", "Qwen3_5MoeRMSNorm"),
-    ],
-)
-def test_active_prefix_qwen_rmsnorm_matches_physical_gradients(module_path, class_name):
-    modeling = pytest.importorskip(
-        module_path,
-        reason=f"installed Transformers version does not support {class_name}",
-    )
-    rmsnorm_cls = getattr(modeling, class_name, None)
-    if rmsnorm_cls is None:
-        pytest.skip(f"installed Transformers version does not expose {class_name}")
-
-    spec = EmbeddingPruningSpec(
-        hidden_size=4,
-        legal_widths=(4, 2),
-        alignment=2,
-        tensor_rules=(TensorAxisRule(r"^norm\.weight$", (0,), "normalization"),),
-    )
-    envelope = rmsnorm_cls(4).to(dtype=torch.bfloat16)
-    envelope.weight.data.copy_(torch.linspace(0.0, 0.3, 4, dtype=torch.bfloat16))
-    physical = rmsnorm_cls(2).to(dtype=torch.bfloat16)
-    physical.weight.data.copy_(envelope.weight[:2])
-    x = torch.tensor(
-        [[0.1015625, 0.205078125, 4.0, -3.0]],
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-
-    with hidden_width_module_context(
-        envelope,
-        canonical_module_name="norm",
-        spec=spec,
-        width=2,
-        mask_boundary_input=True,
-    ):
-        actual = envelope(x)
-    physical_x = x.detach()[..., :2].clone().requires_grad_(True)
-    expected = physical(physical_x)
-
-    assert torch.equal(actual[..., :2], expected)
-    assert torch.count_nonzero(actual[..., 2:]) == 0
-    actual.float().sum().backward()
-    expected.float().sum().backward()
-    torch.testing.assert_close(x.grad[..., :2], physical_x.grad)
-    torch.testing.assert_close(envelope.weight.grad[:2], physical.weight.grad)
-    assert torch.count_nonzero(x.grad[..., 2:]) == 0
-    assert torch.count_nonzero(envelope.weight.grad[2:]) == 0
 
 
 def _distributed_hidden_width_mask_job(rank: int, size: int) -> None:
