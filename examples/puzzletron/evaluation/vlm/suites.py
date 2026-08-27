@@ -35,6 +35,7 @@ __all__ = [
     "EVALUATION_PROFILE",
     "MMVU_SMOKE_ROWS",
     "MVBENCH_LEAF_TASKS",
+    "QUICK_SELECTED_ROWS",
     "QUICK_TASKS",
     "SHORT_TASKS",
     "SINGLE_TASK_SMOKE_SUITES",
@@ -66,6 +67,7 @@ SINGLE_TASK_SMOKE_SUITES = {
 SMOKE_SUITES = frozenset(("short", "adapter-smoke", *SINGLE_TASK_SMOKE_SUITES))
 
 _QUICK_COUNTS = {"realworldqa": 64, "mmmu_val": 120, "mvbench": 160}
+QUICK_SELECTED_ROWS = sum(_QUICK_COUNTS.values())
 MMVU_SMOKE_ROWS = (
     (1, "validation_1", "videos/Chemistry/0.mp4"),
     (3, "validation_3", "videos/Thermodynamics/0.mp4"),

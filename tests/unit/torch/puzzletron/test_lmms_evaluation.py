@@ -102,6 +102,21 @@ def test_command_maps_qwen35_checkpoint_without_vllm_options(tmp_path):
     assert model_args == "pretrained=/ckpts/candidate"
 
 
+@pytest.mark.parametrize("field", ["dtype", "trust_remote_code"])
+def test_command_rejects_vllm_model_settings_for_qwen35(field, tmp_path):
+    with pytest.raises(ValueError, match=f"non-vllm backends.*{field}"):
+        lmms._build_command(
+            {
+                "tasks": ["mmmu_val"],
+                "model": "qwen3_5",
+                "checkpoint_arg": "pretrained",
+                field: "configured",
+            },
+            checkpoint="/ckpts/candidate",
+            output_path=tmp_path / "results",
+        )
+
+
 def test_command_forwards_unowned_model_and_evaluator_options(tmp_path):
     argv, _, _ = lmms._build_command(
         {

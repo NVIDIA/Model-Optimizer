@@ -30,13 +30,15 @@ from examples.puzzletron.evaluation.vlm import profile, suites
 
 __all__ = ["prepare", "task_config", "verify_offline"]
 
+_MMVU_SMOKE_SELECTION_MODULE = "modelopt_mmvu_smoke_selection"
+
 
 def _lmms_eval_root() -> Path:
     spec = importlib.util.find_spec("lmms_eval")
     locations = spec.submodule_search_locations if spec is not None else None
     if not locations:
         raise RuntimeError(
-            "lmms_eval is not installed; install examples/puzzletron/requirements.txt"
+            "lmms_eval is not installed; install examples/puzzletron/requirements-vlm.txt"
         )
     return Path(next(iter(locations))).absolute()
 
@@ -58,6 +60,7 @@ def _write_task_config(
     generation_kwargs: dict[str, object],
     doc_to_visual: str | None = None,
     process_docs: str | None = None,
+    process_docs_module: str = "modelopt_quick_selection",
     process_results: str | None = None,
 ) -> None:
     values = {
@@ -73,7 +76,7 @@ def _write_task_config(
 
     lines = [f"{key}: {json.dumps(value, sort_keys=True)}" for key, value in values.items()]
     if process_docs is not None:
-        lines.append(f"process_docs: !function modelopt_quick_selection.{process_docs}")
+        lines.append(f"process_docs: !function {process_docs_module}.{process_docs}")
     if doc_to_visual is not None:
         lines.append(f"doc_to_visual: !function modelopt_video_paths.{doc_to_visual}")
     if process_results is not None:
@@ -160,7 +163,7 @@ def {function_name}(documents):
         indices.append(index)
     return documents.select(indices)
 '''
-    checkpoint.write_generated(tasks_root / "modelopt_quick_selection.py", source)
+    checkpoint.write_generated(tasks_root / f"{_MMVU_SMOKE_SELECTION_MODULE}.py", source)
 
 
 def _write_mmvu_guard(tasks_root: Path) -> None:
@@ -467,8 +470,11 @@ def _write_single_task(
 ) -> str:
     configured_task = suites.task_name(task)
     process_docs = None
+    process_docs_module = "modelopt_quick_selection"
     if quick_manifest is not None or (suite == "mmvu-smoke" and task == "mmvu_val"):
         process_docs = f"select_{configured_task}"
+    if suite == "mmvu-smoke" and task == "mmvu_val":
+        process_docs_module = _MMVU_SMOKE_SELECTION_MODULE
     doc_to_visual = {
         "videomme": "videomme_doc_to_visual",
         "perceptiontest_val_mc": "perceptiontest_doc_to_visual",
@@ -481,6 +487,7 @@ def _write_single_task(
         generation_kwargs=suites.generation_kwargs(task),
         doc_to_visual=doc_to_visual,
         process_docs=process_docs,
+        process_docs_module=process_docs_module,
         process_results="process_results" if suite == "full" and task == "mmvu_val" else None,
     )
     return configured_task

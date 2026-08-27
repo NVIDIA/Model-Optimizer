@@ -181,7 +181,7 @@ def _report(
         "generation_policy": execution_policy["generation"],
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "quick_selected_rows": 344 if suite == "quick" else None,
+        "quick_selected_rows": suites.QUICK_SELECTED_ROWS if suite == "quick" else None,
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
         ),

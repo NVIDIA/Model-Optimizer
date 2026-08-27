@@ -54,9 +54,19 @@ def _write_checkpoint(root: Path) -> Path:
 def _write_lmms_tasks(root: Path, tasks: tuple[str, ...]) -> Path:
     lmms_root = root / "lmms_eval"
     for task in tasks:
-        config = lmms_root / _TASK_CONFIGS[task]
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(f"task: {task}\n")
+        task_configs = [_TASK_CONFIGS[task]]
+        if task == "video_mmmu":
+            task_configs.extend(
+                f"tasks/videommmu/{leaf}.yaml" for leaf in suites.VIDEO_MMMU_LEAF_TASKS
+            )
+        elif task == "mvbench":
+            task_configs.extend(
+                f"tasks/mvbench/mvbench_{leaf}.yaml" for leaf in suites.MVBENCH_LEAF_TASKS
+            )
+        for relative_path in task_configs:
+            config = lmms_root / relative_path
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(f"task: {task}\n")
     return lmms_root
 
 
@@ -220,9 +230,11 @@ def test_short_profile_materializes_pinned_tasks_and_qwen_backend(monkeypatch, t
     }
 
 
-def test_mmvu_guard_is_limited_to_full_suite(tmp_path):
+def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):
     snapshot = tmp_path / "snapshot"
     snapshot.mkdir()
+    lmms_root = _write_lmms_tasks(tmp_path, profile.VLM_BENCHMARK_TASKS)
+    monkeypatch.setattr(tasks, "_lmms_eval_root", lambda: lmms_root)
 
     tasks_root, configured_tasks = tasks.prepare(
         tmp_path / "results",
@@ -237,8 +249,10 @@ def test_mmvu_guard_is_limited_to_full_suite(tmp_path):
     assert "\nprocess_results:" not in generated
     assert (
         "process_docs: !function "
-        "modelopt_quick_selection.select_modelopt_vlm_benchmark_mmvu_val\n" in generated
+        "modelopt_mmvu_smoke_selection.select_modelopt_vlm_benchmark_mmvu_val\n" in generated
     )
+    assert (tasks_root / "modelopt_mmvu_smoke_selection.py").is_file()
+    assert not (tasks_root / "modelopt_quick_selection.py").exists()
 
     full_root, _ = tasks.prepare(
         tmp_path / "full-results",
@@ -414,7 +428,9 @@ def test_profile_contract_pins_every_task_and_revision():
 
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
-    requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
+    requirements = (
+        checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements-vlm.txt"
+    ).read_text()
     assert (
         "lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
         f"{checkpoint.LMMS_EVAL_REVISION}"
@@ -427,6 +443,17 @@ def test_vlm_parser_exposes_only_suite_owned_sample_limits():
     assert "--full" not in help_text
     assert "--tasks" not in help_text
     assert "--evaluation-profile" not in help_text
+
+
+def test_vlm_parser_defaults_to_short_suite():
+    assert evaluation._build_parser().get_default("suite") == "short"
+
+
+def test_huggingface_dependency_supports_range_metadata_api():
+    requirements = (
+        checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements-vlm.txt"
+    ).read_text()
+    assert "huggingface_hub>=1.2.0" in requirements.splitlines()
 
 
 def test_credential_scope_restores_inherited_values(monkeypatch):

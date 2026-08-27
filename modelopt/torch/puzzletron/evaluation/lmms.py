@@ -261,10 +261,15 @@ def _merge_model_args(
                 "distributed_executor_backend": canonical_topology["distributed_executor_backend"],
             }
         )
+    supplied_vllm_fields = sorted(_MODEL_ARG_FIELDS & settings.keys())
+    if backend != "vllm" and supplied_vllm_fields:
+        raise ValueError(
+            "evaluation settings for non-vllm backends must not set vllm model "
+            f"arguments: {', '.join(supplied_vllm_fields)}"
+        )
     if backend == "vllm":
-        for key in sorted(_MODEL_ARG_FIELDS):
-            if key in settings:
-                derived[key] = settings[key]
+        for key in supplied_vllm_fields:
+            derived[key] = settings[key]
 
     if isinstance(raw, str):
         _reject_reserved_model_args(_model_arg_keys(raw), reserved_fields)

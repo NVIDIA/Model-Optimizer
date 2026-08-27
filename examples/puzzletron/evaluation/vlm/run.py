@@ -64,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
             *suites.SINGLE_TASK_SMOKE_SUITES,
             "full",
         ),
-        default=None,
+        default="short",
         help="Pinned Qwen 3.5 0.8B VLM benchmark suite.",
     )
     parser.add_argument("--batch-size", type=checkpoint.positive_int, default=1)
