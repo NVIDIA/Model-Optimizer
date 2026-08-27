@@ -14,8 +14,11 @@
 # limitations under the License.
 """Utility functions for running example commands reused in multiple example tests."""
 
+import contextlib
 import os
+import signal
 import subprocess
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -61,13 +64,54 @@ def extend_cmd_parts(cmd_parts: list[str], **kwargs):
     return cmd_parts
 
 
+# Grace period for descendants to flush and close the inherited output pipe after the command exits.
+_ORPHAN_PIPE_TIMEOUT_S = 30
+
+
 def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
-    """Run a command, capturing combined stdout/stderr to catch transient HF errors."""
-    result = subprocess.run(
-        cmd_parts, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    """Run a command, streaming and capturing combined stdout/stderr to catch transient HF errors.
+
+    The command runs in its own process group and its output is drained by a reader thread rather
+    than ``subprocess.run``. A command killed without its descendants (e.g. an OOM-killed launcher
+    that leaves a server behind) leaves the inherited pipe open, so a plain read would block on an
+    EOF that never comes -- swallowing every log line and hanging until the test's timeout.
+    """
+    chunks: list[str] = []
+    process = subprocess.Popen(
+        cmd_parts,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
     )
-    print(result.stdout, end="")
-    return result.returncode, result.stdout
+    # start_new_session makes the child its own process-group leader, so the group id is its pid.
+    # Read it now: after wait() reaps the child, os.getpgid() no longer resolves it.
+    pgid = process.pid
+
+    def _drain():
+        for line in process.stdout:  # type: ignore[union-attr]
+            print(line, end="")
+            chunks.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    returncode = process.wait()
+    reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+
+    if reader.is_alive():
+        warnings.warn(
+            f"{cmd_parts[0]} exited with {returncode} but left descendants holding its output "
+            "pipe open; killing the process group. Output may be truncated."
+        )
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+        reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+
+    with contextlib.suppress(Exception):
+        process.stdout.close()  # type: ignore[union-attr]
+    return returncode, "".join(chunks)
 
 
 def run_example_command(
