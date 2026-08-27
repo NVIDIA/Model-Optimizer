@@ -1954,13 +1954,12 @@ def test_load_recipe_kv_autoquantize_contract():
     assert "*mtp*" in aq.disabled_layers
     assert aq.cost_excluded_layers == []
     assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
-    assert all(candidate.quant_cfg[0].cfg.use_constant_amax for candidate in aq.candidate_formats)
     assert [fmt.effective_bits for fmt in aq.candidate_formats] == [8.0, 4.5]
     for fmt in aq.candidate_formats:
         for entry in fmt.quant_cfg:
             assert entry.quantizer_name == "*[kv]_bmm_quantizer"
-            assert entry.cfg.use_constant_amax
-            assert entry.cfg.constant_amax is None
+            assert not entry.cfg.use_constant_amax
+            assert entry.cfg.constant_amax == 448.0
         assert fmt.algorithm is None
 
 
@@ -1983,7 +1982,9 @@ def test_builtin_kv_autoquantize_recipes_use_calibration_free_cast_candidates(
     aq = getattr(load_recipe(recipe_path), kv_stage)
 
     assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
-    assert all(candidate.quant_cfg[0].cfg.use_constant_amax for candidate in aq.candidate_formats)
+    assert all(
+        candidate.quant_cfg[0].cfg.constant_amax == 448.0 for candidate in aq.candidate_formats
+    )
 
 
 def test_load_recipe_fixed_ptq_then_kv_autoquantize(tmp_path):
@@ -2029,12 +2030,12 @@ def test_load_recipe_weight_autoquantize_then_kv_autoquantize(tmp_path):
     assert recipe.kv_auto_quantize.constraints.kv_effective_bits == 8.0
 
 
-def test_composed_kv_autoquantize_rejects_preconfigured_kv_quantizers(tmp_path):
-    recipe_file = tmp_path / "invalid.yml"
+def test_composed_kv_autoquantize_accepts_scoped_gemm_rule(tmp_path):
+    recipe_file = tmp_path / "scoped-gemm.yml"
     recipe_file.write_text(
         "metadata:\n  recipe_type: auto_quantize\n"
         "quantize:\n  algorithm: max\n  quant_cfg:\n"
-        "    - quantizer_name: '*[kv]_bmm_quantizer'\n"
+        "    - quantizer_name: 'model.layers.*.mlp.*'\n"
         "      cfg: {num_bits: [4, 3], constant_amax: 1.0}\n"
         "auto_quantize:\n  constraints:\n    kv_effective_bits: 8.0\n"
         "  candidate_formats:\n"
@@ -2044,40 +2045,10 @@ def test_composed_kv_autoquantize_rejects_preconfigured_kv_quantizers(tmp_path):
         "  auto_quantize_method: kl_div\n"
     )
 
-    with pytest.raises(ValueError, match="must not enable K/V quantizers"):
-        load_recipe(recipe_file)
+    recipe = load_recipe(recipe_file)
 
-
-@pytest.mark.parametrize(
-    "quantizer_name",
-    ["*[kv]_bmm_quantizer", "model.layers.*.self_attn.*_bmm_quantizer"],
-)
-def test_followup_kv_autoquantize_rejects_kv_weight_search_candidate(quantizer_name):
-    kv_candidate = qcfg.QuantizeConfig(
-        quant_cfg=[
-            {"quantizer_name": "*", "enable": False},
-            {
-                "quantizer_name": quantizer_name,
-                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
-            },
-        ],
-        effective_bits=8.0,
-    )
-    kv_search = AutoQuantizeConfig(
-        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
-        candidate_formats=[kv_candidate],
-        auto_quantize_method="kl_div",
-    )
-    weight_search = AutoQuantizeConfig(
-        constraints=AutoQuantizeConstraints(effective_bits=8.0),
-        candidate_formats=[kv_candidate],
-    )
-
-    with pytest.raises(ValueError, match="weight AutoQuantize stage must not enable K/V"):
-        ModelOptAutoQuantizeRecipe(
-            auto_quantize=weight_search,
-            kv_auto_quantize=kv_search,
-        )
+    assert recipe.quantize is not None
+    assert recipe.quantize.quant_cfg[0].quantizer_name == "model.layers.*.mlp.*"
 
 
 def test_kv_autoquantize_rejects_cost_excluded_layers():

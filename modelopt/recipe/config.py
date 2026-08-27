@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import warnings
 from enum import Enum
-from fnmatch import fnmatch
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -326,22 +325,6 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         return self
 
 
-def _quantize_config_enables_kv(config: QuantizeConfig) -> bool:
-    """Return whether ordered quantizer rules leave either K/V quantizer enabled.
-
-    Match the pattern basename so a rule rooted at the real model, such as
-    ``model.layers.*.self_attn.*_bmm_quantizer``, cannot bypass composition validation.
-    """
-    probe_names = ("k_bmm_quantizer", "v_bmm_quantizer")
-    enabled = dict.fromkeys(probe_names, False)
-    for entry in config.quant_cfg:
-        pattern = entry.quantizer_name.rsplit(".", 1)[-1]
-        for name in probe_names:
-            if fnmatch(name, pattern):
-                enabled[name] = entry.enable
-    return any(enabled.values())
-
-
 class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
     """Our config class for AutoQuantize recipes."""
 
@@ -382,20 +365,6 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
                     "A weight AutoQuantize stage followed by kv_auto_quantize must omit the "
                     "uniform auto_quantize.kv_cache post-step."
                 )
-            first_stage_candidates = [
-                *self.auto_quantize.candidate_formats,
-                *(
-                    candidate
-                    for search_space in self.auto_quantize.module_search_spaces
-                    for candidate in search_space.candidate_formats
-                ),
-            ]
-            if any(_quantize_config_enables_kv(config) for config in first_stage_candidates):
-                raise ValueError(
-                    "The weight AutoQuantize stage must not enable K/V quantizers when a "
-                    "kv_auto_quantize follow-up is configured."
-                )
-
         has_fixed_baseline = self.quantize is not None
         has_global_search = bool(self.auto_quantize.candidate_formats)
         if not primary_is_kv and has_fixed_baseline and has_global_search:
@@ -413,15 +382,6 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
             raise ValueError(
                 "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
                 "auto_quantize.candidate_formats for unmatched modules."
-            )
-        if (
-            (primary_is_kv or self.kv_auto_quantize is not None)
-            and self.quantize is not None
-            and _quantize_config_enables_kv(self.quantize)
-        ):
-            raise ValueError(
-                "The fixed quantize stage must not enable K/V quantizers when a KV-cache "
-                "AutoQuantize stage is configured."
             )
         return self
 

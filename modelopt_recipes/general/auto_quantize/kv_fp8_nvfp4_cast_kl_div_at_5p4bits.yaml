@@ -8,8 +8,8 @@
 # modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
 imports:
   base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
-  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
-  kv_nvfp4_cast: configs/ptq/units/kv_nvfp4_cast
+  fp8: configs/numerics/fp8
+  nvfp4: configs/numerics/nvfp4
 
 metadata:
   recipe_type: auto_quantize
@@ -21,11 +21,17 @@ auto_quantize:
 
   candidate_formats:
     - quant_cfg:
-        - $import: kv_fp8_cast
+        - quantizer_name: "*[kv]_bmm_quantizer"
+          cfg:
+            $import: fp8
+            constant_amax: 448.0
       algorithm:
       effective_bits: 8.0
     - quant_cfg:
-        - $import: kv_nvfp4_cast
+        - quantizer_name: "*[kv]_bmm_quantizer"
+          cfg:
+            $import: nvfp4
+            constant_amax: 448.0
       algorithm:
       effective_bits: 4.5
 
