@@ -126,6 +126,7 @@ repos:
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
+              examples/onnx_ptq/bevformer/prepare_calibration.py|
               examples/onnx_ptq/far3d/evaluate.py|
               examples/onnx_ptq/petr/evaluate.py|
               examples/onnx_ptq/petr/prepare_sweep_metadata.py|

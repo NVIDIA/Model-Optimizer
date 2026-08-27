@@ -133,6 +133,10 @@ Inference latency of the model is <X> ms
 
 The [FAR3D example](./far3d/) demonstrates an end-to-end workflow that exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
 
+### BEVFormer 3D object detection
+
+The [BEVFormer example](./bevformer/) exports BEVFormer-tiny to ONNX, generates temporal calibration data, quantizes the model to INT8 or FP8, builds TensorRT engines, and evaluates NDS and mAP on the nuScenes validation set.
+
 ### PETR 3D object detection
 
 The [PETR example](./petr/) demonstrates an end-to-end workflow that exports and quantizes PETRv1 and PETRv2 ONNX backbones and heads, builds TensorRT engines, and evaluates 3D object detection mAP on the nuScenes validation set.
