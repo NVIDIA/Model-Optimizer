@@ -106,13 +106,18 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
     try:
-        # Wait *without* reaping (WNOWAIT): a reaped pid can be recycled, and pgid == the child's
-        # pid, so reaping before the kill below would risk signalling an unrelated group.
-        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        if os.name == "posix":
+            # Wait *without* reaping: a reaped pid can be recycled, and pgid == the child's pid, so
+            # reaping before the kill below would risk signalling an unrelated group.
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        else:  # no process groups, so nothing to protect the pid for
+            process.wait()
     except BaseException:
         # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
         # not swept up with pytest's, so take the descendants down rather than leak them.
         _kill_process_group()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
         raise
     reader.join(_ORPHAN_PIPE_TIMEOUT_S)
 
