@@ -163,8 +163,19 @@ def get_parser() -> argparse.ArgumentParser:
         nargs="+",
         help=(
             "Priority order for the execution providers (EP) to calibrate the model. "
-            "Any subset of ['trt', 'cuda:x', dml:x, 'cpu'], where 'x' is the device id."
+            "Any subset of ['NvTensorRtRtx', 'trt', 'cuda:x', dml:x, 'cpu'], where 'x' is "
+            "the device id."
             "If a custom op is detected in the model, 'trt' will automatically be added to the EP list."
+        ),
+    )
+    argparser.add_argument(
+        "--trt_rtx_backend",
+        choices=["legacy", "abi"],
+        default="legacy",
+        help=(
+            "TensorRT-RTX implementation used with --calibration_eps NvTensorRtRtx. "
+            "The legacy backend uses TensorRT-RTX libraries on PATH; "
+            "the ABI backend uses the installed standalone EP plugin."
         ),
     )
     argparser.add_argument(
@@ -532,6 +543,7 @@ def main():
         calibration_cache_path=args.calibration_cache_path,
         calibration_shapes=args.calibration_shapes,
         calibration_eps=args.calibration_eps,
+        trt_rtx_backend=args.trt_rtx_backend,
         override_shapes=args.override_shapes,
         op_types_to_quantize=args.op_types_to_quantize,
         op_types_to_exclude=args.op_types_to_exclude,

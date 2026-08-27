@@ -233,6 +233,7 @@ def quantize(
             calibration_eps,
             calibration_shapes,
             input_shapes_profile,
+            kwargs.get("trt_rtx_backend", "legacy"),
         )
         nodes_to_exclude.extend(matmul_nodes_to_exclude)  # type: ignore[union-attr]
         logger.debug(f"Excluding {len(matmul_nodes_to_exclude)} MatMul nodes due to GEMV pattern")
@@ -253,6 +254,7 @@ def quantize(
         custom_ops_to_quantize,
         kwargs.get("op_types_needing_output_quant"),
         input_shapes_profile,
+        kwargs.get("trt_rtx_backend", "legacy"),
     )
     logger.info(
         f"Quantizable op types in the model: {[t for t in op_types_to_quantize if t in op_types]}"

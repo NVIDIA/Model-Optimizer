@@ -395,6 +395,7 @@ def quantize(
     autotune_warmup_runs: int = 50,
     autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
+    trt_rtx_backend: str = "legacy",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -423,6 +424,10 @@ def quantize(
 
             .. note::
                 If a custom op is detected in the model, 'trt' will automatically be added to the EP list.
+        trt_rtx_backend:
+            TensorRT-RTX implementation used when calibration_eps contains 'NvTensorRtRtx'.
+            Either 'legacy' (default) or 'abi'. The legacy backend uses TensorRT-RTX
+            libraries on PATH; the ABI backend uses the standalone EP plugin.
         override_shapes:
             Override model input shapes with static shapes.
         op_types_to_quantize:
@@ -673,6 +678,7 @@ def quantize(
             calibration_data_reader,
             calibration_eps,
             input_shapes_profile,
+            trt_rtx_backend,
         )
 
     if calibrate_per_node and not calibration_shapes:
@@ -736,6 +742,7 @@ def quantize(
             opset=opset,
             autotune=autotune,
             input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
 
@@ -751,6 +758,7 @@ def quantize(
             use_zero_point=use_zero_point,
             log_level=log_level,
             input_shapes_profile=input_shapes_profile,
+            trt_rtx_backend=trt_rtx_backend,
             **kwargs,
         )
     else:
