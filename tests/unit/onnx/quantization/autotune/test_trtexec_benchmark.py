@@ -166,10 +166,6 @@ def test_parse_remote_autotuning_url_full():
     assert cfg.port == 2222
     assert cfg.bin_path == "/opt/trt/bin"
     assert cfg.lib_path == "/opt/trt/lib"
-    assert cfg.options == {
-        "remote_exec_path": "/opt/trt/bin/trtexec",
-        "remote_lib_path": "/opt/trt/lib",
-    }
 
 
 def test_parse_remote_autotuning_url_defaults_port_to_22():
@@ -239,6 +235,20 @@ def test_parse_remote_autotuning_url_accepts_normal_user_and_host():
     )
     assert cfg.user == "alice"
     assert cfg.ip == "10.0.0.5"
+
+
+def test_parse_remote_autotuning_url_rejects_empty_user():
+    """An empty username (``ssh://:pass@host``) is rejected."""
+    url = "ssh://:pass@10.0.0.5?remote_exec_path=/x/trtexec&remote_lib_path=/y"
+    with pytest.raises(ValueError, match="remote user"):
+        bm._parse_remote_autotuning_url(url)
+
+
+def test_parse_remote_autotuning_url_rejects_port_out_of_range():
+    """Port 0 is outside the 1–65535 valid range and is rejected."""
+    url = "ssh://alice@10.0.0.5:0?remote_exec_path=/x/trtexec&remote_lib_path=/y"
+    with pytest.raises(ValueError, match="Invalid port"):
+        bm._parse_remote_autotuning_url(url)
 
 
 # --- _ensure_remote_autotuning_flags ---
@@ -613,15 +623,20 @@ def test_remote_run_scp_then_ssh_trtexec_safe(remote_bench, tmp_path):
     trtexec_cmd, scp_cmd, ssh_cmd, cleanup_cmd = (c.args[0] for c in run_mock.call_args_list)
     assert trtexec_cmd[0] == "trtexec"
     assert "scp" in scp_cmd
+    assert "-P" in scp_cmd and str(remote_bench.remote_port) in scp_cmd
     assert "alice@10.0.0.5:" in scp_cmd[-1]
     assert "ssh" in ssh_cmd
+    assert "-p" in ssh_cmd and str(remote_bench.remote_port) in ssh_cmd
     assert "alice@10.0.0.5" in ssh_cmd
     # The remote command string runs trtexec_safe with timing and engine args.
     remote_cmd_str = ssh_cmd[-1]
     assert "trtexec_safe" in remote_cmd_str
+    assert "--useCudaGraph" in remote_cmd_str
     assert "--loadEngine=" in remote_cmd_str
     assert "--warmUp=" in remote_cmd_str
     assert "--iterations=" in remote_cmd_str
+    assert "--avgRuns=" in remote_cmd_str
+    assert "--duration=0" in remote_cmd_str
     assert f"rm -f {remote_bench.remote_engine_path}" in cleanup_cmd[-1]
 
 
@@ -656,6 +671,9 @@ def test_remote_run_falls_back_to_trtexec_safe_flag(remote_bench, tmp_path):
     remote_cmd_str = fallback_cmd[-1]
     assert "trtexec --safe" in remote_cmd_str
     assert "trtexec_safe" not in remote_cmd_str
+    assert "--useCudaGraph" in remote_cmd_str
+    assert "--avgRuns=" in remote_cmd_str
+    assert "--duration=0" in remote_cmd_str
 
 
 def test_remote_run_both_safe_paths_fail_returns_inf(remote_bench, tmp_path):
@@ -664,12 +682,40 @@ def test_remote_run_both_safe_paths_fail_returns_inf(remote_bench, tmp_path):
     scp_proc = _make_proc()
     safe_bin_fail = _make_proc(returncode=127, stderr="not found")
     fallback_fail = _make_proc(returncode=1, stderr="also failed")
+    cleanup_proc = _make_proc()
 
     with patch(
         "subprocess.run",
-        side_effect=[trtexec_proc, scp_proc, safe_bin_fail, fallback_fail],
+        side_effect=[trtexec_proc, scp_proc, safe_bin_fail, fallback_fail, cleanup_proc],
     ):
         assert remote_bench.run(str(tmp_path / "m.onnx")) == float("inf")
+
+
+@pytest.mark.usefixtures("trtexec_version_ok")
+def test_cleanup_exception_is_swallowed_and_warned(remote_bench, tmp_path, caplog):
+    """An exception during remote engine cleanup is caught, logged at WARNING, not propagated."""
+    import subprocess
+
+    trtexec_proc = _make_proc(stdout="")
+    scp_proc = _make_proc()
+    safe_stdout = (
+        "[01/15/2026-12:00:00] [I] GPU Compute Time:  min = 2.0 ms, max = 2.0 ms, "
+        "mean = 2.0 ms, median = 2.0 ms, percentile(99%) = 2.0 ms"
+    )
+    ssh_proc = _make_proc(stdout=safe_stdout)
+    cleanup_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=60.0)
+
+    with (
+        caplog.at_level("WARNING", logger="modelopt.onnx"),
+        patch(
+            "subprocess.run",
+            side_effect=[trtexec_proc, scp_proc, ssh_proc, cleanup_exc],
+        ),
+    ):
+        latency = remote_bench.run(str(tmp_path / "m.onnx"))
+
+    assert latency == pytest.approx(2.0)
+    assert any("cleanup" in r.getMessage().lower() for r in caplog.records)
 
 
 # --- network_timeout_seconds ---
@@ -715,16 +761,17 @@ def test_remote_pipeline_passes_timeout_to_scp_and_ssh(tmp_path):
     scp_proc = _make_proc()
     safe_fail = _make_proc(returncode=1, stderr="trtexec_safe not found")
     fallback_proc = _make_proc(stdout="[I] GPU Compute Time: median = 4.0 ms")
+    cleanup_proc = _make_proc()
 
     with patch(
         "subprocess.run",
-        side_effect=[trtexec_proc, scp_proc, safe_fail, fallback_proc],
+        side_effect=[trtexec_proc, scp_proc, safe_fail, fallback_proc, cleanup_proc],
     ) as run_mock:
         b.run(str(tmp_path / "m.onnx"))
 
-    # Engine build (call 0) has no timeout; the three remote calls all use it.
+    # Engine build (call 0) has no timeout; the four remote calls all use it.
     assert run_mock.call_args_list[0].kwargs.get("timeout") is None
-    for idx in (1, 2, 3):  # scp, ssh trtexec_safe, ssh fallback
+    for idx in (1, 2, 3, 4):  # scp, ssh trtexec_safe, ssh fallback, cleanup ssh
         assert run_mock.call_args_list[idx].kwargs.get("timeout") == timeout, (
             f"call {idx} did not receive timeout={timeout}"
         )
@@ -765,10 +812,11 @@ def test_ssh_trtexec_safe_timeout_returns_inf(tmp_path):
     trtexec_proc = _make_proc(stdout="")
     scp_proc = _make_proc()
     timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=1.0)
+    cleanup_proc = _make_proc()
 
     with patch(
         "subprocess.run",
-        side_effect=[trtexec_proc, scp_proc, timeout_exc],
+        side_effect=[trtexec_proc, scp_proc, timeout_exc, cleanup_proc],
     ):
         assert b.run(str(tmp_path / "m.onnx")) == float("inf")
 
@@ -787,10 +835,11 @@ def test_ssh_fallback_timeout_returns_inf(tmp_path):
     scp_proc = _make_proc()
     safe_fail = _make_proc(returncode=1, stderr="trtexec_safe failed")
     timeout_exc = subprocess.TimeoutExpired(cmd=["ssh"], timeout=1.0)
+    cleanup_proc = _make_proc()
 
     with patch(
         "subprocess.run",
-        side_effect=[trtexec_proc, scp_proc, safe_fail, timeout_exc],
+        side_effect=[trtexec_proc, scp_proc, safe_fail, timeout_exc, cleanup_proc],
     ):
         assert b.run(str(tmp_path / "m.onnx")) == float("inf")
 
