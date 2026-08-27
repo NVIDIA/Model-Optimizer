@@ -5,7 +5,7 @@ from one MIP run and consists of named, single-input nodes. A node can branch fr
 any earlier node. Node IDs must be unique across the campaign because they are also
 stable metric namespaces.
 
-When at least one flow is configured, the campaign orchestrator replaces the
+When at least one flow is configured, Puzzletron replaces the
 legacy fixed post-MIP stages with these dynamic nodes. Run such campaigns through
 `examples/puzzletron/orchestrate.py`; the simple `main.py` stage runner does not
 schedule dynamic/manual nodes.
@@ -100,7 +100,7 @@ Later filters reference metrics as `mip.<metric>` or `<node_id>.<metric>`.
 
 - `filter`: metadata-only selection; modes are `top_k`, `threshold`, `pareto`,
   and `aggregate_rank`.
-- `manual_filter`: writes a durable review, asks in an interactive controller,
+- `manual_filter`: writes a durable review, asks through an interactive run,
   and pauses cleanly in non-interactive execution until a decision is supplied.
 - `materialize`: converts a config-only candidate into a checkpoint.
 - `evaluation`: evaluates either a config-only candidate or a checkpoint and

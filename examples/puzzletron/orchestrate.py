@@ -40,22 +40,25 @@ from puzzletron_orchestrator.logging import OrchestratorLogger  # noqa: E402
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run or resume a Puzzletron v2 campaign from its three YAML contracts."
+        description="Run or resume a Puzzletron v2 campaign from its three configuration files."
     )
     parser.add_argument(
         "--experiment",
         required=True,
-        help="Experiment YAML: model, data, enabled stages, and artifact root.",
+        help="Experiment YAML: model, data, enabled stages, and output directory.",
     )
     parser.add_argument(
         "--runner",
         required=True,
-        help="Runner YAML: worker backend, repository, environment, container, and mounts.",
+        help=(
+            "Runner YAML: where and how worker jobs run, including repository, "
+            "environment, container, and mounts."
+        ),
     )
     parser.add_argument(
         "--execution",
         required=True,
-        help="Execution YAML: per-stage strategy, instances, resources, and failure policy.",
+        help="Execution YAML: how each stage runs, including resources and failure policy.",
     )
     parser.add_argument(
         "--stage",

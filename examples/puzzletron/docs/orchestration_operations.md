@@ -1,4 +1,4 @@
-# Controller operation and recovery
+# Run and recover campaigns
 
 Run one stage with the same experiment, runner, and execution files used for a
 full campaign:
@@ -17,7 +17,7 @@ python examples/puzzletron/orchestrate.py \
 be complete; it does not run missing prerequisites. Use `--stage full` for the
 normal dependency-ordered campaign and whole-campaign resume.
 
-The launch command runs a foreground controller. It submits every
+The launch command runs in the foreground. It submits every
 dependency-ready branch concurrently, polls scheduler state, and exits when the
 selected plan completes or fails.
 
@@ -39,8 +39,8 @@ Redirected output uses timestamped one-line updates instead.
 
 Press `q` or Ctrl-C in an interactive terminal to cancel active jobs and quit,
 detach while leaving jobs running, or continue. Non-interactive Ctrl-C and
-SIGTERM cancel active work and quit. A detached controller preserves durable
-handles, so running the same command recovers the active jobs.
+SIGTERM cancel active work and quit. Detaching preserves saved job information,
+so running the same command recovers the active jobs.
 
 Redirect stderr before piping through `tee` (for example, append
 `2>&1 | tee run.log`) so progress output is captured. Use `--color always` for
@@ -49,10 +49,11 @@ to change the default five-second poll interval.
 
 ## State and execution records
 
-Durable controller state is written under `${puzzle_dir}/orchestration/`. The
-controller supports `single`, `sharded`, and `persistent_pool` strategies,
-Slurm and SSH executors, attempt recovery, and semantic stage validation. See
-the [`configs/orchestration/`](../configs/orchestration/) directory for starter
+The experiment file calls the campaign output directory `puzzle_dir`. Resume
+information is written under `<puzzle-dir>/orchestration/`. The command supports
+`single`, `sharded`, and `persistent_pool` strategies, Slurm and SSH executors,
+attempt recovery, and semantic stage validation. See the
+[`configs/orchestration/`](../configs/orchestration/) directory for starter
 runner and execution files.
 
 Accepted rank-zero stage results also write checksum-validated execution

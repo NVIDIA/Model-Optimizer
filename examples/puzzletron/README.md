@@ -1,9 +1,9 @@
 # Puzzletron v2
 
-Puzzletron v2 helps you explore model shapes and select a smaller, faster
-variant against your quality and deployment goals. Its guided setup creates a
-reproducible, resumable campaign that compares candidates and can optionally
-evaluate, benchmark, materialize, or distill the selected model.
+Puzzletron v2 helps you explore model architectures and find smaller, faster
+variants that meet your quality and deployment goals. Guided setup creates
+reproducible campaigns that find and compare candidates. Campaigns can
+evaluate, benchmark, materialize, or distill those candidates.
 
 ## Table of contents
 
@@ -16,27 +16,25 @@ evaluate, benchmark, materialize, or distill the selected model.
 
 ## First campaign
 
-The supported path is to prepare the control and worker environments, generate
-a campaign, inspect and launch its smoke bundle, and then repeat the launch for
-production. The same launch command resumes compatible work after an
-interruption.
+The usual path is to prepare Puzzletron, generate a campaign, inspect and run a
+small smoke campaign, and then repeat the run with production settings. The
+same command resumes compatible work after an interruption.
 
 ### 1. Prepare the environments
 
-Create a lightweight environment for the setup wizard and controller:
+Create one lightweight Python environment for the setup wizard and the command
+that launches campaigns:
 
 ```bash
-python3 -m venv .venv-puzzletron-control
-source .venv-puzzletron-control/bin/activate
-python -m pip install \
-  -r examples/puzzletron/requirements-setup.txt \
-  -r examples/puzzletron/requirements-orchestrator.txt
+python3 -m venv .venv-puzzletron
+source .venv-puzzletron/bin/activate
+python -m pip install -r examples/puzzletron/requirements-setup.txt
 ```
 
-GPU workers use the environment or container declared in the generated runner
-file. Prepare the [worker environment](docs/environment_setup.md) before
-launching. That guide covers supported containers, pinned CUDA and PyTorch
-packages, patched dependencies, model-specific kernels, and verification.
+This environment creates campaign files and runs `orchestrate.py`. Model
+conversion, training, evaluation, and benchmarking run in the worker
+environment or container selected during setup. Prepare the
+[worker environment](docs/environment_setup.md) before launching a campaign.
 
 ### 2. Generate a campaign
 
@@ -61,7 +59,7 @@ configuration mode, generated files, and setup resume.
 
 ### 3. Inspect and launch smoke
 
-Activate the control environment and inspect the generated smoke plan:
+Activate `.venv-puzzletron` and inspect the generated smoke plan:
 
 ```bash
 PUZZLETRON_BUNDLE=/path/to/generated/campaign/smoke
@@ -74,7 +72,7 @@ python examples/puzzletron/orchestrate.py \
 ```
 
 Review the stage list, worker paths, execution strategies, resources, and
-artifact root. `--stage full` runs every stage enabled by the generated
+output directory. `--stage full` runs every stage enabled by the generated
 experiment in dependency order. Remove `--dry-run` to launch the smoke
 campaign. The checked-in
 [Qwen 3.5 0.8B smoke guide](docs/qwen3p5_0p8b_smoke.md) provides a separate
@@ -85,22 +83,23 @@ one-GPU MIP acceptance route when you need to validate that path directly.
 After smoke succeeds, change `smoke` to `production`, inspect that plan with
 `--dry-run`, and launch it with the same command.
 
-The experiment file owns model and algorithm choices, the runner file owns the
-worker environment, and the execution file owns per-stage orchestration. Keep
-all three together when launching or resuming a generated campaign.
+The experiment file defines the model and algorithm choices, the runner file
+defines the worker environment, and the execution file says how each stage
+runs. Keep all three together when launching or resuming a generated campaign.
 
 ### 5. Resume and inspect results
 
-The controller shows live progress and stores durable state under
-`${puzzle_dir}/orchestration/`. Run the same command with the same three files
-to recover a detached or interrupted campaign; completed compatible stages are
-not submitted again.
+The experiment file calls the campaign output directory `puzzle_dir`.
+`orchestrate.py` shows live progress and stores resume information under
+`<puzzle-dir>/orchestration/`. Run the same command with the same three files to
+recover a detached or interrupted campaign; completed compatible stages are not
+submitted again.
 
-After the selected plan completes cleanly, the orchestrator attempts to write
-the final report to
+After the selected plan completes cleanly, `orchestrate.py` attempts to write the
+final report to
 `<puzzle-dir>/artifacts/campaign_report/campaign_report.html`. A report failure
-does not fail the completed campaign and is recorded in the controller result.
-See [controller operations](docs/orchestration_operations.md) for individual
+does not fail the completed campaign and is recorded in the run result. See
+[run and recovery options](docs/orchestration_operations.md) for individual
 stages, `--once`, logging controls, security options, and recovery details, or
 [campaign reports](docs/campaign_reports.md) to regenerate and interpret a
 report.
@@ -164,9 +163,9 @@ Generated bundles contain an experiment, runner, and execution file. The
 default route above is sufficient when their generated values match your model
 and infrastructure.
 
-- Use [configuration and overrides](docs/configuration_overrides.md) to inspect
-  the checked-in Hydra layout, choose artifact roots, or make temporary
-  experiment changes.
+- Use [configuration and overrides](docs/configuration_overrides.md) to find
+  the built-in configuration files, choose where campaign outputs are stored,
+  or temporarily change experiment settings.
 - Use [Slurm configuration](docs/slurm_configuration.md) to change partitions,
   CPU-only stages, log locations, and accepted compatibility fields.
 - Use the [setup wizard guide](docs/setup_wizard.md) to change profiles,
@@ -177,9 +176,9 @@ the experiment, runner, and execution files before any job is submitted.
 
 ## Operate and recover a campaign
 
-See [controller operations](docs/orchestration_operations.md) for individual
+See [run and recovery options](docs/orchestration_operations.md) for individual
 stages, `--once`, non-interactive behavior, logging controls, security options,
-execution strategies, controller records, and recovery. Remote model code and
+execution strategies, saved run state, and recovery. Remote model code and
 online tokenizer resolution remain disabled by default and should be enabled
 only for trusted sources.
 

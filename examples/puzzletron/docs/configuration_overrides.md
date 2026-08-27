@@ -1,6 +1,7 @@
 # Configuration and experiment overrides
 
-Checked-in experiment configs use Hydra composition:
+Puzzletron builds experiment settings from reusable YAML files in this
+directory:
 
 ```text
 examples/puzzletron/configs/
@@ -13,25 +14,25 @@ examples/puzzletron/configs/
             └── runs/<run>.yaml       # exact named campaign run
 ```
 
-Set a site-specific artifact root without editing a checked-in config:
+Choose where a built-in campaign stores its outputs without editing the YAML:
 
 ```bash
 export PUZZLETRON_RUN_ROOT=/shared/puzzle_runs/my_campaign
 ```
 
-Checked-in experiment YAMLs use `PUZZLETRON_RUN_ROOT` to resolve `puzzle_dir`.
-Generated bundles write their selected `puzzle_dir` directly. In both cases,
-`puzzle_dir` is the canonical location for artifacts, manifests, controller
-state, and logs unless `runner.slurm.log_dir` relocates attempt logs.
+Built-in experiment YAMLs use `PUZZLETRON_RUN_ROOT` as their `puzzle_dir`.
+Generated bundles write the selected `puzzle_dir` directly. This directory
+contains campaign outputs, manifests, resume information, and logs unless
+`runner.slurm.log_dir` sends job logs elsewhere.
 
-Run the orchestrator with `--dry-run` after any configuration change. It
+Run `orchestrate.py` with `--dry-run` after any configuration change. It
 resolves and validates the experiment, runner, and execution files before job
 submission, so misspelled or misplaced fields fail at the command boundary.
 
 ## Command-line overrides
 
 Use command-line overrides for temporary experiment value changes. Append a
-repeatable `--override KEY=VALUE` to the orchestrator command and inspect the
+repeatable `--override KEY=VALUE` to the campaign command and inspect the
 result with `--dry-run` before launch:
 
 ```bash
@@ -41,7 +42,8 @@ result with `--dry-run` before launch:
 ```
 
 Plain `KEY=VALUE` and explicit `++KEY=VALUE` both add or replace experiment
-values. The controller and GPU workers interpret these forms identically.
+values. The `orchestrate.py` command and GPU jobs interpret these forms
+identically.
 Single-plus add (`+KEY=VALUE`) and delete (`~KEY`) operators are not
 supported. Put structural changes in a copied run config so they remain easy to
 review.

@@ -47,9 +47,9 @@ def test_orchestrator_help_explains_first_run_contracts() -> None:
 
     assert result.returncode == 0, result.stderr
     help_text = " ".join(result.stdout.split())
-    assert "Experiment YAML: model, data, enabled stages, and artifact root." in help_text
-    assert "Runner YAML: worker backend, repository, environment" in help_text
-    assert "Execution YAML: per-stage strategy, instances, resources" in help_text
+    assert "Experiment YAML: model, data, enabled stages, and output directory." in help_text
+    assert "Runner YAML: where and how worker jobs run" in help_text
+    assert "Execution YAML: how each stage runs" in help_text
     assert "requires its parent artifacts" in help_text
     assert "jobs keep running" in help_text
 

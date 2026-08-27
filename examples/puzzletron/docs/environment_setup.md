@@ -2,7 +2,8 @@
 
 Puzzletron uses two environments:
 
-- a lightweight control environment for the setup wizard and orchestrator;
+- one lightweight local Python environment for the setup wizard and campaign
+  commands; and
 - a GPU worker environment for ModelOpt, the patched vLLM fork, AutoModel, and
   AIPerf.
 
@@ -10,18 +11,22 @@ The runner file connects them. `runner.execution_contract.venv` selects the
 worker virtual environment, and `runner.execution_contract.container` selects
 an optional Slurm container.
 
-## Control environment
+## Local Puzzletron environment
 
-The setup wizard and orchestrator do not import PyTorch or initialize CUDA.
+The setup wizard and `orchestrate.py` do not import PyTorch or initialize CUDA.
 Create one environment for both:
 
 ```bash
-python3 -m venv .venv-puzzletron-control
-source .venv-puzzletron-control/bin/activate
-python -m pip install \
-  -r examples/puzzletron/requirements-setup.txt \
-  -r examples/puzzletron/requirements-orchestrator.txt
+python3 -m venv .venv-puzzletron
+source .venv-puzzletron/bin/activate
+python -m pip install -r examples/puzzletron/requirements-setup.txt
 ```
+
+Only one local virtual environment is needed for a first campaign.
+`requirements-setup.txt` includes the packages required to generate, launch,
+and monitor a campaign.
+`requirements-orchestrator.txt` is the smaller subset for a machine that only
+launches or monitors an existing campaign. Neither set requires PyTorch.
 
 A Slurm login node also needs `sbatch`, `squeue`, and `sacct`. It does not need
 ModelOpt, CUDA, the worker container, or the worker virtual environment.

@@ -1,9 +1,9 @@
 # Puzzletron Campaign Reports
 
-After a campaign completes cleanly, the orchestrator attempts to generate a
+After a campaign completes cleanly, `orchestrate.py` attempts to generate a
 cumulative HTML report through the configured runner. A report submission,
-polling, or artifact failure is recorded in the controller result but does not
-fail the completed campaign. Inspect the controller logs, then regenerate the
+polling, or artifact failure is recorded in the run result but does not fail
+the completed campaign. Inspect the campaign logs, then regenerate the
 report without rerunning model work:
 
 ```bash
