@@ -21,6 +21,8 @@ import pytest
 import torch
 from _test_utils.torch.misc import set_seed
 
+from modelopt.torch.export.model_config import QUANTIZATION_NVFP4
+from modelopt.torch.export.quant_utils import to_quantized_weight
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -396,6 +398,35 @@ class TestQTensor:
 
         # Compare with input tensor
         assert torch.allclose(deq_x, x, rtol=2e-1, atol=2e-1)
+
+    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Test requires two CUDA devices")
+    def test_nvfp4_export_uses_input_device(self):
+        with torch.cuda.device(1):
+            test_input = torch.randn((8, 32), dtype=torch.bfloat16, device="cuda:1")
+            double_scale = NVFP4QTensor.get_weights_scaling_factor_2(test_input)
+            scale, _ = NVFP4QTensor.get_weights_scaling_factor(
+                test_input, block_size=16, weights_scaling_factor_2=double_scale
+            )
+
+        with torch.cuda.device(0):
+            assert torch.cuda.current_device() == 0
+
+            packed_weight = to_quantized_weight(
+                test_input,
+                scale,
+                QUANTIZATION_NVFP4,
+                weights_scaling_factor2=double_scale,
+                block_size=16,
+            )
+
+            assert packed_weight.device == test_input.device
+            assert packed_weight.shape == (8, 16)
+            assert packed_weight.dtype == torch.uint8
+            assert scale.device == test_input.device
+            assert double_scale.device == test_input.device
+            assert torch.cuda.current_device() == 0
+            torch.cuda.synchronize(test_input.device)
+            assert torch.cuda.current_device() == 0
 
     @pytest.mark.parametrize("device", ["cuda"])
     @pytest.mark.parametrize(

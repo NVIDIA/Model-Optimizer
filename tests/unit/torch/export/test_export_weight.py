@@ -14,6 +14,8 @@
 # limitations under the License.
 
 
+from contextlib import contextmanager
+
 import pytest
 import torch
 import torch.nn as nn
@@ -100,6 +102,43 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+def test_export_quantized_weight_uses_weight_device_context(monkeypatch):
+    model = ToyModel(dims=[32, 32])
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, lambda m: m(torch.randn(1, 4, 32)))
+    linear = model.linears
+    entered = False
+
+    @contextmanager
+    def record_device_context(weight):
+        nonlocal entered
+        assert weight is linear.weight
+        entered = True
+        yield
+
+    monkeypatch.setattr(
+        "modelopt.torch.export.unified_export_hf.same_device_as", record_device_context
+    )
+
+    _export_quantized_weight(linear, torch.float32)
+
+    assert entered
+
+
+def test_export_quantized_weight_does_not_repr_input_quantizer(monkeypatch):
+    model = ToyModel(dims=[32, 256, 32])
+    mtq.quantize(model, partial_fp8_config, lambda x: x(torch.randn(1, 4, 32)))
+    input_quantizer = model.linears[1].input_quantizer
+
+    monkeypatch.setattr(
+        input_quantizer,
+        "extra_repr",
+        lambda: pytest.fail("export should inspect is_enabled without formatting the quantizer"),
+    )
+
+    _export_quantized_weight(model.linears[1], torch.float32, "weight")
+    assert hasattr(model.linears[1], "input_scale")
 
 
 class QuantMoELinear(nn.Module):

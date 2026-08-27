@@ -61,6 +61,7 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+from modelopt.torch.utils import same_device_as
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
 
@@ -571,6 +572,17 @@ def _export_quantized_weight(
     dtype: torch.dtype,
     weight_name: str = "weight",
 ):
+    """Export one quantized weight while its device is current."""
+    with same_device_as(getattr(sub_module, weight_name)):
+        return _export_quantized_weight_impl(sub_module, dtype, weight_name, _tied_cache)
+
+
+def _export_quantized_weight_impl(
+    sub_module: nn.Module,
+    dtype: torch.dtype,
+    weight_name: str = "weight",
+    _tied_cache: dict[int, nn.Module] | None = None,
+):
     """For the given weight attr of the sub_module, export the quantization info of it.
 
     The export includes converting weight tensor to correct quantized values and quantized dtype,
@@ -684,7 +696,7 @@ def _export_quantized_weight(
 
         if (
             input_quantizer is not None
-            and "disabled" not in repr(input_quantizer)
+            and input_quantizer.is_enabled
             and input_quantizer.amax is not None
         ):
             sub_module.register_buffer(
