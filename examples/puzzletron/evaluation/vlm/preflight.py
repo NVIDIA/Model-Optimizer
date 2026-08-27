@@ -231,6 +231,7 @@ def settings(
             "HF_DATASETS_OFFLINE": "1",
             "HF_HOME": str(prepared.hf_home),
             "HF_HUB_OFFLINE": "1",
+            **({} if prepared.judge_env else checkpoint.lmms_eval_disabled_judge_environment()),
             **prepared.judge_env,
         },
         "extra_args": ["--include_path", str(tasks_root)],

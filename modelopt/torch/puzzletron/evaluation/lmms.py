@@ -350,6 +350,11 @@ def _build_command(
     for key, value in env_overrides.items():
         if value is not None:
             env[str(key)] = str(value)
+    compatibility = Path(__file__).parents[1] / "benchmarks" / "vllm_compat"
+    python_paths = [str(compatibility)]
+    if inherited_python_path := env.get("PYTHONPATH"):
+        python_paths.append(inherited_python_path)
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
     if settings.get("cache_dir") is not None and "LMMS_EVAL_HOME" not in env_overrides:
         env["LMMS_EVAL_HOME"] = str(settings["cache_dir"])
     timeout = settings.get("timeout_seconds")

@@ -344,6 +344,7 @@ print(
 """
     env = {
         **checkpoint.credential_free_environment(os.environ),
+        **checkpoint.lmms_eval_disabled_judge_environment(),
         "HF_DATASETS_OFFLINE": "1",
         "HF_HOME": str(hf_home),
         "HF_HUB_OFFLINE": "1",

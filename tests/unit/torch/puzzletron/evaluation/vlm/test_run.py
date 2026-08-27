@@ -218,6 +218,10 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings
     assert settings["env"]["HF_HUB_OFFLINE"] == "1"
+    assert settings["env"]["API_TYPE"] == "openai"
+    assert settings["env"]["MODEL_VERSION"] == "modelopt-disabled-lmms-eval-judge"
+    assert settings["env"]["OPENAI_API_KEY"] == "modelopt-disabled-lmms-eval-judge"
+    assert settings["env"]["OPENAI_API_URL"] == "http://127.0.0.1:9"
     assert report["model_backend"] == settings["model"]
     assert report["backend_limitations"] == [
         "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
@@ -346,6 +350,10 @@ class TaskManager:
     def __init__(self, include_path, model_name):
         assert os.environ["HF_DATASETS_OFFLINE"] == "1"
         assert os.environ["HF_HUB_OFFLINE"] == "1"
+        assert os.environ["API_TYPE"] == "openai"
+        assert os.environ["MODEL_VERSION"] == "modelopt-disabled-lmms-eval-judge"
+        assert os.environ["OPENAI_API_KEY"] == "modelopt-disabled-lmms-eval-judge"
+        assert os.environ["OPENAI_API_URL"] == "http://127.0.0.1:9"
         credential_names = (
             "HF_TOKEN",
             "HUGGINGFACEHUB_API_TOKEN",
@@ -432,9 +440,10 @@ def test_profile_contract_pins_every_task_and_revision():
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
     requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
     assert (
-        "lmms-eval[qwen,video] @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
-        f"{checkpoint.LMMS_EVAL_REVISION}"
+        "-e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
+        f"{checkpoint.LMMS_EVAL_REVISION}#egg=lmms-eval"
     ) in requirements.splitlines()
+    assert 'decord; platform_system != "Darwin"' in requirements.splitlines()
     environment = json.loads(
         (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
     )

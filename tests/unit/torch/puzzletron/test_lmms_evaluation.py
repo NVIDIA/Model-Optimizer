@@ -133,6 +133,21 @@ def test_cache_dir_precedence(monkeypatch, tmp_path):
     assert env["LMMS_EVAL_HOME"] == "/explicit/cache"
 
 
+def test_command_installs_existing_vllm_subprocess_compatibility(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/inherited")
+
+    _, env, _ = lmms._build_command(
+        {**_settings("ifeval"), "env": {"PYTHONPATH": "/explicit"}},
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    python_paths = env["PYTHONPATH"].split(os.pathsep)
+    assert Path(python_paths[0]).name == "vllm_compat"
+    assert (Path(python_paths[0]) / "sitecustomize.py").is_file()
+    assert python_paths[1:] == ["/explicit"]
+
+
 def test_command_uses_bounded_default_timeout(tmp_path):
     _, _, timeout = lmms._build_command(
         _settings("ifeval"),

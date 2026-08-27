@@ -22,11 +22,14 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, cast
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -36,6 +39,7 @@ __all__ = [
     "HUGGINGFACE_CREDENTIAL_NAMES",
     "LMMS_EVAL_REVISION",
     "credential_free_environment",
+    "lmms_eval_disabled_judge_environment",
     "positive_float",
     "positive_int",
     "run_lmms_eval_checkpoint",
@@ -52,6 +56,16 @@ HUGGINGFACE_CREDENTIAL_NAMES = (
     "HUGGINGFACEHUB_API_TOKEN",
     "HUGGING_FACE_HUB_TOKEN",
 )
+
+
+def lmms_eval_disabled_judge_environment() -> dict[str, str]:
+    """Return a loopback-only import shim for pinned tasks that eagerly create a judge."""
+    return {
+        "API_TYPE": "openai",
+        "MODEL_VERSION": "modelopt-disabled-lmms-eval-judge",
+        "OPENAI_API_KEY": "modelopt-disabled-lmms-eval-judge",
+        "OPENAI_API_URL": "http://127.0.0.1:9",
+    }
 
 
 def _load_source_module(name: str, relative_path: str) -> ModuleType:
@@ -127,12 +141,48 @@ def verify_lmms_eval_revision() -> str:
         raise RuntimeError("installed lmms-eval revision provenance is unavailable")
     vcs_info = provenance.get("vcs_info")
     revision = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+    if revision is None:
+        revision = _editable_lmms_eval_revision(provenance)
     if revision != LMMS_EVAL_REVISION:
         raise RuntimeError(
             "installed lmms-eval revision differs from the pinned profile: "
             f"expected {LMMS_EVAL_REVISION}, found {revision or 'unknown'}"
         )
     return revision
+
+
+def _editable_lmms_eval_revision(provenance: dict[str, object]) -> str | None:
+    """Return the revision of a clean editable Git install, when present."""
+    directory_info = provenance.get("dir_info")
+    if not isinstance(directory_info, dict) or directory_info.get("editable") is not True:
+        return None
+    url = provenance.get("url")
+    if not isinstance(url, str):
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+        return None
+    checkout = Path(url2pathname(unquote(parsed.path))).resolve()
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if status:
+        raise RuntimeError("installed lmms-eval editable checkout contains local changes")
+    return revision or None
 
 
 def credential_free_environment(environment: Mapping[str, str]) -> dict[str, str]:
