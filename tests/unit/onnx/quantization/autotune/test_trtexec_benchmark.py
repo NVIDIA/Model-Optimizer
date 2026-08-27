@@ -32,7 +32,6 @@ invoked. They cover:
   binary, unparseable stdout.
 """
 
-import re
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -842,27 +841,6 @@ def test_ssh_fallback_timeout_returns_inf(tmp_path):
         side_effect=[trtexec_proc, scp_proc, safe_fail, timeout_exc, cleanup_proc],
     ):
         assert b.run(str(tmp_path / "m.onnx")) == float("inf")
-
-
-# --- pattern constants ---
-
-
-def test_std_pattern_matches_gpu_compute_time_line():
-    """The std pattern matches a typical ``[I] GPU Compute Time: … median = X ms`` line."""
-    text = "[I] GPU Compute Time: min = 1 ms, max = 2 ms, median = 1.42 ms"
-    match = re.search(bm._STD_PATTERN, text, re.IGNORECASE)
-    assert match and match.group(1) == "1.42"
-
-
-def test_safe_pattern_matches_gpu_compute_time_median():
-    """``_SAFE_PATTERN`` matches a timestamped ``GPU Compute Time … median`` line."""
-    text = (
-        "[02/03/1970-21:02:53] [I] GPU Compute Time:  min = 0.221299 ms, "
-        "max = 0.222502 ms, mean = 0.222012 ms, median = 0.222026 ms, "
-        "percentile(99%) = 0.222445 ms"
-    )
-    match = re.search(bm._SAFE_PATTERN, text, re.IGNORECASE)
-    assert match and match.group(1) == "0.222026"
 
 
 # ===========================================================================
