@@ -8,7 +8,7 @@
 
 Text-only HLE, params aligned to Artificial Analysis Index v2; judge-scored.
 Substitute the judge `model_id`/`url` with the literal values you keep in `.env`
-(`HLE_JUDGE_MODEL_ID` rec. **GPT-4o**, `NS_JUDGE_URL`; see `recipes/env.example`),
+(`HLE_JUDGE_MODEL_ID` rec. **GPT-4o**, `NS_JUDGE_URL`; see `recipes/env.example`) , 
 they're config, not secrets, so they don't need exporting. Only `api_key`
 (`INFERENCE_API_KEY`) is exported and read by the harness. Keep the judge fixed
 across comparable runs.

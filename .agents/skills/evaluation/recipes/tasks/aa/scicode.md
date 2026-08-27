@@ -20,7 +20,7 @@ score-harvesting requirements beyond its task contract.
 ## Contract Source
 
 Select `ns_scicode` through `examples/llm_eval/nel_config.py`. Its container,
-prompt, repeat count, and task parallelism live only in
+prompt settings, and repeat count live only in
 `examples/llm_eval/task_contracts.yaml`.
 
 ## Score Extraction from mlflow

@@ -205,7 +205,7 @@ def test_compile_rejects_boolean_parallelism():
 
 
 def test_compile_rejects_options_for_unselected_tasks():
-    with pytest.raises(ValueError, match="not used.*--hle-judge-model-id"):
+    with pytest.raises(ValueError, match=r"not used.*--hle-judge-model-id"):
         nel_config.compile_nel_config(
             {},
             ["ns_ifbench"],
