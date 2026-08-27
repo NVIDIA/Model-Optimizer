@@ -272,17 +272,30 @@ class DFlashGemma4Attention(DFlashAttention):
                     getattr(config, "num_global_key_value_heads", None) or self.num_kv_heads
                 )
             self.num_key_value_groups = self.num_heads // self.num_kv_heads
-            # Gemma 4 does NOT scale attention logits: vLLM's Gemma4MTPAttention (which
-            # Gemma4DSparkAttention inherits) hardcodes ``self.scaling = 1.0``, and the
-            # base model does the same, documenting that "unlike Gemma2/3,
+            # Keep ``head_dim**-0.5`` even though vLLM serves this draft with
+            # ``scaling = 1.0``. That looks like a train/serve mismatch and it IS one, but
+            # aligning it is measurably WORSE -- do not "fix" this again without repeating
+            # the experiment below.
+            #
+            # vLLM's Gemma4MTPAttention (which Gemma4DSparkAttention inherits) hardcodes
+            # 1.0, matching the Gemma 4 base, which documents that "unlike Gemma2/3,
             # query_pre_attn_scalar is NOT used here; Q/K norms with learnable weights
-            # handle scaling implicitly". Inheriting DFlashAttention's ``head_dim**-0.5``
-            # trains the draft under a softmax temperature the serving stack never
-            # applies. Measured on Gemma-4-E4B DSpark step 7000 (80q MT-Bench,
-            # num_spec=7): 1/sqrt(512) -> AL 2.6809, 1.0 -> AL 2.4984, so the mismatch
-            # is real but modest -- q_norm absorbs most of it, which is exactly why it
-            # never surfaced as an error.
-            self.scaling = 1.0
+            # handle scaling implicitly". Two full lr 2e-3 runs, identical except for this
+            # line, evaluated under REAL vLLM on 80q MT-Bench at num_spec=7:
+            #
+            #     step   trained 1/sqrt(512)   trained 1.0
+            #     1000   2.0645                1.9710   (-4.5%)
+            #     5000   2.5715                2.5234   (-1.9%)
+            #
+            # The reason is that ``q_norm`` is learnable, so it absorbs the scale: serving
+            # a 1/sqrt(512)-trained draft at 1.0 costs only 0.3% (step 1000) to 2.2%
+            # (step 5000), while TRAINING at 1.0 costs more than that. The small scale is
+            # the better training configuration -- smoother attention, better conditioned --
+            # and it transfers almost intact.
+            #
+            # An earlier estimate of a 7% mismatch penalty came from simulating scale 1.0
+            # inside the hand-written harness rather than measuring vLLM, and overstated it.
+            self.scaling = self.head_dim**-0.5
             attn_bias = getattr(config, "attention_bias", False)
             self.q_proj = nn.Linear(
                 config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias
