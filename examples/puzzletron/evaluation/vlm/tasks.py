@@ -38,7 +38,7 @@ def _lmms_eval_root() -> Path:
     locations = spec.submodule_search_locations if spec is not None else None
     if not locations:
         raise RuntimeError(
-            "lmms_eval is not installed; install examples/puzzletron/requirements-vlm.txt"
+            "lmms_eval is not installed; install examples/puzzletron/requirements.txt"
         )
     return Path(next(iter(locations))).absolute()
 
@@ -217,7 +217,7 @@ def _write_video_path_adapter(tasks_root: Path) -> None:
     alias_root = tasks_root / "video_path_aliases"
     checkpoint.write_generated(
         tasks_root / "modelopt_video_paths.py",
-        f'''"""Normalize upstream video paths for the pinned Qwen 3.5 backend."""
+        f'''"""Normalize upstream video paths for the pinned Qwen 3.5 vLLM backend."""
 
 import hashlib
 import os
@@ -283,7 +283,7 @@ root, *tasks = sys.argv[1:]
 credential_names = ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 if inherited := [name for name in credential_names if name in os.environ]:
     raise RuntimeError(f"offline task preflight inherited Hub credentials: {inherited}")
-manager = TaskManager(include_path=root, model_name="qwen3_5")
+manager = TaskManager(include_path=root, model_name="vllm")
 loaded = manager.load_task_or_group(tasks)
 loaded_names = {getattr(key, "group_name", key) for key in loaded}
 if loaded_names != set(tasks):

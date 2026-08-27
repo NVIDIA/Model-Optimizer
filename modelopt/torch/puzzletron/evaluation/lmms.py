@@ -70,10 +70,6 @@ _RESERVED_TOPOLOGY_MODEL_ARG_FIELDS = frozenset(
         "ep",
     }
 )
-_BACKEND_CHECKPOINT_ARGS = {
-    "qwen3_5": "pretrained",
-    "vllm": "model",
-}
 _RESERVED_EXTRA_ARG_FLAGS = frozenset(
     {
         "--batch-size",
@@ -218,37 +214,15 @@ def _model_arg_string(values: Mapping[str, Any]) -> str:
     return ",".join(parts)
 
 
-def _backend_contract(settings: Mapping[str, Any]) -> tuple[str, str]:
-    backend = str(settings.get("model", "vllm"))
-    if backend not in _BACKEND_CHECKPOINT_ARGS:
-        supported = ", ".join(sorted(_BACKEND_CHECKPOINT_ARGS))
-        raise ValueError(f"evaluation settings.model must be one of: {supported}")
-    expected_checkpoint_arg = _BACKEND_CHECKPOINT_ARGS[backend]
-    checkpoint_arg = str(settings.get("checkpoint_arg", expected_checkpoint_arg))
-    if checkpoint_arg != expected_checkpoint_arg:
-        raise ValueError(
-            f"evaluation settings.checkpoint_arg for {backend} must be {expected_checkpoint_arg!r}"
-        )
-    return backend, checkpoint_arg
-
-
-def _merge_model_args(
-    settings: Mapping[str, Any],
-    checkpoint: str,
-    *,
-    backend: str,
-    checkpoint_arg: str,
-) -> str:
+def _merge_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
     raw = settings.get("model_args")
+    checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
+    if checkpoint_arg != "model":
+        raise ValueError("evaluation settings.checkpoint_arg must be 'model'")
     topology = dict(settings.get("topology") or {})
-    if topology and backend != "vllm":
-        raise ValueError("evaluation settings.topology is supported only for vllm")
     canonical_topology = normalize_vllm_topology(topology) if topology else {}
     reserved_fields = frozenset(
-        (
-            *_BACKEND_CHECKPOINT_ARGS.values(),
-            *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS,
-        )
+        key for key in (checkpoint_arg, *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS) if key
     )
     derived: dict[str, Any] = {checkpoint_arg: checkpoint}
     if canonical_topology:
@@ -261,14 +235,8 @@ def _merge_model_args(
                 "distributed_executor_backend": canonical_topology["distributed_executor_backend"],
             }
         )
-    supplied_vllm_fields = sorted(_MODEL_ARG_FIELDS & settings.keys())
-    if backend != "vllm" and supplied_vllm_fields:
-        raise ValueError(
-            "evaluation settings for non-vllm backends must not set vllm model "
-            f"arguments: {', '.join(supplied_vllm_fields)}"
-        )
-    if backend == "vllm":
-        for key in supplied_vllm_fields:
+    for key in sorted(_MODEL_ARG_FIELDS):
+        if key in settings:
             derived[key] = settings[key]
 
     if isinstance(raw, str):
@@ -334,18 +302,15 @@ def _build_command(
 ) -> tuple[list[str], dict[str, str], float]:
     """Build a deterministic lmms-eval CLI invocation for one local checkpoint."""
 
-    model, checkpoint_arg = _backend_contract(settings)
+    model = str(settings.get("model", "vllm"))
+    if model != "vllm":
+        raise ValueError("evaluation settings.model must be 'vllm'")
     argv = [
         *_command_prefix(settings),
         "--model",
         model,
         "--model_args",
-        _merge_model_args(
-            settings,
-            checkpoint,
-            backend=model,
-            checkpoint_arg=checkpoint_arg,
-        ),
+        _merge_model_args(settings, checkpoint),
         "--tasks",
         ",".join(_configured_tasks(settings)),
         "--batch_size",

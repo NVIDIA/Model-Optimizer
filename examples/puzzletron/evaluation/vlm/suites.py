@@ -116,7 +116,6 @@ class FramePolicy(TypedDict):
 class GenerationPolicy(TypedDict):
     """Generation fields shared by provenance and execution."""
 
-    enable_thinking: bool
     temperature: int
     do_sample: bool
 
@@ -154,8 +153,8 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
     )
     return {
-        "frame": {"reader": "torchcodec", "fps": 2, "max_frames": 32},
-        "generation": {"enable_thinking": False, "temperature": 0, "do_sample": False},
+        "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
+        "generation": {"temperature": 0, "do_sample": False},
         "limit": 8 if is_smoke else None,
         "repetitions": 2 if suite == "short" else 1,
         "timeout_seconds": (

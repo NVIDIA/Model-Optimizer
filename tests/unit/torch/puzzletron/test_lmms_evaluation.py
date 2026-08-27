@@ -86,37 +86,6 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert timeout == 123
 
 
-def test_command_maps_qwen35_checkpoint_without_vllm_options(tmp_path):
-    argv, _, _ = lmms._build_command(
-        {
-            "tasks": ["mmmu_val"],
-            "model": "qwen3_5",
-            "checkpoint_arg": "pretrained",
-        },
-        checkpoint="/ckpts/candidate",
-        output_path=tmp_path / "results",
-    )
-
-    model_args = argv[argv.index("--model_args") + 1]
-    assert argv[:5] == [sys.executable, "-m", "lmms_eval", "--model", "qwen3_5"]
-    assert model_args == "pretrained=/ckpts/candidate"
-
-
-@pytest.mark.parametrize("field", ["dtype", "trust_remote_code"])
-def test_command_rejects_vllm_model_settings_for_qwen35(field, tmp_path):
-    with pytest.raises(ValueError, match=f"non-vllm backends.*{field}"):
-        lmms._build_command(
-            {
-                "tasks": ["mmmu_val"],
-                "model": "qwen3_5",
-                "checkpoint_arg": "pretrained",
-                field: "configured",
-            },
-            checkpoint="/ckpts/candidate",
-            output_path=tmp_path / "results",
-        )
-
-
 def test_command_forwards_unowned_model_and_evaluator_options(tmp_path):
     argv, _, _ = lmms._build_command(
         {
@@ -214,11 +183,8 @@ def test_command_rejects_reserved_model_args_setting(tmp_path, model_args, expec
 @pytest.mark.parametrize(
     ("settings", "expected"),
     [
-        ({"model": "hf"}, "settings.model must be one of: qwen3_5, vllm"),
-        (
-            {"checkpoint_arg": "pretrained"},
-            "settings.checkpoint_arg for vllm must be 'model'",
-        ),
+        ({"model": "hf"}, "settings.model must be 'vllm'"),
+        ({"checkpoint_arg": "pretrained"}, "settings.checkpoint_arg must be 'model'"),
     ],
 )
 def test_command_rejects_unsupported_backend_contract(tmp_path, settings, expected):

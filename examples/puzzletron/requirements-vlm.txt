@@ -1,3 +1,0 @@
-# Temporary split: this Qwen3.5-capable revision pins wandb==0.25.0. Reunify
-# with requirements.txt after lmms-eval supports AutoModel's wandb>=0.28.0.
-lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@88b23e2bfa16a1edbc16e9e238ed82130b3a4f56

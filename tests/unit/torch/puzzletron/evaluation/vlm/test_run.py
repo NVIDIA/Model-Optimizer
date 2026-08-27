@@ -145,7 +145,7 @@ def _quick_manifest(path: Path) -> Path:
     return path
 
 
-def test_short_profile_materializes_pinned_tasks_and_qwen_backend(monkeypatch, tmp_path, capsys):
+def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, tmp_path, capsys):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -213,21 +213,23 @@ def test_short_profile_materializes_pinned_tasks_and_qwen_backend(monkeypatch, t
     for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
-    assert settings["model"] == "qwen3_5"
-    assert settings["checkpoint_arg"] == "pretrained"
+    assert settings["model"] == "vllm"
+    assert settings["checkpoint_arg"] == "model"
+    assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings
     assert settings["env"]["HF_HUB_OFFLINE"] == "1"
+    assert report["model_backend"] == settings["model"]
+    assert report["backend_limitations"] == [
+        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+    ]
     assert report["sample_limit"] == settings["limit"]
     assert report["timeout_seconds"] == settings["timeout_seconds"]
     assert report["frame_policy"] == {
         "reader": settings["env"]["FORCE_QWENVL_VIDEO_READER"],
         "fps": settings["model_args"]["fps"],
-        "max_frames": settings["model_args"]["max_frames"],
+        "max_frames": settings["model_args"]["max_frame_num"],
     }
-    assert report["generation_policy"] == {
-        "enable_thinking": settings["model_args"]["enable_thinking"],
-        **settings["gen_kwargs"],
-    }
+    assert report["generation_policy"] == settings["gen_kwargs"]
 
 
 def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):
@@ -428,13 +430,15 @@ def test_profile_contract_pins_every_task_and_revision():
 
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
-    requirements = (
-        checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements-vlm.txt"
-    ).read_text()
+    requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
     assert (
-        "lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
+        "lmms-eval[qwen,video] @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
         f"{checkpoint.LMMS_EVAL_REVISION}"
     ) in requirements.splitlines()
+    environment = json.loads(
+        (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
+    )
+    assert environment["lmms_eval"]["commit"] == checkpoint.LMMS_EVAL_REVISION
 
 
 def test_vlm_parser_exposes_only_suite_owned_sample_limits():
