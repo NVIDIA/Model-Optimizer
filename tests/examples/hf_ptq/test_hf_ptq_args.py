@@ -26,7 +26,11 @@ import yaml
 from _test_utils.torch.transformers_models import get_tiny_qwen3
 
 from modelopt.recipe import load_recipe
-from modelopt.recipe.config import AutoQuantizeConfig, AutoQuantizeConstraints
+from modelopt.recipe.config import (
+    AutoQuantizeConfig,
+    AutoQuantizeConstraints,
+    ModelOptAutoQuantizeRecipe,
+)
 from modelopt.recipe.presets import QUANT_CFG_CHOICES
 from modelopt.torch.quantization import tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
@@ -106,8 +110,33 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
     assert "kv_cache_quant_cfg" not in inputs
 
 
-def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
-    """The HF entry point runs the real public KV AutoQuant path on an offline Qwen fixture."""
+def test_followup_kv_autoquant_suppresses_uniform_kv_fallback(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "fp8_cast"
+    )
+    aq = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args, allow_uniform_kv=False)
+
+    assert inputs["kv_cache_quant_cfg"] is None
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "kv_stage"),
+    [
+        ("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits", "auto_quantize"),
+        (
+            "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "auto_quantize",
+        ),
+        (
+            "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "kv_auto_quantize",
+        ),
+    ],
+)
+def test_hf_ptq_shipped_kv_autoquant_recipes_invoke_public_api(monkeypatch, recipe_path, kv_stage):
+    """Every shipped recipe runs the real public KV AutoQuant path on an offline Qwen fixture."""
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(
         tensor_quant,
@@ -115,7 +144,7 @@ def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
         lambda inputs, *_args, **_kwargs: torch.zeros_like(inputs),
     )
     model = get_tiny_qwen3(num_hidden_layers=1)
-    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    aq = getattr(load_recipe(recipe_path), kv_stage)
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
@@ -133,6 +162,140 @@ def test_hf_ptq_kv_autoquant_invokes_public_api(monkeypatch):
     assert attention.v_bmm_quantizer.num_bits == (2, 1)
     assert attention.k_bmm_quantizer.amax == 448.0
     assert attention.v_bmm_quantizer.amax == 448.0
+
+
+def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    weight_aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        candidate_formats=[QuantizeConfig(**QUANT_CFG_CHOICES["fp8"])],
+        auto_quantize_method="gradient",
+    )
+    kv_aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
+        candidate_formats=[
+            QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+    )
+    recipe = ModelOptAutoQuantizeRecipe(auto_quantize=weight_aq, kv_auto_quantize=kv_aq)
+    calls = []
+    monkeypatch.setattr(
+        hf_ptq,
+        "auto_quantize",
+        lambda *_args, **kwargs: calls.append(kwargs),
+    )
+
+    hf_ptq._run_auto_quantize_recipe(
+        SimpleNamespace(), recipe, torch.nn.Module(), torch.nn.Module(), None, False, [], False
+    )
+
+    assert [call["aq_config"] for call in calls] == [weight_aq, kv_aq]
+    assert calls[0]["allow_uniform_kv"] is False
+    assert calls[0]["checkpoint_attr"] == "auto_quantize_checkpoint"
+    assert calls[1]["checkpoint_attr"] == "kv_auto_quantize_checkpoint"
+
+
+def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    original_auto_quantize = hf_ptq.auto_quantize
+    checkpoint_attrs = []
+
+    def recording_auto_quantize(*args, **kwargs):
+        checkpoint_attrs.append(kwargs["checkpoint_attr"])
+        return original_auto_quantize(*args, **kwargs)
+
+    monkeypatch.setattr(hf_ptq, "auto_quantize", recording_auto_quantize)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*q_proj.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None, "constant_amax": 1.0},
+            },
+        ],
+        algorithm=None,
+    )
+    kv_aq = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
+        candidate_formats=[
+            QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+        score_size=1,
+    )
+    recipe = ModelOptAutoQuantizeRecipe(quantize=fixed, auto_quantize=kv_aq)
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+    args = SimpleNamespace(
+        qformat="fp8",
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+        kv_auto_quantize_checkpoint=None,
+        pyt_ckpt_path="dummy",
+        cast_mxfp4_to_nvfp4=False,
+    )
+
+    hf_ptq._run_auto_quantize_recipe(args, recipe, model, model, None, False, data, False)
+
+    attention = model.model.layers[0].self_attn
+    assert attention.q_proj.weight_quantizer.is_enabled
+    assert attention.q_proj.weight_quantizer.num_bits == (4, 3)
+    assert attention.k_bmm_quantizer.is_enabled
+    assert attention.v_bmm_quantizer.is_enabled
+    assert checkpoint_attrs == ["kv_auto_quantize_checkpoint"]
+
+
+def test_composed_kv_autoquantize_rejects_enabled_actual_kv_quantizers(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    model = get_tiny_qwen3(num_hidden_layers=1)
+    hf_ptq.mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {
+                    "quantizer_name": "*[kv]_bmm_quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                }
+            ],
+            "algorithm": None,
+        },
+    )
+
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        kv_cache_qformat="none",
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+    aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+
+    with pytest.raises(ValueError, match="preceding weight/activation stage left K/V"):
+        hf_ptq.auto_quantize(args, model, [], aq, full_model=model)
+    assert model.model.layers[0].self_attn.k_bmm_quantizer.is_enabled
 
 
 def test_kv_autoquant_names_asymmetric_export_format(monkeypatch):

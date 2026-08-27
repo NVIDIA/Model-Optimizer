@@ -1916,8 +1916,10 @@ def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_pa
 @pytest.mark.parametrize(
     "recipe_path",
     [
+        "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_at_5p4bits",
         "general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits",
+        "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
         "general/auto_quantize/nvfp4_mse_fp8_at_6p0bits",
         "general/auto_quantize/w4a8_awq_beta_fp8_at_6p0bits",
@@ -1959,6 +1961,94 @@ def test_load_recipe_kv_autoquantize_contract():
             assert not entry.cfg.use_constant_amax
             assert entry.cfg.constant_amax == 448.0
         assert fmt.algorithm is None
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "kv_stage"),
+    [
+        (
+            "general/auto_quantize/fp8_ptq_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "auto_quantize",
+        ),
+        (
+            "general/auto_quantize/nvfp4_fp8_gradient_then_kv_fp8_nvfp4_cast_kl_div_at_5p4bits",
+            "kv_auto_quantize",
+        ),
+    ],
+)
+def test_builtin_kv_autoquantize_recipes_use_calibration_free_cast_candidates(
+    recipe_path, kv_stage
+):
+    aq = getattr(load_recipe(recipe_path), kv_stage)
+
+    assert all(candidate.algorithm is None for candidate in aq.candidate_formats)
+    assert all(
+        candidate.quant_cfg[0].cfg.constant_amax == 448.0 for candidate in aq.candidate_formats
+    )
+
+
+def test_load_recipe_fixed_ptq_then_kv_autoquantize(tmp_path):
+    recipe_file = tmp_path / "ptq-then-kv.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg:\n"
+        "    - quantizer_name: '*'\n      enable: false\n"
+        "    - quantizer_name: '*.weight_quantizer'\n"
+        "      cfg: {num_bits: [4, 3], axis: null}\n"
+        "auto_quantize:\n  constraints:\n    kv_effective_bits: 8.0\n"
+        "  candidate_formats:\n"
+        "    - algorithm: null\n      effective_bits: 8.0\n      quant_cfg:\n"
+        "        - quantizer_name: '*[kv]_bmm_quantizer'\n"
+        "          cfg: {num_bits: [4, 3], constant_amax: 1.0}\n"
+        "  auto_quantize_method: kl_div\n"
+    )
+
+    recipe = load_recipe(recipe_file)
+
+    assert recipe.quantize is not None
+    assert recipe.auto_quantize.constraints.kv_effective_bits == 8.0
+    assert recipe.kv_auto_quantize is None
+
+
+def test_load_recipe_weight_autoquantize_then_kv_autoquantize(tmp_path):
+    recipe_file = tmp_path / "weight-then-kv.yml"
+    recipe_file.write_text(
+        _AQ_MINIMAL_BODY + "kv_auto_quantize:\n  constraints:\n    kv_effective_bits: 8.0\n"
+        "  candidate_formats:\n"
+        "    - algorithm: null\n      effective_bits: 8.0\n      quant_cfg:\n"
+        "        - quantizer_name: '*[kv]_bmm_quantizer'\n"
+        "          cfg: {num_bits: [4, 3], constant_amax: 1.0}\n"
+        "  auto_quantize_method: kl_div\n"
+    )
+
+    recipe = load_recipe(recipe_file)
+
+    assert recipe.auto_quantize.auto_quantize_method == "gradient"
+    assert recipe.auto_quantize.constraints.effective_bits == 4.8
+    assert recipe.kv_auto_quantize is not None
+    assert recipe.kv_auto_quantize.auto_quantize_method == "kl_div"
+    assert recipe.kv_auto_quantize.constraints.kv_effective_bits == 8.0
+
+
+def test_composed_kv_autoquantize_accepts_scoped_gemm_rule(tmp_path):
+    recipe_file = tmp_path / "scoped-gemm.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg:\n"
+        "    - quantizer_name: 'model.layers.*.mlp.*'\n"
+        "      cfg: {num_bits: [4, 3], constant_amax: 1.0}\n"
+        "auto_quantize:\n  constraints:\n    kv_effective_bits: 8.0\n"
+        "  candidate_formats:\n"
+        "    - algorithm: null\n      effective_bits: 8.0\n      quant_cfg:\n"
+        "        - quantizer_name: '*[kv]_bmm_quantizer'\n"
+        "          cfg: {num_bits: [4, 3], constant_amax: 1.0}\n"
+        "  auto_quantize_method: kl_div\n"
+    )
+
+    recipe = load_recipe(recipe_file)
+
+    assert recipe.quantize is not None
+    assert recipe.quantize.quant_cfg[0].quantizer_name == "model.layers.*.mlp.*"
 
 
 def test_kv_autoquantize_rejects_cost_excluded_layers():
