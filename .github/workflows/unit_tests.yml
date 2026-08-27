@@ -16,7 +16,10 @@ on:
       - "tests/_test_utils/torch/distributed/**"
       - "tests/unit/**"
       - "tools/launcher/**"
+      - "tools/mcp/**"
+      - "tools/resource_monitor.py"
       - ".agents/skills/**"
+      - "plugins/modelopt/skills/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch:
@@ -28,13 +31,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check-dco:
-    uses: ./.github/workflows/_wait_for_checks.yml
-    permissions:
-      checks: read
-    secrets: inherit
-    with:
-      match_pattern: "^DCO$"
   check-file-changes:
     permissions:
       contents: read
@@ -65,16 +61,20 @@ jobs:
       - if: github.event_name == 'pull_request'
         name: Check for changes in test-relevant paths
         id: changed
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
           files: |
             .github/workflows/unit_tests.yml
             modelopt/**
+            modelopt_recipes/**
             noxfile.py
             pyproject.toml
             tests/_test_utils/torch/distributed/**
             tests/unit/**
+            tests/_test_utils/**
             tools/launcher/**
+            tools/mcp/**
+            tools/resource_monitor.py
             .agents/skills/**
       - if: github.event_name == 'pull_request'
         name: Check for Puzzletron v2 changes
@@ -196,7 +196,6 @@ jobs:
             exit 1
           fi
   linux:
-    needs: [check-dco]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -206,9 +205,9 @@ jobs:
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
           COVERAGE_FILE: ${{ github.workspace }}/.coverage
-        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_213, tf_latest)"
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit
@@ -223,13 +222,15 @@ jobs:
     needs: [linux, check-file-changes]
     runs-on: windows-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
-        run: pip install nox uv && nox -s "unit-3.12(torch_212, tf_latest)"
+        run: pip install nox uv && nox -s "unit-3.12(torch_213, tf_latest)"
   multi-version:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -239,15 +240,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {nox_session: "unit-3.10(torch_212, tf_latest)", python_version: "3.10"}
-          - {nox_session: "unit-3.11(torch_212, tf_latest)", python_version: "3.11"}
-          - {nox_session: "unit-3.13(torch_212, tf_latest)", python_version: "3.13"}
-          - {nox_session: "unit-3.14(torch_212, tf_latest)", python_version: "3.14"}
+          # Default torch (2.13) across the other supported Python versions
+          - {nox_session: "unit-3.10(torch_213, tf_latest)", python_version: "3.10"}
+          - {nox_session: "unit-3.11(torch_213, tf_latest)", python_version: "3.11"}
+          - {nox_session: "unit-3.13(torch_213, tf_latest)", python_version: "3.13"}
+          - {nox_session: "unit-3.14(torch_213, tf_latest)", python_version: "3.14"}
+          # Older torch versions on the default Python (3.12) for back-compat.
           - {nox_session: "unit-3.12(torch_28, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_29, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_210, tf_latest)", python_version: "3.12"}
           - {nox_session: "unit-3.12(torch_211, tf_latest)", python_version: "3.12"}
-          - {nox_session: "unit-3.12(torch_212, tf_min)", python_version: "3.12"}
+          - {nox_session: "unit-3.12(torch_212, tf_latest)", python_version: "3.12"}
+          # Minimum supported transformers on the default torch.
+          - {nox_session: "unit-3.12(torch_213, tf_min)", python_version: "3.12"}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup
@@ -286,6 +291,29 @@ jobs:
           uv venv .venv
           uv pip install -e . pytest
           uv run python3 -m pytest -v
+  mcp:
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    needs: [linux, check-file-changes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run modelopt-mcp tests
+        working-directory: tools/mcp
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
+          # Install the sibling launcher package first; it's a runtime
+          # dep declared in tools/mcp/pyproject.toml as `modelopt-launcher`
+          # but uv resolves the source via [tool.uv.sources] to a local
+          # editable path. -e on both packages keeps the install cheap
+          # and matches the dev-mode install in tools/mcp/README.md.
+          uv pip install -e ../launcher
+          uv pip install -e . pytest
+          uv run python3 -m pytest -v
   skills:
     if: needs.check-file-changes.outputs.any_changed == 'true'
     needs: [linux, check-file-changes]
@@ -302,7 +330,7 @@ jobs:
         # Override addopts to drop the repo's coverage/instafail plugins (not installed here).
         run: |
           pip install pytest
-          python -m pytest .agents/skills/ -o addopts="" -p no:cacheprovider -v
+          python -m pytest plugins/modelopt/skills/ -o addopts="" -p no:cacheprovider -v
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
@@ -317,6 +345,7 @@ jobs:
             needs.multi-version.result != 'success' ||
             needs.partial-install.result != 'success' ||
             needs.launcher.result != 'success' ||
+            needs.mcp.result != 'success' ||
             needs.skills.result != 'success'
           )) || (needs.check-file-changes.outputs.puzzletron_changed == 'true' &&
             needs.puzzletron_v2.result != 'success') }}

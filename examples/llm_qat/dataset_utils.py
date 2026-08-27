@@ -539,7 +539,7 @@ def _build_cache_path(
     cache_dir: str,
 ) -> str:
     """Build a deterministic cache path for the blend config."""
-    base = cache_dir if cache_dir else tempfile.gettempdir()
+    base = cache_dir or tempfile.gettempdir()
 
     tok_name, tok_fp = _tokenizer_fingerprint(tokenizer)
     splits_str = ",".join(f"{k}:{v}" for k, v in sorted(config.splits.items()))

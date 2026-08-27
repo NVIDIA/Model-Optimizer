@@ -50,6 +50,107 @@ def _seq_lens_from_mask(
     return None, False
 
 
+def _check_mask_supported(attention_mask: torch.Tensor | None, seq_q: int) -> None:
+    """Reject attention masks this wrapper would silently misread.
+
+    The wrapper only derives right-padded per-sequence lengths from 2D
+    ``[batch, q_len]`` masks; anything else either loses padding info (4D
+    masks) or corrupts the varlen metadata (FA2-style ``[batch, kv_len]``
+    masks during cached decode).
+    """
+
+    def _unsupported(reason):
+        return NotImplementedError(
+            f"The ModelOpt Triton attention kernel does not support {reason}. "
+            "Use unpadded (or uniform-length) right-padded inputs."
+        )
+
+    if attention_mask is None:
+        return
+    if attention_mask.dim() == 2:
+        if attention_mask.shape[1] != seq_q:
+            # FA2-style [batch, kv_len] mask during cached decode: the wrapper
+            # would misread KV lengths as query lengths (out-of-bounds access).
+            raise _unsupported("padded batches during cached decode")
+        mask_bool = attention_mask.to(torch.bool)
+        if not mask_bool[:, 0].all():
+            raise _unsupported("left-padded inputs")
+        # ``_seq_lens_from_mask`` derives lengths via ``sum(dim=1)``, which is only
+        # correct when each row is a contiguous run of valid tokens followed by
+        # padding. A hole (e.g. ``[1, 0, 1]``) would sum to the right count but
+        # place the valid tokens at the wrong positions, so reject non-right-padded
+        # masks (any valid token after a pad == row not monotonically non-increasing).
+        if not (mask_bool[:, :-1].int() >= mask_bool[:, 1:].int()).all():
+            raise _unsupported("non-contiguously padded inputs")
+        return
+    # 4D [batch, 1, q, kv] masks are ignored by the wrapper, which is safe only
+    # when they encode pure causal structure (the kernel masks causally itself).
+    # In a causal mask the newest query row sees every position; any masked
+    # entry there means padding, windowing, or a non-causal/bias pattern.
+    last_row = attention_mask[..., -1, :]
+    hidden = ~last_row if attention_mask.dtype == torch.bool else last_row != 0
+    if hidden.any():
+        raise _unsupported("masks carrying padding or non-causal structure")
+
+
+def validate_triton_attention_envelope(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    **kwargs,
+) -> None:
+    """Raise ``NotImplementedError`` for inputs outside this wrapper/kernel envelope.
+
+    These limits do not come from the quantization or sparsity features layered
+    on top — they document what the ``triton_fa`` kernel (causal or single-token
+    decode only; no sliding window, attention sinks, logit softcapping, or
+    dropout; head_dim >= 16) and this wrapper's varlen-metadata derivation
+    (right-padded 2D masks only; no multi-token forwards over a longer KV cache)
+    support. Callers that route arbitrary HF models onto the kernel dynamically
+    (e.g. the quantization plugin's p_bmm_quantizer dispatch) should call this
+    before dispatching, so unsupported models fail loudly instead of silently
+    computing wrong attention. The sparse-attention path predates these checks
+    and does not yet enforce them.
+    """
+    # Mistral-style models pass sliding_window as an interface kwarg instead of
+    # setting it on the attention module, so check both.
+    if getattr(module, "sliding_window", None) or kwargs.get("sliding_window"):
+        raise NotImplementedError(
+            "The ModelOpt Triton attention kernel does not support sliding-window attention layers."
+        )
+    # Semantic attention arguments the kernel does not implement: dropping them
+    # would change the attention math.
+    for name, reason in (("s_aux", "attention sinks"), ("softcap", "logit softcapping")):
+        if kwargs.get(name) is not None:
+            raise NotImplementedError(
+                f"The ModelOpt Triton attention kernel does not support {reason} ('{name}')."
+            )
+    if kwargs.get("is_causal") is False or getattr(module, "is_causal", True) is False:
+        raise NotImplementedError(
+            "The ModelOpt Triton attention kernel does not support non-causal attention."
+        )
+    if kwargs.get("dropout"):
+        raise NotImplementedError(
+            "The ModelOpt Triton attention kernel does not support attention dropout; "
+            "set attention_dropout=0 for training."
+        )
+    if query.shape[-1] < 16:
+        raise NotImplementedError(
+            f"The ModelOpt Triton attention kernel requires head_dim >= 16, got {query.shape[-1]}."
+        )
+    seq_q, seq_k = query.shape[2], key.shape[2]
+    if seq_q > 1 and seq_k != seq_q:
+        # The wrapper only passes K-side varlen metadata for single-token decode;
+        # multi-token forwards over a longer KV cache would mis-index K/V.
+        raise NotImplementedError(
+            "The ModelOpt Triton attention kernel does not support multi-token "
+            "forwards over a longer KV cache (chunked prefill or "
+            "assisted/speculative decoding)."
+        )
+    _check_mask_supported(attention_mask, seq_q)
+
+
 def triton_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -58,6 +159,8 @@ def triton_attention_forward(
     attention_mask: torch.Tensor | None,
     scaling: float,
     dropout: float = 0.0,
+    p_qdq: str | None = None,
+    p_qdq_amax: float | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
     """Attention forward compatible with HF AttentionInterface.
@@ -75,6 +178,12 @@ def triton_attention_forward(
             Other formats (e.g. 4D causal masks) are ignored.
         scaling: Softmax scale (e.g. 1/sqrt(head_dim)).
         dropout: Ignored (kernel has no dropout); use 0 for eval.
+        p_qdq: Optional softmax fake quant-dequant mode ("fp8" or
+            "nvfp4") forwarded to the kernel. Not passed by HF dispatch;
+            used by direct callers such as the quantization plugin.
+        p_qdq_amax: Optional per-tensor amax for the softmax-P qdq; None uses
+            the kernel default of 1.0 (the theoretical upper bound of the
+            unnormalized P's amax).
         **kwargs: Reserved for future extensions.
 
     Returns:
@@ -121,7 +230,7 @@ def triton_attention_forward(
         trials = getattr(method, "_threshold_trials", None)
         # Deferred: the package __init__ imports this module, so importing
         # attention_calibrate at module top would be circular.
-        from modelopt.torch.kernels.common.attention import attention_calibrate
+        from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
 
         if trials and attention_calibrate is not None:
             o, counters = attention_calibrate(q, k, v, **kw, threshold_trials=trials)
@@ -152,6 +261,11 @@ def triton_attention_forward(
         threshold = method.get_inference_threshold(seq_len, seq_k)
         if threshold:
             kw["skip_softmax_threshold"] = threshold
+
+    if p_qdq is not None:
+        kw["p_qdq"] = p_qdq
+        if p_qdq_amax is not None:
+            kw["p_qdq_amax"] = p_qdq_amax
 
     o = attention(q, k, v, **kw)
 
@@ -188,4 +302,5 @@ def register_triton_attention() -> bool:
 __all__ = [
     "register_triton_attention",
     "triton_attention_forward",
+    "validate_triton_attention_envelope",
 ]

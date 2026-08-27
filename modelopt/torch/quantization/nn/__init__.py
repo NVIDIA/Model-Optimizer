@@ -26,3 +26,6 @@ from .modules.quant_module import *
 from .modules.quant_pooling import *
 from .modules.quant_rnn import *
 from .modules.tensor_quantizer import *
+
+# Every quantizer instance type: the leaf TensorQuantizer or a quantizer container.
+AnyQuantizer = (TensorQuantizer, SequentialQuantizer, GroupedQuantizer)  # noqa: F405

@@ -10,10 +10,15 @@
 # H100/A100. Surfaced on OMNIML-4969: tp_size=2 OOMed at model load
 # (~80 GB needed per GPU at tp=2, only 79.11 GiB available).
 #
-# Slurm run on cw_dfw — cells override per-cell runtime_params,
-# --save_dir, --block_size, --num_requests via pipeline.task_N.args+=[...]:
+# Slurm run on cw_dfw — cells override per-cell knobs via
+# pipeline.task_N.args+=[...] CLI flags (post-PR-#1564 convention; no
+# per-cell runtime_params file, no _cells/<sweep>.yaml):
 #
-#   uv run slurm.py #     --yaml modules/Model-Optimizer/tools/launcher/examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/specdec_bench_dflash_vllm.yaml #     --yes detach=true #     pipeline.task_0.args+=["--runtime_params common/specdec_bench/_cells/<sweep_name>.yaml","--save_dir /scratchspace/<sweep>/qualitative","--block_size 4"] #     pipeline.task_1.args+=["--runtime_params common/specdec_bench/_cells/<sweep_name>.yaml","--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--block_size 4"]
+#   uv run slurm.py \
+#     --yaml modules/Model-Optimizer/tools/launcher/examples/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/specdec_bench_dflash_vllm.yaml \
+#     --yes detach=true \
+#     pipeline.task_0.args+=["--save_dir /scratchspace/<sweep>/qualitative","--block_size 4"] \
+#     pipeline.task_1.args+=["--save_dir /scratchspace/<sweep>/throughput_32k","--num_requests 80","--block_size 4"]
 #
 # Reference run: cicd_1781024226 (cw_dfw) produced
 #   qualitative   Average_AL = 2.7316  (11-cat breakdown)

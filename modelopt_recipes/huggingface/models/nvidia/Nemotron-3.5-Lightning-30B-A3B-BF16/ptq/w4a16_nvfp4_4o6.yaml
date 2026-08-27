@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Quantization config for nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4:
+#   NVFP4 weights use the four_over_six (4/6) per-block scale selection.
+#   Weight-only; activations BF16. MSE selects per-block M=6 (mult 1.0) vs
+#   M=4 (mult 1.5); the choice is baked into the amax by MSE.
+#
+# HF -> MCore name mapping for Nemotron-3.5-Lightning-30B-A3B (Mamba/Attn/MoE hybrid):
+#   - mixer.experts.<N>.{up,down}_proj   -> mlp.experts.local_experts.<N>.linear_fc{1,2}
+#   - mixer.shared_experts.{up,down}_proj -> mlp.shared_experts.linear_fc{1,2}
+#   - mixer.in_proj / out_proj            -> mixer.in_proj / out_proj      (same name; W4A16)
+#   - lm_head                             -> output_layer                  (W4A16)
+imports:
+  nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
+  fp8_default: configs/numerics/fp8
+metadata:
+  recipe_type: ptq
+  description: >
+    Lightning 3.5 W4A16 PTQ, NVFP4 four_over_six (4/6) weight scales.
+    Routed MoE experts, shared experts, and lm_head; FP8 Mamba in_proj/out_proj.
+    W4A16 use weight-only NVFP4 4/6 (static, MSE-selected). KV cache FP8.
+    Attention BF16.
+quantize:
+  # 4/6: MSE selects per-block between M=6 (keep amax) and M=4 (amax x 6/4).
+  algorithm:
+    method: mse
+    fp8_scale_sweep: false
+    start_multiplier: 1.0   # M=6 (keep amax)
+    stop_multiplier: 1.5    # M=4 (amax x 6/4)
+    step_size: 0.5          # candidates [1.0, 1.5]
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    # W4A16 NVFP4 4/6 weight-only (block 16, static, four_over_six: true). HF + MCore names.
+    - quantizer_name: '*mixer.experts*weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    - quantizer_name: '*mixer.shared_experts*weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    - quantizer_name: '*mlp.experts*weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    - quantizer_name: '*mlp.shared_experts*weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    # FP8 Mamba projections.
+    - quantizer_name: '*mixer.in_proj*weight_quantizer'
+      enable: true
+      cfg: {$import: fp8_default}
+    - quantizer_name: '*mixer.in_proj*input_quantizer'
+      enable: true
+      cfg: {$import: fp8_default}
+    - quantizer_name: '*mixer.out_proj*weight_quantizer'
+      enable: true
+      cfg: {$import: fp8_default}
+    - quantizer_name: '*mixer.out_proj*input_quantizer'
+      enable: true
+      cfg: {$import: fp8_default}
+    # KV cache -> FP8.
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      enable: true
+      cfg:
+        num_bits: e4m3
+    # lm_head (output_layer) W4A16 4/6 weight-only.
+    - quantizer_name: 'output_layer.weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    - quantizer_name: 'lm_head.weight_quantizer'
+      enable: true
+      cfg: {$import: nvfp4_four_over_six}
+    # Keep the entire MTP subtree in BF16. This rule must remain last so it
+    # overrides the broad expert, Mamba, KV-cache, and output-layer selectors.
+    - quantizer_name: 'mtp.*'
+      enable: false

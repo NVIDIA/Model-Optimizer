@@ -15,9 +15,12 @@
 
 """Test of quantization config validations."""
 
+import warnings
+
 import pytest
 from pydantic import ValidationError
 
+import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -26,8 +29,15 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    AWQLiteCalibConfig,
+    GPTQCalibConfig,
+    LayerwiseConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
+    MseCalibConfig,
     QuantizeConfig,
+    QuantizerAttributeConfig,
+    SmoothQuantCalibConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -573,33 +583,135 @@ class TestQuantizeConfigValidators:
         assert len(cfg.quant_cfg) == 2
 
 
-class TestLayerwiseUseSequentialAlias:
-    """`layerwise` accepts the legacy `use_sequential` name via validation_alias.
+class TestLayerwiseNestedConfig:
+    """Layerwise calibration options live in a nested ``LayerwiseConfig``."""
 
-    Old PTQ checkpoints serialized the field as `use_sequential` before #1251 renamed
-    it to `layerwise`. AliasChoices lets those checkpoints load without a migration
-    validator while still serializing under the current name.
+    def test_nested_form_accepted(self):
+        cfg = MaxCalibConfig(layerwise={"enable": True, "checkpoint_dir": "/x"})
+        assert cfg.layerwise.enable is True
+        assert cfg.layerwise.checkpoint_dir == "/x"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"layerwise": True},
+            {"use_sequential": True},
+            {"layerwise": {"enable": True}, "layerwise_checkpoint_dir": "/x"},
+        ],
+    )
+    def test_legacy_forms_rejected(self, kwargs):
+        """The bool form, the ``use_sequential`` alias and the flat checkpoint-dir key are gone."""
+        with pytest.raises(ValidationError):
+            MaxCalibConfig(**kwargs)
+
+    def test_dict_form_no_deprecation(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            MaxCalibConfig(layerwise={"enable": True})
+
+    def test_checkpoint_dir_requires_enable(self):
+        with pytest.raises(ValidationError, match=r"requires layerwise.enable=True"):
+            MaxCalibConfig(layerwise={"checkpoint_dir": "/x"})
+
+    @pytest.mark.parametrize(
+        ("cfg_cls", "expected_qdq"),
+        [(MaxCalibConfig, False), (GPTQCalibConfig, True)],
+    )
+    def test_per_algorithm_qdq_default(self, cfg_cls, expected_qdq):
+        assert cfg_cls().layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+
+    @pytest.mark.parametrize(
+        ("layerwise_input", "expected_qdq"),
+        [
+            # GPTQ default kicks in for user dict that doesn't mention qdq.
+            ({"enable": True}, True),
+            # User-explicit False overrides the GPTQ default.
+            ({"enable": True, "get_qdq_activations_from_prev_layer": False}, False),
+            # ``LayerwiseConfig`` instance: ``_coerce_layerwise_input`` must
+            # preserve ``model_fields_set`` so the GPTQ default still kicks in
+            # for fields the user didn't explicitly set.
+            (LayerwiseConfig(enable=True), True),
+            (
+                LayerwiseConfig(enable=True, get_qdq_activations_from_prev_layer=False),
+                False,
+            ),
+        ],
+    )
+    def test_gptq_qdq_default_respects_user_explicit_value(self, layerwise_input, expected_qdq):
+        cfg = GPTQCalibConfig(layerwise=layerwise_input)
+        assert cfg.layerwise.get_qdq_activations_from_prev_layer is expected_qdq
+
+    def test_default_dump_shape(self):
+        dumped = MaxCalibConfig().model_dump()
+        assert dumped["layerwise"] == {
+            "enable": False,
+            "get_qdq_activations_from_prev_layer": False,
+            "checkpoint_dir": None,
+            "save_every": 1,
+            "calib_mutates_weights": True,
+        }
+        assert "layerwise_checkpoint_dir" not in dumped
+
+    def test_save_every_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            MaxCalibConfig(layerwise={"enable": True, "save_every": 0})
+
+    @pytest.mark.parametrize(
+        "cfg_cls",
+        [GPTQCalibConfig, AWQLiteCalibConfig, SmoothQuantCalibConfig],
+    )
+    def test_calib_mutates_weights_false_rejected_for_weight_mutating_algorithms(self, cfg_cls):
+        """Whitelist: only amax-only algorithms (max/mse/local_hessian) may set
+        calib_mutates_weights=False. Weight-mutating algorithms (GPTQ folds Hessian
+        updates, AWQ/SmoothQuant fold pre-quant scales) must reject the flag.
+        """
+        with pytest.raises(ValidationError, match="mutates layer weights in-place"):
+            cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
+
+    @pytest.mark.parametrize("cfg_cls", [MaxCalibConfig, MseCalibConfig, LocalHessianCalibConfig])
+    def test_calib_mutates_weights_false_accepted_for_amax_only_algorithms(self, cfg_cls):
+        cfg = cfg_cls(layerwise={"enable": True, "calib_mutates_weights": False})
+        assert cfg.layerwise.calib_mutates_weights is False
+
+
+class TestFourOverSixBlockSizes:
+    """`four_over_six` is an accepted block_sizes key for NVFP4 4/6 adaptive weight scaling.
+
+    The block_sizes validator only permits a fixed set of string keys
+    (``type``, ``scale_bits``, ``scale_block_sizes``, ``four_over_six``); any other
+    string key is rejected. See QuantizerAttributeConfig.validate_block_sizes.
     """
 
-    def test_use_sequential_true_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=True)
-        assert cfg.layerwise is True
+    def test_four_over_six_true_accepted(self):
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3), "four_over_six": True},
+        )
+        # The schema coerces the bool to int 1; the feature reads it truthily.
+        assert cfg.block_sizes["four_over_six"]
 
-    def test_use_sequential_false_sets_layerwise(self):
-        cfg = MaxCalibConfig(use_sequential=False)
-        assert cfg.layerwise is False
+    def test_four_over_six_false_accepted(self):
+        cfg = QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 16, "type": "static", "four_over_six": False},
+        )
+        # Coerced to int 0; must read falsy.
+        assert not cfg.block_sizes["four_over_six"]
 
-    def test_layerwise_name_still_accepted(self):
-        cfg = MaxCalibConfig(layerwise=True)
-        assert cfg.layerwise is True
-
-    def test_serializes_under_current_name(self):
-        """Dump must use `layerwise`, not the legacy alias."""
-        dumped = MaxCalibConfig(use_sequential=True).model_dump()
-        assert dumped["layerwise"] is True
-        assert "use_sequential" not in dumped
-
-    def test_unknown_field_still_rejected(self):
-        """extra='forbid' must still reject unrelated unknown fields."""
+    def test_unknown_block_sizes_string_key_rejected(self):
+        """A string key outside the allow-list is rejected by the validator."""
         with pytest.raises(ValidationError):
-            MaxCalibConfig(not_a_real_field=True)
+            QuantizerAttributeConfig(
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "not_a_real_key": True},
+            )
+
+    def test_nvfp4_four_over_six_cfg_validates(self):
+        """The shipped NVFP4_FOUR_OVER_SIX_CFG preset validates as a QuantizeConfig."""
+        cfg = QuantizeConfig(**mtq.NVFP4_FOUR_OVER_SIX_CFG)
+        assert isinstance(cfg.quant_cfg, list)
+        assert len(cfg.quant_cfg) > 0
+
+    def test_nvfp4_four_over_six_cfg_needs_calibration(self):
+        """The 4/6 preset is statically calibrated, so it requires calibration."""
+        assert need_calibration(mtq.NVFP4_FOUR_OVER_SIX_CFG)

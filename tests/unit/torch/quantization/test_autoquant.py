@@ -24,8 +24,10 @@ from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, 
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+import modelopt.torch.quantization.model_quant as model_quant
 from modelopt.torch.quantization._auto_quantize_cost import (
     EXCLUDED_MODULE_NAME_PATTERNS_KEY,
+    _get_module_weight_numel,
     get_auto_quantize_cost_model,
     infer_active_moe_expert_ratio,
 )
@@ -33,10 +35,12 @@ from modelopt.torch.quantization.algorithms import (
     AutoQuantizeGradientSearcher,
     QuantRecipe,
     QuantRecipeHparam,
+    _AutoQuantizeBaseSearcher,
+    _module_search_space_signature,
     estimate_quant_compression,
 )
 from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
-from modelopt.torch.utils import safe_load
+from modelopt.torch.utils import safe_load, safe_save
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
@@ -108,7 +112,36 @@ def test_quant_recipe(quant_cfg, other_quant_cfg, is_less_than):
     assert (qr_this < qr_other) == is_less_than
 
     qr_this_duplicate = QuantRecipe(quant_cfg)
-    assert qr_this_duplicate in {qr_this}
+    assert qr_this_duplicate == qr_this
+
+
+def test_module_search_space_signature_is_canonical_and_uses_full_configs():
+    fp8_recipe = QuantRecipe(mtq.FP8_DEFAULT_CFG)
+    int8_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+
+    def signature(recipes):
+        return _module_search_space_signature(
+            [
+                {
+                    "module_name_patterns": ("*mlp*",),
+                    "quant_recipes": recipes,
+                    "allow_no_quant": False,
+                }
+            ]
+        )
+
+    assert signature([fp8_recipe, int8_recipe]) == signature([int8_recipe, fp8_recipe])
+
+    custom_max_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    custom_max_cfg["quant_cfg"].append({"quantizer_name": "unused_quantizer", "enable": False})
+    custom_mse_cfg = copy.deepcopy(custom_max_cfg)
+    custom_mse_cfg["algorithm"] = "mse"
+    max_recipe = QuantRecipe(custom_max_cfg, name="CUSTOM_MODULE_0_0")
+    mse_recipe = QuantRecipe(custom_mse_cfg, name="CUSTOM_MODULE_0_0")
+
+    assert str(max_recipe) == str(mse_recipe)
+    assert max_recipe != mse_recipe
+    assert signature([max_recipe]) != signature([mse_recipe])
 
 
 def test_quant_recipe_hparam():
@@ -171,26 +204,37 @@ def test_quant_recipe_hparam_zero_cost_weight():
     assert hparam.get_cost(QuantRecipe(mtq.INT8_DEFAULT_CFG)) == pytest.approx(0.0)
 
 
+def test_quant_recipe_hparam_cost_weight_and_effective_bits_compose():
+    """cost_weight (active_moe) and effective_bits stack multiplicatively in get_cost."""
+    model_test = mtq.quantize(torch.nn.Linear(4, 16), mtq.NVFP4_DEFAULT_CFG)
+    numel = model_test.weight.numel()
+    hparam = QuantRecipeHparam(
+        [QuantRecipe(mtq.NVFP4_DEFAULT_CFG)],
+        quant_modules=[model_test],
+        quant_module_names=["layers.0.mlp.experts.0.down_proj"],
+        cost_weight=0.03125,
+    )
+
+    # NVFP4's library-default effective_bits (4.5, from configs/numerics/nvfp4) stacks with cost_weight:
+    # numel * cost_weight * (effective_bits / 16).
+    assert hparam.get_cost(QuantRecipe(mtq.NVFP4_DEFAULT_CFG)) == pytest.approx(
+        numel * 0.03125 * (4.5 / 16)
+    )
+    # A recipe-level effective_bits override (8.0) wins over the library default and still stacks.
+    override = QuantRecipe({**mtq.NVFP4_DEFAULT_CFG, "effective_bits": 8.0}, name="NVFP4_8B")
+    assert hparam.get_cost(override) == pytest.approx(numel * 0.03125 * 0.5)
+
+
 def test_auto_quantize_cost_model_excludes_module_name_patterns():
-    visual = torch.nn.Linear(4, 16)
-    mtp = torch.nn.Linear(4, 16)
-    lm_head = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("weight")
     cost_constraints = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*", "*vision_tower*", "*mtp*"]}
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("model.visual.blocks.0.attn.qkv", visual),
-            ("model.mtp.layers.0.mlp", mtp),
-            ("lm_head", lm_head),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints=cost_constraints,
-    )
-
-    assert total_weight_size == pytest.approx(lm_head.weight.numel())
+    # Modules whose name matches an excluded pattern contribute zero cost weight.
     assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
     assert cost_model.module_cost_weight(["model.mtp.layers.0.mlp"], cost_constraints) == 0
+    # Non-excluded modules keep full weight.
+    assert cost_model.module_cost_weight(["lm_head"], cost_constraints) == 1.0
+    # A group is only excluded when *all* of its module names match; a mixed group is not.
     assert (
         cost_model.module_cost_weight(
             ["model.visual.blocks.0.attn.qkv", "lm_head"], cost_constraints
@@ -203,24 +247,19 @@ def test_active_moe_cost_model_counts_fused_experts_without_weight():
     fused_experts = torch.nn.Module()
     fused_experts.gate_up_proj = torch.nn.Parameter(torch.empty(2, 3, 5))
     fused_experts.down_proj = torch.nn.Parameter(torch.empty(2, 5, 3))
-    visual = torch.nn.Linear(4, 16)
     cost_model = get_auto_quantize_cost_model("active_moe")
+    cost_constraints = {
+        "active_moe_expert_ratio": 0.25,
+        EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
+    }
 
-    total_weight_size = cost_model.total_weight_size(
-        [
-            ("layers.0.mlp.experts", fused_experts),
-            ("model.visual.blocks.0.attn.qkv", visual),
-        ],
-        is_auto_quantize_module=lambda module: True,
-        cost_constraints={
-            "active_moe_expert_ratio": 0.25,
-            EXCLUDED_MODULE_NAME_PATTERNS_KEY: ["*visual*"],
-        },
+    # Fused experts expose no `.weight`; their size is summed across all parameters.
+    assert _get_module_weight_numel(fused_experts) == (
+        fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()
     )
-
-    assert total_weight_size == pytest.approx(
-        (fused_experts.gate_up_proj.numel() + fused_experts.down_proj.numel()) * 0.25
-    )
+    # Routed MoE experts are scaled by the active-expert ratio; excluded modules drop to zero.
+    assert cost_model.module_cost_weight(["layers.0.mlp.experts"], cost_constraints) == 0.25
+    assert cost_model.module_cost_weight(["model.visual.blocks.0.attn.qkv"], cost_constraints) == 0
 
 
 @pytest.mark.parametrize("num_experts_attr", ["num_experts", "num_local_experts"])
@@ -259,6 +298,386 @@ def test_auto_quantize_active_moe_cost_model(num_experts_attr):
     assert all(stats["cost_weight"] == pytest.approx(0.25) for stats in routed_stats)
     assert all(stats["cost_weight"] == pytest.approx(1.0) for stats in shared_stats)
     assert all("active_costs" not in stats for stats in search_history["candidate_stats"].values())
+
+
+def test_auto_quantize_module_search_spaces_keep_fixed_routed_experts_costed():
+    """A one-format routed rule is fixed in the LP but retained in active-MoE cost."""
+    model = _AutoQuantMoeModel()
+    int4_recipe = QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    int8_recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
+    no_quant_recipe = QuantRecipe(None)
+
+    searched_model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0, "cost_model": "active_moe"},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp.experts*"],
+                "quantization_formats": [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+                "allow_no_quant": False,
+            },
+            {
+                "module_name_patterns": ["*mlp.shared_expert*"],
+                "quantization_formats": [
+                    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                    mtq.INT8_DEFAULT_CFG,
+                ],
+                "allow_no_quant": False,
+            },
+        ],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    stats = search_history["candidate_stats"]
+    routed = next(
+        candidate
+        for candidate in stats.values()
+        if any("mlp.experts" in name for name in candidate["module_names"])
+    )
+    shared = next(
+        candidate
+        for candidate in stats.values()
+        if any("mlp.shared_expert" in name for name in candidate["module_names"])
+    )
+
+    assert routed["formats"] == [int4_recipe]
+    assert routed["allow_no_quant"] is False
+    assert routed["cost_weight"] == pytest.approx(0.25)
+    assert routed["costs"] == pytest.approx([routed["uncompressed_cost"] * 0.25])
+    assert no_quant_recipe not in routed["formats"]
+    assert shared["formats"] == [int4_recipe, int8_recipe]
+    assert shared["allow_no_quant"] is False
+    assert no_quant_recipe not in shared["formats"]
+    assert search_history["cost_denominator"] == pytest.approx(
+        sum(candidate["uncompressed_cost"] for candidate in stats.values())
+    )
+    routed_best = [
+        recipe
+        for name, recipe in search_history["best"]["recipe"].items()
+        if any("mlp.experts" in module for module in stats[name]["module_names"])
+    ]
+    assert routed_best and all(recipe == int4_recipe for recipe in routed_best)
+    routed_hparam = searched_model.mlp.experts[0].gate_proj.get_hparam("quant_recipe")
+    assert not routed_hparam.is_configurable
+    assert routed_hparam.active == int4_recipe
+
+
+def test_auto_quantize_fixed_ptq_baseline_keeps_unmatched_routed_experts_costed():
+    """A normal PTQ config fixes unmatched groups while explicit families remain searched."""
+    model = _AutoQuantMoeModel()
+    int4_recipe = QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    no_quant_recipe = QuantRecipe(None)
+
+    searched_model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0, "cost_model": "active_moe"},
+        fixed_quantization_config=mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp.shared_expert*"],
+                "quantization_formats": [
+                    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                    mtq.INT8_DEFAULT_CFG,
+                ],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    stats = search_history["candidate_stats"]
+    routed_name, routed = next(
+        (name, candidate)
+        for name, candidate in stats.items()
+        if any("mlp.experts" in module for module in candidate["module_names"])
+    )
+    shared = next(
+        candidate
+        for candidate in stats.values()
+        if any("mlp.shared_expert" in module for module in candidate["module_names"])
+    )
+
+    assert search_history["quantization_formats_signature"] == ()
+    assert search_history["fixed_quantization_config_signature"] == int4_recipe.checkpoint_signature
+    assert routed["formats"] == [int4_recipe]
+    assert routed["is_fixed"] is True
+    assert routed["allow_no_quant"] is False
+    assert routed["cost_weight"] == pytest.approx(0.25)
+    assert no_quant_recipe not in routed["formats"]
+    assert shared["is_fixed"] is False
+    assert search_history["best"]["recipe"][routed_name] == int4_recipe
+    routed_hparam = searched_model.mlp.experts[0].gate_proj.get_hparam("quant_recipe")
+    assert not routed_hparam.is_configurable
+    assert routed_hparam.is_fixed
+    assert routed_hparam.active == int4_recipe
+
+    exported = mtq.get_auto_quantize_config(search_history)
+    fixed_entries = search_history["fixed_quantization_config"]["quant_cfg"]
+    assert exported["quant_cfg"][: len(fixed_entries)] == fixed_entries
+
+
+def test_auto_quantize_fixed_ptq_baseline_honors_full_model_disables():
+    model = TransformerBlock()
+    fixed_config = copy.deepcopy(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    fixed_config["quant_cfg"].append({"quantizer_name": "*attn.o_proj*", "enable": False})
+
+    searched_model, search_history = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        fixed_quantization_config=fixed_config,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "quantization_formats": [
+                    mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                    mtq.INT8_DEFAULT_CFG,
+                ],
+            }
+        ],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    o_proj_hparam = searched_model.attn.o_proj.get_hparam("quant_recipe")
+    assert o_proj_hparam.is_fixed
+    assert o_proj_hparam.active == QuantRecipe(None)
+    o_proj_stats = next(
+        candidate
+        for candidate in search_history["candidate_stats"].values()
+        if candidate["module_names"] == ["attn.o_proj"]
+    )
+    assert o_proj_stats["costs"] == [o_proj_stats["uncompressed_cost"]]
+    exported = mtq.get_auto_quantize_config(search_history)
+    assert any(
+        entry["quantizer_name"] == "*attn.o_proj*" and entry["enable"] is False
+        for entry in exported["quant_cfg"]
+    )
+
+
+def test_auto_quantize_fixed_ptq_baseline_isolated_from_search_calibration(monkeypatch):
+    model = TransformerBlock()
+    calibration_states = []
+    original_calibrate = model_quant.calibrate
+
+    def recording_calibrate(model, algorithm="max", forward_loop=None):
+        algorithm_name = algorithm.get("method") if isinstance(algorithm, dict) else algorithm
+        calibration_states.append(
+            {
+                "algorithm": algorithm_name,
+                "fixed_enabled": model.attn.q_proj.weight_quantizer.is_enabled,
+                "fixed_num_bits": model.attn.q_proj.weight_quantizer.num_bits,
+            }
+        )
+        return original_calibrate(model, algorithm=algorithm, forward_loop=forward_loop)
+
+    monkeypatch.setattr(model_quant, "calibrate", recording_calibrate)
+
+    searched_model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 8.0},
+        fixed_quantization_config=mtq.FP8_DEFAULT_CFG,
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "quantization_formats": [mtq.INT4_AWQ_CFG],
+            }
+        ],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    awq_state = next(state for state in calibration_states if "awq" in state["algorithm"])
+    fp8_state = next(state for state in calibration_states if state["algorithm"] == "max")
+    assert not awq_state["fixed_enabled"]
+    assert fp8_state["fixed_enabled"]
+    assert fp8_state["fixed_num_bits"] == (4, 3)
+    assert searched_model.attn.q_proj.weight_quantizer.is_enabled
+    assert searched_model.attn.q_proj.weight_quantizer.num_bits == (4, 3)
+
+
+def test_auto_quantize_fixed_ptq_baseline_rejects_global_formats():
+    with pytest.raises(ValueError, match="cannot be combined"):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            fixed_quantization_config=mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": [mtq.INT8_DEFAULT_CFG],
+                }
+            ],
+        )
+
+
+def test_auto_quantize_fixed_ptq_baseline_requires_explicit_search_spaces():
+    with pytest.raises(ValueError, match="requires at least one explicit"):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            fixed_quantization_config=mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+        )
+
+
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
+def test_auto_quantize_rejects_non_list_global_formats(formats):
+    with pytest.raises(TypeError, match="`quantization_formats` must be a list"):
+        mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
+
+
+@pytest.mark.parametrize("formats", [[], [None]])
+def test_auto_quantize_rejects_empty_global_formats(formats):
+    with pytest.raises(ValueError, match="`quantization_formats` must"):
+        mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
+
+
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
+def test_auto_quantize_rejects_non_list_module_formats(formats):
+    with pytest.raises(
+        TypeError, match=r"module_search_spaces\.quantization_formats must be a list"
+    ):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": formats,
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize("formats", [[], [None]])
+def test_auto_quantize_rejects_empty_module_formats(formats):
+    with pytest.raises(ValueError, match=r"module_search_spaces\.quantization_formats must"):
+        mtq.auto_quantize(
+            TransformerBlock(),
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": formats,
+                }
+            ],
+        )
+
+
+def test_auto_quantize_fixed_module_isolated_from_unrelated_calibration(monkeypatch):
+    model = TransformerBlock()
+    calibration_states = []
+    original_calibrate = model_quant.calibrate
+
+    def recording_calibrate(model, algorithm="max", forward_loop=None):
+        algorithm_name = algorithm.get("method") if isinstance(algorithm, dict) else algorithm
+        weight_quantizer = model.mlp.weight_quantizer
+        calibration_states.append(
+            {
+                "algorithm": algorithm_name,
+                "enabled": weight_quantizer.is_enabled,
+                "num_bits": weight_quantizer.num_bits,
+                "quantizer_id": id(weight_quantizer),
+            }
+        )
+        return original_calibrate(model, algorithm=algorithm, forward_loop=forward_loop)
+
+    monkeypatch.setattr(model_quant, "calibrate", recording_calibrate)
+
+    searched_model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_AWQ_CFG],
+        module_search_spaces=[
+            {
+                "module_name_patterns": ["*mlp*"],
+                "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                "allow_no_quant": False,
+            }
+        ],
+        data_loader=[model.get_input()],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+
+    awq_state = next(state for state in calibration_states if "awq" in state["algorithm"])
+    fp8_state = next(state for state in calibration_states if state["algorithm"] == "max")
+    assert not awq_state["enabled"]
+    assert fp8_state["enabled"]
+    assert fp8_state["num_bits"] == (4, 3)
+    assert awq_state["quantizer_id"] != fp8_state["quantizer_id"]
+    assert id(searched_model.mlp.weight_quantizer) == fp8_state["quantizer_id"]
+    assert searched_model.mlp.weight_quantizer.pre_quant_scale is None
+    assert not searched_model.mlp.get_hparam("quant_recipe").is_configurable
+    assert searched_model.mlp.get_hparam("quant_recipe").active == QuantRecipe(mtq.FP8_DEFAULT_CFG)
+
+
+def test_auto_quantize_rejects_infeasible_resolved_module_search_space(monkeypatch):
+    def unexpected_calibration(*args, **kwargs):
+        pytest.fail("infeasible search should fail before calibration")
+
+    monkeypatch.setattr(model_quant, "calibrate", unexpected_calibration)
+    model = TransformerBlock()
+
+    with pytest.raises(ValueError, match=r"minimum achievable effective bits is 8\.0000"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
+
+
+def test_auto_quantize_module_search_space_cannot_split_runtime_group():
+    model = TransformerBlock()
+
+    with pytest.raises(ValueError, match="partially matches runtime-grouped modules"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*q_proj"],
+                    "quantization_formats": [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+        )
 
 
 def test_active_moe_ratio_requires_single_config_object():
@@ -373,7 +792,7 @@ def test_auto_quantize_disable_layers():
 
     best_model, search_history = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints={"effective_bits": 8.0},
         quantization_formats=[
             mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
             mtq.INT8_DEFAULT_CFG,
@@ -396,7 +815,7 @@ def test_auto_quantize_disabled_layers_no_poison():
 
     best_model, _ = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints={"effective_bits": 8.0},
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -486,30 +905,64 @@ def test_data_parallel_auto_quantize(skip_on_windows):
     spawn_multiprocess_job(2, _test_data_parallel_auto_quantize, backend="gloo")
 
 
+def test_auto_quantize_budget_uses_no_quant_candidate_cost(monkeypatch):
+    class _BudgetCaptureSearcher(AutoQuantizeGradientSearcher):
+        def run_search_with_stats(self, max_weight_size, verbose=False):
+            self.max_weight_size = max_weight_size
+            return {}, True
+
+    def _raise_local_total_weight_size(modules):
+        pytest.fail("run_search should derive total weight size from candidate costs")
+
+    monkeypatch.setattr(
+        _AutoQuantizeBaseSearcher,
+        "_get_total_weight_size",
+        staticmethod(_raise_local_total_weight_size),
+    )
+
+    searcher = _BudgetCaptureSearcher()
+    searcher.reset_search()
+    searcher.model = torch.nn.Module()
+    searcher.config = {"verbose": False}
+    searcher.constraints = {"effective_bits": 8.0}
+    searcher.candidate_stats = {
+        "local_expert.quant_recipe": {
+            "formats": [QuantRecipe(mtq.NVFP4_DEFAULT_CFG), QuantRecipe(None)],
+            "scores": [1.0, 0.0],
+            "costs": [25.0, 100.0],
+        }
+    }
+
+    searcher.run_search()
+
+    assert searcher.max_weight_size == 50.0
+
+
 def test_estimate_quant_compression():
+    # NVFP4 weight/input carry effective_bits=4.5 from configs/numerics/nvfp4 -> 4.5/16 = 0.28125.
     nvfp4_affine_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AFFINE_KV_CFG)
-    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_affine_kv_cfg) == 0.28125
 
     nvfp4_awq_clip_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_CLIP_CFG)
-    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_clip_cfg) == 0.28125
 
     nvfp4_awq_full_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_FULL_CFG)
-    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_full_cfg) == 0.28125
 
     nvfp4_awq_lite_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_AWQ_LITE_CFG)
-    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_awq_lite_cfg) == 0.28125
 
     nvfp4_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_default_cfg) == 0.28125
 
     nvfp4_kv_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_CFG)
-    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_cfg) == 0.28125
 
     nvfp4_kv_rotate_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_KV_ROTATE_CFG)
-    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_kv_rotate_cfg) == 0.28125
 
     nvfp4_svdquant_default_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_SVDQUANT_DEFAULT_CFG)
-    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.25
+    assert estimate_quant_compression(nvfp4_svdquant_default_cfg) == 0.28125
 
     int8_default_cfg = mtq.config.QuantizeConfig(**mtq.INT8_DEFAULT_CFG)
     assert estimate_quant_compression(int8_default_cfg) == 0.5
@@ -554,6 +1007,82 @@ def test_estimate_quant_compression():
 
     fp8_affine_kv_cfg = mtq.config.QuantizeConfig(**mtq.FP8_AFFINE_KV_CFG)
     assert estimate_quant_compression(fp8_affine_kv_cfg) == 0.5
+
+
+def test_estimate_quant_compression_effective_bits_override():
+    """Recipe-level ``QuantizeConfig.effective_bits`` overrides the per-entry library default."""
+    # NVFP4 weight carries effective_bits=4.5 from configs/numerics/nvfp4 (per-entry default).
+    nvfp4_cfg = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG)
+    assert nvfp4_cfg.effective_bits is None  # no recipe-level override
+    assert estimate_quant_compression(nvfp4_cfg) == 4.5 / 16.0  # per-entry library default
+
+    # A recipe-level QuantizeConfig.effective_bits override wins over the per-entry default.
+    nvfp4_cfg_overridden = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=8.0)
+    assert estimate_quant_compression(nvfp4_cfg_overridden) == 8.0 / 16.0
+
+    # Override can also represent a higher cost (e.g., conservative for a sensitive recipe).
+    nvfp4_cfg_high = mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=16.0)
+    assert estimate_quant_compression(nvfp4_cfg_high) == 1.0
+
+    # Out-of-range values are rejected by the Pydantic validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=0.0)
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(**mtq.NVFP4_DEFAULT_CFG, effective_bits=17.0)
+
+
+def test_estimate_quant_compression_per_entry_effective_bits():
+    """Per-entry ``effective_bits`` overrides the heuristic; recipe-level wins over it; min across entries."""
+    # num_bits=(2,1) -> heuristic 0.25, but per-entry library default is 4.5.
+    cfg = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+    )
+    assert cfg.effective_bits is None
+    assert estimate_quant_compression(cfg) == 4.5 / 16.0
+
+    # Recipe-level override (layer 1) wins over the per-entry value (layer 2).
+    cfg_recipe_override = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+        ],
+        algorithm="max",
+        effective_bits=8.0,
+    )
+    assert estimate_quant_compression(cfg_recipe_override) == 8.0 / 16.0
+
+    # min across entries: weight 4.5/16 = 0.28125 vs heuristic fp8 input 0.5 -> 0.28125.
+    cfg_mixed = mtq.config.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": (2, 1), "effective_bits": 4.5},
+            },
+            {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3)}},
+        ],
+        algorithm="max",
+    )
+    assert estimate_quant_compression(cfg_mixed) == 4.5 / 16.0
+
+    # Per-entry out-of-range is rejected by the QuantizerAttributeConfig validator.
+    with pytest.raises(ValueError, match="effective_bits must be in"):
+        mtq.config.QuantizeConfig(
+            quant_cfg=[
+                {
+                    "quantizer_name": "*weight_quantizer",
+                    "cfg": {"num_bits": (2, 1), "effective_bits": 20.0},
+                },
+            ],
+            algorithm="max",
+        )
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
@@ -644,6 +1173,265 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
                 torch.testing.assert_close(
                     s1["state_dict"][qname][buf_name], s2["state_dict"][qname][buf_name]
                 )
+
+
+def test_auto_quantize_checkpoint_rejects_changed_fixed_ptq_baseline(tmp_path):
+    checkpoint_path = str(tmp_path / "autoquant_fixed_baseline_checkpoint.pth")
+
+    def run(fixed_config):
+        model = TransformerBlock()
+        return mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 8.0},
+            fixed_quantization_config=fixed_config,
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": [
+                        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                        mtq.INT8_DEFAULT_CFG,
+                    ],
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    run(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG)
+    with pytest.raises(ValueError, match="fixed_quantization_config does not match"):
+        run(mtq.FP8_DEFAULT_CFG)
+
+
+def test_auto_quantize_calibration_only_checkpoint_validates_module_search_spaces(
+    tmp_path, monkeypatch
+):
+    checkpoint_path = str(tmp_path / "autoquant_calibration_only_checkpoint.pth")
+    original_estimate_scores = AutoQuantizeGradientSearcher.estimate_sensitivity_scores
+
+    def interrupt_after_calibration(self):
+        raise RuntimeError("interrupt after calibration")
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        interrupt_after_calibration,
+    )
+    model = TransformerBlock()
+    with pytest.raises(RuntimeError, match="interrupt after calibration"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": [mtq.FP8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    saved = safe_load(checkpoint_path)
+    assert saved["quantizer_states"]
+    assert not saved["candidate_stats"]
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        original_estimate_scores,
+    )
+    resumed_model = TransformerBlock()
+    with pytest.raises(ValueError, match="module_search_spaces do not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            module_search_spaces=[
+                {
+                    "module_name_patterns": ["*mlp*"],
+                    "quantization_formats": [mtq.INT8_DEFAULT_CFG],
+                    "allow_no_quant": False,
+                }
+            ],
+            data_loader=[resumed_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("initial_disabled", "initial_excluded", "resumed_disabled", "resumed_excluded"),
+    [
+        (["*mlp*"], None, ["*o_proj*"], None),
+        (None, ["*mlp*"], None, ["*o_proj*"]),
+    ],
+    ids=["disabled-layers", "cost-exclusions"],
+)
+def test_auto_quantize_calibration_checkpoint_validates_resolved_search_setup(
+    tmp_path,
+    monkeypatch,
+    initial_disabled,
+    initial_excluded,
+    resumed_disabled,
+    resumed_excluded,
+):
+    checkpoint_path = str(tmp_path / "autoquant_calibration_only_checkpoint.pth")
+    original_estimate_scores = AutoQuantizeGradientSearcher.estimate_sensitivity_scores
+
+    def interrupt_after_calibration(self):
+        raise RuntimeError("interrupt after calibration")
+
+    def constraints(excluded_patterns):
+        result = {"effective_bits": 8.0}
+        if excluded_patterns is not None:
+            result["cost"] = {EXCLUDED_MODULE_NAME_PATTERNS_KEY: excluded_patterns}
+        return result
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        interrupt_after_calibration,
+    )
+    model = TransformerBlock()
+    with pytest.raises(RuntimeError, match="interrupt after calibration"):
+        mtq.auto_quantize(
+            model,
+            constraints=constraints(initial_excluded),
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            disabled_layers=initial_disabled,
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    saved = safe_load(checkpoint_path)
+    assert saved["quantizer_states"]
+    assert saved["resolved_search_setup_signature"]
+    assert not saved["candidate_stats"]
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        original_estimate_scores,
+    )
+    resumed_model = TransformerBlock()
+    with pytest.raises(ValueError, match="resolved search setup does not match"):
+        mtq.auto_quantize(
+            resumed_model,
+            constraints=constraints(resumed_excluded),
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            disabled_layers=resumed_disabled,
+            data_loader=[resumed_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+
+def test_auto_quantize_calibration_only_checkpoint_validates_global_formats_and_legacy(
+    tmp_path, monkeypatch
+):
+    checkpoint_path = str(tmp_path / "autoquant_calibration_only_checkpoint.pth")
+    legacy_checkpoint_path = str(tmp_path / "autoquant_legacy_calibration_only_checkpoint.pth")
+    original_estimate_scores = AutoQuantizeGradientSearcher.estimate_sensitivity_scores
+
+    def interrupt_after_calibration(self):
+        raise RuntimeError("interrupt after calibration")
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        interrupt_after_calibration,
+    )
+    model = TransformerBlock()
+    with pytest.raises(RuntimeError, match="interrupt after calibration"):
+        mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            data_loader=[model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    saved = safe_load(checkpoint_path)
+    assert saved["quantizer_states"]
+    assert saved["quantization_formats_signature"]
+    legacy_saved = dict(saved)
+    legacy_saved.pop("quantization_formats_signature")
+    safe_save(legacy_saved, legacy_checkpoint_path)
+
+    monkeypatch.setattr(
+        AutoQuantizeGradientSearcher,
+        "estimate_sensitivity_scores",
+        original_estimate_scores,
+    )
+    mismatched_model = TransformerBlock()
+    with pytest.raises(ValueError, match="quantization_formats do not match"):
+        mtq.auto_quantize(
+            mismatched_model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.FP8_DEFAULT_CFG],
+            data_loader=[mismatched_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=checkpoint_path,
+        )
+
+    legacy_model = TransformerBlock()
+    with pytest.raises(ValueError, match="does not record its quantization_formats signature"):
+        mtq.auto_quantize(
+            legacy_model,
+            constraints={"effective_bits": 6.0},
+            quantization_formats=[
+                mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
+                mtq.INT8_DEFAULT_CFG,
+            ],
+            data_loader=[legacy_model.get_input()],
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.sum(),
+            num_calib_steps=1,
+            num_score_steps=1,
+            checkpoint=legacy_checkpoint_path,
+        )
 
 
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])

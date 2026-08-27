@@ -32,7 +32,7 @@ jobs:
       - name: Build docs
         run: pip install nox uv && nox -s docs
       - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docs-html
           path: docs/build/html
@@ -44,7 +44,7 @@ jobs:
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
     steps:
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -54,9 +54,12 @@ jobs:
               - '.github/workflows/pages.yml'
 
   deploy-preview:
+    # Fork PRs get a read-only GITHUB_TOKEN regardless of the `permissions:` block
+    # above, so pushing the preview to gh-pages would fail with a 403. Skip them.
     if: |
       always() &&
       github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action == 'closed' || needs.changes.outputs.docs == 'true')
     needs: [build-docs, changes]
     runs-on: ubuntu-latest
@@ -68,7 +71,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Download docs artifact
         if: github.event.action != 'closed'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: docs-html
           path: docs/build/html
@@ -84,7 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Download docs artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: docs-html
           path: docs/build/html

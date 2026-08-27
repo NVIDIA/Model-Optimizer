@@ -37,6 +37,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import glob
+import json
+import os
+import sys
 import warnings
 from importlib.metadata import version
 
@@ -44,8 +48,9 @@ import datasets
 from lm_eval import utils
 from packaging.version import Version
 
-if Version(version("lm_eval")) < Version("0.4.10"):
-    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.10; found {version('lm_eval')}.")
+if Version(version("lm_eval")) < Version("0.4.12"):
+    # Matches the floor pinned in requirements.txt.
+    raise ImportError(f"lm_eval_hf.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
 from lm_eval._cli import HarnessCLI
 from lm_eval.api.model import T
@@ -236,6 +241,17 @@ def _add_modelopt_args(parser):
         type=str,
         help="Sparse attention configuration (e.g., SKIP_SOFTMAX_DEFAULT, SKIP_SOFTMAX_CALIB)",
     )
+    # Not a model arg (kept out of _MODELOPT_ARG_KEYS): popped separately and
+    # applied after the eval as an accuracy gate.
+    parser.add_argument(
+        "--accuracy_lower_bound",
+        type=float,
+        default=None,
+        help=(
+            "Exit non-zero if the requested task's acc is below this. Requires exactly one "
+            "--tasks and --output_path."
+        ),
+    )
 
 
 def _inject_modelopt_args_into_model_args(args):
@@ -243,9 +259,12 @@ def _inject_modelopt_args_into_model_args(args):
 
     args.model_args is a dict (parsed by lm-eval's MergeDictAction). The ModelOpt
     keys must be removed from the namespace so EvaluatorConfig.from_cli doesn't
-    reject them as unknown kwargs.
+    reject them as unknown kwargs. They only apply to the HF backend; passing a
+    quantization/sparsity arg with a non-HF backend raises an error.
     """
     model_args = dict(args.model_args) if args.model_args else {}
+    # HFLM and its subclasses (registered as hf / hf-auto / huggingface / hf-multimodal).
+    is_hf = getattr(args, "model", "hf") in ("hf", "hf-auto", "huggingface", "hf-multimodal")
 
     if getattr(args, "trust_remote_code", False):
         # Propagate the user-provided --trust_remote_code flag (not hardcoded).
@@ -253,12 +272,48 @@ def _inject_modelopt_args_into_model_args(args):
         model_args["trust_remote_code"] = True
         args.trust_remote_code = None
 
+    if not is_hf:
+        requested = [
+            k
+            for k in ("quant_cfg", "auto_quantize_bits", "compress", "sparse_cfg")
+            if getattr(args, k, None)
+        ]
+        if requested:
+            raise ValueError(
+                f"{', '.join('--' + k for k in requested)} request quantization/sparsity, which "
+                f"only applies to the HF backend; with --model {args.model!r} the checkpoint must "
+                "already be quantized/sparsified (drop the ModelOpt args)."
+            )
+
     for key in _MODELOPT_ARG_KEYS:
-        if hasattr(args, key):
-            model_args[key] = getattr(args, key)
-            delattr(args, key)
+        value = vars(args).pop(key, None)
+        if is_hf:
+            model_args[key] = value
 
     args.model_args = model_args
+
+
+def _enforce_accuracy_gate(output_path, task, lower_bound):
+    """Read lm-eval results at output_path; exit non-zero if <task>/acc < lower_bound."""
+    # HarnessCLI.execute() returns None, so we recover the result dict from disk.
+    files = glob.glob(os.path.join(output_path, "**", "results*.json"), recursive=True)
+    if not files:
+        raise FileNotFoundError(f"No results*.json under {output_path}")
+    # Sort by mtime, not path: a reused output_path nests results under a
+    # <model_name>/ dir, and lexical order would pick the wrong run's file.
+    with open(max(files, key=os.path.getmtime)) as f:
+        scores = json.load(f)["results"].get(task, {})
+    # lm-eval keys metrics by filter, e.g. "acc,none"; take acc (never acc_stderr).
+    acc = next((float(v) for k, v in scores.items() if k == "acc" or k.startswith("acc,")), None)
+    if acc is None:
+        raise KeyError(f"acc not found for '{task}' (have: {list(scores)})")
+    passed = acc >= lower_bound
+    print(
+        f"[accuracy_gate] {task}/acc = {acc:.4f} (lower_bound {lower_bound}) -> "
+        f"{'PASS' if passed else 'FAIL'}"
+    )
+    if not passed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -277,4 +332,19 @@ if __name__ == "__main__":
     _add_modelopt_args(run_parser)
     args = cli.parse_args()
     _inject_modelopt_args_into_model_args(args)
+    lower_bound = vars(args).pop("accuracy_lower_bound", None)
+    output_path = getattr(args, "output_path", None)
+    gate_task = None
+    if lower_bound is not None:  # fail fast before the (expensive) eval
+        if not output_path:
+            raise ValueError("--accuracy_lower_bound requires --output_path.")
+        raw = args.tasks if isinstance(args.tasks, list) else str(args.tasks or "").split(",")
+        tasks = [t.strip() for t in raw if t and t.strip()]
+        if len(tasks) != 1:
+            raise ValueError(
+                f"--accuracy_lower_bound needs exactly one --tasks (got {tasks or 'none'})."
+            )
+        gate_task = tasks[0]
     cli.execute(args)
+    if lower_bound is not None:
+        _enforce_accuracy_gate(output_path, gate_task, lower_bound)

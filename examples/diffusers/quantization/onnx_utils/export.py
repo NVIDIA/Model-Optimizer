@@ -417,9 +417,9 @@ def get_io_shapes(model_id, onnx_load_path, trt_dynamic_shapes):
     if onnx_load_path != "":
         if model_id in ["sdxl-1.0", "sdxl-turbo"]:
             output_name = "latent"
-        elif model_id in ["sd3-medium"]:
+        elif model_id == "sd3-medium":
             output_name = "sample"
-        elif model_id in ["sd3.5-medium"]:
+        elif model_id == "sd3.5-medium":
             output_name = "out_hidden_states"
         elif model_id in ["flux-dev", "flux-schnell"]:
             output_name = "output"
@@ -499,7 +499,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         if model_name == "flux-dev":
             input_names.append("guidance")
         output_names = ["latent"]
-    elif model_name in ["ltx-video-dev"]:
+    elif model_name == "ltx-video-dev":
         input_names = [
             "hidden_states",
             "encoder_hidden_states",
@@ -508,7 +508,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
             "video_coords",
         ]
         output_names = ["latent"]
-    elif model_name in ["wan2.2-t2v-14b"]:
+    elif model_name == "wan2.2-t2v-14b":
         input_names = [
             "hidden_states",
             "timestep",

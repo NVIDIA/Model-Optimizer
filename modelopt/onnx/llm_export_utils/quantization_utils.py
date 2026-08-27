@@ -123,7 +123,7 @@ def quantize(
         f"Only fp8(W8A8), int4_awq(W4A16), nvfp4(W4A4) is supported. You passed an unsupported precision: {precision}."
     )
 
-    assert lm_head_precision in ["fp16"], (
+    assert lm_head_precision == "fp16", (
         f"Only fp16(unquantized) is supported for lm_head. You passed an unsupported precision: {lm_head_precision}."
     )
 

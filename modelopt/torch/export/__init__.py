@@ -21,6 +21,7 @@ from .model_config_export import *
 from .model_utils import *
 from .moe_utils import *
 from .plugins import *
+from .registry import *
 from .transformer_engine import *
 from .unified_export_hf import *
 from .unified_export_megatron import *

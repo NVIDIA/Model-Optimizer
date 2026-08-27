@@ -61,11 +61,12 @@ jobs:
       - if: startsWith(github.ref, 'refs/heads/pull-request/')
         name: Check for changes in test-relevant directories
         id: changed-tests
-        uses: step-security/changed-files@v46.0.5
+        uses: step-security/changed-files@v47.0.5
         with:
-          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
-          sha: ${{ steps.pr-shas.outputs.head_sha }}
+          base_sha: ${{ steps.base.outputs.merge_base }}
+          sha: ${{ steps.base.outputs.head_sha }}
           files: ${{ inputs.files }}
+          files_ignore: ${{ inputs.files_ignore }}
           fail_on_initial_diff_error: true
       - if: >-
           startsWith(github.ref, 'refs/heads/pull-request/') &&
@@ -117,7 +118,9 @@ jobs:
     uses: ./.github/workflows/_wait_for_checks.yml
     permissions:
       checks: read
-    secrets: inherit
-    with:
-      match_pattern: "^linux$" # Wait for Unit tests / linux (DCO is a prerequisite of linux)
-      delay: 300s
+    steps:
+      - uses: poseidon/wait-for-status-checks@v0.7.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          match_pattern: "^linux$" # Wait for Unit tests / linux
+          delay: 300s

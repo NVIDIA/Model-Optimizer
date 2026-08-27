@@ -1,0 +1,379 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for offload-aware unified HF export helpers (CPU-only, no GPU required)."""
+
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+import torch
+import torch.nn as nn
+from safetensors import safe_open
+
+try:
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.utils import set_module_tensor_to_device
+except ImportError:
+    pytest.skip("accelerate not available", allow_module_level=True)
+
+from _test_utils.torch.quantization.tied_modules import (
+    make_tied_linear_pair,
+    wrap_in_parent_with_tied_keys,
+)
+
+import modelopt.torch.quantization as mtq
+from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.export.unified_export_hf_streaming import (
+    _parse_shard_size,
+    _StreamingShardWriter,
+)
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_offloaded_linear(dim: int = 16):
+    """Return a Linear with a CPU-offload AlignDevicesHook attached and params on meta."""
+    linear = nn.Linear(dim, dim, bias=False)
+    weights_map = {"weight": linear.weight.data.clone().cpu()}
+    hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    add_hook_to_module(linear, hook)
+    set_module_tensor_to_device(linear, "weight", "meta")
+    return linear, weights_map
+
+
+def _offload_module(module):
+    """Offload ``module`` like accelerate does: real weight to ``weights_map``, ``.weight`` to a meta Parameter."""
+    weights_map = {"weight": module.weight.data.clone().cpu()}
+    hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    add_hook_to_module(module, hook)
+    set_module_tensor_to_device(module, "weight", "meta")
+
+
+# ---------------------------------------------------------------------------
+# tied-weight alias map under offload
+# ---------------------------------------------------------------------------
+
+
+def test_tied_weight_map_from_hf_map_survives_offload():
+    """TiedWeightMap reads HF's name-based all_tied_weights_keys, so offload does not change it."""
+    enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
+    model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    assert not has_accelerate_offload(model)
+    assert TiedWeightMap(model).alias_to_canonical == {"encoder.weight": "decoder.weight"}
+
+    _offload_module(model.encoder)
+    _offload_module(model.decoder)
+    assert has_accelerate_offload(model)
+
+    # The map is a plain name dict on the model; offload metas the weights but not the attribute.
+    tied_map = TiedWeightMap(model)
+    assert tied_map.alias_to_canonical == {"encoder.weight": "decoder.weight"}
+    assert tied_map.group_key("encoder.weight") == "decoder.weight"
+
+
+# ---------------------------------------------------------------------------
+# has_accelerate_offload
+# ---------------------------------------------------------------------------
+
+
+def test_has_accelerate_offload_true():
+    linear, _ = _make_offloaded_linear()
+    assert has_accelerate_offload(linear) is True
+
+
+def test_has_accelerate_offload_false_no_hooks():
+    linear = nn.Linear(16, 16)
+    assert has_accelerate_offload(linear) is False
+
+
+def test_has_accelerate_offload_false_non_offload_hook():
+    """A hook with offload=False should not be detected as offloaded."""
+    linear = nn.Linear(16, 16)
+    hook = AlignDevicesHook(execution_device="cpu", offload=False)
+    add_hook_to_module(linear, hook)
+    assert has_accelerate_offload(linear) is False
+
+
+def test_has_accelerate_offload_detects_nested_module():
+    """Offload hook on a child module should be detected when scanning the parent."""
+
+    class _Parent(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.child = nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return self.child(x)
+
+    parent = _Parent()
+    weights_map = {"weight": parent.child.weight.data.clone().cpu()}
+    hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    add_hook_to_module(parent.child, hook)
+    set_module_tensor_to_device(parent.child, "weight", "meta")
+
+    assert has_accelerate_offload(parent) is True
+
+
+# ---------------------------------------------------------------------------
+# _export_quantized_weight meta guard
+# ---------------------------------------------------------------------------
+
+
+def test_meta_guard_raises_on_meta_weight():
+    """_export_quantized_weight must raise RuntimeError when weight is a meta tensor."""
+    linear = nn.Linear(16, 16, bias=False)
+
+    mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 16)))
+
+    # Manually set weight to meta to simulate what happens after hooks are removed.
+    linear.weight = nn.Parameter(torch.empty(16, 16, device="meta"))
+
+    with pytest.raises(RuntimeError, match="meta tensor"):
+        _export_quantized_weight(linear, torch.float32)
+
+
+def test_meta_guard_not_raised_for_real_weight():
+    """No RuntimeError when weight is a real (non-meta) tensor."""
+    linear = nn.Linear(32, 32, bias=False)
+    mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 32)))
+    # Should not raise
+    _export_quantized_weight(linear, torch.float32)
+
+
+# ---------------------------------------------------------------------------
+# _StreamingShardWriter
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_shard_writer_single_shard():
+    """Tensors fitting in one shard produce model.safetensors, no index, and round-trip."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        a, b = torch.randn(4, 4), torch.zeros(2, 2)
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("a", a)
+        writer.add("b", b)
+        weight_map = writer.finalize()
+
+        single = Path(tmpdir) / "model.safetensors"
+        index = Path(tmpdir) / "model.safetensors.index.json"
+        assert single.exists(), "model.safetensors not written"
+        assert not index.exists(), "index file must not exist for single-shard export"
+        assert set(weight_map.values()) == {"model.safetensors"}
+        assert set(weight_map.keys()) == {"a", "b"}
+
+        with safe_open(str(single), framework="pt") as f:
+            assert torch.equal(f.get_tensor("a"), a)
+            assert torch.equal(f.get_tensor("b"), b)
+
+
+def test_streaming_shard_writer_multi_shard():
+    """Tensors exceeding max_shard_size produce an index whose shards all exist on disk.
+
+    The file-existence half is a regression guard: an earlier code path called
+    model.save_pretrained(state_dict={}) after finalize(), triggering transformers' stale-
+    shard cleanup loop which matched and deleted every model-NNNNN-of-NNNNN.safetensors
+    file because filename_to_tensors was empty.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # One float32 4x4 tensor = 64 bytes; set limit to 64 so each tensor goes to a new shard
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=64)
+        writer.add("x", torch.ones(4, 4))
+        writer.add("y", torch.ones(4, 4))
+        weight_map = writer.finalize()
+
+        index_path = Path(tmpdir) / "model.safetensors.index.json"
+        assert index_path.exists(), "model.safetensors.index.json not written"
+        assert weight_map["x"] != weight_map["y"], "keys must be in different shards"
+
+        with open(index_path) as f:
+            index = json.load(f)
+        assert index["metadata"]["total_size"] > 0
+
+        for key, shard_name in index["weight_map"].items():
+            shard_path = Path(tmpdir) / shard_name
+            assert shard_path.exists(), (
+                f"Shard '{shard_name}' (for key '{key}') missing from disk after finalize()"
+            )
+            assert shard_path.stat().st_size > 0, f"Shard file {shard_name} is empty"
+
+
+def test_streaming_shard_writer_copies_tied_alias():
+    """Two keys sharing storage must both survive; save_file rejects the alias itself.
+
+    The name-based _tied_weights_keys filter misses ties transformers does not declare
+    (e.g. tie_word_embeddings=False but shared storage), so the writer needs its own
+    guard. It copies rather than drops: offloaded export writes tied weights as separate
+    entries, so losing a key here would leave the checkpoint short a tensor.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        shared = torch.ones(4, 4)
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("embed_tokens.weight", shared)
+        writer.add("lm_head.weight", shared)
+        weight_map = writer.finalize()
+
+        assert set(weight_map) == {"embed_tokens.weight", "lm_head.weight"}
+        shard_file = Path(tmpdir) / weight_map["lm_head.weight"]
+        with safe_open(str(shard_file), framework="pt") as f:
+            assert torch.equal(f.get_tensor("embed_tokens.weight"), shared)
+            assert torch.equal(f.get_tensor("lm_head.weight"), shared)
+
+
+def test_streaming_shard_writer_copies_aliased_view():
+    """A distinct view onto shared storage must be copied, not dropped."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = torch.arange(16, dtype=torch.float32).reshape(4, 4)
+        view = base.view(16)  # same data_ptr, different shape
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("base", base)
+        writer.add("view", view)
+        weight_map = writer.finalize()
+
+        assert set(weight_map) == {"base", "view"}, "aliased view must be kept, not dropped"
+        shard_file = Path(tmpdir) / weight_map["view"]
+        with safe_open(str(shard_file), framework="pt") as f:
+            assert torch.equal(f.get_tensor("view"), view)
+            assert torch.equal(f.get_tensor("base"), base)
+
+
+def test_streaming_shard_writer_accepts_extra_tensors():
+    """extra_state_dict tensors must land in the shards.
+
+    MTP weights are orphaned — HF builds only num_hidden_layers decoders, so they are
+    never in model.state_dict() and reach export only via extra_state_dict. The streaming
+    path used to drop them, silently losing 19 tensors relative to the batch export.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        writer = _StreamingShardWriter(tmpdir, max_shard_size=10 * 1024**3)
+        writer.add("model.layers.0.weight", torch.ones(4, 4))
+        writer.add("mtp.fc.weight", torch.full((2, 2), 7.0))
+        weight_map = writer.finalize()
+
+        assert "mtp.fc.weight" in weight_map
+        with safe_open(str(Path(tmpdir) / weight_map["mtp.fc.weight"]), framework="pt") as f:
+            assert torch.equal(f.get_tensor("mtp.fc.weight"), torch.full((2, 2), 7.0))
+
+
+# ---------------------------------------------------------------------------
+# _postprocess_single_tensor
+# ---------------------------------------------------------------------------
+
+
+def test_postprocess_passthrough_normal_key():
+    """Non-quantizer weights pass through unchanged."""
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.self_attn.q_proj.weight", torch.randn(4, 4), 448.0, None
+    )
+    assert key == "model.layers.0.self_attn.q_proj.weight"
+    assert val is not None
+    assert val.shape == (4, 4)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model.layers.0.weight_quantizer._amax",  # skip_keys hit, no replacement
+        "model.layers.0.output_quantizer._amax",  # output_quantizer always dropped
+        "vision_model.radio_model.summary_idxs",  # problematic VL parameter
+        *(  # RealQuantLinear scale tensors
+            f"model.layers.0.weight_quantizer.{q}" for q in RealQuantLinear.list_of_scale_tensors
+        ),
+    ],
+)
+def test_postprocess_drops_key(key):
+    """Keys with no exported counterpart are dropped rather than renamed."""
+    assert _postprocess_single_tensor(key, torch.tensor(1.0), 448.0, None) == (None, None)
+
+
+def test_postprocess_kv_scale_renamed_and_divided():
+    """k_bmm_quantizer._amax is renamed to k_proj.k_scale and divided by maxbound."""
+    key, val = _postprocess_single_tensor(
+        "model.layers.0.self_attn.k_bmm_quantizer._amax",
+        torch.tensor(224.0),
+        448.0,
+        KV_CACHE_FP8,
+    )
+    assert key == "model.layers.0.self_attn.k_proj.k_scale"
+    assert abs(val.item() - 0.5) < 1e-5
+
+
+def test_postprocess_scale_squeezed():
+    """3D scale tensors with shape[0]==1 are squeezed."""
+    t = torch.ones(1, 4, 4)
+    key, val = _postprocess_single_tensor("model.weight_scale", t, 448.0, None)
+    assert key == "model.weight_scale"
+    assert val.shape == (4, 4), f"expected (4, 4), got {val.shape}"
+
+
+# ---------------------------------------------------------------------------
+# data_ptr identity under offload
+#
+# The tests below exist because ``data_ptr()`` only identifies a tensor while that
+# tensor is resident. Getting this wrong silently exported wrong weights: meta
+# tensors all report 0, and freed addresses are recycled by the allocator.
+# ---------------------------------------------------------------------------
+
+
+def test_tied_weights_exported_independently_without_cache():
+    """Tied dense modules each pack their own weight instead of aliasing.
+
+    Dense ties are no longer deduped at pack time (the duplicate is dropped by name in
+    postprocess_state_dict), so both sides pack independently to byte-identical tensors.
+    This checks the packing behavior only; it does not construct an offloaded model or
+    drive the streaming export path.
+    """
+    shared = nn.Parameter(torch.randn(16, 16))
+    first, second = nn.Linear(16, 16, bias=False), nn.Linear(16, 16, bias=False)
+    first.weight = second.weight = shared
+
+    for linear in (first, second):
+        mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 16)))
+        _export_quantized_weight(linear, torch.float16)
+
+    assert first.weight.data_ptr() != second.weight.data_ptr()
+    assert torch.equal(first.weight, second.weight)
+
+
+# ---------------------------------------------------------------------------
+# _parse_shard_size
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        (1234, 1234),
+        ("1234", 1234),
+        # transformers' convert_file_size_to_int reads GB/MB as decimal, GiB/MiB as binary
+        ("10GB", 10 * 1000**3),
+        ("500MB", 500 * 1000**2),
+        ("100KB", 100 * 1000),
+        ("10GiB", 10 * 1024**3),
+        ("500MiB", 500 * 1024**2),
+        ("100KiB", 100 * 1024),
+    ],
+)
+def test_parse_shard_size_units(size, expected):
+    assert _parse_shard_size(size) == expected

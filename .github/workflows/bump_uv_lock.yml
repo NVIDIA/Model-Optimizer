@@ -37,7 +37,10 @@ jobs:
       - name: Check for changes
         id: changes
         run: |
-          if git diff --quiet; then
+          # Scope to uv.lock: the pyproject.toml torch-override step above rewrites
+          # the whole file (toml.dump drops comments), so an unscoped diff is always
+          # dirty and the no-update path below would fail on an empty commit.
+          if git diff --quiet -- uv.lock; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
