@@ -5,7 +5,7 @@ from one MIP run and consists of named, single-input nodes. A node can branch fr
 any earlier node. Node IDs must be unique across the campaign because they are also
 stable metric namespaces.
 
-When at least one flow is configured, the campaign orchestrator replaces the
+When at least one flow is configured, Puzzletron replaces the
 legacy fixed post-MIP stages with these dynamic nodes. Run such campaigns through
 `examples/puzzletron/orchestrate.py`; the simple `main.py` stage runner does not
 schedule dynamic/manual nodes.
@@ -100,7 +100,7 @@ Later filters reference metrics as `mip.<metric>` or `<node_id>.<metric>`.
 
 - `filter`: metadata-only selection; modes are `top_k`, `threshold`, `pareto`,
   and `aggregate_rank`.
-- `manual_filter`: writes a durable review, asks in an interactive controller,
+- `manual_filter`: writes a durable review, asks through an interactive run,
   and pauses cleanly in non-interactive execution until a decision is supplied.
 - `materialize`: converts a config-only candidate into a checkpoint.
 - `evaluation`: evaluates either a config-only candidate or a checkpoint and
@@ -118,9 +118,48 @@ node where the transition is needed.
 ## Add downstream evaluation to an existing campaign
 
 Keep the campaign's `puzzle_dir` and add a `post_mip.flows` entry whose source
-selects the completed MIP run. See the
+selects the completed MIP run. Select the candidate, materialize it, and pass
+that checkpoint to `downstream_evaluation`:
+
+```yaml
+post_mip:
+  flows:
+    runtime-eval:
+      source:
+        run: runtime-075
+        variants: all
+        objectives: all
+      nodes:
+        best_mip:
+          type: filter
+          mode: top_k
+          metric: mip.score
+          direction: minimize
+          top_k: 1
+        materialized:
+          type: materialize
+          input: best_mip
+        lmms_eval:
+          type: downstream_evaluation
+          input: materialized
+          config:
+            tasks: [ifeval, gsm8k]
+            limit: 128
+            topology:
+              tensor_parallel_size: 8
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              gpu_group_size: 8
+```
+
+Replace `runtime-075` with a MIP run defined by the campaign and adjust the
+tasks, sample limit, and topology for the worker environment. A non-empty
+`post_mip.flows` mapping replaces the legacy fixed post-MIP stages. See the
 [lmms-eval run configuration](../configs/families/nemotron3/nano_30b_a3b_bf16/runs/lmms_eval.yaml)
-for a complete filter, materialization, and downstream-evaluation flow.
+for the complete configuration, including model and runtime settings.
 
 ## Lineage and model source
 

@@ -13,8 +13,8 @@ public model source and revision but inherits a repository-relative
 `dataset_path` from `base.yaml`. Override it with a materialized Hugging Face
 dataset directory that is visible at the same path on every worker.
 
-If needed, prepare Puzzle-KD from the full worker environment before starting
-the controller:
+If needed, prepare Puzzle-KD from the full worker environment before launching
+the campaign:
 
 ```bash
 export PUZZLETRON_DATASET=/shared/datasets/puzzle-kd-v2
@@ -26,7 +26,7 @@ python examples/puzzletron/materialize_dataset.py puzzle_kd_v2 \
   --seed 408
 ```
 
-Pass the same dataset override to every controller invocation. First run the
+Pass the same dataset override to every `orchestrate.py` command. First run the
 campaign through MIP with the downstream stages disabled:
 
 ```bash
@@ -98,7 +98,7 @@ Return to the login node and resume the remaining enabled stages:
 
 ```bash
 cd /path/to/modelopt
-source .venv-puzzletron-control/bin/activate
+source .venv-puzzletron/bin/activate
 PUZZLETRON_EXPERIMENT=examples/puzzletron/configs/families/nemotron3/nano_30b_a3b_bf16/runs/default.yaml
 PUZZLETRON_RUNNER=/path/to/runner.yaml
 PUZZLETRON_EXECUTION=/path/to/execution.yaml
