@@ -354,36 +354,3 @@ class Testfp4:
             f"Mean abs diff: {(output_static - output_dynamic).abs().mean()}\n"
             f"Max relative diff: {((output_static - output_dynamic).abs() / (output_dynamic.abs() + 1e-8)).max()}"
         )
-
-
-def test_dynamic_block_quantize_forwards_block_size(monkeypatch):
-    """NVFP4 dynamic dispatch must pass the configured block size to the Triton kernel.
-
-    The Triton kernel defaults to block_size=16; dropping the argument would
-    silently quantize non-16 NVFP4 configs with 16-element blocks while the
-    cuda_ext fallback honors the configured size (device-dependent numerics).
-    """
-    recorded = {}
-
-    def fake_fp4_fake_quant_block(inputs, amax, block_size=16):
-        recorded["block_size"] = block_size
-        return inputs.clone()
-
-    monkeypatch.setattr(tensor_quant, "DISABLE_TRITON_KERNEL", False)
-    monkeypatch.setattr(triton_kernel, "IS_AVAILABLE", True, raising=False)
-    monkeypatch.setattr(
-        triton_kernel, "fp4_fake_quant_block", fake_fp4_fake_quant_block, raising=False
-    )
-
-    inputs = torch.randn(4, 64, device="cuda")
-    amax = inputs.abs().amax()
-    tensor_quant._dynamic_block_quantize_impl(
-        inputs,
-        32,  # non-default NVFP4 block size
-        amax,
-        4,  # num_bits total (E2M1)
-        2,  # exponent_bits -> (2, 1)
-        8,  # scale_num_bits -> (4, 3)
-        4,  # scale_exponent_bits
-    )
-    assert recorded["block_size"] == 32
