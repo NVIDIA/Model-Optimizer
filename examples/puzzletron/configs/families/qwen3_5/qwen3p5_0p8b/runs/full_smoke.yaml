@@ -1,0 +1,99 @@
+# @package _global_
+
+defaults:
+  - mip_smoke
+  - _self_
+
+# Extend the current real-checkpoint MIP smoke through the complete post-MIP
+# lifecycle. Evaluate the bounded MIP result set, then keep one candidate for
+# materialization, serving, distillation, and final selection.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_full_smoke}
+
+# This route searches only FFN intermediate width. Keep attention and GDN
+# tensors in their original order so the full-width sanity gate isolates the
+# enabled axis instead of applying unrelated capability permutations.
+sort:
+  deferred_axes:
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+
+post_mip:
+  flows:
+    params-90:
+      source:
+        run: params-90
+        variants: all
+        objectives: all
+      nodes:
+        online_eval:
+          type: evaluation
+          config:
+            eval_samples: 2
+            block_size: 512
+        best_lm:
+          type: filter
+          input: online_eval
+          mode: top_k
+          metric: online_eval.lm_loss
+          direction: minimize
+          top_k: 1
+        materialized:
+          type: materialize
+          input: best_lm
+        serving:
+          type: aiperf
+          input: materialized
+          config:
+            input_tokens: 128
+            output_tokens: 32
+            concurrency: [1]
+            request_count: 4
+            use_server_token_count: true
+            benchmark_timeout: 900
+            allow_aiperf_v011_online_tokenizer_resolution: true
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --gpu-memory-utilization
+                - "0.5"
+        fastest:
+          type: filter
+          input: serving
+          mode: top_k
+          metric: serving.output_token_throughput
+          direction: maximize
+          top_k: 1
+        short_kd:
+          type: global_kd
+          input: fastest
+          config:
+            max_steps: 2
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 2
+        final_eval:
+          type: evaluation
+          input: short_kd
+          config:
+            eval_samples: 2
+            block_size: 512
+        best:
+          type: filter
+          input: final_eval
+          mode: top_k
+          metric: final_eval.lm_loss
+          direction: minimize
+          top_k: 1

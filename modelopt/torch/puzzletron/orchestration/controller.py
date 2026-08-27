@@ -38,7 +38,13 @@ from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecu
 from .identity import stable_hash
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
-from .reporting import FinalReportResult, build_final_report_attempt, final_report_paths
+from .reporting import (
+    FinalReportResult,
+    build_final_report_attempt,
+    completed_final_report,
+    final_report_paths,
+    record_completed_final_report,
+)
 from .schema import (
     AttemptSpec,
     CampaignPlan,
@@ -1203,6 +1209,10 @@ class CampaignController:
     def _generate_final_report(self) -> FinalReportResult:
         """Generate the canonical campaign report through the configured executor."""
 
+        completed = completed_final_report(self.plan)
+        if completed is not None:
+            self.logger.skip("final_report: completion artifacts validated")
+            return completed
         attempt = build_final_report_attempt(self.plan, attempt_id=str(uuid.uuid4()))
         fallback_logs = (attempt.command.log_path,) if attempt.command.log_path is not None else ()
         self.logger.stage("generating final campaign report")
@@ -1250,13 +1260,13 @@ class CampaignController:
                     + ", ".join(missing)
                 )
                 return FinalReportResult(status="failed", log_paths=tuple(log_paths))
+            try:
+                result = record_completed_final_report(self.plan, log_paths=tuple(log_paths))
+            except OSError as exc:
+                self.logger.error(f"final campaign report sealing failed: {exc}")
+                return FinalReportResult(status="failed", log_paths=tuple(log_paths))
             self.logger.success(f"final campaign report: {report_path}")
-            return FinalReportResult(
-                status="completed",
-                path=str(report_path),
-                manifest_path=str(manifest_path),
-                log_paths=tuple(log_paths),
-            )
+            return result
 
     def _prompt_shutdown_action(self) -> ShutdownAction:
         """Suspend live rendering and collect one interactive exit decision."""

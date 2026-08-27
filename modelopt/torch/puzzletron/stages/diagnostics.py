@@ -34,7 +34,7 @@ import math
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from omegaconf import OmegaConf
@@ -76,6 +76,7 @@ from .pipeline import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ..anymodel.model_descriptor import ModelDescriptor
     from ..manifest import StageManifest
 
 __all__ = [
@@ -676,7 +677,7 @@ def _replace_axis(
     teacher_value = _teacher_axis_value(subblock, field, teacher_value_fallback)
     if teacher_value is None or int(target) >= int(teacher_value):
         return None
-    updates = {field: int(target)}
+    updates: dict[str, Any] = {field: int(target)}
     if subblock_kind == "mamba" and field == "gdn_key_groups":
         groups = int(getattr(subblock, "num_groups"))
         ratio = int(getattr(subblock, "num_heads")) // groups
@@ -701,7 +702,7 @@ def _replace_axis(
             "num_kv_heads": int(kv),
             "num_query_heads": int(kv) * int(target),
         }
-    child = dataclasses.replace(subblock, **updates)
+    child = dataclasses.replace(cast("Any", subblock), **updates)
     replace_kinds = {
         "attention": ("attention", "mamba"),
         "mamba": ("attention", "mamba"),
@@ -738,16 +739,18 @@ def _diagnostic_solutions(
         if target_info is None:
             continue
         subblock_kind, field = target_info
-        eligible = [
-            idx
-            for idx, block in enumerate(block_configs)
-            if block.get_subblock(subblock_kind) is not None
-            and not getattr(block.get_subblock(subblock_kind), "no_op", False)
-            and (
-                _teacher_axis_value(block.get_subblock(subblock_kind), field) is not None
-                or f"{subblock_kind}.{field}" in fallback_values
-            )
-        ]
+        eligible = []
+        for idx, block in enumerate(block_configs):
+            subblock = block.get_subblock(subblock_kind)
+            if (
+                subblock is not None
+                and not getattr(subblock, "no_op", False)
+                and (
+                    _teacher_axis_value(subblock, field) is not None
+                    or f"{subblock_kind}.{field}" in fallback_values
+                )
+            ):
+                eligible.append(idx)
         for layer_idx in _select_layers(
             eligible,
             layer_count,
@@ -758,13 +761,14 @@ def _diagnostic_solutions(
         ):
             base = block_configs[layer_idx]
             subblock = base.require_subblock(subblock_kind)
-            teacher_value = int(
-                _teacher_axis_value(
-                    subblock,
-                    field,
-                    fallback_values.get(f"{subblock_kind}.{field}"),
-                )
+            raw_teacher_value = _teacher_axis_value(
+                subblock,
+                field,
+                fallback_values.get(f"{subblock_kind}.{field}"),
             )
+            if raw_teacher_value is None:
+                continue
+            teacher_value = int(raw_teacher_value)
             configured_targets = target_values.get(axis)
             if configured_targets is None:
                 targets = _ratio_targets(teacher_value, ratios)
@@ -852,7 +856,9 @@ def _configured_bypass_block_targets(
         )
     ]
     requested = {
-        _axis_subblock_and_field(axis)[0] for axis in axes if _axis_subblock_and_field(axis)
+        target_info[0]
+        for axis in axes
+        if (target_info := _axis_subblock_and_field(axis)) is not None
     }
     use_ffn = bool(ffn_sizes) and (not requested or "ffn" in requested or "attention" in requested)
     use_attn = bool(attn_targets) and (not requested or "attention" in requested)
@@ -870,10 +876,11 @@ def _configured_bypass_block_targets(
         if use_attn and attn is not None and not getattr(attn, "no_op", False):
             teacher_q = _teacher_axis_value(attn, "num_query_heads")
             teacher_kv = _teacher_axis_value(attn, "num_kv_heads")
-            has_attn_target = any(
-                q <= teacher_q and kv <= teacher_kv and (q < teacher_q or kv < teacher_kv)
-                for q, kv in attn_targets
-            )
+            if teacher_q is not None and teacher_kv is not None:
+                has_attn_target = any(
+                    q <= teacher_q and kv <= teacher_kv and (q < teacher_q or kv < teacher_kv)
+                    for q, kv in attn_targets
+                )
         has_target = (
             has_attn_target if prefer_attention_layers else (has_ffn_target or has_attn_target)
         )
@@ -925,7 +932,7 @@ def _configured_bypass_block_targets(
                 if attn_target is not None:
                     q, kv = attn_target
                     child_attn = dataclasses.replace(
-                        child.require_subblock("attention"),
+                        cast("AttentionConfig", child.require_subblock("attention")),
                         num_query_heads=int(q),
                         num_kv_heads=int(kv),
                     )
@@ -994,9 +1001,10 @@ def _read_sorted_permutations(sorted_teacher_dir: Path) -> dict[str, Any]:
         sidecar_path = sorted_teacher_dir / str(value["sidecar"])
         if sidecar_path not in sidecars:
             sidecars[sidecar_path] = torch.load(sidecar_path, map_location="cpu", weights_only=True)
-        tensor = sidecars[sidecar_path].get(key)
-        if not torch.is_tensor(tensor):
+        raw_tensor = sidecars[sidecar_path].get(key)
+        if not torch.is_tensor(raw_tensor):
             raise KeyError(f"Missing permutation {key!r} in {sidecar_path}")
+        tensor = cast("torch.Tensor", raw_tensor)
         expected_shape = tuple(int(dim) for dim in value.get("shape", tensor.shape))
         if tuple(tensor.shape) != expected_shape:
             raise ValueError(f"Permutation {key!r} shape {tuple(tensor.shape)} != {expected_shape}")
@@ -1022,7 +1030,10 @@ def _annotate_solution_selections(
     permutations = _read_sorted_permutations(sorted_teacher_dir)
     for solution in solutions:
         diag = solution.get("diagnostic") or {}
-        layer_idx = int(diag.get("layer_idx"))
+        raw_layer_idx = diag.get("layer_idx")
+        if raw_layer_idx is None:
+            raise ValueError("Activation diagnostic is missing layer_idx")
+        layer_idx = int(raw_layer_idx)
         changed_layers = [
             idx
             for idx, child in enumerate(solution.get("block_configs") or [])
@@ -1050,7 +1061,10 @@ def _annotate_solution_selections(
             order = permutations.get(f"attn.q.{layer_idx}")
             teacher_attn = teacher_block_configs[layer_idx].get_subblock("attention")
             if order is not None and teacher_attn is not None:
+                teacher_attn = cast("AttentionConfig", teacher_attn)
                 order = [int(item) for item in order]
+                if teacher_attn.num_kv_heads is None or teacher_attn.num_query_heads is None:
+                    raise ValueError("Attention diagnostic requires query and KV head counts")
                 num_kv = int(teacher_attn.num_kv_heads)
                 heads_per_group = int(teacher_attn.num_query_heads) // num_kv
                 target = int(diag["target_value"])
@@ -1073,11 +1087,12 @@ def _annotate_solution_selections(
                 diag["removed_experts"] = order[target:]
                 diag["selection_basis"] = "ranked_original_expert_ids"
 
+        field = diag.get("field")
         gdn_perm_key = {
             "gdn_key_groups": "gdn.key_groups",
             "state_dim": "gdn.key_dim",
             "head_dim": "gdn.value_dim",
-        }.get(diag.get("field"))
+        }.get(str(field))
         if diag.get("subblock_kind") == "mamba" and gdn_perm_key is not None:
             order = permutations.get(f"{gdn_perm_key}.{layer_idx}")
             if order is not None:
@@ -1325,7 +1340,7 @@ def _run_hidden_width_diagnostic_at_width(
     dist.barrier()
 
     solution = _identity_width_solution(block_configs, width)
-    rows = []
+    rows: list[dict[str, Any]] = []
     parallel = _diagnostic_parallel(hydra_cfg, diag_cfg)
     runtime_sources = {
         "original": teacher_dir,
@@ -1424,9 +1439,10 @@ def _run_hidden_width_diagnostic_at_width(
     if dist.is_master():
         by_role = {row["role"]: row for row in rows}
         metric = str(diag_cfg.get("embedding_primary_metric", "raw_replacement_loss"))
-        values = {role: by_role[role]["metrics"].get(metric) for role in by_role}
-        if any(value is None or not math.isfinite(value) for value in values.values()):
-            raise RuntimeError(f"hidden-width diagnosis has invalid {metric}: {values}")
+        raw_values = {role: by_role[role]["metrics"].get(metric) for role in by_role}
+        if any(value is None or not math.isfinite(value) for value in raw_values.values()):
+            raise RuntimeError(f"hidden-width diagnosis has invalid {metric}: {raw_values}")
+        values = {role: float(value) for role, value in raw_values.items() if value is not None}
         tolerance = float(diag_cfg.get("comparison_tolerance", 0.0))
         verdict = _hidden_width_ranking_verdict(
             values,
@@ -1613,6 +1629,20 @@ def _merge_reused_sort_equivalence(
 
     merged = dict(existing)
     merged.update(reuse)
+    return merged
+
+
+def _write_reused_sort_equivalence(
+    sort_summary_path: Path,
+    reuse_summary_path: Path,
+    reuse: dict[str, Any],
+) -> dict[str, Any]:
+    """Write width-owned reuse evidence without mutating the completed sort artifact."""
+
+    existing = json.loads(sort_summary_path.read_text()) if sort_summary_path.is_file() else {}
+    merged = _merge_reused_sort_equivalence(existing, reuse)
+    reuse_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    reuse_summary_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
     return merged
 
 
@@ -2309,7 +2339,9 @@ def _activation_diagnostic_parent_sweep(
             trust_remote_code=descriptor.requires_trust_remote_code(),
         )
         lm = descriptor.get_language_model_config(teacher_config)
-        block_configs = list(maybe_cast_block_configs(teacher_config.block_configs))
+        block_configs = cast(
+            "list[BlockConfig]", maybe_cast_block_configs(teacher_config.block_configs)
+        )
         head_dim = getattr(lm, "head_dim", None) or (lm.hidden_size // lm.num_attention_heads)
 
         needs_sorted_parent = _diagnostic_checkpoint_needs_rebuild(sorted_dir)
@@ -2410,6 +2442,7 @@ def _activation_diagnostic_parent_sweep(
                 is_master=dist.is_master(),
             )
             if dist.is_master():
+                assert hidden_width_summary is not None
                 parent_sweep = {
                     "version": 1,
                     "status": "not_applicable",
@@ -2687,9 +2720,7 @@ def _activation_diagnostic_parent_sweep(
             sort_equivalence_dir = puzzle_dir / "artifacts" / "sort_sanity"
             sort_equivalence_dir.mkdir(parents=True, exist_ok=True)
             sort_summary_path = sort_equivalence_dir / "summary.json"
-            existing_sort_summary = (
-                json.loads(sort_summary_path.read_text()) if sort_summary_path.is_file() else {}
-            )
+            reused_sort_summary_path = artifacts_dir / "reused_sort_equivalence.json"
             reuse_sort_summary = {
                 "passed": sort_passed,
                 "reused_parent_sweep": True,
@@ -2701,16 +2732,10 @@ def _activation_diagnostic_parent_sweep(
                 "verdict": "passed" if sort_passed else "failed",
                 "parent_sweep_manifest": str(load_manifest_path),
             }
-            sort_summary_path.write_text(
-                json.dumps(
-                    _merge_reused_sort_equivalence(
-                        existing_sort_summary,
-                        reuse_sort_summary,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
+            _write_reused_sort_equivalence(
+                sort_summary_path,
+                reused_sort_summary_path,
+                reuse_sort_summary,
             )
 
             cleanup_reverse = bool(diag_cfg.get("cleanup_reverse_on_success", True))
@@ -2731,8 +2756,8 @@ def _activation_diagnostic_parent_sweep(
 
     width_summary_path = puzzle_dir / "artifacts" / "width_sanity" / "summary.json"
     width_verdict = json.loads(width_summary_path.read_text(encoding="utf-8"))
-    sort_summary_path = puzzle_dir / "artifacts" / "sort_sanity" / "summary.json"
-    sort_verdict = json.loads(sort_summary_path.read_text(encoding="utf-8"))
+    reused_sort_summary_path = artifacts_dir / "reused_sort_equivalence.json"
+    sort_verdict = json.loads(reused_sort_summary_path.read_text(encoding="utf-8"))
 
     return complete_sanity_stage(
         config,
@@ -2754,6 +2779,7 @@ def _activation_diagnostic_parent_sweep(
                 artifacts_dir / "hidden_width_diagnostic_summary.json"
             ),
             "width_summary_path": str(width_summary_path),
+            "reused_sort_summary_path": str(reused_sort_summary_path),
             "slicing_summary_path": str(
                 puzzle_dir / "artifacts" / "slicing_sanity" / "summary.json"
             ),
@@ -2819,7 +2845,9 @@ def activation_diagnostic_stage(config: dict[str, Any], manifest: StageManifest)
             teacher_dir, trust_remote_code=descriptor.requires_trust_remote_code()
         )
         lm = descriptor.get_language_model_config(teacher_config)
-        block_configs = list(maybe_cast_block_configs(teacher_config.block_configs))
+        block_configs = cast(
+            "list[BlockConfig]", maybe_cast_block_configs(teacher_config.block_configs)
+        )
         head_dim = getattr(lm, "head_dim", None) or (lm.hidden_size // lm.num_attention_heads)
 
         for axis in axes:
@@ -3618,8 +3646,9 @@ def width_slice_equivalence_stage(config: dict[str, Any], manifest: StageManifes
     raw_batch = next(iter(dataloader))
     if isinstance(raw_batch, dict):
         input_ids = raw_batch.get("input_ids")
+        input_tensor = cast("torch.Tensor", input_ids) if torch.is_tensor(input_ids) else None
         batch_size = (
-            int(input_ids.shape[0]) if torch.is_tensor(input_ids) and input_ids.ndim > 1 else 1
+            int(input_tensor.shape[0]) if input_tensor is not None and input_tensor.ndim > 1 else 1
         )
     else:
         batch_size = raw_batch.batch_size
@@ -4001,7 +4030,9 @@ def bypass_diagnostic_stage(config: dict[str, Any], manifest: StageManifest):
             sorted_dir, trust_remote_code=descriptor.requires_trust_remote_code()
         )
         lm = descriptor.get_language_model_config(model_config)
-        block_configs = list(maybe_cast_block_configs(model_config.block_configs))
+        block_configs = cast(
+            "list[BlockConfig]", maybe_cast_block_configs(model_config.block_configs)
+        )
         head_dim = getattr(lm, "head_dim", None) or (lm.hidden_size // lm.num_attention_heads)
         overlay_layers = (
             layer_indices

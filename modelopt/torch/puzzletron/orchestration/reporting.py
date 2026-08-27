@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -28,7 +30,9 @@ from .schema import AttemptSpec, CampaignPlan, CommandSpec, TaskLauncher, TaskTo
 __all__ = [
     "FinalReportResult",
     "build_final_report_attempt",
+    "completed_final_report",
     "final_report_paths",
+    "record_completed_final_report",
 ]
 
 
@@ -76,6 +80,70 @@ def final_report_paths(plan: CampaignPlan) -> tuple[Path, Path]:
 
     output_dir = plan.puzzle_dir / "artifacts" / "campaign_report"
     return output_dir / "campaign_report.html", output_dir / "report_manifest.json"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _completion_path(plan: CampaignPlan) -> Path:
+    report_path, _ = final_report_paths(plan)
+    return report_path.parent / "completion.json"
+
+
+def completed_final_report(plan: CampaignPlan) -> FinalReportResult | None:
+    """Return a sealed final report when its contract and artifact hashes still match."""
+
+    report_path, manifest_path = final_report_paths(plan)
+    try:
+        payload = json.loads(_completion_path(plan).read_text(encoding="utf-8"))
+        log_paths = payload["log_paths"]
+        if (
+            payload["schema_version"] != 1
+            or payload["contract_hash"] != plan.contract_hash
+            or payload["report_sha256"] != _sha256(report_path)
+            or payload["manifest_sha256"] != _sha256(manifest_path)
+            or not isinstance(log_paths, list)
+            or not all(isinstance(path, str) for path in log_paths)
+        ):
+            return None
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return FinalReportResult(
+        status="completed",
+        path=str(report_path),
+        manifest_path=str(manifest_path),
+        log_paths=tuple(log_paths),
+    )
+
+
+def record_completed_final_report(
+    plan: CampaignPlan, *, log_paths: tuple[str, ...]
+) -> FinalReportResult:
+    """Atomically seal a completed final report for idempotent controller resumes."""
+
+    report_path, manifest_path = final_report_paths(plan)
+    payload = {
+        "schema_version": 1,
+        "contract_hash": plan.contract_hash,
+        "report_sha256": _sha256(report_path),
+        "manifest_sha256": _sha256(manifest_path),
+        "log_paths": list(log_paths),
+    }
+    completion_path = _completion_path(plan)
+    temporary = completion_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(completion_path)
+    return FinalReportResult(
+        status="completed",
+        path=str(report_path),
+        manifest_path=str(manifest_path),
+        log_paths=log_paths,
+    )
 
 
 def build_final_report_attempt(plan: CampaignPlan, *, attempt_id: str) -> AttemptSpec:

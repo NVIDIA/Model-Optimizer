@@ -15,6 +15,8 @@
 
 import json
 
+import pytest
+
 from modelopt.torch.puzzletron.stages.diagnostics import (
     _diagnostic_checkpoint_needs_rebuild,
     _hidden_only_diagnostic_ready,
@@ -27,6 +29,7 @@ from modelopt.torch.puzzletron.stages.diagnostics import (
     _select_diagnostic_hidden_width,
     _select_layers,
     _write_hidden_only_diagnostic_artifacts,
+    _write_reused_sort_equivalence,
 )
 
 
@@ -135,14 +138,10 @@ def test_hidden_only_guard_allows_nonmaster_rank_without_summary():
         axes=["hidden_width"], hidden_width_summary=None, is_master=False
     )
 
-    try:
+    with pytest.raises(RuntimeError, match="rank 0"):
         _hidden_only_diagnostic_ready(
             axes=["hidden_width"], hidden_width_summary=None, is_master=True
         )
-    except RuntimeError as error:
-        assert "rank 0" in str(error)
-    else:
-        raise AssertionError("master rank without a width verdict should fail")
 
 
 def test_diagnostic_retry_rebuilds_partial_indexed_checkpoint(tmp_path):
@@ -241,6 +240,30 @@ def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
     assert merged["teacher"] == existing["teacher"]
     assert merged["sorted_teacher"] == existing["sorted_teacher"]
     assert merged["reverse_sorted"] == existing["reverse_sorted"]
+    assert merged["reused_parent_sweep"] is True
+
+
+def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    original = {
+        "passed": True,
+        "teacher": {"lm_loss": 1.2},
+        "sorted_teacher": {"lm_loss": 1.2001},
+    }
+    sort_summary_path.write_text(json.dumps(original, indent=2, sort_keys=True) + "\n")
+    original_bytes = sort_summary_path.read_bytes()
+
+    merged = _write_reused_sort_equivalence(
+        sort_summary_path,
+        reuse_summary_path,
+        {"passed": True, "reused_parent_sweep": True},
+    )
+
+    assert sort_summary_path.read_bytes() == original_bytes
+    assert json.loads(reuse_summary_path.read_text()) == merged
+    assert merged["teacher"] == original["teacher"]
     assert merged["reused_parent_sweep"] is True
 
 
