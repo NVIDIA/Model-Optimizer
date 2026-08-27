@@ -109,7 +109,7 @@ for an "AA" request. If the user asks for MRCR:
 
 ### Step 1 — Prerequisites
 
-Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
+Run **`"$SKILL_DIR/scripts/nel-check.sh"`** — it asserts the `nel` on PATH is the validated launcher and, when it is not, prints the exact `pip install` command to fix it. Do **not** just check that `nel` exists: a base environment can already carry an older launcher (directly, or via `nemo-evaluator-launcher-internal`, which ships its own launcher version), and scoring on it silently makes the run non-comparable with runs on the validated one. Record the version line it prints with the scores (Step 9). See `references/launcher-version.md` for why it is pinned and how to bump it. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
 
 **Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
 
@@ -442,8 +442,13 @@ export DUMMY_API_KEY=dummy
 **Step 8.1 — Dry-run** (config validation):
 
 ```bash
+"$SKILL_DIR/scripts/nel-check.sh"      # re-assert the validated launcher before scoring
 nel run --config <path> --dry-run
 ```
+
+Re-run the check here even if Step 1 already passed: the existing-config path skips
+Step 1 entirely, and this is the last point before a run that will be scored and
+compared. GDPVal instead goes through `nel-gdpval.sh`, which pins the launcher itself.
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
 
@@ -484,6 +489,8 @@ Remove `limit_samples` overrides; keep canary-validated parallelism. If the cana
 ### Step 9 — Verify completed run
 
 Before pulling/reporting scores, validate the run. Read `references/run-validation.md` for NEL timeout/resume behavior, completed-run validation, diagnostics, and score harvesting. For a baseline that will be compared with a candidate, also perform its **External Baseline Sanity Check** before a success verdict, then hand the validated runs to `compare-results` for baseline-vs-candidate deltas.
+
+**Report the launcher version with the scores** (`"$SKILL_DIR/scripts/nel-check.sh" --version`, or the line Step 1 printed). It is the harness half of any delta: a baseline and a candidate scored on different launchers are not comparable, and without the version recorded that is undetectable after the fact. See `references/launcher-version.md`.
 
 ---
 
