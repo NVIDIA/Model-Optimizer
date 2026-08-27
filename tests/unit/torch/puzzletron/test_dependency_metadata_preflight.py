@@ -71,17 +71,14 @@ def test_metadata_fetch_uses_fixed_https_host_and_timeout(monkeypatch):
         def __init__(self, host, *, timeout):
             calls.append(("connect", host, timeout))
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
         def request(self, method, path):
             calls.append(("request", method, path))
 
         def getresponse(self):
             return Response()
+
+        def close(self):
+            calls.append(("close",))
 
     monkeypatch.setattr(preflight_dependency_metadata, "HTTPSConnection", Connection)
     url = "https://raw.githubusercontent.com/owner/repository/revision/pyproject.toml"
@@ -90,10 +87,49 @@ def test_metadata_fetch_uses_fixed_https_host_and_timeout(monkeypatch):
     assert calls == [
         ("connect", "raw.githubusercontent.com", 30),
         ("request", "GET", "/owner/repository/revision/pyproject.toml"),
+        ("close",),
     ]
 
     with pytest.raises(ValueError, match="unsupported pinned metadata URL"):
         preflight_dependency_metadata._fetch_url("https://example.com/pyproject.toml")
+
+
+@pytest.mark.parametrize("failure_stage", ["request", "getresponse", "read"])
+def test_metadata_fetch_closes_connection_on_error(monkeypatch, failure_stage):
+    calls = []
+
+    class Response:
+        status = 200
+
+        def read(self):
+            if failure_stage == "read":
+                raise RuntimeError("read failed")
+            return b"metadata"
+
+    class Connection:
+        def __init__(self, _host, *, timeout):
+            assert timeout == 30
+
+        def request(self, _method, _path):
+            if failure_stage == "request":
+                raise RuntimeError("request failed")
+
+        def getresponse(self):
+            if failure_stage == "getresponse":
+                raise RuntimeError("response failed")
+            return Response()
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(preflight_dependency_metadata, "HTTPSConnection", Connection)
+
+    with pytest.raises(RuntimeError):
+        preflight_dependency_metadata._fetch_url(
+            "https://raw.githubusercontent.com/owner/repository/revision/pyproject.toml"
+        )
+
+    assert calls == ["close"]
 
 
 def test_preflight_accepts_pinned_distribution_names_and_compatible_dependencies():

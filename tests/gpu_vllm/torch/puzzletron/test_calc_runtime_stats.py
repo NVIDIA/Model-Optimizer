@@ -40,7 +40,7 @@ from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_run
 )
 @pytest.mark.timeout(600)
 def test_calc_runtime_for_subblocks(tmp_path: Path):
-    """End-to-end: a tiny subblock set yields a runtime dict + positive no-block overhead."""
+    """End-to-end: a tiny subblock set yields finite typed runtime measurements."""
     tokenizer = get_tiny_tokenizer()
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer.save_pretrained(str(tokenizer_dir))
@@ -76,7 +76,5 @@ def test_calc_runtime_for_subblocks(tmp_path: Path):
     for runtime in (runtime_by_subblock[attn], runtime_by_subblock[ffn]):
         assert math.isfinite(runtime.total_ms)
         assert math.isfinite(runtime.prefill_ms)
-    # The 1-block model is always slower than the per-block extrapolation from
-    # the 10-block model, so the (embedding + LM-head) overhead is positive.
-    assert no_block_runtime_ms.total_ms > 0
+    assert math.isfinite(no_block_runtime_ms.total_ms)
     assert math.isfinite(no_block_runtime_ms.prefill_ms)

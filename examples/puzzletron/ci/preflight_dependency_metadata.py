@@ -95,12 +95,15 @@ def _fetch_url(url: str) -> str:
         or parsed.fragment
     ):
         raise ValueError(f"unsupported pinned metadata URL: {url!r}")
-    with HTTPSConnection(_RAW_GITHUB_HOST, timeout=30) as connection:
+    connection = HTTPSConnection(_RAW_GITHUB_HOST, timeout=30)
+    try:
         connection.request("GET", parsed.path)
         response = connection.getresponse()
         if response.status != HTTPStatus.OK:
             raise ValueError(f"pinned metadata request failed with HTTP status {response.status}")
         return response.read().decode()
+    finally:
+        connection.close()
 
 
 def _parse_metadata(metadata_path: str, text: str) -> tuple[str, list[str]]:
