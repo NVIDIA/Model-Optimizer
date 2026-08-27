@@ -60,6 +60,7 @@ from .conversion import (
     update_quantize_metadata,
 )
 from .model_calib import (
+    _warn_on_kv_cache_during_calibration,
     awq,
     gptq,
     layerwise_calibrate,
@@ -247,6 +248,7 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
+        forward_loop = _warn_on_kv_cache_during_calibration(forward_loop)
         if layerwise:
             # All currently implemented PTQ algorithms support layerwise calibration;
             # future algorithms that need full-model context must add a guard here.

@@ -17,17 +17,13 @@
 
 import copy
 import json
+import warnings
 from collections import deque
 
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.transformers_models import (
-    get_tiny_gpt_oss,
-    get_tiny_llama,
-    get_tiny_nemotron_h,
-)
-from transformers.cache_utils import Cache
+from _test_utils.torch.transformers_models import get_tiny_llama
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.model_calib import layerwise_calibrate
@@ -1042,46 +1038,33 @@ def test_layerwise_save_every_mid_window_crash_recovers_at_prev_boundary(monkeyp
     assert manifest["last_completed_layer"] == 1, f"manifest leaked mid-window state: {manifest}"
 
 
-@pytest.mark.parametrize(
-    "factory",
-    [get_tiny_llama, get_tiny_nemotron_h, get_tiny_gpt_oss],
-    ids=["llama", "nemotron_h_hybrid", "gpt_oss_sliding_window"],
-)
-def test_layerwise_calibration_and_kv_caching(factory):
-    """No cache may reach a decoder layer, and one that does must be refused.
+@pytest.mark.parametrize("layerwise", [False, True], ids=["non_layerwise", "layerwise"])
+def test_calibration_warns_when_a_kv_cache_is_live(layerwise):
+    """Calibration never reads a KV cache, and layerwise is corrupted by one.
 
-    Layerwise replays each layer's captured inputs, so a cache on them lets a layer
-    attend over its own earlier replay's writes. Prevented by not building one, which
-    rests on the model honouring ``config.use_cache`` -- hence the sweep over attention
-    styles -- and backstopped by the capture check, since a caller may pass ``use_cache``
-    or ``past_key_values`` itself.
+    Layerwise replays each layer's captured inputs, so a cache among them makes the
+    layer attend over the keys and values its own earlier replay wrote. Detected on what
+    modules receive, since a layerwise forward stops early and returns nothing.
     """
+    tokens = torch.randint(0, 32, (1, 8))
     cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
-    cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
-    tokens = torch.randint(0, 20, (1, 8))
+    cfg["algorithm"] = (
+        {"method": "max", "layerwise": {"enable": True}} if layerwise else {"method": "max"}
+    )
 
-    model = factory().eval()
-    assert model.config.use_cache, "fixture must start with caching on to be meaningful"
-    seen = []
-    handles = [
-        layer.register_forward_pre_hook(
-            lambda mod, args, kwargs: seen.extend(
-                v for v in (*args, *kwargs.values()) if isinstance(v, Cache)
-            ),
-            with_kwargs=True,
+    with pytest.warns(UserWarning, match="KV caching enabled"):
+        mtq.quantize(get_tiny_llama(num_hidden_layers=3).eval(), cfg, lambda m: m(tokens))
+
+    # A loop that disables caching calibrates silently -- as do models that never build
+    # one at all, which is why non-HF paths (e.g. Megatron) are unaffected.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mtq.quantize(
+            get_tiny_llama(num_hidden_layers=3).eval(),
+            cfg,
+            lambda m: m(tokens, use_cache=False),
         )
-        for layer in LayerActivationCollector.get_decoder_layers(model)
-    ]
-    try:
-        mtq.quantize(model, cfg, lambda m: m(tokens))
-    finally:
-        for h in handles:
-            h.remove()
-    assert not seen, f"{len(seen)} KV cache(s) reached a decoder layer"
-    assert model.config.use_cache, "config.use_cache was not restored"
-
-    with pytest.raises(RuntimeError, match="captured a KV cache"):
-        mtq.quantize(factory().eval(), cfg, lambda m: m(tokens, use_cache=True))
+    assert not [w for w in caught if "KV caching enabled" in str(w.message)]
 
 
 def test_layerwise_checkpoint_mismatch_save_every_raises(monkeypatch, tmp_path):

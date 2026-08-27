@@ -51,11 +51,6 @@ class _EarlyStopForwardError(Exception):
     """Raised to halt the forward pass after capturing layer inputs."""
 
 
-def _is_kv_cache(obj: Any) -> bool:
-    """Duck-typed ``transformers.Cache``, so this module need not import transformers."""
-    return hasattr(obj, "update") and hasattr(obj, "get_seq_length")
-
-
 @dataclass
 class _LayerCalibState:
     """Mutable per-layer state used during layerwise calibration.
@@ -246,13 +241,6 @@ class LayerActivationCollector:
                 return output
 
             if info.mode == "capture":
-                if any(_is_kv_cache(v) for v in (*args, *kwargs.values())):
-                    raise RuntimeError(
-                        f"Layerwise calibration captured a KV cache on layer {info.name!r}. "
-                        "Replaying it would attend over the layer's own earlier writes. "
-                        "Check that forward_loop does not pass use_cache=True or an "
-                        "explicit past_key_values."
-                    )
                 info.collected_inputs.append((args, kwargs))
                 raise _EarlyStopForwardError()
 
