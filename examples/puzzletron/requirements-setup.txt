@@ -1,6 +1,7 @@
-# Lightweight, config-only Puzzletron setup environment. No PyTorch is required.
-questionary>=2.1,<3
-PyYAML>=6.0
-huggingface_hub>=0.24
-transformers>=4.56,<5.0
+# Setup wizard plus lightweight campaign commands. No PyTorch is required.
+-r requirements-orchestrator.txt
 datasets>=2.17,<5
+huggingface_hub>=0.24
+
+questionary>=2.1,<3
+transformers>=4.56,<5.0

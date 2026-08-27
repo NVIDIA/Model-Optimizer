@@ -39,12 +39,34 @@ from puzzletron_orchestrator.logging import OrchestratorLogger  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the Puzzletron v2 campaign orchestrator.")
-    parser.add_argument("--experiment", required=True, help="Path to the experiment YAML.")
-    parser.add_argument("--runner", required=True, help="Path to the runner environment YAML.")
-    parser.add_argument("--execution", required=True, help="Path to the execution semantics YAML.")
+    parser = argparse.ArgumentParser(
+        description="Run or resume a Puzzletron v2 campaign from its three configuration files."
+    )
     parser.add_argument(
-        "--stage", default="full", help="Stage id or 'full' for all enabled stages."
+        "--experiment",
+        required=True,
+        help="Experiment YAML: model, data, enabled stages, and output directory.",
+    )
+    parser.add_argument(
+        "--runner",
+        required=True,
+        help=(
+            "Runner YAML: where and how worker jobs run, including repository, "
+            "environment, container, and mounts."
+        ),
+    )
+    parser.add_argument(
+        "--execution",
+        required=True,
+        help="Execution YAML: how each stage runs, including resources and failure policy.",
+    )
+    parser.add_argument(
+        "--stage",
+        default="full",
+        help=(
+            "'full' runs every enabled stage in dependency order; a stage id runs only "
+            "that stage and requires its parent artifacts."
+        ),
     )
     parser.add_argument(
         "--override",
@@ -54,10 +76,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Repeatable config override; KEY=VALUE and ++KEY=VALUE are supported.",
     )
     parser.add_argument(
-        "--dry-run", action="store_true", help="Print packed submissions without submitting."
+        "--dry-run",
+        action="store_true",
+        help="Compile and print packed submissions without submitting jobs.",
     )
     parser.add_argument("--local", action="store_true", help="Use the local subprocess executor.")
-    parser.add_argument("--once", action="store_true", help="Run one controller iteration.")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help=(
+            "Recover, poll, and submit ready work once, then exit; jobs keep running and "
+            "the same command continues them."
+        ),
+    )
     parser.add_argument("--max-iterations", type=int, default=None)
     parser.add_argument(
         "--color",

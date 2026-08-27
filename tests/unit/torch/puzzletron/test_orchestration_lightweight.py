@@ -35,6 +35,25 @@ from puzzletron_orchestrator.logging import OrchestratorLogger
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 
+def test_orchestrator_help_explains_first_run_contracts() -> None:
+    result = subprocess.run(
+        [sys.executable, "examples/puzzletron/orchestrate.py", "--help"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    help_text = " ".join(result.stdout.split())
+    assert "Experiment YAML: model, data, enabled stages, and output directory." in help_text
+    assert "Runner YAML: where and how worker jobs run" in help_text
+    assert "Execution YAML: how each stage runs" in help_text
+    assert "requires its parent artifacts" in help_text
+    assert "jobs keep running" in help_text
+
+
 def test_lightweight_package_does_not_import_torch() -> None:
     result = subprocess.run(
         [
