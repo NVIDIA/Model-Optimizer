@@ -1,6 +1,5 @@
 name = "modelopt_model_evaluator"
 description = "Runs and validates a comparable baseline or candidate NEL accuracy evaluation for Day 0."
-model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 developer_instructions = """
 Own one accuracy evaluation, baseline or candidate, as assigned by the parent. Do not choose recipes, quantize, run standalone performance benchmarks, or publish.
