@@ -155,7 +155,7 @@ Download data
 
 ```bash
 mkdir -p data
-wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O data/mmlu.tar
+wget https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar -O data/mmlu.tar
 tar -xf data/mmlu.tar -C data && mv data/data data/mmlu
 cd ..
 ```
