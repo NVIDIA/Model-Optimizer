@@ -272,7 +272,17 @@ class DFlashGemma4Attention(DFlashAttention):
                     getattr(config, "num_global_key_value_heads", None) or self.num_kv_heads
                 )
             self.num_key_value_groups = self.num_heads // self.num_kv_heads
-            self.scaling = self.head_dim**-0.5
+            # Gemma 4 does NOT scale attention logits: vLLM's Gemma4MTPAttention (which
+            # Gemma4DSparkAttention inherits) hardcodes ``self.scaling = 1.0``, and the
+            # base model does the same, documenting that "unlike Gemma2/3,
+            # query_pre_attn_scalar is NOT used here; Q/K norms with learnable weights
+            # handle scaling implicitly". Inheriting DFlashAttention's ``head_dim**-0.5``
+            # trains the draft under a softmax temperature the serving stack never
+            # applies. Measured on Gemma-4-E4B DSpark step 7000 (80q MT-Bench,
+            # num_spec=7): 1/sqrt(512) -> AL 2.6809, 1.0 -> AL 2.4984, so the mismatch
+            # is real but modest -- q_norm absorbs most of it, which is exactly why it
+            # never surfaced as an error.
+            self.scaling = 1.0
             attn_bias = getattr(config, "attention_bias", False)
             self.q_proj = nn.Linear(
                 config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias

@@ -122,6 +122,23 @@ if [ -z "$EAGLE_CAPTURE_IDS" ]; then
     echo "ERROR: EAGLE_CAPTURE_IDS must be set (e.g. '[2, 18, 33, 36]' for Qwen3-8B)." >&2; exit 1
 fi
 
+# EAGLE_CAPTURE_IDS is "<aux ids...> <final id>": the trailing entry is the KD target
+# (hf_streaming_dataset slices it off as base_model_hidden_states) and the rest become the
+# draft's fc input. The trainer consumes aux_hidden_states verbatim and cannot tell which
+# layers produced them, so hand it the same list that configures the producer. Without
+# this, build_target_layer_ids() invents a uniformly-spaced list, it is written to the
+# exported config, and vLLM reads it to choose SERVING capture layers -- so the draft is
+# served on layers it never trained on. It fails silently because the invented list has
+# the same LENGTH and only fc's input width is validated.
+AUX_IDS_JSON="$(python3 -c '
+import json, sys
+ids = json.loads(sys.argv[1])
+if len(ids) < 2:
+    raise SystemExit("EAGLE_CAPTURE_IDS needs at least one aux id plus the final KD id")
+print(json.dumps(ids[:-1]))' "$EAGLE_CAPTURE_IDS")" || {
+    echo "ERROR: could not parse EAGLE_CAPTURE_IDS=$EAGLE_CAPTURE_IDS" >&2; exit 1; }
+echo "Trainer aux layer ids (capture ids minus KD target): $AUX_IDS_JSON"
+
 # Forwarded verbatim to the trainer; capture before the helpers below run.
 SCRIPT_ARGS=("$@")
 
@@ -237,6 +254,7 @@ run_trainer_and_export() {
         "${mn_args[@]}" \
         data.streaming_server_url="$url" \
         data.streaming_model_name="$HF_MODEL_CKPT" \
+        dflash.dflash_aux_layer_ids="$AUX_IDS_JSON" \
         training.dataloader_num_workers="${STREAMING_NUM_WORKERS:-4}" \
         || { echo "ERROR: trainer failed." >&2; return 1; }
 

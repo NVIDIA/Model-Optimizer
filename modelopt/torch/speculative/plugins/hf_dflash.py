@@ -486,7 +486,27 @@ class HFDFlashModel(DFlashModel):
             else base_config.num_hidden_layers
         )
         num_draft_layers = self.dflash_config.num_hidden_layers
-        self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
+        # Prefer the ids the hidden-state PRODUCER actually captured. In streaming/offline
+        # runs the trainer never indexes hidden_states itself -- it consumes
+        # ``aux_hidden_states`` verbatim (see DFlashBaseModelOutput.from_offline_dict) --
+        # so a computed list here is pure fiction that still lands in the exported config,
+        # where vLLM reads it to choose SERVING capture layers. Measured on Gemma-4-E4B
+        # DSpark step 7000 (80q MT-Bench, num_spec=7): serving the same weights with the
+        # invented [1,10,20,30,39] gives AL 1.4221, while the layers training was actually
+        # fed ([5,11,17,23,35]) give AL 2.5287. Nothing errors, because the two lists have
+        # equal LENGTH and the only validation is on fc's input width.
+        configured_aux = getattr(config, "dflash_aux_layer_ids", None)
+        if configured_aux:
+            if len(configured_aux) != num_draft_layers:
+                raise ValueError(
+                    f"dflash_aux_layer_ids has {len(configured_aux)} entries but the draft "
+                    f"has {num_draft_layers} layers; the draft's fc expects exactly one "
+                    "aux hidden state per draft layer. Pass the producer's aux ids only "
+                    "(the capture list WITHOUT its final KD-target entry)."
+                )
+            self.target_layer_ids = list(configured_aux)
+        else:
+            self.target_layer_ids = build_target_layer_ids(num_target_layers, num_draft_layers)
         self.dflash_config.target_layer_ids = self.target_layer_ids
 
         # mask_token_id: validated by DFlashConfig, auto-detected from tokenizer context

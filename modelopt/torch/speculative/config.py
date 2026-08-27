@@ -140,6 +140,22 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_aux_layer_ids: list[int] | None = ModeloptField(
+        default=None,
+        description=(
+            "Base-model layer ids whose hidden states are concatenated into the draft's "
+            "``fc`` input, in capture order. Only meaningful for STREAMING/offline runs, "
+            "where the producer (vLLM ``eagle_aux_hidden_state_layer_ids``) decides which "
+            "layers are captured and the trainer merely consumes ``aux_hidden_states`` "
+            "verbatim -- it has no way to know which layers those were. Left unset, "
+            "``build_target_layer_ids()`` invents a uniformly-spaced list that is written "
+            "to the exported config and then used by vLLM to pick SERVING capture layers, "
+            "so the served draft reads different layers than it trained on. Pass the "
+            "producer's aux ids here (the capture list minus its final entry, which is the "
+            "KD target) to keep training and serving on the same layers."
+        ),
+    )
+
     dflash_architecture_config: dict = ModeloptField(
         default={}, description="Config for the DFlash draft module architecture."
     )
