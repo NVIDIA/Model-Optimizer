@@ -28,6 +28,10 @@ export workflow for the framework that produced it.
 QAD workflow and rationale
 ==========================
 
+For a broad overview of PTQ, QAT, and QAD, including how QAT uses simulated
+quantization during the training forward pass, see `How Quantization-Aware
+Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_.
+
 QAD is a two-stage workflow:
 
 #. Start from the BF16 checkpoint and use PTQ to create a quantized student
@@ -128,7 +132,6 @@ the container; it does not overlay a host checkout.
         -e HF_TOKEN="$HF_TOKEN" \
         -v "$QAT_WORK_DIR":/workspace \
         -v "$QAT_WORK_DIR/hf-cache":/root/.cache/huggingface \
-        -w /opt/Model-Optimizer \
         nvcr.io/nvidia/nemo:26.08 bash
 
 Inside the container, authenticate with ``hf auth login --token "$HF_TOKEN"`` if
@@ -309,6 +312,5 @@ Additional resources
 * `Hugging Face QAT/QAD examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat>`_
 * `Megatron-Bridge examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
 * `Megatron-LM ModelOpt post-training examples <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_
-* `How Quantization-Aware Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_
 * `Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
 * `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_
