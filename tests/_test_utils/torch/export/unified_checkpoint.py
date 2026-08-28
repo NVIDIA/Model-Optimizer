@@ -96,6 +96,7 @@ def assert_exported_checkpoint_matches(
     ref_hf_dir: Path | str,
     *,
     allow_missing: tuple[str, ...] = (),
+    allow_unexpected: tuple[str, ...] = (),
     check_values: bool = True,
     rtol: float = 0.15,
 ) -> None:
@@ -105,6 +106,8 @@ def assert_exported_checkpoint_matches(
         export_dir: Directory holding the exported unified HF checkpoint.
         ref_hf_dir: The HuggingFace checkpoint the Megatron model was built from.
         allow_missing: Substrings of reference keys the export is expected to omit.
+        allow_unexpected: Substrings of exported keys with no reference counterpart, beyond the
+            quantization scales that are always allowed.
         check_values: Compare tensor values, not just names and shapes. Set ``False`` when the
             Megatron weights are random rather than loaded from ``ref_hf_dir``.
         rtol: Max relative error for quantized tensors (per-tensor FP8 lands well inside 0.15).
@@ -119,7 +122,11 @@ def assert_exported_checkpoint_matches(
     )
 
     # Anything extra must be a quantization scale; a stray weight means a mis-named rule.
-    unexpected = {k for k in set(exported) - set(reference) if not k.endswith(QUANT_SUFFIXES)}
+    unexpected = {
+        k
+        for k in set(exported) - set(reference)
+        if not k.endswith(QUANT_SUFFIXES) and not any(a in k for a in allow_unexpected)
+    }
     assert not unexpected, f"Export produced unexpected tensors: {sorted(unexpected)[:8]}"
 
     shared = sorted(set(exported) & set(reference))

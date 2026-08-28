@@ -27,6 +27,7 @@ from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     create_tiny_nemotron_dir,
+    create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
 from safetensors import safe_open
@@ -99,6 +100,23 @@ def _test_unified_export_megatron(
         max_sequence_length = text_cfg.max_position_embeddings
         vocab_size = text_cfg.vocab_size
         extra_kwargs = {"kv_channels": text_cfg.head_dim, "qk_layernorm": True}
+    elif model_type == "qwen3_moe":
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        num_layers = config.num_hidden_layers
+        hidden_size = config.hidden_size
+        num_attention_heads = config.num_attention_heads
+        num_query_groups = config.num_key_value_heads
+        ffn_hidden_size = config.intermediate_size
+        max_sequence_length = config.max_position_embeddings
+        vocab_size = config.vocab_size
+        # SequentialMLP: the Qwen3 rules only cover per-expert (``local_experts``) MoE.
+        extra_kwargs = {
+            "kv_channels": config.hidden_size // config.num_attention_heads,
+            "qk_layernorm": True,
+            "num_moe_experts": config.num_experts,
+            "moe_ffn_hidden_size": config.moe_intermediate_size,
+            "moe_grouped_gemm": False,
+        }
     elif model_type in {"llama", "nemotron"}:
         config = transformers.AutoConfig.from_pretrained(model_dir)
         num_layers = config.num_hidden_layers
@@ -169,7 +187,13 @@ def _test_unified_export_megatron(
 
     if rank == 0 and extra_module is None:
         # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
-        assert_exported_checkpoint_matches(tmp_export_dir, model_dir, check_values=False)
+        assert_exported_checkpoint_matches(
+            tmp_export_dir,
+            model_dir,
+            check_values=False,
+            # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
+            allow_unexpected=("mlp.gate.expert_bias",),
+        )
 
     if model_type == "qwen3vl" and rank == 0:
         # try to load the model and run a forward pass
@@ -197,6 +221,9 @@ def _test_unified_export_megatron(
         ("llama", "medusa", None, None),
         ("qwen3vl", None, None, None),
         ("qwen3vl", None, "FP8_DEFAULT_CFG", None),
+        # Regression guard: routed experts used to be dropped silently from the export.
+        ("qwen3_moe", None, None, None),
+        ("qwen3_moe", None, "FP8_DEFAULT_CFG", None),
     ],
 )
 def test_unified_export_megatron(
@@ -208,6 +235,8 @@ def test_unified_export_megatron(
         model_dir = create_tiny_qwen3vl_dir(tmp_path)
     elif model_type == "nemotron":
         model_dir = create_tiny_nemotron_dir(tmp_path)
+    elif model_type == "qwen3_moe":
+        model_dir = create_tiny_qwen3_moe_dir(tmp_path)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
     # TODO: Fix TP>1 failures

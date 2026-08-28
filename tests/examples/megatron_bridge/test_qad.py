@@ -50,7 +50,12 @@ from _test_utils.torch.transformers_models import (
         ),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
-                tmp_path, with_processor=True, num_hidden_layers=2
+                tmp_path,
+                with_processor=True,
+                # Cover both Qwen3.5 decoder kinds at the same layer count: auto-generated
+                # layer_types would give linear attention only at this depth.
+                num_hidden_layers=2,
+                layer_types=["linear_attention", "full_attention"],
             ),
             True,
             # Gated MoE experts are only exportable as SequentialMLP; grouped GEMM raises.

@@ -1391,7 +1391,11 @@ class GPTModelExporter:
         head_num = config.num_attention_heads
         head_size = config.kv_channels
         heads_per_group = head_num // num_query_groups
-        qkv_total_dim = head_num + 2 * num_query_groups
+        # Gated attention (e.g. Qwen3.5) packs a per-head output gate next to every query head, so a
+        # group holds [q, gate, k, v] instead of [q, k, v]. HF keeps the gate inside ``q_proj``.
+        output_gate = getattr(config, "attention_output_gate", False)
+        group_dim = (2 * heads_per_group if output_gate else heads_per_group) + 2
+        qkv_total_dim = num_query_groups * group_dim
 
         weight = name_to_value.pop("weight")
 
@@ -1413,12 +1417,24 @@ class GPTModelExporter:
 
         q_slice = torch.cat(
             [
-                torch.arange((heads_per_group + 2) * i, (heads_per_group + 2) * i + heads_per_group)
+                torch.arange(group_dim * i, group_dim * i + heads_per_group)
                 for i in range(num_query_groups_local)
             ]
         )
-        k_slice = torch.arange(heads_per_group, per_rank_qkv_dim, (heads_per_group + 2))
-        v_slice = torch.arange(heads_per_group + 1, per_rank_qkv_dim, (heads_per_group + 2))
+        gate_slice = (
+            torch.cat(
+                [
+                    torch.arange(
+                        group_dim * i + heads_per_group, group_dim * i + 2 * heads_per_group
+                    )
+                    for i in range(num_query_groups_local)
+                ]
+            )
+            if output_gate
+            else None
+        )
+        k_slice = torch.arange(group_dim - 2, per_rank_qkv_dim, group_dim)
+        v_slice = torch.arange(group_dim - 1, per_rank_qkv_dim, group_dim)
         ## Example of slices
         ## 7b: num_query_groups = head_num = 32,
         ## q_slice = [0, 3, 6, 9 , ... 90, 93]
@@ -1431,7 +1447,14 @@ class GPTModelExporter:
         slices = [q_slice, k_slice, v_slice]
         prefixes = [q_proj_prefix, k_proj_prefix, v_proj_prefix]
 
-        proj_weights = [weight[s].reshape(-1, hidden_size) for s in slices]
+        def _take(tensor, index, last_dim):
+            """Gather ``index`` heads; for q under gated attention also append the gate heads."""
+            taken = tensor[index]
+            if output_gate and index is q_slice:
+                taken = torch.cat([taken, tensor[gate_slice]], dim=1)
+            return taken.reshape(-1, last_dim)
+
+        proj_weights = [_take(weight, s, hidden_size) for s in slices]
         proj_keys = [p + "weight" for p in prefixes]
 
         if weight_scale is None:
@@ -1446,9 +1469,7 @@ class GPTModelExporter:
                     [per_rank_qkv_dim, head_size, weight_scale_hidden_size]
                 )
                 proj_weight_scales = [
-                    weight_scale[s]
-                    .reshape(-1, weight_scale_hidden_size)
-                    .to(dtype=weight_scale_dtype)
+                    _take(weight_scale, s, weight_scale_hidden_size).to(dtype=weight_scale_dtype)
                     for s in slices
                 ]
             else:
@@ -1485,7 +1506,7 @@ class GPTModelExporter:
                 # Slice bias similar to weight
                 bias = val.detach().clone()
                 bias = bias.reshape([per_rank_qkv_dim, head_size])
-                proj_biases = [bias[s].reshape(-1) for s in slices]
+                proj_biases = [_take(bias, s, 1).reshape(-1) for s in slices]
                 proj_bias_keys = [q_proj_prefix + key, k_proj_prefix + key, v_proj_prefix + key]
                 for bias_tensor, bias_key in zip(proj_biases, proj_bias_keys):
                     self._state_dict[bias_key] = bias_tensor
