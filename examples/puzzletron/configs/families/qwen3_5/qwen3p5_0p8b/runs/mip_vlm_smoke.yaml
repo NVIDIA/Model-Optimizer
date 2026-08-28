@@ -1,0 +1,56 @@
+# @package _global_
+
+defaults:
+  - mip_smoke
+  - _self_
+
+# Bounded one-GPU VLM smoke for the same pinned public checkpoint and FFN-only
+# MIP search as mip_smoke. Images and conversations are read through the native
+# AutoModel processor path; no text token cache is created or consumed.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
+dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH}
+display_name: Qwen3p5_0p8B_VLM
+
+data:
+  modality: multimodal
+  layout: padded_varlen
+  max_sample_length: 512
+  path: ${dataset_path}
+  revision: ${oc.env:PUZZLETRON_DATASET_REVISION}
+  processor_identity: ${model_info.hf_repo}@${model_info.hf_revision}
+  packing:
+
+train_token_cache_path:
+validation_token_cache_path:
+tokenize_data:
+  enabled: false
+  caches: []
+
+pruning:
+  packed_token_cache_path:
+sort:
+  # The search is FFN-only; preserve unrelated attention and GDN ordering.
+  deferred_axes:
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+sort_sanity:
+  packed_token_cache_path:
+  # Exact FFN channel permutations change BF16 reduction order and produced
+  # sub-0.002 loss drift on the VLM smoke batch; keep the gate symmetric.
+  max_abs_lm_loss_delta: 0.002
+  max_abs_reverse_lm_loss_delta: 0.002
+  automodel:
+    # Keep the portable smoke independent of the optional FLA fused-KL backend.
+    lm_head_backend: streaming
+width_sanity:
+  packed_token_cache_path:
+depth_importance:
+  packed_token_cache_path:
+replacement_scoring:
+  packed_token_cache_path:
+  automodel:
+    lm_head_backend: streaming

@@ -1,10 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from collections import UserDict
 from types import SimpleNamespace
 
 import torch
 
+from modelopt.torch.puzzletron.dataset import DataLayout, PuzzletronBatch
 from modelopt.torch.puzzletron.plugins.automodel.dummy_data import make_dummy_dataset
 from modelopt.torch.puzzletron.plugins.automodel.scoring_recipe import (
     ActivationScoringRecipe,
@@ -53,9 +70,7 @@ def test_variable_length_pp_update_restores_hidden_state_output_metadata():
             self.updated = []
 
         def update_seq_len(self, seq_len):
-            self.updated.append(
-                (seq_len, self.pp_microbatch_size, self._pp_current_seq_len)
-            )
+            self.updated.append((seq_len, self.pp_microbatch_size, self._pp_current_seq_len))
             stage.inputs_meta = (
                 torch.empty(1, seq_len, 1024, device="meta", dtype=torch.bfloat16),
             )
@@ -75,18 +90,14 @@ def test_variable_length_pp_update_restores_hidden_state_output_metadata():
 
 def test_pp_envelope_batch_size_accounts_for_forward_microbatches():
     recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
-    recipe.pp = SimpleNamespace(
-        info=SimpleNamespace(schedule=SimpleNamespace(_n_microbatches=2))
-    )
+    recipe.pp = SimpleNamespace(info=SimpleNamespace(schedule=SimpleNamespace(_n_microbatches=2)))
 
     assert recipe._pp_envelope_batch_size(local_batch_size=4) == 2
 
 
 def test_pp_envelope_batch_size_rounds_up_partial_final_batch():
     recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
-    recipe.pp = SimpleNamespace(
-        info=SimpleNamespace(schedule=SimpleNamespace(_n_microbatches=2))
-    )
+    recipe.pp = SimpleNamespace(info=SimpleNamespace(schedule=SimpleNamespace(_n_microbatches=2)))
 
     assert recipe._pp_envelope_batch_size(local_batch_size=3) == 2
 
@@ -107,6 +118,53 @@ def test_data_parallel_slice_uses_the_reduction_group_not_the_combined_ep_mesh()
     ) == (2, 1)
 
 
+def test_data_parallel_slice_accepts_mapping_collator_outputs():
+    recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
+    recipe._dp_size = 2
+    recipe._dp_rank = 1
+    batch = UserDict(
+        {
+            "input_ids": torch.tensor([[1, 2], [3, 4]]),
+            "image_grid_thw": torch.tensor([[1, 2, 2], [1, 3, 3]]),
+            "processor_metadata": "preserved",
+        }
+    )
+
+    actual = recipe._dp_slice_batch(batch)
+
+    assert torch.equal(actual["input_ids"], torch.tensor([[3, 4]]))
+    assert torch.equal(actual["image_grid_thw"], torch.tensor([[1, 3, 3]]))
+    assert actual["processor_metadata"] == "preserved"
+
+
+def test_canonicalize_batch_accepts_mapping_collator_outputs():
+    recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
+    recipe._data_spec = SimpleNamespace(layout=DataLayout.PADDED_VARLEN)
+    recipe._data_cfg = {
+        "path": "/materialized/vlm",
+        "revision": "dataset-commit",
+        "processor_identity": "qwen-vlm-processor",
+    }
+    recipe._dp_size = 1
+    recipe._use_puzzletron_dataloader = True
+    recipe._cp_info = lambda: (0, 1)
+    collated = UserDict(
+        {
+            "input_ids": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "pixel_values": torch.randn(1, 3, 2, 2),
+            "image_grid_thw": torch.tensor([[1, 2, 2]]),
+        }
+    )
+
+    actual = recipe._canonicalize_batch(collated, step=7)
+
+    assert isinstance(actual, PuzzletronBatch)
+    assert actual.sample_ids == ("batch-00000007-row-0",)
+    assert torch.equal(actual.model_kwargs["pixel_values"], collated["pixel_values"])
+    assert actual.source_metadata["processor"] == "qwen-vlm-processor"
+
+
 def test_resumed_observability_merges_local_forward_evidence_without_duplication():
     recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
     recipe._resumed_observability_local = {
@@ -114,9 +172,7 @@ def test_resumed_observability_merges_local_forward_evidence_without_duplication
         "vision_output_checksums": ["old", "shared"],
         "batch_fingerprints": ["batch-a"],
     }
-    recipe._vision_monitors = [
-        SimpleNamespace(forward_count=2, output_checksums=["shared", "new"])
-    ]
+    recipe._vision_monitors = [SimpleNamespace(forward_count=2, output_checksums=["shared", "new"])]
     recipe._canonical_batch_fingerprints = ["batch-a", "batch-b"]
 
     actual = recipe._local_observability_metadata()
@@ -173,9 +229,7 @@ def test_nonfirst_pp_stage_restores_replicated_tp_layout_before_sequence_paralle
     recipe.model_parts = [model_part]
     recipe.device_mesh = {"tp": "tp-mesh"}
     recipe._groups = SimpleNamespace(tp_size=2)
-    recipe.cfg = SimpleNamespace(
-        distributed=SimpleNamespace(sequence_parallel=True)
-    )
+    recipe.cfg = SimpleNamespace(distributed=SimpleNamespace(sequence_parallel=True))
     seen = []
 
     def fake_replicate(hidden_states, tp_mesh):

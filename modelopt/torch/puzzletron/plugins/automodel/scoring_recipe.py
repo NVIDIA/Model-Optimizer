@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import shutil
+from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -111,7 +112,7 @@ def _force_forward_only_pp_schedule(
     """
     info = getattr(pp, "info", None)
     schedule = getattr(info, "schedule", None)
-    if schedule is None:
+    if info is None or schedule is None:
         return
 
     from torch.distributed.pipelining.schedules import _ScheduleForwardOnly
@@ -181,8 +182,7 @@ def _strip_stale_pp_layer_kwargs(module, args, kwargs):
     try:
         signature = inspect.signature(module.forward)
         accepts_var_kwargs = any(
-            param.kind is inspect.Parameter.VAR_KEYWORD
-            for param in signature.parameters.values()
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
         )
         if not accepts_var_kwargs:
             allowed = set(signature.parameters)
@@ -231,8 +231,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             else None
         )
         self._use_vlm_recipe = bool(
-            self._data_spec is not None
-            and self._data_spec.modality is Modality.MULTIMODAL
+            self._data_spec is not None and self._data_spec.modality is Modality.MULTIMODAL
         )
         self._groups: MeshGroups | None = None
         self._scorers: list | None = None
@@ -386,13 +385,17 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                         candidate = torch.load(
                             candidate_path, map_location="cpu", weights_only=False
                         )
-                        candidate_identity = [tuple(value) for value in candidate.get("scorers", [])]
+                        candidate_identity = [
+                            tuple(value) for value in candidate.get("scorers", [])
+                        ]
                         candidate_steps = {
                             int(state["curr_iter"])
                             for state in candidate.get("states", [])
                             if isinstance(state, dict) and state.get("curr_iter") is not None
                         }
-                        if candidate_identity == expected_identity and candidate_steps == {min_step}:
+                        if candidate_identity == expected_identity and candidate_steps == {
+                            min_step
+                        }:
                             peer_payload = candidate
                             break
                     if peer_payload is None:
@@ -440,14 +443,10 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         from ...tools.logger import mprint
 
         additive = [
-            scorer
-            for scorer in (self._scorers or [])
-            if "lane_gram" in scorer.checkpoint_state()
+            scorer for scorer in (self._scorers or []) if "lane_gram" in scorer.checkpoint_state()
         ]
         iterative = [
-            scorer
-            for scorer in (self._scorers or [])
-            if "curr_iter" in scorer.checkpoint_state()
+            scorer for scorer in (self._scorers or []) if "curr_iter" in scorer.checkpoint_state()
         ]
         before = [scorer.checkpoint_state() for scorer in additive]
         for scorer in iterative:
@@ -575,9 +574,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             # legacy Puzzletron loader already returns one packed row and must
             # continue to execute as one microbatch.
             forward_microbatches = (
-                None
-                if self._use_vlm_recipe and not self._use_puzzletron_dataloader
-                else 1
+                None if self._use_vlm_recipe and not self._use_puzzletron_dataloader else 1
             )
             _force_forward_only_pp_schedule(
                 self.pp,
@@ -608,14 +605,14 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 f"cache={self._pruning_cfg.get('realized_dataset_cache_dir', None)}"
             )
             if self.dist_env.is_main:
-                mprint(f"[activation/automodel] setup: rank0 preparing Puzzletron dataloader ({dataloader_msg})")
+                mprint(
+                    f"[activation/automodel] setup: rank0 preparing Puzzletron dataloader ({dataloader_msg})"
+                )
                 self.dataloader = prepare_validation_dataloader(
                     self._pruning_cfg,
                     None,
                     data_layout=(
-                        self._data_spec.layout.value
-                        if self._data_spec is not None
-                        else None
+                        self._data_spec.layout.value if self._data_spec is not None else None
                     ),
                 )
                 mprint(
@@ -627,14 +624,14 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 torch.distributed.barrier()
                 aprint("[activation/automodel] setup: dataloader barrier complete")
             if not self.dist_env.is_main:
-                aprint(f"[activation/automodel] setup: rank preparing Puzzletron dataloader ({dataloader_msg})")
+                aprint(
+                    f"[activation/automodel] setup: rank preparing Puzzletron dataloader ({dataloader_msg})"
+                )
                 self.dataloader = prepare_validation_dataloader(
                     self._pruning_cfg,
                     None,
                     data_layout=(
-                        self._data_spec.layout.value
-                        if self._data_spec is not None
-                        else None
+                        self._data_spec.layout.value if self._data_spec is not None else None
                     ),
                 )
                 aprint(
@@ -710,9 +707,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         if descriptor_name is None:
             model_cfg = getattr(self.cfg, "model", None)
             descriptor_name = getattr(model_cfg, "anymodel_descriptor", None)
-        model_descriptor = (
-            ModelDescriptorFactory.get(descriptor_name) if descriptor_name else None
-        )
+        model_descriptor = ModelDescriptorFactory.get(descriptor_name) if descriptor_name else None
         self._model_descriptor = model_descriptor
 
         if self._use_vlm_recipe and model_descriptor is not None:
@@ -780,8 +775,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                     )
 
         self._scorer_groups = [
-            (spec_scorer_lists[i], spec["activations_log_dir"])
-            for i, spec in enumerate(all_specs)
+            (spec_scorer_lists[i], spec["activations_log_dir"]) for i, spec in enumerate(all_specs)
         ]
         self._scorers = [s for scorers, _ in self._scorer_groups for s in scorers]
 
@@ -827,9 +821,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             cp_rank, cp_size = self._cp_info()
             if cp_size > 1:
                 automodel_cfg = (
-                    self._pruning_cfg.get("automodel", {})
-                    if self._pruning_cfg is not None
-                    else {}
+                    self._pruning_cfg.get("automodel", {}) if self._pruning_cfg is not None else {}
                 )
                 gdn_cp_backend = str(automodel_cfg.get("gdn_cp_backend", "native_fla"))
                 if gdn_cp_backend == "replicated_exact":
@@ -844,11 +836,11 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                     raise ValueError(f"Unknown automodel.gdn_cp_backend={gdn_cp_backend!r}")
                 if bool(automodel_cfg.get("trace_layer_forwards", False)):
                     n_traces = self._install_layer_forward_traces()
-                    mprint(
-                        f"[activation/automodel] layer forward traces on {n_traces} module(s)"
-                    )
+                    mprint(f"[activation/automodel] layer forward traces on {n_traces} module(s)")
                 n_cp_hooks = self._install_cp_position_overrides(cp_rank, cp_size)
-                mprint(f"[activation/automodel] CP position override hooks on {n_cp_hooks} module(s)")
+                mprint(
+                    f"[activation/automodel] CP position override hooks on {n_cp_hooks} module(s)"
+                )
             # Null out the schedule's loss_fn so _maybe_compute_loss is a no-op.
             # After removing lm_head the last stage returns hidden_states; the schedule
             # would still try to compute loss (and crash on None target_mbs) unless we
@@ -1001,22 +993,17 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             submod = getattr(stage, "submod", None)
             if submod is None:
                 continue
-            lm_head_passthrough = bool(
-                getattr(submod, "_puzzletron_lm_head_passthrough", False)
-            )
-            mtp_disabled = bool(
-                getattr(submod, "_puzzletron_mtp_disabled_for_scoring", False)
-            )
-            if (
-                getattr(submod, "lm_head", None) is not None
-                and not lm_head_passthrough
-            ):
+            lm_head_passthrough = bool(getattr(submod, "_puzzletron_lm_head_passthrough", False))
+            mtp_disabled = bool(getattr(submod, "_puzzletron_mtp_disabled_for_scoring", False))
+            if getattr(submod, "lm_head", None) is not None and not lm_head_passthrough:
                 continue
             if not getattr(stage, "is_last", False) and not mtp_disabled:
                 continue
             inputs_meta = getattr(stage, "inputs_meta", None)
             if not inputs_meta:
-                aprint("[activation/automodel] PP last-stage inputs_meta absent; runtime shape inference will be used")
+                aprint(
+                    "[activation/automodel] PP last-stage inputs_meta absent; runtime shape inference will be used"
+                )
                 continue
             first_meta = inputs_meta[0]
             if not torch.is_tensor(first_meta) or first_meta.dim() < 2:
@@ -1027,11 +1014,14 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             hidden_size = int(first_meta.shape[2]) if first_meta.dim() >= 3 else None
             if hidden_size is None:
                 cfg = getattr(submod, "config", None)
-                if hasattr(cfg, "text_config") and not hasattr(cfg, "hidden_size"):
-                    cfg = cfg.text_config
+                text_config = getattr(cfg, "text_config", None)
+                if text_config is not None and not hasattr(cfg, "hidden_size"):
+                    cfg = text_config
                 hidden_size = getattr(cfg, "hidden_size", None)
             if hidden_size is None:
-                aprint("[activation/automodel] could not infer hidden_size for PP last-stage output metadata")
+                aprint(
+                    "[activation/automodel] could not infer hidden_size for PP last-stage output metadata"
+                )
                 continue
 
             try:
@@ -1177,8 +1167,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 return output.full_tensor()
             if isinstance(output, tuple):
                 return tuple(
-                    value.full_tensor() if isinstance(value, DTensor) else value
-                    for value in output
+                    value.full_tensor() if isinstance(value, DTensor) else value for value in output
                 )
             return output
 
@@ -1228,9 +1217,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         if "tp" in mesh_dim_names and len(mesh_dim_names) == len(placements):
             return isinstance(placements[mesh_dim_names.index("tp")], Replicate)
         return (
-            value_mesh is tp_mesh
-            and len(placements) == 1
-            and isinstance(placements[0], Replicate)
+            value_mesh is tp_mesh and len(placements) == 1 and isinstance(placements[0], Replicate)
         )
 
     @classmethod
@@ -1269,6 +1256,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             has_first_stage = bool(self.pp.info.has_first_stage)
         distributed_cfg = getattr(self.cfg, "distributed", None)
         sequence_parallel = bool(getattr(distributed_cfg, "sequence_parallel", False))
+        assert self._groups is not None, "call setup() before installing PP restorers"
         tp_size = int(self._groups.tp_size)
         pruning_cfg = getattr(self, "_pruning_cfg", None)
         trace_enabled = bool(
@@ -1356,9 +1344,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             return args, kwargs
 
         roots = [
-            stage.submod
-            for stage in local_stages
-            if getattr(stage, "submod", None) is not None
+            stage.submod for stage in local_stages if getattr(stage, "submod", None) is not None
         ]
         roots.extend(self.model_parts or [])
         modules = []
@@ -1447,10 +1433,14 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                 if cp_size > 1:
                     cp_group = cp_mesh.get_group()
                     cp_rank = dist.get_rank(cp_group)
-                    mprint(f"[activation/automodel] CP sharding active: cp_rank={cp_rank} cp_size={cp_size}")
+                    mprint(
+                        f"[activation/automodel] CP sharding active: cp_rank={cp_rank} cp_size={cp_size}"
+                    )
                     return cp_rank, cp_size
             else:
-                mprint(f"[activation/automodel] _cp_info: device_mesh.mesh_dim_names={dim_names!r} — 'cp' not found")
+                mprint(
+                    f"[activation/automodel] _cp_info: device_mesh.mesh_dim_names={dim_names!r} — 'cp' not found"
+                )
         else:
             mprint("[activation/automodel] _cp_info: self.device_mesh is None")
 
@@ -1462,7 +1452,9 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                     grp = cp_mesh.get_group()
                     cp_rank = dist.get_rank(grp)
                     cp_size = dist.get_world_size(grp)
-                    mprint(f"[activation/automodel] CP sharding via module._cp_mesh: cp_rank={cp_rank} cp_size={cp_size}")
+                    mprint(
+                        f"[activation/automodel] CP sharding via module._cp_mesh: cp_rank={cp_rank} cp_size={cp_size}"
+                    )
                     return cp_rank, cp_size
 
         mprint("[activation/automodel] _cp_info: CP not detected (size=1 or not configured)")
@@ -1573,7 +1565,9 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             return 1, 0
         return dp_size, (int(token_rank) // int(cp_size)) % dp_size
 
-    def _trace_pp_eval(self, phase: str, step: int, input_ids=None, extra: dict | None = None) -> None:
+    def _trace_pp_eval(
+        self, phase: str, step: int, input_ids=None, extra: dict | None = None
+    ) -> None:
         trace_enabled = bool(
             self._pruning_cfg.get("automodel", {}).get("trace_layer_forwards", False)
             if self._pruning_cfg is not None
@@ -1608,7 +1602,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             if bool(batch.source_metadata.get("distributed_sampler_sharded", False)):
                 return batch
             return batch.dp_slice(dp_rank=self._dp_rank, dp_size=self._dp_size)
-        if not isinstance(batch, dict):
+        if not isinstance(batch, Mapping):
             return batch
         out = {}
         for k, v in batch.items():
@@ -1624,13 +1618,14 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             return batch
         if self._data_spec is None:
             return None
-        if not isinstance(batch, dict):
+        if not isinstance(batch, Mapping):
             raise TypeError(
                 f"canonical Puzzletron data expected a mapping batch, got {type(batch).__name__}"
             )
         input_ids = batch.get("input_ids")
         if not torch.is_tensor(input_ids):
             raise ValueError("canonical Puzzletron batch has no input_ids")
+        assert isinstance(input_ids, torch.Tensor)
         batch_size = int(input_ids.shape[0]) if input_ids.ndim > 1 else 1
         source_metadata = {
             "dataset": self._data_cfg.get("path"),
@@ -1673,17 +1668,20 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         batch = batch.to(device)
         payload = dict(batch.model_kwargs)
         payload["labels"] = (
-            batch.labels
-            if batch.labels is not None
-            else torch.full_like(batch.input_ids, -100)
+            batch.labels if batch.labels is not None else torch.full_like(batch.input_ids, -100)
         )
         sequence_ids = batch.sequence.seq_ids
         if sequence_ids is None:
-            sequence_ids = torch.arange(
-                batch.batch_size,
-                dtype=torch.long,
-                device=device,
-            ).unsqueeze(1).expand(-1, batch.sequence_length).clone()
+            sequence_ids = (
+                torch.arange(
+                    batch.batch_size,
+                    dtype=torch.long,
+                    device=device,
+                )
+                .unsqueeze(1)
+                .expand(-1, batch.sequence_length)
+                .clone()
+            )
             if batch.hidden_mask is not None:
                 sequence_ids.masked_fill_(~batch.hidden_mask, -1)
         else:
@@ -1734,17 +1732,13 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             {
                 **payload,
                 "_puzzletron_ce_mask": (
-                    batch.ce_mask
-                    if batch.ce_mask is not None
-                    else payload["labels"].ne(-100)
+                    batch.ce_mask if batch.ce_mask is not None else payload["labels"].ne(-100)
                 ),
                 "_puzzletron_kd_mask": (
                     batch.kd_mask
                     if batch.kd_mask is not None
                     else (
-                        batch.ce_mask
-                        if batch.ce_mask is not None
-                        else payload["labels"].ne(-100)
+                        batch.ce_mask if batch.ce_mask is not None else payload["labels"].ne(-100)
                     )
                 ),
                 "_puzzletron_hidden_mask": (
@@ -1872,8 +1866,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
             ),
             "batch_fingerprints": list(
                 dict.fromkeys(
-                    [*resumed.get("batch_fingerprints", [])]
-                    + self._canonical_batch_fingerprints
+                    [*resumed.get("batch_fingerprints", [])] + self._canonical_batch_fingerprints
                 )
             ),
         }
@@ -1882,19 +1875,20 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         local = self._local_observability_metadata()
         if not torch.distributed.is_initialized():
             return local
-        gathered = [None] * torch.distributed.get_world_size()
+        gathered: list[dict[str, Any] | None] = [None] * torch.distributed.get_world_size()
         torch.distributed.all_gather_object(gathered, local)
+        gathered_items = [item for item in gathered if item is not None]
+        if len(gathered_items) != len(gathered):
+            raise RuntimeError("observability gather returned an empty rank payload")
         return {
-            "vision_forward_count": sum(item["vision_forward_count"] for item in gathered),
+            "vision_forward_count": sum(item["vision_forward_count"] for item in gathered_items),
             "vision_output_checksums": sorted(
-                checksum
-                for item in gathered
-                for checksum in item["vision_output_checksums"]
+                checksum for item in gathered_items for checksum in item["vision_output_checksums"]
             ),
             "batch_fingerprints": sorted(
                 set(
                     fingerprint
-                    for item in gathered
+                    for item in gathered_items
                     for fingerprint in item["batch_fingerprints"]
                 )
             ),
@@ -1939,6 +1933,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         canonical = self._canonicalize_batch(batch, step)
         if canonical is not None:
             canonical = self._dp_slice_batch(canonical)
+            assert isinstance(canonical, PuzzletronBatch)
             if step >= 0 and samples_hashing_enabled():
                 log_batch_hashes(
                     canonical.input_ids,
@@ -1951,7 +1946,12 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         batch = self._dp_slice_batch(batch)  # data-parallel: this rank's sub-batch
         cp_rank, cp_size = self._cp_info()
         # Debug: record which samples this rank actually feeds (gated by PUZZLE_HASH_SAMPLES).
-        if step >= 0 and samples_hashing_enabled() and isinstance(batch, dict) and "input_ids" in batch:
+        if (
+            step >= 0
+            and samples_hashing_enabled()
+            and isinstance(batch, dict)
+            and "input_ids" in batch
+        ):
             log_batch_hashes(
                 batch["input_ids"], "automodel", step, extra=f"dp={self._dp_rank} cp={cp_rank}"
             )
@@ -1987,9 +1987,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                     )
                 input_ids = self._shard_seq_for_cp(input_ids, cp_rank, cp_size)
                 targets = self._shard_seq_for_cp(targets, cp_rank, cp_size)
-                extra = {
-                    k: self._shard_seq_for_cp(v, cp_rank, cp_size) for k, v in extra.items()
-                }
+                extra = {k: self._shard_seq_for_cp(v, cp_rank, cp_size) for k, v in extra.items()}
             tp_group = self.tensor_parallel_group()
             if bool(
                 self._pruning_cfg.get("automodel", {}).get("trace_layer_forwards", False)
@@ -2027,9 +2025,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                     inputs["position_ids"] = (
                         torch.arange(S, device=device).unsqueeze(0).expand(B, -1)
                     )
-                inputs = {
-                    k: self._shard_seq_for_cp(v, cp_rank, cp_size) for k, v in inputs.items()
-                }
+                inputs = {k: self._shard_seq_for_cp(v, cp_rank, cp_size) for k, v in inputs.items()}
             with self._forward_autocast_context():
                 model(**inputs)
 
@@ -2040,6 +2036,8 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         from ...tools.logger import mprint
 
         assert self._scorers is not None, "call setup() before run_scoring()"
+        assert self._groups is not None, "call setup() before run_scoring()"
+        assert self._eval_iters is not None, "setup must resolve evaluation iterations"
 
         total = self._eval_iters
 
@@ -2052,7 +2050,9 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         # for HF MoE stages.
         if self.pp is not None:
             if self._pp_metadata_ready():
-                mprint("[activation/automodel] skipping PP warmup: stage shape metadata is precomputed")
+                mprint(
+                    "[activation/automodel] skipping PP warmup: stage shape metadata is precomputed"
+                )
             else:
                 mprint("[activation/automodel] warmup forward (hooks disabled) to prime PP shapes")
                 for scorer in self._scorers:
@@ -2077,6 +2077,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         # Cycle the dataloader when pruning_iters > len(dataloader) so that the number of
         # greedy scoring steps is determined by pruning_iters, not by dataset size.
         import itertools
+
         dl_len = len(self.dataloader) if hasattr(self.dataloader, "__len__") else None
         if total is not None and dl_len is not None and total > dl_len:
             data_iter = itertools.islice(itertools.cycle(self.dataloader), start_step, total)
@@ -2137,6 +2138,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
 
         if self._scorer_groups is None:
             # Backward-compat: old-style single-group (no scorer_groups set).
+            assert self._activations_log_dir is not None
             results = write_scores(self._scorers, self._activations_log_dir, self._groups)
             if self.dist_env.is_main:
                 mprint(f"[activation/automodel] wrote {len(results)} module scores")

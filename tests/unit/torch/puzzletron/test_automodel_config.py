@@ -246,3 +246,25 @@ def test_build_recipe_config_selects_native_vlm_and_neat_packing(monkeypatch):
     assert recipe["packed_sequence"]["packing_ratio"] == 0.9
     assert recipe["packed_sequence"]["attn_implementation"] == "flash_attention_2"
     assert recipe["packed_sequence"]["max_packs"] == 200
+    assert "collate_fn" not in recipe["dataloader"]
+
+
+def test_build_recipe_config_uses_native_vlm_padded_collator(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config._inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    cfg = _cfg()
+    cfg.pruning.automodel.force_hf = False
+    cfg.pruning.automodel.use_puzzletron_dataloader = False
+    cfg.data = {
+        "path": "/puzzle/data/vlm-smoke",
+        "modality": "multimodal",
+        "layout": "padded_varlen",
+        "max_sample_length": 512,
+    }
+
+    recipe = build_recipe_config(cfg)
+
+    assert recipe["dataset"]["path_or_dataset"] == "/puzzle/data/vlm-smoke"
+    assert "collate_fn" not in recipe["dataloader"]
