@@ -47,6 +47,7 @@ from omegaconf import OmegaConf
 from ...anymodel.model_descriptor import ModelDescriptorFactory
 from ...dataset.batch import DataLayout, Modality
 from ...dataset.config import PuzzletronDataSpec
+from ...security_policy import require_boolean_policy
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,16 @@ def _teacher_path(hydra_cfg) -> str:
     if explicit:
         return str(explicit)
     return f"{hydra_cfg.puzzle_dir}/{_DEFAULT_TEACHER_SUBDIR}"
+
+
+def _trust_remote_code(hydra_cfg) -> bool:
+    """Resolve the shared model and processor remote-code policy."""
+    model = _as_dict(hydra_cfg.get("model", None))
+    return require_boolean_policy(
+        model.get("trust_remote_code"),
+        path="model.trust_remote_code",
+        default=False,
+    )
 
 
 def _inject_canonical_data(
@@ -128,7 +139,7 @@ def _inject_canonical_data(
             dataset["num_samples"] = int(num_samples)
         recipe["dataset"] = dataset
         processor = dict(recipe.get("processor") or {})
-        processor.setdefault("trust_remote_code", True)
+        processor["trust_remote_code"] = bool(model.get("trust_remote_code", False))
         recipe["processor"] = processor
         # AutoModel's VLM recipe owns processor-aware padded and packed collation.
         dataloader = dict(recipe.get("dataloader") or {})
@@ -251,7 +262,7 @@ def build_stage_recipe_config(automodel_cfg) -> dict:
     return {
         "step_scheduler": {"global_batch_size": 1, "local_batch_size": 1, "max_steps": 1},
         "dist_env": {"backend": "nccl"},
-        "model": {"torch_dtype": "bf16", "trust_remote_code": True},
+        "model": {"torch_dtype": "bf16", "trust_remote_code": False},
         "checkpoint": {"enabled": False},
         "distributed": distributed,
         "distributed_config": {
@@ -371,7 +382,7 @@ def inject_descriptor_pipeline_config(
     *,
     model_path,
     descriptor_name,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
 ) -> dict:
     """Let the model descriptor customize AutoModel PP splitting for this recipe.
 
@@ -528,7 +539,7 @@ def build_recipe_config(hydra_cfg) -> dict:
     model["pretrained_model_name_or_path"] = _teacher_path(hydra_cfg)
     model.setdefault("anymodel_descriptor", hydra_cfg.get("descriptor", None))
     model.setdefault("force_hf", bool(_as_dict(automodel_cfg).get("force_hf", True)))
-    model.setdefault("trust_remote_code", True)
+    model["trust_remote_code"] = _trust_remote_code(hydra_cfg)
     recipe["model"] = model
 
     if model["anymodel_descriptor"] is None:
@@ -553,14 +564,14 @@ def build_recipe_config(hydra_cfg) -> dict:
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
 
     inject_descriptor_pipeline_config(
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     _align_pipeline_seq_len(recipe, block_size=hydra_cfg.pruning.get("block_size", None))
     _align_pipeline_batch_size(
@@ -577,14 +588,20 @@ def build_recipe_config(hydra_cfg) -> dict:
     return recipe
 
 
-def _inject_model(recipe: dict, model_path, descriptor, force_hf: bool) -> dict:
+def _inject_model(
+    recipe: dict,
+    model_path,
+    descriptor,
+    force_hf: bool,
+    trust_remote_code: bool,
+) -> dict:
     """Set the recipe's ``model`` block to load ``model_path`` via the patched from_pretrained."""
     model = dict(recipe.get("model", {}))
     model.setdefault("_target_", _FROM_PRETRAINED_TARGET)
     model["pretrained_model_name_or_path"] = str(model_path)
     model.setdefault("anymodel_descriptor", descriptor)
     model.setdefault("force_hf", bool(force_hf))
-    model.setdefault("trust_remote_code", True)
+    model["trust_remote_code"] = trust_remote_code
     recipe["model"] = model
     if model["anymodel_descriptor"] is None:
         raise ValueError(
@@ -594,13 +611,13 @@ def _inject_model(recipe: dict, model_path, descriptor, force_hf: bool) -> dict:
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     inject_descriptor_pipeline_config(
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     return recipe
 
@@ -617,7 +634,13 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     force_hf = bool(_as_dict(automodel_cfg).get("force_hf", False))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)
-    recipe = _inject_model(recipe, model_path, descriptor, force_hf)
+    recipe = _inject_model(
+        recipe,
+        model_path,
+        descriptor,
+        force_hf,
+        _trust_remote_code(hydra_cfg),
+    )
     _inject_canonical_data(
         recipe,
         hydra_cfg,

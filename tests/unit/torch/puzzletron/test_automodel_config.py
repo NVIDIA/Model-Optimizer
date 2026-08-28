@@ -247,6 +247,8 @@ def test_build_recipe_config_selects_native_vlm_and_neat_packing(monkeypatch):
     assert recipe["packed_sequence"]["attn_implementation"] == "flash_attention_2"
     assert recipe["packed_sequence"]["max_packs"] == 200
     assert "collate_fn" not in recipe["dataloader"]
+    assert recipe["model"]["trust_remote_code"] is False
+    assert recipe["processor"]["trust_remote_code"] is False
 
 
 def test_build_recipe_config_uses_native_vlm_padded_collator(monkeypatch):
@@ -257,6 +259,7 @@ def test_build_recipe_config_uses_native_vlm_padded_collator(monkeypatch):
     cfg = _cfg()
     cfg.pruning.automodel.force_hf = False
     cfg.pruning.automodel.use_puzzletron_dataloader = False
+    cfg.model = {"trust_remote_code": True}
     cfg.data = {
         "path": "/puzzle/data/vlm-smoke",
         "modality": "multimodal",
@@ -268,3 +271,5 @@ def test_build_recipe_config_uses_native_vlm_padded_collator(monkeypatch):
 
     assert recipe["dataset"]["path_or_dataset"] == "/puzzle/data/vlm-smoke"
     assert "collate_fn" not in recipe["dataloader"]
+    assert recipe["model"]["trust_remote_code"] is True
+    assert recipe["processor"]["trust_remote_code"] is True

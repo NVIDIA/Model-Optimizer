@@ -181,6 +181,36 @@ def test_resumed_observability_merges_local_forward_evidence_without_duplication
     }
 
 
+def test_resume_checkpoint_round_trip_uses_safe_tensor_state(tmp_path):
+    class Scorer:
+        name = "layer"
+        block_idx = 0
+
+        def __init__(self):
+            self.state = {"curr_iter": 3, "scores": torch.tensor([1.0, 2.0])}
+
+        def checkpoint_state(self):
+            return self.state
+
+        def load_checkpoint_state(self, state):
+            self.state = state
+
+    scorer = Scorer()
+    recipe = ActivationScoringRecipe.__new__(ActivationScoringRecipe)
+    recipe._scorers = [scorer]
+    recipe._resume_dir = lambda: tmp_path
+    recipe._local_observability_metadata = lambda: {"vision_forward_count": 1}
+    recipe.dist_env = SimpleNamespace(is_main=True)
+
+    recipe._save_resume_checkpoint(next_step=3, total=5)
+    scorer.state = None
+
+    assert recipe._load_resume_checkpoint(total=5) == 3
+    assert scorer.state["curr_iter"] == 3
+    assert torch.equal(scorer.state["scores"], torch.tensor([1.0, 2.0]))
+    assert recipe._resumed_observability_local == {"vision_forward_count": 1}
+
+
 def test_load_balanced_cp_metric_shards_preserve_exact_token_partition():
     values = torch.arange(16).reshape(2, 8)
 

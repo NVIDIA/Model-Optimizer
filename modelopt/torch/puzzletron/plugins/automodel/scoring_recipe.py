@@ -51,6 +51,8 @@ from typing import Any
 import torch
 from nemo_automodel.recipes.llm.train_ft import TrainFinetuneRecipeForNextTokenPrediction
 
+from modelopt.torch.utils import safe_load, safe_save
+
 from ...anymodel.model_descriptor import ModelDescriptorFactory
 from ...dataset import (
     DataLayout,
@@ -322,7 +324,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         state_path = resume_dir / f"rank_{rank}.pth"
         if not state_path.is_file():
             raise RuntimeError(f"Activation resume is missing rank state: {state_path}")
-        payload = torch.load(state_path, map_location="cpu", weights_only=False)
+        payload = safe_load(state_path, map_location="cpu")
         self._resumed_observability_local = dict(payload.get("observability") or {})
         expected_identity = self._scorer_identity()
         saved_identity = [tuple(value) for value in payload.get("scorers", [])]
@@ -382,9 +384,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
                         if peer_rank == rank or peer_rank % tp_size != rank % tp_size:
                             continue
                         candidate_path = resume_dir / f"rank_{peer_rank}.pth"
-                        candidate = torch.load(
-                            candidate_path, map_location="cpu", weights_only=False
-                        )
+                        candidate = safe_load(candidate_path, map_location="cpu")
                         candidate_identity = [
                             tuple(value) for value in candidate.get("scorers", [])
                         ]
@@ -508,7 +508,7 @@ class ActivationScoringRecipe(TrainFinetuneRecipeForNextTokenPrediction):
         }
         state_path = resume_dir / f"rank_{rank}.pth"
         tmp_path = state_path.with_suffix(".tmp")
-        torch.save(payload, tmp_path)
+        safe_save(payload, tmp_path)
         tmp_path.replace(state_path)
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
