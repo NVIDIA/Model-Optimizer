@@ -157,33 +157,28 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
-_BUILTIN_PTQ_RECIPES = [
-    "general/ptq/fp8_default-kv_fp8",
-    "general/ptq/fp8_default-kv_fp8_cast",
-    "general/ptq/int4_blockwise_weight_only",
-    "general/ptq/nvfp4_act_headroom-kv_fp8_cast",
-    "general/ptq/nvfp4_default-kv_fp8",
-    "general/ptq/nvfp4_default-kv_fp8_cast",
-    "general/ptq/nvfp4_default-kv_nvfp4_cast",
-    "general/ptq/nvfp4_default-kv_none-gptq",
-    "general/ptq/nvfp4_experts_only-kv_fp8",
-    "general/ptq/nvfp4_experts_only-kv_fp8_cast",
-    "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
-    "models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib",
-    "models/nvidia/Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16",
-    "models/nvidia/Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-max-calib",
-    "models/nvidia/Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse",
-    "models/nvidia/Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6",
-    "models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6",
-    "models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only",
-    "general/ptq/nvfp4_mlp_only-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_omlp_only-kv_fp8",
-    "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_weight_only-kv_fp16",
-    "general/ptq/nvfp4_weight_only-kv_fp8_cast",
-]
+def _all_shipped_ptq_recipe_paths():
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    root = files("modelopt_recipes")
+    paths = []
+    for path in sorted(Path(str(root)).rglob("*.yaml")):
+        rel = path.relative_to(str(root))
+        # Units/presets under configs/ are fragments, not standalone recipes.
+        if rel.parts[0] == "configs":
+            continue
+        raw = _load_raw_config(path)
+        # List-shaped fragments (layer-pattern units) are not recipes.
+        if not isinstance(raw, dict):
+            continue
+        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+            paths.append(str(rel.with_suffix("")))
+    return paths
+
+
+# Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
+# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# never drift as recipes are added, moved, or removed.
+_BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
@@ -1931,25 +1926,7 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
 
 
-def _all_shipped_ptq_recipe_paths():
-    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
-    root = files("modelopt_recipes")
-    paths = []
-    for path in sorted(Path(str(root)).rglob("*.yaml")):
-        rel = path.relative_to(str(root))
-        # Units/presets under configs/ are fragments, not standalone recipes.
-        if rel.parts[0] == "configs":
-            continue
-        raw = _load_raw_config(path)
-        # List-shaped fragments (layer-pattern units) are not recipes.
-        if not isinstance(raw, dict):
-            continue
-        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
-            paths.append(str(rel.with_suffix("")))
-    return paths
-
-
-@pytest.mark.parametrize("recipe_path", _all_shipped_ptq_recipe_paths())
+@pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_shipped_ptq_recipe_algorithm_config_constructs(recipe_path):
     """Every shipped PTQ recipe's ``algorithm`` must build its calibration config class.
 
