@@ -21,6 +21,7 @@
 import io
 import json
 import os
+import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -438,6 +439,45 @@ class GPTModelExporter:
             save_directory=save_directory,
             name_template="model-{:05d}-of-{:05d}",
         )
+
+        # Every rank has written its shards; one rank now checks nothing was dropped.
+        torch.distributed.barrier()
+        if is_writer_rank:
+            self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
+
+    def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
+        """Raise if the export dropped tensors the source checkpoint has.
+
+        A missing export rule emits nothing rather than failing, so the checkpoint looks valid.
+        """
+        if pretrained_model_name_or_path is None or not os.path.isdir(
+            str(pretrained_model_name_or_path)
+        ):
+            return  # hub id: not worth a download inside export
+        index_file = Path(save_directory) / "model.safetensors.index.json"
+        if not index_file.exists():
+            return
+        with open(index_file) as f:
+            exported = set(json.load(f)["weight_map"])
+        source = _read_checkpoint_keys(pretrained_model_name_or_path)
+        if not source:
+            return
+
+        num_layers = self.model.config.num_layers
+        missing = set()
+        for key in source - exported:
+            layer = re.search(r"\.layers\.(\d+)\.", key)
+            if layer is not None and int(layer.group(1)) >= num_layers:
+                continue  # depth-pruned model: the source has layers this export does not
+            if key == "lm_head.weight" and self.model.share_embeddings_and_output_weights:
+                continue  # tied embeddings: no separate output layer to export
+            missing.add(key)
+        if missing:
+            raise RuntimeError(
+                f"Export dropped {len(missing)} tensor(s) present in "
+                f"{pretrained_model_name_or_path}, e.g. {sorted(missing)[:8]}. This usually means "
+                "an architecture has no export rule for one of its modules."
+            )
 
     @property
     def state_dict(self):
@@ -1843,6 +1883,20 @@ class GPTModelExporter:
             if dt is not None:
                 return dt
         return None
+
+
+def _read_checkpoint_keys(checkpoint_dir) -> set[str]:
+    """Tensor names in a local HuggingFace checkpoint, from its index or single safetensors file."""
+    directory = Path(checkpoint_dir)
+    index_file = directory / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            return set(json.load(f)["weight_map"])
+    single_file = directory / "model.safetensors"
+    if single_file.exists():
+        with safe_open(str(single_file), framework="pt", device="cpu") as f:
+            return set(f.keys())
+    return set()
 
 
 def export_mcore_gpt_to_hf(
