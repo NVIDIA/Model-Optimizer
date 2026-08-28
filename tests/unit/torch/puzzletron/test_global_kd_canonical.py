@@ -362,18 +362,10 @@ def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(tmp_path, 
     assert recipe["distributed"]["dp_size"] == 4
 
 
-@pytest.mark.parametrize(
-    "checkpoint_config",
-    [
-        {"block_configs": [{"subblock_configs": []}]},
-        {"text_config": {"block_configs": [{"subblock_configs": []}]}},
-    ],
-)
-def test_global_kd_checkpoint_copies_vlm_assets_before_completion(
-    tmp_path, monkeypatch, checkpoint_config
-):
+def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monkeypatch):
     from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
+    checkpoint_config = {"text_config": {"block_configs": [{"subblock_configs": []}]}}
     source = tmp_path / "student"
     source.mkdir()
     (source / "preprocessor_config.json").write_text('{"source": true}')

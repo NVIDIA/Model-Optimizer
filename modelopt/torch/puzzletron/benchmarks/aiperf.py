@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """AIPerf subprocess adapter with owned vLLM server lifecycle."""
 
 from __future__ import annotations
@@ -426,6 +423,7 @@ def _vllm_server_command(
         processor_assets = ("preprocessor_config.json", "video_preprocessor_config.json")
         if not any((checkpoint_dir / name).is_file() for name in processor_assets):
             raise ValueError("multimodal AIPerf requires local processor assets")
+        max_pixels = max(1, image_width_mean * image_height_mean)
         command.extend(
             (
                 "--limit-mm-per-prompt",
@@ -433,8 +431,8 @@ def _vllm_server_command(
                 "--mm-processor-kwargs",
                 json.dumps(
                     {
-                        "max_pixels": max(1, image_width_mean * image_height_mean),
-                        "min_pixels": 262144,
+                        "max_pixels": max_pixels,
+                        "min_pixels": min(262144, max_pixels),
                         "max_num_frames": 1,
                     },
                     sort_keys=True,
@@ -559,11 +557,6 @@ def run_aiperf_sweep(
 
     checkpoint_dir = Path(checkpoint_dir).resolve()
     artifact_dir = Path(artifact_dir).resolve()
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    _prepare_vllm_checkpoint(
-        checkpoint_dir,
-        trust_remote_code=trust_remote_code,
-    )
     concurrency_values = tuple(int(value) for value in concurrencies)
     if not concurrency_values or len(set(concurrency_values)) != len(concurrency_values):
         raise ValueError("AIPerf concurrencies must be non-empty and unique")
@@ -581,6 +574,11 @@ def run_aiperf_sweep(
         raise ValueError("AIPerf image_batch_sizes cannot mix text-only and multimodal workloads")
     if multimodal and (image_width_mean <= 0 or image_height_mean <= 0):
         raise ValueError("multimodal AIPerf requires positive image dimensions")
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_vllm_checkpoint(
+        checkpoint_dir,
+        trust_remote_code=trust_remote_code,
+    )
     request_counts = {
         value: int((request_counts or {}).get(value, max(32, 4 * value)))
         for value in concurrency_values

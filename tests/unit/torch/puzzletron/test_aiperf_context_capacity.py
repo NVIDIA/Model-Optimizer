@@ -292,23 +292,18 @@ def test_vllm_server_command_loads_full_multimodal_model(monkeypatch, tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
+                "model_type": "qwen3_5",
                 "architectures": ["AnyModel"],
                 "base_architecture": "Qwen3_5ForConditionalGeneration",
                 "vision_config": {"model_type": "qwen3_5_vision"},
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "layer_types": ["linear_attention"],
+                },
             }
         )
     )
     (tmp_path / "preprocessor_config.json").write_text("{}")
-    monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
-        lambda _checkpoint, **_kwargs: [
-            "--model-loader-extra-config",
-            '{"enable_weights_track": false}',
-            "--mamba-cache-mode",
-            "align",
-            "--enable-prefix-caching",
-        ],
-    )
 
     command = _vllm_server_command(
         checkpoint_dir=tmp_path,
@@ -357,6 +352,38 @@ def test_vllm_server_command_requires_visual_context_budget(monkeypatch, tmp_pat
             image_width_mean=1280,
             image_height_mean=720,
         )
+
+
+def test_vllm_server_command_bounds_processor_pixels_for_small_images(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "vision_config": {},
+            }
+        )
+    )
+    (tmp_path / "preprocessor_config.json").write_text("{}")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint, **_kwargs: [],
+    )
+
+    command = _vllm_server_command(
+        checkpoint_dir=tmp_path,
+        port=8000,
+        model_name="served-model",
+        input_tokens=100,
+        output_tokens=80,
+        topology={"gpu_group_size": 1, "server_context_overhead_tokens": 256},
+        trust_remote_code=False,
+        image_batch_size=1,
+        image_width_mean=128,
+        image_height_mean=128,
+    )
+
+    processor = json.loads(command[command.index("--mm-processor-kwargs") + 1])
+    assert processor["min_pixels"] == processor["max_pixels"] == 128 * 128
 
 
 @pytest.mark.parametrize(
@@ -546,6 +573,10 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         lambda _checkpoint, **_kwargs: [],
     )
     monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._free_port",
+        lambda: 8000,
+    )
+    monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._wait_for_health",
         lambda *_args, **_kwargs: None,
     )
@@ -607,17 +638,18 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
 
 def test_multimodal_sweep_rejects_an_empty_image_workload_axis(monkeypatch, tmp_path):
     checkpoint = tmp_path / "checkpoint"
+    artifact_dir = tmp_path / "artifacts"
     checkpoint.mkdir()
     (checkpoint / "config.json").write_text("{}")
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._prepare_vllm_checkpoint",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: pytest.fail("checkpoint preparation must follow validation"),
     )
 
     with pytest.raises(ValueError, match="must be non-empty"):
         run_aiperf_sweep(
             checkpoint,
-            artifact_dir=tmp_path / "artifacts",
+            artifact_dir=artifact_dir,
             concurrencies=(1,),
             input_tokens=100,
             output_tokens=80,
@@ -625,6 +657,7 @@ def test_multimodal_sweep_rejects_an_empty_image_workload_axis(monkeypatch, tmp_
             topology={"gpu_group_size": 1},
             image_batch_sizes=(),
         )
+    assert not artifact_dir.exists()
 
 
 def _offline_environment() -> dict[str, str]:

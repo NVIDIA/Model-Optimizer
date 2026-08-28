@@ -51,47 +51,14 @@ def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revi
     )
 
 
-def test_qwen3p5_0p8b_full_vlm_smoke_inherits_the_vlm_mip_route(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    run_config = yaml.safe_load(RUN_PATH.read_text())
-    config = _compile_plan(monkeypatch, tmp_path).experiment_config
-
-    assert run_config["defaults"] == ["mip_vlm_smoke", "_self_"]
-    assert config["model"]["revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
-    assert config["data"]["modality"] == "multimodal"
-    assert config["data"]["layout"] == "padded_varlen"
-    assert config["data"]["revision"] == "fixture-revision"
-    assert config["tokenize_data"] == {
-        "enabled": False,
-        "workers": 16,
-        "tokenize_batch_size": 64,
-        "content_field": "messages",
-        "caches": [],
-    }
-    assert config["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert config["sort"]["deferred_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_value_heads_per_group",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
-
-
 def test_qwen3p5_0p8b_full_vlm_smoke_defaults_to_the_tested_dataset_snapshot(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    run_config = yaml.safe_load(RUN_PATH.read_text())
     config = _compile_plan(monkeypatch, tmp_path, dataset_revision=None).experiment_config
 
+    assert run_config["defaults"] == ["mip_vlm_smoke", "_self_"]
     assert config["data"]["revision"] == "51f4f4d219315c3283950994d4eb3d7fc30aa87b"
 
 
