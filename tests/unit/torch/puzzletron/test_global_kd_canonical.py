@@ -22,18 +22,20 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from nemo_automodel.recipes.base_recipe import BaseRecipe as AutoModelBaseRecipe
 
+from modelopt.torch.puzzletron.distillation import global_kd_recipe
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
     GlobalKDResult,
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
+from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
+from modelopt.torch.puzzletron.plugins.automodel import local_kd_recipe
 
 
 def test_global_kd_pp_shape_reset_uses_pipeline_activation_dtype(monkeypatch):
-    from modelopt.torch.puzzletron.distillation import global_kd_recipe
-
     calls = []
     monkeypatch.setattr(
         global_kd_recipe,
@@ -59,7 +61,6 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
 ):
     """Checkpoint conversion keeps the student’s per-layer MoE geometry."""
     from modelopt.torch.puzzletron.anymodel.automodel import AutoModelDescriptorFactory
-    from modelopt.torch.puzzletron.distillation import global_kd_recipe
 
     observed = []
 
@@ -362,11 +363,122 @@ def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(tmp_path, 
     assert recipe["distributed"]["dp_size"] == 4
 
 
+def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monkeypatch):
+    checkpoint_config = {"text_config": {"block_configs": [{"subblock_configs": []}]}}
+    source = tmp_path / "student"
+    source.mkdir()
+    (source / "preprocessor_config.json").write_text('{"source": true}')
+    (source / "processor_config.json").write_text('{"processor": true}')
+    (source / "model.safetensors").write_bytes(b"source weights")
+    (source / "modeling_untrusted.py").write_text("raise RuntimeError\n")
+
+    class BaseRecipe:
+        def save_checkpoint(
+            self,
+            epoch,
+            step,
+            train_loss,
+            val_loss,
+            best_metric_key="default",
+        ):
+            del train_loss, val_loss, best_metric_key
+            checkpoint = tmp_path / f"epoch_{epoch}_step_{step}"
+            consolidated = checkpoint / "model/consolidated"
+            consolidated.mkdir(parents=True)
+            (consolidated / "config.json").write_text(json.dumps(checkpoint_config))
+            (consolidated / "model.safetensors").write_bytes(b"consolidated weights")
+            return "saved"
+
+    class Recipe(_WeightedObjectiveMixin, BaseRecipe):
+        pass
+
+    recipe = Recipe()
+    recipe.checkpointer = type(
+        "Checkpointer",
+        (),
+        {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
+    )()
+    recipe.dist_env = type("DistEnv", (), {"is_main": True})()
+    recipe.cfg = {
+        "model": {
+            "pretrained_model_name_or_path": str(source),
+            "trust_remote_code": True,
+        }
+    }
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda *args, **kwargs: None,
+    )
+
+    assert recipe.save_checkpoint(2, 17, 0.5, {"lm_loss": 0.25}) == "saved"
+
+    checkpoint = tmp_path / "epoch_2_step_17"
+    consolidated = checkpoint / "model/consolidated"
+    assert json.loads((consolidated / "preprocessor_config.json").read_text()) == {"source": True}
+    assert json.loads((consolidated / "processor_config.json").read_text()) == {"processor": True}
+    assert json.loads((consolidated / "config.json").read_text()) == checkpoint_config
+    assert (consolidated / "model.safetensors").read_bytes() == b"consolidated weights"
+    assert not (consolidated / "modeling_untrusted.py").exists()
+    assert (checkpoint / "saving_completed").is_file()
+
+
+@pytest.mark.parametrize(
+    "symlink_location",
+    ["source_directory", "source_asset", "destination_directory", "destination_asset_directory"],
+)
+def test_hf_auxiliary_assets_reject_symlinks_before_copying(tmp_path, symlink_location):
+    source = tmp_path / "source"
+    consolidated = tmp_path / "consolidated"
+    if symlink_location == "source_directory":
+        source.symlink_to(tmp_path / "missing-source", target_is_directory=True)
+    else:
+        source.mkdir()
+        (source / "preprocessor_config.json").write_text("{}")
+    if symlink_location == "destination_directory":
+        consolidated.symlink_to(tmp_path / "missing-destination", target_is_directory=True)
+    else:
+        consolidated.mkdir()
+    if symlink_location == "source_asset":
+        (source / "target.json").write_text("{}")
+        (source / "tokenizer_config.json").symlink_to(source / "target.json")
+    elif symlink_location == "destination_asset_directory":
+        templates = source / "chat_templates"
+        templates.mkdir()
+        (templates / "vision.jinja").write_text("template")
+        destination = tmp_path / "destination"
+        destination.mkdir()
+        (consolidated / "chat_templates").symlink_to(destination)
+
+    with pytest.raises(ValueError, match="symbolic link|regular file"):
+        local_kd_recipe._copy_hf_auxiliary_assets(source, consolidated)
+
+    assert not (consolidated / "preprocessor_config.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("file_limit", "total_limit", "expected"),
+    [(1, 10, "per-file"), (10, 3, "aggregate")],
+)
+def test_hf_auxiliary_assets_enforce_size_limits_before_copying(
+    tmp_path, monkeypatch, file_limit, total_limit, expected
+):
+    source = tmp_path / "source"
+    consolidated = tmp_path / "consolidated"
+    source.mkdir()
+    consolidated.mkdir()
+    (source / "preprocessor_config.json").write_bytes(b"{}")
+    (source / "processor_config.json").write_bytes(b"{}")
+    monkeypatch.setattr(local_kd_recipe, "_HF_AUXILIARY_FILE_SIZE_LIMIT", file_limit)
+    monkeypatch.setattr(local_kd_recipe, "_HF_AUXILIARY_TOTAL_SIZE_LIMIT", total_limit)
+
+    with pytest.raises(ValueError, match=expected):
+        local_kd_recipe._copy_hf_auxiliary_assets(source, consolidated)
+
+    assert list(consolidated.iterdir()) == []
+
+
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
     """Preserve the failing rank's exception while every rank completes collectives."""
-
-    # Import the dynamic mixin at test runtime to preserve lightweight module collection.
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     publication = {"error": None, "broadcasts": 0}
     parent_save_errors = [None, None]
@@ -484,10 +596,6 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
 
 
 def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
-    import torch
-
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
-
     class ToyModel(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -510,6 +618,21 @@ def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
     assert all(id(parameter) not in optimized for parameter in model.mm_projector.parameters())
     assert all(id(parameter) in optimized for parameter in model.language.parameters())
     assert all(id(parameter) in optimized for parameter in model.mtp.parameters())
+
+
+def test_global_kd_does_not_checkpoint_flash_kld_helper_as_model():
+    class Recipe(_WeightedObjectiveMixin, AutoModelBaseRecipe):
+        def __init__(self):
+            self.model_parts = [torch.nn.Linear(2, 2)]
+            self.loss_fn = SimpleNamespace(chunk_size=512)
+            self.main_kd_loss_fn = SimpleNamespace(chunk_size=0, temperature=2.0)
+            self.mtp_kd_loss_fn = SimpleNamespace(chunk_size=0, temperature=2.0)
+
+    recipe = Recipe()
+    engine = recipe._flash_kld_engine("mtp")
+
+    assert recipe._flash_kld_engine("mtp") is engine
+    assert recipe.__dict__["__state_tracked"] == {"model_parts"}
 
 
 def test_global_kd_quarantines_unmarked_checkpoint_even_with_dcp_metadata(tmp_path):

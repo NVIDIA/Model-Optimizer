@@ -77,6 +77,7 @@ from torch.distributed.tensor import DTensor, Replicate
 from torch.utils.checkpoint import checkpoint
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
+from ..plugins.automodel.local_kd_recipe import _copy_hf_auxiliary_assets
 from ..plugins.automodel.pp_utils import set_pp_vlm_chunk_specs
 from ..security_policy import require_boolean_policy
 from .flash_kld import TrainingFlashKLD
@@ -707,6 +708,10 @@ class _WeightedObjectiveMixin:
                             default=False,
                         ),
                     )
+                model_config = _config_value(getattr(self, "cfg", None), "model")
+                source_dir = _config_value(model_config, "pretrained_model_name_or_path")
+                if source_dir:
+                    _copy_hf_auxiliary_assets(Path(source_dir), consolidated)
                 Path(checkpoint_path, "saving_completed").touch()
             except Exception as error:  # noqa: BLE001 - all ranks must reach the collective
                 publication_error = error
@@ -1131,6 +1136,7 @@ class _WeightedObjectiveMixin:
             checkpoint_chunks=True,
         )
         setattr(self, attribute, engine)
+        self.untrack_state(attribute)  # type: ignore[attr-defined]
         return engine
 
     def _hidden_objective_losses(

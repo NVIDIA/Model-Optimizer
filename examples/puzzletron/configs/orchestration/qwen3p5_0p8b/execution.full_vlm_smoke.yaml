@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One instance on one GPU for the bounded Qwen 3.5 VLM lifecycle. Image-backed
+# evaluation and VLM KD remain model stages; filters are controller operations.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    convert: {strategy: single, instances: 1}
+    width_importance: {strategy: single, instances: 1}
+    sort: {strategy: single, instances: 1}
+    sort_sanity: {strategy: single, instances: 1}
+    width_sanity: {strategy: single, instances: 1}
+    slicing_sanity: {strategy: single, instances: 1}
+    build_library: {strategy: single, instances: 1}
+    replacement_scoring: {strategy: single, instances: 1}
+    mip: {strategy: single, instances: 1}
+    post.params-90.image_eval: {strategy: sharded, instances: 1}
+    post.params-90.best_vlm_loss: {strategy: single, instances: 1}
+    post.params-90.materialized: {strategy: sharded, instances: 1}
+    post.params-90.vlm_serving: {strategy: sharded, instances: 1}
+    post.params-90.fastest_vlm: {strategy: single, instances: 1}
+    post.params-90.short_vlm_kd: {strategy: sharded, instances: 1}
+    post.params-90.final_image_eval: {strategy: sharded, instances: 1}
+    post.params-90.best: {strategy: single, instances: 1}

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import math
 
@@ -13,6 +25,7 @@ from modelopt.torch.puzzletron.post_mip.records import (
     CandidateRevision,
     NodeObservation,
 )
+from modelopt.torch.puzzletron.post_mip.reporting import render_aiperf_report
 
 
 def _ledger(tmp_path, metrics_by_revision):
@@ -46,6 +59,13 @@ def _sweep(*values):
     }
 
 
+def _vlm_sweep(*values):
+    return {
+        f"images_12.concurrency_{concurrency}.image_throughput": value
+        for concurrency, value in values
+    }
+
+
 def test_individual_best_ranks_each_model_by_its_best_concurrency(tmp_path):
     ledger = _ledger(
         tmp_path,
@@ -75,6 +95,60 @@ def test_individual_best_ranks_each_model_by_its_best_concurrency(tmp_path):
         "revision-b": 30.0,
         "revision-c": 15.0,
     }
+
+
+def test_multimodal_sweep_selection_resolves_one_image_workload(tmp_path):
+    ledger = _ledger(
+        tmp_path,
+        {
+            "revision-a": _vlm_sweep((1, 20.0), (2, 25.0)),
+            "revision-b": _vlm_sweep((1, 30.0), (2, 15.0)),
+        },
+    )
+
+    selected, excluded, scores = apply_filter(
+        ledger,
+        ("revision-a", "revision-b"),
+        {
+            "mode": "top_k",
+            "metric": "serving.images_12.image_throughput",
+            "direction": "maximize",
+            "top_k": 1,
+            "best_selection_mode": "individual_best",
+        },
+    )
+
+    assert selected == ("revision-b",)
+    assert excluded == {"revision-a": "outside top_k"}
+    assert scores == {"revision-a": 25.0, "revision-b": 30.0}
+
+
+def test_aiperf_report_renders_multimodal_namespaced_metrics():
+    html = render_aiperf_report(
+        "vlm-serving",
+        {
+            "status": "completed",
+            "observations": [
+                {
+                    "label": "candidate-a",
+                    "status": "success",
+                    "selected_by": ["fastest_vlm"],
+                    "metrics": {
+                        "images_12.concurrency_1.request_throughput": 2.0,
+                        "images_12.concurrency_1.image_throughput": 24.0,
+                        "images_12.concurrency_1.output_token_throughput": 128.0,
+                        "images_12.concurrency_1.ttft_mean_ms": 10.0,
+                        "images_12.concurrency_1.tpot_mean_ms": 3.0,
+                    },
+                }
+            ],
+        },
+    )
+
+    assert "images 12 / concurrency 1" in html
+    assert "<td>24</td>" in html
+    assert "<td>128</td>" in html
+    assert "Selected by Fastest" in html
 
 
 def test_best_per_concurrency_unions_top_k_from_each_point(tmp_path):

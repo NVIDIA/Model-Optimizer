@@ -35,6 +35,7 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _server_max_model_len,
     _topology_vllm_args,
     _vllm_server_command,
+    run_aiperf_sweep,
 )
 
 # Subprocess environment and request sizing
@@ -261,7 +262,7 @@ def test_vllm_topology_args_enable_dp_and_expert_parallel_only_when_requested():
 def test_vllm_server_command_applies_explicit_remote_code_policy(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
-        lambda _checkpoint: [],
+        lambda _checkpoint, **_kwargs: [],
     )
 
     default_command = _vllm_server_command(
@@ -287,6 +288,104 @@ def test_vllm_server_command_applies_explicit_remote_code_policy(monkeypatch, tm
     assert "--trust-remote-code" in trusted_command
 
 
+def test_vllm_server_command_loads_full_multimodal_model(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5",
+                "architectures": ["AnyModel"],
+                "base_architecture": "Qwen3_5ForConditionalGeneration",
+                "vision_config": {"model_type": "qwen3_5_vision"},
+                "text_config": {
+                    "model_type": "qwen3_5_text",
+                    "layer_types": ["linear_attention"],
+                },
+            }
+        )
+    )
+    (tmp_path / "preprocessor_config.json").write_text("{}")
+
+    command = _vllm_server_command(
+        checkpoint_dir=tmp_path,
+        port=8000,
+        model_name="served-model",
+        input_tokens=100,
+        output_tokens=80,
+        topology={"gpu_group_size": 1, "server_context_overhead_tokens": 12288},
+        trust_remote_code=False,
+        image_batch_size=12,
+        image_width_mean=1280,
+        image_height_mean=720,
+    )
+
+    assert "--language-model-only" not in command
+    assert command[command.index("--max-model-len") + 1] == "12468"
+    assert json.loads(command[command.index("--limit-mm-per-prompt") + 1]) == {
+        "image": 12,
+        "video": 0,
+    }
+    assert json.loads(command[command.index("--mm-processor-kwargs") + 1]) == {
+        "max_num_frames": 1,
+        "max_pixels": 1280 * 720,
+        "min_pixels": 262144,
+    }
+    assert "--mamba-cache-mode" in command
+    assert "--enable-prefix-caching" in command
+
+
+def test_vllm_server_command_requires_visual_context_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint, **_kwargs: [],
+    )
+
+    with pytest.raises(ValueError, match="visual-token budget"):
+        _vllm_server_command(
+            checkpoint_dir=tmp_path,
+            port=8000,
+            model_name="served-model",
+            input_tokens=100,
+            output_tokens=80,
+            topology={"gpu_group_size": 1},
+            trust_remote_code=False,
+            image_batch_size=1,
+            image_width_mean=1280,
+            image_height_mean=720,
+        )
+
+
+def test_vllm_server_command_bounds_processor_pixels_for_small_images(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "vision_config": {},
+            }
+        )
+    )
+    (tmp_path / "preprocessor_config.json").write_text("{}")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint, **_kwargs: [],
+    )
+
+    command = _vllm_server_command(
+        checkpoint_dir=tmp_path,
+        port=8000,
+        model_name="served-model",
+        input_tokens=100,
+        output_tokens=80,
+        topology={"gpu_group_size": 1, "server_context_overhead_tokens": 256},
+        trust_remote_code=False,
+        image_batch_size=1,
+        image_width_mean=128,
+        image_height_mean=128,
+    )
+
+    processor = json.loads(command[command.index("--mm-processor-kwargs") + 1])
+    assert processor["min_pixels"] == processor["max_pixels"] == 128 * 128
+
+
 @pytest.mark.parametrize(
     "extra_arg",
     [
@@ -304,7 +403,7 @@ def test_vllm_server_command_applies_explicit_remote_code_policy(monkeypatch, tm
 def test_vllm_server_command_rejects_remote_code_policy_override(monkeypatch, tmp_path, extra_arg):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
-        lambda _checkpoint: [],
+        lambda _checkpoint, **_kwargs: [],
     )
 
     with pytest.raises(ValueError, match="cannot set policy-owned vLLM options"):
@@ -338,6 +437,9 @@ def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
         extra_inputs=None,
         use_server_token_count=True,
         gpu_telemetry=None,
+        image_batch_size=0,
+        image_width_mean=0,
+        image_height_mean=0,
     )
 
     assert command[command.index("--concurrency") + 1] == "8"
@@ -347,7 +449,72 @@ def test_profile_command_maps_each_workload_answer_to_aiperf_cli(tmp_path):
     assert command[command.index("--output-tokens-mean") + 1] == "128"
     assert command[command.index("--output-tokens-stddev") + 1] == "0"
     assert command[command.index("--tokenizer") + 1] == str(tmp_path / "tokenizer")
+    assert command[command.index("--image-batch-size") + 1] == "0"
+    assert "--image-width-mean" not in command
+    assert "--image-height-mean" not in command
     assert "--use-server-token-count" in command
+
+
+def test_profile_command_maps_multimodal_workload_to_aiperf_cli(tmp_path):
+    command = _profile_command(
+        executable=Path("/opt/aiperf/bin/aiperf"),
+        model_name="served-model",
+        port=8000,
+        endpoint_type="chat",
+        concurrency=1,
+        request_count=4,
+        input_tokens=100,
+        output_tokens=80,
+        tokenizer_dir=tmp_path / "tokenizer",
+        artifact_dir=tmp_path / "artifacts",
+        seed=7,
+        extra_inputs={"min_tokens": 80},
+        use_server_token_count=True,
+        gpu_telemetry=None,
+        image_batch_size=12,
+        image_width_mean=1280,
+        image_height_mean=720,
+    )
+
+    assert command[command.index("--image-batch-size") + 1] == "12"
+    assert command[command.index("--image-width-mean") + 1] == "1280"
+    assert command[command.index("--image-width-stddev") + 1] == "0"
+    assert command[command.index("--image-height-mean") + 1] == "720"
+    assert command[command.index("--image-height-stddev") + 1] == "0"
+
+
+@pytest.mark.parametrize(
+    ("endpoint_type", "image_batch_size", "image_width_mean", "image_height_mean", "match"),
+    [
+        ("completions", 1, 1280, 720, "require endpoint_type='chat'"),
+        ("chat", -1, 0, 0, "must be nonnegative"),
+        ("chat", 1, 0, 720, "require positive"),
+        ("chat", 0, 1280, 720, "require image_batch_size > 0"),
+    ],
+)
+def test_profile_command_rejects_invalid_multimodal_workloads(
+    tmp_path, endpoint_type, image_batch_size, image_width_mean, image_height_mean, match
+):
+    with pytest.raises(ValueError, match=match):
+        _profile_command(
+            executable=Path("/opt/aiperf/bin/aiperf"),
+            model_name="served-model",
+            port=8000,
+            endpoint_type=endpoint_type,
+            concurrency=1,
+            request_count=1,
+            input_tokens=100,
+            output_tokens=80,
+            tokenizer_dir=tmp_path / "tokenizer",
+            artifact_dir=tmp_path / "artifacts",
+            seed=7,
+            extra_inputs=None,
+            use_server_token_count=True,
+            gpu_telemetry=None,
+            image_batch_size=image_batch_size,
+            image_width_mean=image_width_mean,
+            image_height_mean=image_height_mean,
+        )
 
 
 def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
@@ -367,6 +534,9 @@ def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
                 "total_gpu_energy": {"avg": 4500.0},
                 "output_tokens_per_joule": {"avg": 64.0},
                 "energy_per_user": {"avg": 70.0},
+                "num_images": {"avg": 12.0},
+                "image_throughput": {"avg": 24.0},
+                "image_latency": {"avg": 40.0, "p95": 50.0, "p99": 60.0},
                 "error_request_count": {"avg": 0.0},
             }
         )
@@ -380,6 +550,114 @@ def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
     assert metrics["total_gpu_power_w"] == 900.0
     assert metrics["total_gpu_energy_j"] == 4500.0
     assert metrics["output_tokens_per_joule"] == 64.0
+    assert metrics["num_images"] == 12.0
+    assert metrics["image_throughput"] == 24.0
+    assert metrics["image_latency_p95_ms"] == 50.0
+
+
+def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["AnyModel"],
+                "base_architecture": "Qwen3_5ForConditionalGeneration",
+                "vision_config": {"model_type": "qwen3_5_vision"},
+            }
+        )
+    )
+    (checkpoint / "preprocessor_config.json").write_text("{}")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
+        lambda _checkpoint, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._free_port",
+        lambda: 8000,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._wait_for_health",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._stop_process_group",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.subprocess.Popen",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+
+    def fake_run(command, **_kwargs):
+        artifact_dir = Path(command[command.index("--artifact-dir") + 1])
+        image_batch_size = int(command[command.index("--image-batch-size") + 1])
+        (artifact_dir / "profile_export_aiperf.json").write_text(
+            json.dumps(
+                {
+                    "input_sequence_length": {"avg": 100.0},
+                    "output_sequence_length": {"avg": 80.0},
+                    "num_images": {"avg": float(image_batch_size)},
+                    "image_throughput": {"avg": float(image_batch_size)},
+                    "error_request_count": {"avg": 0.0},
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.subprocess.run",
+        fake_run,
+    )
+
+    results = run_aiperf_sweep(
+        checkpoint,
+        artifact_dir=tmp_path / "artifacts",
+        concurrencies=(1,),
+        input_tokens=100,
+        output_tokens=80,
+        gpu_ids="0",
+        topology={"gpu_group_size": 1, "server_context_overhead_tokens": 16384},
+        request_counts={1: 1},
+        executable=Path("/opt/aiperf/bin/aiperf"),
+        endpoint_type="chat",
+        image_batch_sizes=(1, 6, 12),
+        image_width_mean=1280,
+        image_height_mean=720,
+        gpu_telemetry=None,
+    )
+
+    assert [result.workload["image_batch_size"] for result in results] == [1, 6, 12]
+    assert len({result.workload_id for result in results}) == 3
+    assert len({result.cache_identity for result in results}) == 3
+    assert all(
+        f"images_{result.workload['image_batch_size']}" in result.raw_artifacts["profile"]
+        for result in results
+    )
+
+
+def test_multimodal_sweep_rejects_an_empty_image_workload_axis(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    artifact_dir = tmp_path / "artifacts"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._prepare_vllm_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("checkpoint preparation must follow validation"),
+    )
+
+    with pytest.raises(ValueError, match="must be non-empty"):
+        run_aiperf_sweep(
+            checkpoint,
+            artifact_dir=artifact_dir,
+            concurrencies=(1,),
+            input_tokens=100,
+            output_tokens=80,
+            gpu_ids="0",
+            topology={"gpu_group_size": 1},
+            image_batch_sizes=(),
+        )
+    assert not artifact_dir.exists()
 
 
 def _offline_environment() -> dict[str, str]:

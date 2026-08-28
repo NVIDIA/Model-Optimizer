@@ -197,7 +197,14 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     def fake_run_aiperf_sweep(checkpoint, **settings):
         captured["checkpoint"] = checkpoint
         captured.update(settings)
-        return [SimpleNamespace(concurrency=8, metrics={}, raw_artifacts={})]
+        return [
+            SimpleNamespace(
+                concurrency=8,
+                workload={"image_batch_size": 12},
+                metrics={},
+                raw_artifacts={},
+            )
+        ]
 
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.run_aiperf_sweep",
@@ -217,6 +224,9 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
                 "allow_aiperf_v011_online_tokenizer_resolution": True,
                 "input_tokens": 1024,
                 "output_tokens": 128,
+                "image_batch_sizes": [1, 6, 12],
+                "image_width_mean": 1280,
+                "image_height_mean": 720,
                 "topology": {"gpu_group_size": 1},
             }
         },
@@ -238,6 +248,9 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert captured["request_counts"] == {8: 23}
     assert captured["trust_remote_code"] is True
     assert captured["allow_aiperf_v011_online_tokenizer_resolution"] is True
+    assert captured["image_batch_sizes"] == [1, 6, 12]
+    assert captured["image_width_mean"] == 1280
+    assert captured["image_height_mean"] == 720
     assert "request_count" not in captured
     assert "minimum_request_count" not in captured
     assert "requests_per_concurrency" not in captured
