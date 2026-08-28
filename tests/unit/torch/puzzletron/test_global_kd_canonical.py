@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from nemo_automodel.components.checkpoint import stateful_wrappers
+from nemo_automodel.recipes.base_recipe import BaseRecipe as AutoModelBaseRecipe
 
 from modelopt.torch.puzzletron.distillation import global_kd_recipe
 from modelopt.torch.puzzletron.distillation.global_automodel import (
@@ -84,41 +84,6 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
 
     assert len(observed) == 1
     assert observed[0][0].to_dict() == {"subblock_configs": []}
-
-
-def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
-    failure = [
-        "The option indicates that model state_dict is required to save or load, "
-        "but model state_dict is empty.rank = dist.get_rank()=0."
-    ]
-
-    original_parameters = []
-
-    def failed_dcp_state(model, *args, **kwargs):
-        if not original_parameters:
-            original_parameters.extend(model._parameters.values())
-            model._parameters.clear()
-        raise RuntimeError(failure[0])
-
-    monkeypatch.setattr(stateful_wrappers, "get_model_state_dict", failed_dcp_state)
-    monkeypatch.setattr(stateful_wrappers, "set_model_state_dict", failed_dcp_state)
-    global_kd_recipe.install_unsharded_checkpoint_state_dict_support()
-
-    class DynamicModel(torch.nn.Linear):
-        def state_dict(self):
-            return {}
-
-    model = DynamicModel(2, 3)
-    state_dict = stateful_wrappers.get_model_state_dict(model)
-
-    assert set(state_dict) == {"bias", "weight"}
-    model._parameters.update(zip(("weight", "bias"), original_parameters))
-    replacement = {name: torch.ones_like(value) for name, value in state_dict.items()}
-    stateful_wrappers.set_model_state_dict(model, replacement)
-    assert all(torch.equal(value, replacement[name]) for name, value in model.named_parameters())
-    failure[0] = "unrelated checkpoint failure"
-    with pytest.raises(RuntimeError, match="unrelated checkpoint failure"):
-        stateful_wrappers.get_model_state_dict(model)
 
 
 def test_distillation_overfit_stage_disables_mtp_objectives_by_default(monkeypatch, tmp_path):
@@ -644,6 +609,21 @@ def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
     assert all(id(parameter) not in optimized for parameter in model.mm_projector.parameters())
     assert all(id(parameter) in optimized for parameter in model.language.parameters())
     assert all(id(parameter) in optimized for parameter in model.mtp.parameters())
+
+
+def test_global_kd_does_not_checkpoint_flash_kld_helper_as_model():
+    class Recipe(_WeightedObjectiveMixin, AutoModelBaseRecipe):
+        def __init__(self):
+            self.model_parts = [torch.nn.Linear(2, 2)]
+            self.loss_fn = SimpleNamespace(chunk_size=512)
+            self.main_kd_loss_fn = SimpleNamespace(chunk_size=0, temperature=2.0)
+            self.mtp_kd_loss_fn = SimpleNamespace(chunk_size=0, temperature=2.0)
+
+    recipe = Recipe()
+    engine = recipe._flash_kld_engine("mtp")
+
+    assert recipe._flash_kld_engine("mtp") is engine
+    assert recipe.__dict__["__state_tracked"] == {"model_parts"}
 
 
 def test_global_kd_quarantines_unmarked_checkpoint_even_with_dcp_metadata(tmp_path):

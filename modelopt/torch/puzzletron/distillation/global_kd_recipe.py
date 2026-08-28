@@ -212,68 +212,6 @@ def install_pp_checkpoint_state_dict_support() -> None:
         setattr(stateful_wrappers, name, non_strict)
 
 
-def install_unsharded_checkpoint_state_dict_support() -> None:
-    """Fall back to named tensors for a one-rank dynamic model checkpoint.
-
-    PyTorch DCP can reject an otherwise valid unsharded DynamicModule after its
-    model-state verification removes every entry. The module's regular state
-    dict is empty for the same reason, so collect registered parameters and
-    persistent buffers directly. A one-rank checkpoint needs no distributed
-    state-dict transformation.
-    """
-    from nemo_automodel.components.checkpoint import stateful_wrappers
-
-    def is_empty_dcp_state(error: RuntimeError) -> bool:
-        return "model state_dict is required to save or load, but model state_dict is empty" in str(
-            error
-        )
-
-    original_get = stateful_wrappers.get_model_state_dict
-    if not getattr(original_get, "_puzzletron_unsharded_fallback", False):
-
-        def get_model_state_dict(model, *args, **kwargs):
-            # Snapshot references before DCP enters ModelOpt's dynamic-attribute
-            # reset contexts. Some nested dynamic VLMs expose no registered
-            # tensors after that failed traversal has unwound.
-            fallback_state_dict = {
-                name: parameter.detach()
-                for name, parameter in model.named_parameters(remove_duplicate=False)
-            }
-            for name, buffer in model.named_buffers(remove_duplicate=False):
-                module_name, _, buffer_name = name.rpartition(".")
-                owner = model.get_submodule(module_name)
-                if buffer_name not in owner._non_persistent_buffers_set:
-                    fallback_state_dict[name] = buffer.detach()
-            try:
-                return original_get(model, *args, **kwargs)
-            except RuntimeError as error:
-                if not is_empty_dcp_state(error):
-                    raise
-                if not fallback_state_dict:
-                    raise
-                return fallback_state_dict
-
-        setattr(get_model_state_dict, "_puzzletron_unsharded_fallback", True)
-        stateful_wrappers.get_model_state_dict = get_model_state_dict
-
-    original_set = stateful_wrappers.set_model_state_dict
-    if not getattr(original_set, "_puzzletron_unsharded_fallback", False):
-
-        def set_model_state_dict(model, state_dict, *args, options=None, **kwargs):
-            try:
-                return original_set(model, state_dict, *args, options=options, **kwargs)
-            except RuntimeError as error:
-                if not is_empty_dcp_state(error):
-                    raise
-                return model.load_state_dict(
-                    state_dict,
-                    strict=True if options is None else bool(options.strict),
-                )
-
-        setattr(set_model_state_dict, "_puzzletron_unsharded_fallback", True)
-        stateful_wrappers.set_model_state_dict = set_model_state_dict
-
-
 def _trace_global_kd_phase(phase: str) -> None:
     if os.environ.get("PUZZLETRON_TRACE_GLOBAL_KD") != "1":
         return
@@ -716,8 +654,6 @@ class _WeightedObjectiveMixin:
     ):
         """Publish a completion marker only after model and optimizer DCP succeed."""
 
-        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
-            install_unsharded_checkpoint_state_dict_support()
         result = None
         publication_error: Exception | None = None
         publication_error_text: str | None = None
@@ -1200,6 +1136,7 @@ class _WeightedObjectiveMixin:
             checkpoint_chunks=True,
         )
         setattr(self, attribute, engine)
+        self.untrack_state(attribute)  # type: ignore[attr-defined]
         return engine
 
     def _hidden_objective_losses(
