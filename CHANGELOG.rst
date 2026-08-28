@@ -8,6 +8,7 @@ Changelog
 
 *Quantization*
 
+- Add a Muse Glimmer AutoQuantize recipe that searches language-model MLP projections, self-attention projections, and ``lm_head`` over W4A16 NVFP4 Four-Over-Six, FP8, and BF16 fallback at 5.5 effective bits while leaving the vision tower unquantized.
 - Add ``examples/alpamayo/qad.py``, which runs quantization-aware distillation on the quantized Alpamayo checkpoint produced by ``examples/alpamayo/quantize.py``. It distills the quantized VLM against the original FP16 VLM with ``QADTrainer``, supports FSDP2 for multi-GPU runs, and ``--export`` reassembles the trained VLM into a full AlpamayoR1 checkpoint that ``AlpamayoR1.from_pretrained`` can reload.
 - Add a calibration-free streaming Kimi-K3 converter and checkpoint-mirror recipe for NVFP4 routed experts with ``input_scale=1.0`` and 128x128 block-FP8 KDA/MLA attention weights. The converter operates shard-by-shard on the source checkpoint's packed MXFP4 experts instead of loading the 2.8T model through the in-memory ``hf_ptq.py`` path.
 - Add ``mtq.temporarily_fold_weights`` for repeated frozen-weight inference and ``mtq.preserve_quantizer_attributes_context`` for restoring temporary quantizer property and type changes. Temporary folding snapshots affected fake-quant weights on a configurable device and restores them with their quantizer state; retained pre-quant scales are inactive, while shared weights, shared quantizers, and ``SequentialQuantizer`` weights are unsupported.
