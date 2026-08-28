@@ -229,6 +229,49 @@ python -m modelopt.onnx.quantization \
 
 For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html) and the [Autotune guide](https://nvidia.github.io/Model-Optimizer/guides/9_autotune.html).
 
+### Recover accuracy with sensitivity-driven node exclusion
+
+Post-training quantization of ONNX models can result in accuracy degradation, and it is often unclear which ops or nodes are more sensitive to precision lowering. To aid in this debugging, we proppose using a sensitivity score function to rank each quantizable target (op type or individual node) by its impact on model output and then using a downstream picker to decide which targets to keep in higher precision. See the [Quantization Sensitivity Scan guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#quantization-sensitivity-scan) for more details.
+
+End-to-end workflow:
+
+```python
+from modelopt.onnx.quantization import quantize
+from modelopt.onnx.quantization.sensitivity import (
+    score,
+    suggest_exclusion,
+    summarize_exclusion,
+)
+
+# 1. Rank the quantizable targets by their impact on model output.
+result = score(
+    onnx_path="<model>.onnx",
+    calibration_data="<calibration>.npy",
+    granularity="node",      # or "op_type"
+    metric="kl_div",         # or "mse", "cos"
+    target_precision="int8",
+)
+
+# 2. Turn the ranking into an exclusion list. Coverage mode (default) leaves the
+#    largest set whose cumulative sensitivity mass stays at or below the requested
+#    fraction. Threshold mode (`threshold=<value>`) excludes every target whose
+#    individual score exceeds an absolute cutoff.
+excluded = suggest_exclusion(result["scores"], coverage=0.90)
+print(summarize_exclusion(result["scores"], excluded))
+
+# 3. Quantize with the exclusion applied. Use ``nodes_to_exclude=`` for per-node
+#    and ``op_types_to_exclude=`` for op-type granularity.
+quantize(
+    onnx_path="<model>.onnx",
+    quantize_mode="int8",
+    calibration_data="<calibration>.npy",
+    nodes_to_exclude=excluded,
+    output_path="<model>.sens_excluded.quant.onnx",
+)
+```
+
+An optional `blocks=` / `block_agg=` argument to `suggest_exclusion` ranks entire blocks instead of individual nodes.See the [guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#grouping-per-node-scores-into-architectural-blocks) for more details.
+
 ## Resources
 
 - 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
