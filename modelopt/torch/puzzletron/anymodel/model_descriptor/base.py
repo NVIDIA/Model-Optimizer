@@ -226,7 +226,7 @@ class ModelDescriptor(ABC):
             config,
             sorted_checkpoint_dir,
             alignment=alignment,
-            sampled_layers=sampled_layers,
+            sampled_layers=tuple(sampled_layers) if sampled_layers is not None else None,
         )
 
     @classmethod
@@ -592,6 +592,11 @@ class ModelDescriptor(ABC):
     def runtime_vllm_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
         """Return extra ``vllm bench latency`` args for this descriptor."""
         return []
+
+    @classmethod
+    def runtime_vllm_multimodal_benchmark_args(cls, config: dict[str, Any]) -> list[str]:
+        """Return extra vLLM args for full-model multimodal serving."""
+        raise ValueError(f"{cls.__name__} does not declare multimodal vLLM serving support")
 
     @staticmethod
     def passthrough_weight_name_predicates() -> Dict[str, re.Pattern]:

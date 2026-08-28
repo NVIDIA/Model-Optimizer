@@ -362,6 +362,73 @@ def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(tmp_path, 
     assert recipe["distributed"]["dp_size"] == 4
 
 
+@pytest.mark.parametrize(
+    "checkpoint_config",
+    [
+        {"block_configs": [{"subblock_configs": []}]},
+        {"text_config": {"block_configs": [{"subblock_configs": []}]}},
+    ],
+)
+def test_global_kd_checkpoint_copies_vlm_assets_before_completion(
+    tmp_path, monkeypatch, checkpoint_config
+):
+    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
+
+    source = tmp_path / "student"
+    source.mkdir()
+    (source / "preprocessor_config.json").write_text('{"source": true}')
+    (source / "processor_config.json").write_text('{"processor": true}')
+    (source / "model.safetensors").write_bytes(b"source weights")
+
+    class BaseRecipe:
+        def save_checkpoint(
+            self,
+            epoch,
+            step,
+            train_loss,
+            val_loss,
+            best_metric_key="default",
+        ):
+            del train_loss, val_loss, best_metric_key
+            checkpoint = tmp_path / f"epoch_{epoch}_step_{step}"
+            consolidated = checkpoint / "model/consolidated"
+            consolidated.mkdir(parents=True)
+            (consolidated / "config.json").write_text(json.dumps(checkpoint_config))
+            (consolidated / "model.safetensors").write_bytes(b"consolidated weights")
+            return "saved"
+
+    class Recipe(_WeightedObjectiveMixin, BaseRecipe):
+        pass
+
+    recipe = Recipe()
+    recipe.checkpointer = type(
+        "Checkpointer",
+        (),
+        {"config": type("Config", (), {"checkpoint_dir": tmp_path})()},
+    )()
+    recipe.dist_env = type("DistEnv", (), {"is_main": True})()
+    recipe.cfg = {
+        "model": {
+            "pretrained_model_name_or_path": str(source),
+            "trust_remote_code": True,
+        }
+    }
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.utils.vllm_adapter.refresh_realized_checkpoint_config",
+        lambda *args, **kwargs: None,
+    )
+
+    assert recipe.save_checkpoint(2, 17, 0.5, {"lm_loss": 0.25}) == "saved"
+
+    checkpoint = tmp_path / "epoch_2_step_17"
+    consolidated = checkpoint / "model/consolidated"
+    assert json.loads((consolidated / "preprocessor_config.json").read_text()) == {"source": True}
+    assert json.loads((consolidated / "processor_config.json").read_text()) == {"processor": True}
+    assert json.loads((consolidated / "config.json").read_text()) == checkpoint_config
+    assert (consolidated / "model.safetensors").read_bytes() == b"consolidated weights"
+    assert (checkpoint / "saving_completed").is_file()
+
+
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
     """Preserve the failing rank's exception while every rank completes collectives."""
 

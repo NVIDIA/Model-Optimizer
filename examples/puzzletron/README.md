@@ -77,6 +77,8 @@ experiment in dependency order. Remove `--dry-run` to launch the smoke
 campaign. The checked-in
 [Qwen 3.5 0.8B smoke guide](docs/qwen3p5_0p8b_smoke.md) provides a separate
 one-GPU MIP acceptance route when you need to validate that path directly.
+For the same pinned architecture with real image-conversation inputs, use the
+[Qwen 3.5 0.8B VLM full-lifecycle smoke](docs/qwen3p5_0p8b_vlm_smoke.md).
 
 ### 4. Launch production
 

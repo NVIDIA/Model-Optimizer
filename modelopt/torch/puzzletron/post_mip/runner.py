@@ -483,12 +483,11 @@ def _aiperf(
     for result in results:
         if len(results) == 1:
             metrics.update(result.metrics)
-        metrics.update(
-            {
-                f"concurrency_{result.concurrency}.{key}": value
-                for key, value in result.metrics.items()
-            }
-        )
+        image_batch_size = int(result.workload.get("image_batch_size", 0))
+        namespace = f"concurrency_{result.concurrency}"
+        if image_batch_size > 0:
+            namespace = f"images_{image_batch_size}.{namespace}"
+        metrics.update({f"{namespace}.{key}": value for key, value in result.metrics.items()})
     return {
         "metrics": metrics,
         "result_paths": [result.raw_artifacts for result in results],

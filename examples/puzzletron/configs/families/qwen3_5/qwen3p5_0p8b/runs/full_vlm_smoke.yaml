@@ -1,0 +1,115 @@
+# @package _global_
+
+defaults:
+  - mip_vlm_smoke
+  - _self_
+
+# Extend the bounded image-text MIP smoke through evaluation, physical
+# materialization, comparative multimodal serving, VLM distillation, and final
+# image-text evaluation. The inherited recipe owns the pinned public checkpoint,
+# native multimodal data contract, and FFN-only search.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
+data:
+  # Tested public snapshot; callers may override with another immutable SHA.
+  revision: ${oc.env:PUZZLETRON_DATASET_REVISION,51f4f4d219315c3283950994d4eb3d7fc30aa87b}
+
+# Auto-detection would select the VLM recipe from data.modality. Declare the
+# domain and trainable groups explicitly so the resolved run packet is auditable.
+global_distillation:
+  domain: vlm
+  force_hf: false
+  teacher_force_hf: false
+  student_force_hf: false
+  freeze_policy: train_all
+  validation_enabled: false
+  objective:
+    main_ce: {weight: 1.0}
+    main_kd: {weight: 1.0}
+    mtp_ce: {weight: 1.0}
+    mtp_kd: {weight: 1.0, chunk_size: 512}
+
+post_mip:
+  flows:
+    params-90:
+      source:
+        run: params-90
+        variants: all
+        objectives: all
+      nodes:
+        image_eval:
+          type: evaluation
+          config:
+            eval_samples: 2
+            block_size: 512
+        best_vlm_loss:
+          type: filter
+          input: image_eval
+          mode: top_k
+          metric: image_eval.lm_loss
+          direction: minimize
+          top_k: 2
+        materialized:
+          type: materialize
+          input: best_vlm_loss
+        vlm_serving:
+          type: aiperf
+          input: materialized
+          config:
+            endpoint_type: chat
+            input_tokens: 100
+            output_tokens: 80
+            image_batch_sizes: [1, 6, 12]
+            image_width_mean: 1280
+            image_height_mean: 720
+            concurrency: [1]
+            request_count: 1
+            extra_inputs: {min_tokens: 80}
+            use_server_token_count: true
+            benchmark_timeout: 900
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+              server_context_overhead_tokens: 16384
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --gpu-memory-utilization
+                - "0.5"
+                - --reasoning-parser
+                - qwen3
+                - --default-chat-template-kwargs
+                - '{"enable_thinking": false}'
+        fastest_vlm:
+          type: filter
+          input: vlm_serving
+          mode: top_k
+          metric: vlm_serving.images_12.concurrency_1.image_throughput
+          direction: maximize
+          top_k: 1
+        short_vlm_kd:
+          type: global_kd
+          input: fastest_vlm
+          config:
+            max_steps: 2
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 2
+        final_image_eval:
+          type: evaluation
+          input: short_vlm_kd
+          config:
+            eval_samples: 2
+            block_size: 512
+        best:
+          type: filter
+          input: final_image_eval
+          mode: top_k
+          metric: final_image_eval.lm_loss
+          direction: minimize
+          top_k: 1

@@ -764,6 +764,12 @@ class Qwen3P5TextModelDescriptor(_Qwen3P5BaseModelDescriptor):
 @ModelDescriptorFactory.register_decorator("qwen3_5")
 class Qwen3P5VLModelDescriptor(_Qwen3P5BaseModelDescriptor):
     @classmethod
+    def runtime_vllm_multimodal_benchmark_args(cls, config: Any) -> list[str]:
+        return [
+            arg for arg in cls.runtime_vllm_benchmark_args(config) if arg != "--language-model-only"
+        ]
+
+    @classmethod
     def vision_module_names(cls) -> tuple[str, ...]:
         return ("model.visual",)
 
@@ -1687,6 +1693,12 @@ class Qwen3P5MoeTextModelDescriptor(_Qwen3P5MoeModelDescriptor):
 @ModelDescriptorFactory.register_decorator("qwen3_5_moe")
 class Qwen3P5MoeVLModelDescriptor(_Qwen3P5MoeModelDescriptor):
     _IS_VLM = True
+
+    @classmethod
+    def runtime_vllm_multimodal_benchmark_args(cls, config: Any) -> list[str]:
+        return [
+            arg for arg in cls.runtime_vllm_benchmark_args(config) if arg != "--language-model-only"
+        ]
 
     @classmethod
     def runtime_benchmark_export_descriptor(cls) -> Type[ModelDescriptor]:
