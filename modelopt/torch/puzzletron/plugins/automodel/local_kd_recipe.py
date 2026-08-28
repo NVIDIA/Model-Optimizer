@@ -443,10 +443,10 @@ def _copy_hf_auxiliary_assets(source_dir: Path, consolidated_dir: Path) -> None:
     retaining bounded tokenizer and image/video processor assets needed by
     ``AutoProcessor.from_pretrained``.
     """
-    if not source_dir.is_dir() or not consolidated_dir.is_dir():
-        return
     if source_dir.is_symlink() or consolidated_dir.is_symlink():
         raise ValueError("checkpoint asset directories must not be symbolic links")
+    if not source_dir.is_dir() or not consolidated_dir.is_dir():
+        return
 
     candidates = [source_dir / name for name in sorted(_HF_AUXILIARY_FILENAMES)]
     chat_templates = source_dir / "chat_templates"

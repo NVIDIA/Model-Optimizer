@@ -422,17 +422,26 @@ def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monk
     assert (checkpoint / "saving_completed").is_file()
 
 
-@pytest.mark.parametrize("symlink_location", ["source", "destination"])
+@pytest.mark.parametrize(
+    "symlink_location",
+    ["source_directory", "source_asset", "destination_directory", "destination_asset_directory"],
+)
 def test_hf_auxiliary_assets_reject_symlinks_before_copying(tmp_path, symlink_location):
     source = tmp_path / "source"
     consolidated = tmp_path / "consolidated"
-    source.mkdir()
-    consolidated.mkdir()
-    (source / "preprocessor_config.json").write_text("{}")
-    if symlink_location == "source":
+    if symlink_location == "source_directory":
+        source.symlink_to(tmp_path / "missing-source", target_is_directory=True)
+    else:
+        source.mkdir()
+        (source / "preprocessor_config.json").write_text("{}")
+    if symlink_location == "destination_directory":
+        consolidated.symlink_to(tmp_path / "missing-destination", target_is_directory=True)
+    else:
+        consolidated.mkdir()
+    if symlink_location == "source_asset":
         (source / "target.json").write_text("{}")
         (source / "tokenizer_config.json").symlink_to(source / "target.json")
-    else:
+    elif symlink_location == "destination_asset_directory":
         templates = source / "chat_templates"
         templates.mkdir()
         (templates / "vision.jinja").write_text("template")
