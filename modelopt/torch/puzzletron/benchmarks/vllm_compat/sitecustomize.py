@@ -57,6 +57,27 @@ def _install_stable_libtorch_c_stub() -> None:
     sys.modules["vllm._C"] = c_stub
 
 
+def _load_inherited_sitecustomize() -> None:
+    """Run the next sitecustomize module after this compatibility hook."""
+    current_directory = Path(__file__).resolve().parent
+    search_path = [
+        entry for entry in sys.path if Path(entry or os.curdir).resolve() != current_directory
+    ]
+    spec = importlib.machinery.PathFinder.find_spec("sitecustomize", search_path)
+    if spec is None or spec.loader is None or spec.origin == __file__:
+        return
+    current_module = sys.modules.get("sitecustomize")
+    inherited = importlib.util.module_from_spec(spec)
+    sys.modules["sitecustomize"] = inherited
+    try:
+        spec.loader.exec_module(inherited)
+    finally:
+        if current_module is None:
+            sys.modules.pop("sitecustomize", None)
+        else:
+            sys.modules["sitecustomize"] = current_module
+
+
 try:
     import torch
 except ImportError:
@@ -72,3 +93,4 @@ if torch is not None and importlib.util.find_spec("torch._opaque_base") is None:
     sys.modules["torch._opaque_base"] = opaque_base
 
 _install_stable_libtorch_c_stub()
+_load_inherited_sitecustomize()

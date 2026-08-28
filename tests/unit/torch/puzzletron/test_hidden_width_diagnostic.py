@@ -15,13 +15,19 @@
 
 import json
 
+import pytest
+
 from modelopt.torch.puzzletron.stages.diagnostics import (
     _diagnostic_checkpoint_needs_rebuild,
+    _hidden_only_diagnostic_ready,
     _hidden_width_ranking_verdict,
+    _hidden_width_result_metrics,
+    _merge_reused_sort_equivalence,
     _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
     _select_layers,
     _write_hidden_only_diagnostic_artifacts,
+    _write_reused_sort_equivalence,
 )
 
 
@@ -97,6 +103,17 @@ def test_hidden_only_diagnostic_finishes_without_empty_parent_sweep(tmp_path):
     )
 
 
+def test_hidden_only_guard_allows_nonmaster_rank_without_summary():
+    assert _hidden_only_diagnostic_ready(
+        axes=["hidden_width"], hidden_width_summary=None, is_master=False
+    )
+
+    with pytest.raises(RuntimeError, match="rank 0"):
+        _hidden_only_diagnostic_ready(
+            axes=["hidden_width"], hidden_width_summary=None, is_master=True
+        )
+
+
 def test_diagnostic_retry_rebuilds_partial_indexed_checkpoint(tmp_path):
     checkpoint = tmp_path / "reverse"
     checkpoint.mkdir()
@@ -149,6 +166,108 @@ def test_random_diagnostic_layers_are_deterministic_and_axis_specific():
     assert ffn == repeated
     assert ffn != gdn
     assert ffn == sorted(ffn)
+
+
+def test_hidden_width_diagnostic_preserves_all_available_solution_metrics():
+    metric_names = (
+        "raw_replacement_loss",
+        "cosine_embedding_loss_hidden_states",
+        "normalized_mse_loss_hidden_states",
+        "mse_loss_hidden_states",
+        "mae_loss_hidden_states",
+        "kl_div",
+        "lm_loss",
+        "token_accuracy_top_1",
+        "token_accuracy_top_1_consistency",
+        "token_accuracy_top_5",
+        "token_accuracy_top_5_consistency",
+        "token_accuracy_top_10",
+        "token_accuracy_top_10_consistency",
+    )
+    raw = {name: {"avg": index / 10} for index, name in enumerate(metric_names, 1)}
+
+    metrics = _hidden_width_result_metrics(raw)
+
+    assert list(metrics)[: len(metric_names)] == list(metric_names)
+    assert all(metrics[name] == raw[name]["avg"] for name in metric_names)
+
+
+def test_reused_parent_sweep_preserves_existing_sort_diagnosis_metrics():
+    existing = {
+        "passed": True,
+        "teacher": {"lm_loss": 1.2},
+        "sorted_teacher": {"lm_loss": 1.2001},
+        "reverse_sorted": {"lm_loss": 1.5},
+    }
+    reuse = {
+        "passed": True,
+        "reused_parent_sweep": True,
+        "equivalence": {"passed": True},
+    }
+
+    merged = _merge_reused_sort_equivalence(existing, reuse)
+
+    assert merged["teacher"] == existing["teacher"]
+    assert merged["sorted_teacher"] == existing["sorted_teacher"]
+    assert merged["reverse_sorted"] == existing["reverse_sorted"]
+    assert merged["reused_parent_sweep"] is True
+
+
+def test_reused_parent_sweep_does_not_mutate_completed_sort_artifact(tmp_path):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    original = {
+        "passed": True,
+        "teacher": {"lm_loss": 1.2},
+        "sorted_teacher": {"lm_loss": 1.2001},
+    }
+    sort_summary_path.write_text(json.dumps(original, indent=2, sort_keys=True) + "\n")
+    original_bytes = sort_summary_path.read_bytes()
+
+    merged = _write_reused_sort_equivalence(
+        sort_summary_path,
+        reuse_summary_path,
+        {"passed": True, "reused_parent_sweep": True},
+    )
+
+    assert sort_summary_path.read_bytes() == original_bytes
+    assert json.loads(reuse_summary_path.read_text()) == merged
+    assert merged["teacher"] == original["teacher"]
+    assert merged["reused_parent_sweep"] is True
+
+
+@pytest.mark.parametrize("invalid_summary", [None, [], "not-an-object"])
+def test_reused_parent_sweep_rejects_non_object_sort_artifacts(tmp_path, invalid_summary):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    sort_summary_path.write_text(json.dumps(invalid_summary))
+
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        _write_reused_sort_equivalence(
+            sort_summary_path,
+            reuse_summary_path,
+            {"passed": True, "reused_parent_sweep": True},
+        )
+
+    assert not reuse_summary_path.exists()
+
+
+def test_reused_parent_sweep_rejects_oversized_sort_artifact(tmp_path):
+    sort_summary_path = tmp_path / "sort_sanity" / "summary.json"
+    reuse_summary_path = tmp_path / "width_sanity" / "reused_sort_equivalence.json"
+    sort_summary_path.parent.mkdir()
+    sort_summary_path.write_bytes(b"{}" + b" " * (1 << 20))
+
+    with pytest.raises(ValueError, match="exceeds metadata size limit"):
+        _write_reused_sort_equivalence(
+            sort_summary_path,
+            reuse_summary_path,
+            {"passed": True, "reused_parent_sweep": True},
+        )
+
+    assert not reuse_summary_path.exists()
 
 
 def test_parent_sweep_sort_miss_is_blocking_but_width_miss_remains_advisory():

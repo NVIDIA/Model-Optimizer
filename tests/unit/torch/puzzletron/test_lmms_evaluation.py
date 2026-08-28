@@ -17,6 +17,7 @@
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -82,6 +83,87 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert "gpu_group_size" not in model_args
     assert env["LMMS_EVAL_HOME"] == str(tmp_path / "cache")
     assert timeout == 123
+
+
+def test_command_forwards_unowned_model_and_evaluator_options(tmp_path):
+    argv, _, _ = lmms._build_command(
+        {
+            **_settings("ifeval"),
+            "model_args": {"new_vllm_option": "enabled"},
+            "extra_args": ["--new-lmms-option", "enabled"],
+        },
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    model_args = argv[argv.index("--model_args") + 1]
+    evaluator_option = argv.index("--new-lmms-option")
+    assert "new_vllm_option=enabled" in model_args
+    assert argv[evaluator_option + 1] == "enabled"
+
+
+def test_command_splits_string_prefix(tmp_path):
+    argv, _, _ = lmms._build_command(
+        {**_settings("ifeval"), "command_prefix": "python -m lmms_eval"},
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    assert argv[:3] == ["python", "-m", "lmms_eval"]
+
+
+def test_cache_dir_precedence(monkeypatch, tmp_path):
+    monkeypatch.setenv("LMMS_EVAL_HOME", "/inherited/cache")
+    settings = {**_settings("ifeval"), "cache_dir": tmp_path / "configured-cache"}
+
+    _, env, _ = lmms._build_command(
+        settings,
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+    assert env["LMMS_EVAL_HOME"] == str(tmp_path / "configured-cache")
+
+    settings["env"] = {"LMMS_EVAL_HOME": "/explicit/cache"}
+    _, env, _ = lmms._build_command(
+        settings,
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+    assert env["LMMS_EVAL_HOME"] == "/explicit/cache"
+
+
+def test_command_installs_existing_vllm_subprocess_compatibility(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/inherited")
+
+    _, env, _ = lmms._build_command(
+        {**_settings("ifeval"), "env": {"PYTHONPATH": "/explicit"}},
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    python_paths = env["PYTHONPATH"].split(os.pathsep)
+    assert Path(python_paths[0]).name == "vllm_compat"
+    assert (Path(python_paths[0]) / "sitecustomize.py").is_file()
+    assert python_paths[1:] == ["/explicit"]
+
+
+def test_vllm_subprocess_compatibility_runs_inherited_sitecustomize(tmp_path):
+    inherited = tmp_path / "inherited"
+    inherited.mkdir()
+    marker = tmp_path / "loaded"
+    (inherited / "sitecustomize.py").write_text(
+        "import os\nfrom pathlib import Path\nPath(os.environ['MARKER']).write_text('loaded')\n"
+    )
+    compatibility = Path(lmms.__file__).parents[1] / "benchmarks" / "vllm_compat"
+    environment = {
+        **os.environ,
+        "MARKER": str(marker),
+        "PYTHONPATH": os.pathsep.join((str(compatibility), str(inherited))),
+    }
+
+    subprocess.run([sys.executable, "-c", "pass"], check=True, env=environment)
+
+    assert marker.read_text() == "loaded"
 
 
 def test_command_uses_bounded_default_timeout(tmp_path):

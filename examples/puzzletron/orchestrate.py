@@ -33,6 +33,7 @@ from puzzletron_orchestrator.compiler import (  # noqa: E402
     compile_campaign_plan,
     load_execution_config,
     load_runner_config,
+    validate_runner_ready,
 )
 from puzzletron_orchestrator.controller import CampaignController, dry_run_plan  # noqa: E402
 from puzzletron_orchestrator.logging import OrchestratorLogger  # noqa: E402
@@ -110,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     logger = OrchestratorLogger(color=args.color)
     try:
         runner = load_runner_config(args.runner)
+        if not args.dry_run:
+            validate_runner_ready(runner)
         execution = load_execution_config(args.execution)
         plan = compile_campaign_plan(
             experiment_config_path=args.experiment,
