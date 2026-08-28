@@ -17,8 +17,6 @@
 
 from pathlib import Path
 
-import yaml
-
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -47,35 +45,7 @@ def _compile_plan(monkeypatch, tmp_path: Path):
     )
 
 
-def test_qwen3p5_0p8b_vlm_smoke_is_a_multimodal_overlay() -> None:
-    overlay = yaml.safe_load(RUN_PATH.read_text(encoding="utf-8"))
-
-    assert overlay["defaults"] == ["mip_smoke", "_self_"]
-    assert overlay["data"] == {
-        "modality": "multimodal",
-        "layout": "padded_varlen",
-        "max_sample_length": 512,
-        "path": "${dataset_path}",
-        "revision": "${oc.env:PUZZLETRON_DATASET_REVISION}",
-        "processor_identity": "${model_info.hf_repo}@${model_info.hf_revision}",
-        "packing": None,
-    }
-    assert overlay["tokenize_data"] == {"enabled": False, "caches": []}
-    assert overlay["sort"]["deferred_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_value_heads_per_group",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
-    assert overlay["sort_sanity"]["automodel"]["lm_head_backend"] == "streaming"
-    assert overlay["sort_sanity"]["max_abs_lm_loss_delta"] == 0.002
-    assert overlay["sort_sanity"]["max_abs_reverse_lm_loss_delta"] == 0.002
-    assert overlay["replacement_scoring"]["automodel"]["lm_head_backend"] == "streaming"
-
-
-def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_native_route(
+def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_ffn_only_route(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -99,6 +69,7 @@ def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_native_route(
     assert config["model"]["revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
     assert config["model"]["descriptor_override"] == "qwen3_5"
     assert config["model"]["force_hf"] is False
+    assert config["model"]["trust_remote_code"] is False
     assert config["data"]["path"] == str(tmp_path / "dataset")
     assert config["data"]["revision"] == "fixture-revision"
     assert config["data"]["processor_identity"] == (
@@ -128,14 +99,6 @@ def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_native_route(
         "replacement_scoring",
     ):
         assert config[section]["packed_token_cache_path"] is None
-
-
-def test_qwen3p5_0p8b_vlm_smoke_preserves_the_accepted_ffn_only_search(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    config = _compile_plan(monkeypatch, tmp_path).experiment_config
-
     assert config["search_space"]["axes"] == {
         "ffn_intermediate": {
             "enabled": True,

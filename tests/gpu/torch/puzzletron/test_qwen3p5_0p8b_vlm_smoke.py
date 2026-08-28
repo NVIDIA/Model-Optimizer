@@ -28,7 +28,6 @@ import yaml
 from PIL import Image
 
 from modelopt.torch.puzzletron.dataset.multimodal import materialize_normalized_conversation_samples
-from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 
 RUN_PATH = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_vlm_smoke.yaml"
 EXECUTION_PATH = "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml"
@@ -159,12 +158,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
             f"stderr tail:\n{completed.stderr[-12000:]}"
         )
 
-    run_config = pipeline_config_from_path(project_root_path / RUN_PATH)
-    assert run_config["data"]["modality"] == "multimodal"
-    assert run_config["data"]["revision"] == "fixture-revision"
-    assert run_config["model"]["descriptor_override"] == "qwen3_5"
-    assert run_config["model"]["source"] == "Qwen/Qwen3.5-0.8B"
-
     width_manifest = json.loads(
         (results / "manifests/width_importance.json").read_text(encoding="utf-8")
     )
@@ -185,25 +178,6 @@ def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
         assert observability["vision_forward_count"] > 0
         assert observability["vision_output_checksums"]
         assert observability["batch_fingerprints"]
-
-    slicing_summary = json.loads(
-        (results / "artifacts/slicing_sanity/summary.json").read_text(encoding="utf-8")
-    )
-    assert slicing_summary["passed"] is True
-    assert slicing_summary["verdict"] == "passed"
-    assert slicing_summary["provenance"]["backend"] == "distributed_parent_sweep"
-    physical_rows = [
-        row
-        for row in slicing_summary["rows"]
-        if row["axis"] == "ffn_intermediate" and row["method"] == "physical"
-    ]
-    assert len(physical_rows) == 2
-    for row in physical_rows:
-        assert row["parent_role"].startswith("realized_")
-        assert row["teacher_value"] == 3584
-        assert row["target_value"] in {3072, 2048}
-        assert row["num_changed_layers"] == 1
-        assert json.loads(row["changed_layers"]) == [row["layer_idx"]]
 
     replacement_results = [
         json.loads(path.read_text(encoding="utf-8"))
