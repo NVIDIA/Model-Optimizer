@@ -15,13 +15,9 @@
 
 """ONNX quantization sensitivity: rank quantizable targets by per-target Q/DQ drift."""
 
-from modelopt.onnx.quantization.sensitivity.picker import suggest_exclusion, summarize_exclusion
-from modelopt.onnx.quantization.sensitivity.score import (
-    CalibrationSource,
-    Granularity,
-    Metric,
-    score,
-)
+# ruff: noqa: F405
+from .picker import *
+from .score import *
 
 __all__ = [
     "CalibrationSource",

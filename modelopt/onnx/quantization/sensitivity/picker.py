@@ -25,6 +25,8 @@ from modelopt.onnx.logging_config import logger
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+__all__ = ["suggest_exclusion", "summarize_exclusion"]
+
 
 def suggest_exclusion(
     scores: Mapping[str, float],
@@ -39,8 +41,9 @@ def suggest_exclusion(
 ) -> list[str]:
     """Return an exclusion list from a per-target sensitivity score dictionary.
 
-    Coverage mode (default) picks the largest target set whose cumulative score stays at or
-    below ``coverage * total_mass``. Threshold mode (when ``threshold`` is set; ``coverage``
+    Coverage mode (default) walks targets in descending score order, accumulating them until
+    the next one would push the cumulative score above ``coverage * total_mass``, at which
+    point it stops (rank-prefix). Threshold mode (when ``threshold`` is set; ``coverage`` 
     is then ignored) picks every target whose individual score exceeds ``threshold``.
 
     Args:
@@ -240,14 +243,16 @@ def summarize_exclusion(
         ``excluded_mass`` (absolute cumulative score), and ``total_mass`` (sum across all
         probed targets).
     """
+    effective_excluded = {name for name in excluded if name in scores}
     total_mass = sum(scores.values())
-    excluded_mass = sum(scores.get(name, 0.0) for name in excluded)
+    excluded_mass = sum(scores[name] for name in effective_excluded)
     coverage_pct = 100.0 * excluded_mass / total_mass if total_mass > 0.0 else 0.0
+    num_excluded = len(effective_excluded)
     return {
         "coverage_pct": coverage_pct,
-        "num_excluded": len(excluded),
+        "num_excluded": num_excluded,
         "num_previously_quantized": len(scores),
-        "num_remaining_quantized": len(scores) - len(excluded),
+        "num_remaining_quantized": len(scores) - num_excluded,
         "excluded_mass": excluded_mass,
         "total_mass": total_mass,
     }

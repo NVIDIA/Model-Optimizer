@@ -168,6 +168,8 @@ from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks l
 
 .. code-block:: python
 
+    from itertools import islice
+
     import numpy as np, onnx, timm, torch
     from datasets import load_dataset
     from timm.data import resolve_model_data_config, create_transform
@@ -187,8 +189,7 @@ from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks l
     input_name = m.graph.input[0].name
     tfm = create_transform(**cfg, is_training=False)
     ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
-    samples = [tfm(ex["image"].convert("RGB")).numpy()
-               for i, ex in enumerate(ds) if i < 500]
+    samples = [tfm(ex["image"].convert("RGB")).numpy() for ex in islice(ds, 500)]
     np.savez("imagenet_calib_500.npz",
              **{input_name: np.stack(samples).astype(np.float32)})
 
@@ -392,6 +393,8 @@ tail than blocks.11), so any of the following expressions produces the same
 101-node exclusion:
 
 .. code-block:: python
+
+    scores = result["scores"]  # from the score() call above
 
     # max + threshold (recommended natural pairing, used in the example above)
     suggest_exclusion(scores, threshold=0.1, blocks=blocks, block_agg="max")

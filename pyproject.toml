@@ -322,6 +322,8 @@ markers = [
     "integration: Tests that require external services or other non-hermetic dependencies",
     "manual: Only run when --run-manual is given",
     "release: Regression tests that should be run before every release",
+    "slow: Longer-running integration tests (opt-in via -m slow)",
+    "slow_gpu: GPU-heavy integration tests skipped in default CI (opt-in via -m slow_gpu)",
 ]
 
 

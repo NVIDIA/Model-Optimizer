@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Proxy metrics between reference and quantized activations. Higher = more distortion."""
+"""Proxy metrics between reference-graph and per-target-quantized graph outputs. Higher = more distortion."""
 
 import numpy as np
 
@@ -83,6 +83,9 @@ def mse(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
 def cos_dist(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
     """Cosine distance ``1 - cos(fp16, quant)`` averaged across samples. Scale-invariant.
 
+    A check is added in the cases of both the reference and quantized outputs being 0 to
+    prevent unchanged zero-output probes being perceived as maximally sensitive.
+
     Args:
         fp16_act: FP16 reference activations.
         quant_act: Activations from the quantized model with the same shape as ``fp16_act``.
@@ -94,5 +97,5 @@ def cos_dist(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
     q = _flatten_per_sample(quant_act).astype(np.float64)
     dot = np.sum(p * q, axis=-1)
     norm = np.linalg.norm(p, axis=-1) * np.linalg.norm(q, axis=-1)
-    cos = dot / (norm + _EPS)
+    cos = np.where(norm > 0, dot / (norm + _EPS), 1.0)
     return float(np.mean(1.0 - cos))

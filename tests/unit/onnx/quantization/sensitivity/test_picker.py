@@ -246,9 +246,19 @@ class TestSummarizeExclusion:
         assert summary["coverage_pct"] == 0.0
         assert summary["num_excluded"] == 0
 
-    def test_missing_node_names_default_zero(self):
+    def test_missing_node_names_are_filtered_out_of_counts(self):
+        # Filter out unknown or duplicated entries
         scores = {"a": 5.0, "b": 5.0}
         summary = summarize_exclusion(scores, ["a", "unknown"])
         assert summary["excluded_mass"] == pytest.approx(5.0)
         assert summary["coverage_pct"] == pytest.approx(50.0)
-        assert summary["num_excluded"] == 2
+        # Only "a" counts as excluded; "b" remains quantized
+        assert summary["num_excluded"] == 1
+        assert summary["num_remaining_quantized"] == 1
+
+    def test_duplicate_excluded_names_counted_once(self):
+        scores = {"a": 5.0, "b": 5.0}
+        summary = summarize_exclusion(scores, ["a", "a"])
+        assert summary["num_excluded"] == 1
+        assert summary["num_remaining_quantized"] == 1
+        assert summary["excluded_mass"] == pytest.approx(5.0)

@@ -34,6 +34,39 @@ from modelopt.onnx.quantization.sensitivity.score import Granularity, Metric, sc
 _ONNX_MAX_SIZE_BYTES = 2 * (1024**3)
 # 4 GiB accommodates ImageNet-scale calibration NPZ files.
 _CALIB_MAX_SIZE_BYTES = 4 * (1024**3)
+# 16 GiB aggregate cap for a directory of .npz shards.
+_CALIB_DIR_MAX_TOTAL_BYTES = 16 * (1024**3)
+
+
+def _validate_calibration_dir(path: str) -> None:
+    """Enforce per-file and aggregate size limits on a directory of ``.npz`` calibration shards.
+
+    The directory loader in :func:`score` concatenates every ``.npz`` in the directory without
+    bounds, so a directory containing many large shards can exhaust process memory during load.
+    Cap each shard at ``_CALIB_MAX_SIZE_BYTES`` and the aggregate at
+    ``_CALIB_DIR_MAX_TOTAL_BYTES``.
+
+    Args:
+        path: Directory expected to contain one or more ``.npz`` calibration shards.
+
+    Raises:
+        FileNotFoundError: If ``path`` contains no ``.npz`` files.
+        ValueError: If any shard or the aggregate exceeds the limit.
+    """
+    import glob
+
+    files = sorted(glob.glob(os.path.join(path, "*.npz")))
+    if not files:
+        raise FileNotFoundError(f"No .npz files found under calibration directory: {path}")
+    total = 0
+    for f in files:
+        validate_file_size(f, _CALIB_MAX_SIZE_BYTES)
+        total += os.path.getsize(f)
+    if total > _CALIB_DIR_MAX_TOTAL_BYTES:
+        raise ValueError(
+            f"Aggregate calibration directory size {total} bytes exceeds "
+            f"{_CALIB_DIR_MAX_TOTAL_BYTES} bytes ({len(files)} shards under {path})."
+        )
 
 
 def _default_output_json(onnx_path: str) -> str:
@@ -51,14 +84,21 @@ def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
 
     Returns:
         A newline-joined string with a header, one row per non-hidden target, and highest / lowest
-        markers. A trailing footer notes the count of hidden zero-score rows when applicable.
+        markers. A trailing footer notes the count of hidden zero-score rows and, when applicable,
+        the number of unprobed / failed targets.
     """
     scores = result["scores"]
+    failed = result.get("failed", [])
     header = (
         f"Sensitivity scan ({result['target_precision']} / "
         f"{result['metric']} / {result['granularity']}):"
     )
     if not scores:
+        if failed:
+            return (
+                header + f"\n  (no scores produced; {len(failed)} target(s) failed to probe -- "
+                f"see calibration_source / failed in the JSON)"
+            )
         return header + "\n  (no quantizable targets found)"
 
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
@@ -69,10 +109,10 @@ def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
         ranked = visible
 
     if not ranked:
-        return (
-            header
-            + f"\n  (all {hidden} target(s) scored 0.0 -- pass --show_zero_scores to see them)"
-        )
+        footer = f"\n  (all {hidden} target(s) scored 0.0 -- pass --show_zero_scores to see them)"
+        if failed:
+            footer += f"\n  ({len(failed)} additional target(s) failed to probe)"
+        return header + footer
 
     name_width = max(len(name) for name, _ in ranked)
     lines = [header]
@@ -87,6 +127,8 @@ def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
         lines.append(
             f"  ({hidden} target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)"
         )
+    if failed:
+        lines.append(f"  ({len(failed)} target(s) failed to probe -- see failed in the JSON)")
     return "\n".join(lines)
 
 
@@ -130,7 +172,7 @@ def get_parser() -> argparse.ArgumentParser:
         type=str,
         default=Metric.KL_DIV.value,
         choices=[m.value for m in Metric],
-        help="Proxy metric between FP-reference and quantized activations.",
+        help="Proxy metric between FP-reference and quantized graph outputs.",
     )
     parser.add_argument(
         "--target_precision",
@@ -191,8 +233,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Boundary validation on user-supplied paths -- mirrors modelopt.onnx.quantization.__main__.
     validate_file_size(args.onnx_path, _ONNX_MAX_SIZE_BYTES)
-    if args.calibration_data_path is not None and not os.path.isdir(args.calibration_data_path):
-        validate_file_size(args.calibration_data_path, _CALIB_MAX_SIZE_BYTES)
+    if args.calibration_data_path is not None:
+        if os.path.isdir(args.calibration_data_path):
+            _validate_calibration_dir(args.calibration_data_path)
+        else:
+            validate_file_size(args.calibration_data_path, _CALIB_MAX_SIZE_BYTES)
 
     if args.calibration_data_path is None:
         logger.warning(

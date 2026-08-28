@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for :mod:`modelopt.onnx.quantization.sensitivity.score`."""
 
 from __future__ import annotations
 
@@ -79,14 +78,15 @@ def test_failed_probe_is_recorded(synthetic_onnx_path, monkeypatch):
     """A probe that inserts no Q/DQ nodes is recorded in ``failed`` and absent from ``scores``."""
     import shutil
 
-    from modelopt.onnx.quantization.sensitivity import score as score_mod
+    # Patch quantize() in score() to copy the input as-is, so the probe path has no Q/DQ nodes
+    import modelopt.onnx.quantization.sensitivity.score as score_module
 
     def _fake_quantize(**kwargs):
-        # Copy the input as-is so probe_path has no QDQ nodes.
         shutil.copy(kwargs["onnx_path"], kwargs["output_path"])
 
-    monkeypatch.setattr(score_mod, "quantize", _fake_quantize)
+    monkeypatch.setattr(score_module, "quantize", _fake_quantize)
 
+    # Calculate scores
     result = score(
         synthetic_onnx_path,
         calibration_data=deterministic_calibration(),
@@ -99,6 +99,32 @@ def test_failed_probe_is_recorded(synthetic_onnx_path, monkeypatch):
     assert result["failed"], "Expected failed probes to be surfaced, got empty list"
     assert not result["scores"], (
         f"Expected empty scores when every probe fails, got {result['scores']}"
+    )
+
+
+def test_failed_probe_records_exceptions(synthetic_onnx_path, monkeypatch):
+    """A probe whose ``quantize()`` call raises is recorded in ``failed`` and absent from ``scores``."""
+    # Patch quantize() in score() to raise an issue, so every probe hits the except branch that
+    # appends the target to ``failed``.
+    import modelopt.onnx.quantization.sensitivity.score as score_module
+
+    def _raising_quantize(**kwargs):
+        raise RuntimeError("Simulated quantize failure")
+
+    monkeypatch.setattr(score_module, "quantize", _raising_quantize)
+
+    result = score(
+        synthetic_onnx_path,
+        calibration_data=deterministic_calibration(),
+        metric="kl_div",
+        target_precision="int8",
+        granularity="op_type",
+        calibration_eps=["cpu"],
+        op_types_scope=SYNTHETIC_OP_SCOPE,
+    )
+    assert result["failed"], "Expected failed probes to be surfaced, got empty list"
+    assert not result["scores"], (
+        f"Expected empty scores when every probe raises, got {result['scores']}"
     )
 
 

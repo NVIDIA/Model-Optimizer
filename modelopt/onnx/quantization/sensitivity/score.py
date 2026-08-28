@@ -54,7 +54,7 @@ __all__ = ["CalibrationSource", "Granularity", "Metric", "score"]
 
 
 class Metric(str, Enum):
-    """Proxy metrics between FP16 and quantized activations."""
+    """Proxy metrics between reference-graph and per-target-quantized graph outputs."""
 
     KL_DIV = "kl_div"
     MSE = "mse"
@@ -166,8 +166,9 @@ def score(
             (see :func:`_default_op_types_scope`). Graph plumbing (``Cast`` / ``Constant`` /
             ``Shape`` / ...) is skipped by default because it produces zero-drift probes.
             Ops that slip past the filter but that the underlying
-            :func:`modelopt.onnx.quantization.quantize` still cannot quantize are reported
-            with score ``0.0``.
+            :func:`modelopt.onnx.quantization.quantize` still cannot quantize are appended
+            to the returned ``failed`` list so callers can tell "unprobed" from 
+            "quantizing this target is free."
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.
 
@@ -205,9 +206,8 @@ def score(
     )
     num_samples = _num_samples(calib_dict)
     logger.info(
-        f"Sensitivity scan on {onnx_path}: {calibration_source.value} calibration, "
-        f"{num_samples} samples, granularity={granularity}, metric={metric}, "
-        f"target_precision={target_precision}"
+        f"Sensitivity scan: {calibration_source.value} calibration, {num_samples} samples, "
+        f"granularity={granularity}, metric={metric}, target_precision={target_precision}"
     )
 
     quantizable_ops = set(op_types_scope) if op_types_scope else _default_op_types_scope(onnx_model)
@@ -252,8 +252,10 @@ def score(
                 )
             except Exception as e:
                 logger.warning(
-                    f"[{idx}/{len(targets)}] quantize() failed for target '{target_name}': {e}"
+                    f"[{idx}/{len(targets)}] quantize() failed for target '{target_name}' "
+                    f"({type(e).__name__}); recording as unprobed."
                 )
+                logger.debug(f"quantize() failure detail for '{target_name}':", exc_info=True)
                 failed.append(target_name)
                 continue
 
