@@ -37,6 +37,7 @@ Changelog
 **Deprecations**
 
 - Remove ``examples/llm_eval/lm_eval_tensorrt_llm.py`` (the ``trt-llm`` model) in favor of the TensorRT-LLM backend shipped by lm-evaluation-harness itself (registered as ``trtllm``, also supports ``loglikelihood_rolling`` and pipeline parallelism); ``lm_eval`` is pinned to ``>=0.4.12,<0.5``. Replace ``python lm_eval_tensorrt_llm.py --model trt-llm --model_args tokenizer=<tok>,checkpoint_dir=<ckpt>`` with ``python lm_eval_trtllm.py --model trtllm --model_args model=<ckpt>,tokenizer=<tok>``, and set ``tensor_parallel_size`` and ``max_input_len`` explicitly — they default to 1 and 2048, and longer prompts are silently truncated. Use ``lm_eval_trtllm.py`` rather than the plain ``lm_eval`` CLI: it patches an off-by-one in the backend's ``_parse_logprobs`` that otherwise raises ``KeyError`` on every loglikelihood task. Loglikelihood tasks additionally require **TensorRT-LLM >= 1.3.0rc11**; generative tasks are unaffected. ``examples/hf_ptq/scripts/huggingface_example.sh`` gains ``--input`` (``BUILD_MAX_INPUT_LEN``, default 4096) to size the evaluation engine's context, and honours a preset ``LM_EVAL_TP`` to override the tensor-parallel size.
+- Bump minimum container requirement to ``nemo:26.08`` for the Megatron-Bridge / Megatron-LM optimization features. Megatron-LM quantization still works on ``nemo:26.06`` but will be dropped in a future release.
 
 **Bug Fixes**
 
