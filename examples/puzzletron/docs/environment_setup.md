@@ -41,11 +41,13 @@ maintain a second set of worker installation commands outside the Dockerfile.
 Build the Linux amd64 image from the repository root:
 
 ```bash
+test -z "$(git status --porcelain)"
+revision="$(git rev-parse HEAD)"
 docker build \
   --platform linux/amd64 \
   --file examples/puzzletron/Dockerfile \
-  --build-arg MODELOPT_REVISION="$(git rev-parse HEAD)" \
-  --tag modelopt-puzzletron-worker:amd64-local \
+  --build-arg MODELOPT_REVISION="${revision}" \
+  --tag "modelopt-puzzletron-worker:sha-${revision}" \
   .
 ```
 
@@ -56,7 +58,7 @@ Run the image locally with GPU access:
 
 ```bash
 docker run --gpus all --ipc=host --rm -it \
-  modelopt-puzzletron-worker:amd64-local
+  "modelopt-puzzletron-worker:sha-${revision}"
 ```
 
 Inside the image, the runner contract is:

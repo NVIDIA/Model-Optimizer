@@ -157,3 +157,23 @@ def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):
         assert image_input in pull_request_paths
     assert "examples/puzzletron/**" in push_paths
     assert "examples/puzzletron/Dockerfile" in pull_request_paths
+
+
+def test_worker_image_workflow_builds_a_revision_identified_image(project_root_path):
+    workflow_path = project_root_path / ".github/workflows/puzzletron_worker_image.yml"
+    workflow_text = workflow_path.read_text()
+    workflow = yaml.safe_load(workflow_text)
+
+    assert workflow["on"]["push"]["branches"] == [
+        "pull-request/[0-9]+",
+        "feature/puzzletron_v2",
+    ]
+    assert "workflow_dispatch" in workflow["on"]
+    job = workflow["jobs"]["build-worker-image"]
+    assert job["timeout-minutes"] == 240
+    assert "linux-amd64-gpu-rtxpro6000" in job["runs-on"]
+    assert job["env"]["IMAGE"] == "modelopt-puzzletron-worker:sha-${{ github.sha }}"
+    assert "--platform linux/amd64" in workflow_text
+    assert '--build-arg "MODELOPT_REVISION=${GITHUB_SHA}"' in workflow_text
+    assert "org.opencontainers.image.revision" in workflow_text
+    assert "docker run --gpus device=0" in workflow_text

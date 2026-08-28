@@ -1,0 +1,73 @@
+name: Puzzletron worker image
+
+"on":
+  push:
+    branches:
+      - "pull-request/[0-9]+"
+      - feature/puzzletron_v2
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/puzzletron_worker_image.yml"
+      - "LICENSE_HEADER"
+      - "README.md"
+      - "examples/__init__.py"
+      - "examples/puzzletron/**"
+      - "modelopt/**"
+      - "modelopt_recipes/**"
+      - "puzzletron_orchestrator/**"
+      - "puzzletron_setup/**"
+      - "pyproject.toml"
+  workflow_dispatch:
+    # On-demand
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-worker-image:
+    name: Build and smoke-test linux/amd64 image
+    runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
+    timeout-minutes: 240
+    env:
+      IMAGE: modelopt-puzzletron-worker:sha-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build the pinned worker image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --file examples/puzzletron/Dockerfile \
+            --build-arg "MODELOPT_REVISION=${GITHUB_SHA}" \
+            --tag "${IMAGE}" \
+            .
+      - name: Verify the baked worker contract
+        run: |
+          test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE}")" = "${GITHUB_SHA}"
+          docker run --rm "${IMAGE}" \
+            python /opt/puzzletron/verify_image_environment.py \
+              --environment /opt/puzzletron/ci_environment.json
+      - name: Smoke-test CUDA access
+        run: |
+          docker run --gpus device=0 --ipc=host --rm "${IMAGE}" \
+            python -c 'import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+      - name: Record the image identity
+        run: |
+          image_id="$(docker image inspect --format '{{.Id}}' "${IMAGE}")"
+          {
+            echo "## Puzzletron worker image built"
+            echo
+            echo "Local tag: \`${IMAGE}\`"
+            echo
+            echo "Image ID: \`${image_id}\`"
+            echo
+            echo "Source revision: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Remove the runner-local image
+        if: ${{ always() }}
+        run: docker image rm --force "${IMAGE}" || true
