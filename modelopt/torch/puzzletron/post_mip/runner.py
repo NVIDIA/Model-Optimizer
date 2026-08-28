@@ -525,22 +525,69 @@ def _downstream_evaluation(
         / source.architecture_id
         / "lmms_eval"
     )
-    settings = dict(node.config.get("config") or {})
+    settings = copy.deepcopy(dict(node.config.get("config") or {}))
+    reference_checkpoint = settings.pop("reference_checkpoint", None)
     profile = settings.pop("profile", None)
+    evaluator = run_lmms_eval_checkpoint
     if profile is not None:
         evaluator = _DOWNSTREAM_EVALUATION_PROFILES.get(str(profile))
         if evaluator is None:
             raise ValueError(f"unsupported downstream evaluation profile: {profile}")
-        return evaluator(
-            source.artifact["checkpoint"],
-            output_root=output_root,
-            settings=settings,
-        )
-    return run_lmms_eval_checkpoint(
+    candidate = evaluator(
         source.artifact["checkpoint"],
         output_root=output_root,
         settings=settings,
     )
+    if reference_checkpoint is None:
+        return candidate
+
+    reference = evaluator(
+        reference_checkpoint,
+        output_root=output_root.parent / "reference",
+        settings=settings,
+    )
+    candidate_metrics = dict(candidate["metrics"])
+    reference_metrics = dict(reference["metrics"])
+    if candidate_metrics.keys() != reference_metrics.keys():
+        raise RuntimeError(
+            "candidate and reference downstream evaluations produced different metrics: "
+            f"candidate_only={sorted(candidate_metrics.keys() - reference_metrics.keys())}, "
+            f"reference_only={sorted(reference_metrics.keys() - candidate_metrics.keys())}"
+        )
+    comparison_metrics = {
+        **candidate_metrics,
+        **{f"candidate.{name}": value for name, value in candidate_metrics.items()},
+        **{f"reference.{name}": value for name, value in reference_metrics.items()},
+        **{
+            f"delta.{name}": value - reference_metrics[name]
+            for name, value in candidate_metrics.items()
+        },
+    }
+    comparison_path = _atomic_json(
+        output_root / "comparison.json",
+        {
+            "candidate": {
+                "checkpoint": source.artifact["checkpoint"],
+                "metrics": candidate_metrics,
+                "result_path": candidate["result_path"],
+            },
+            "reference": {
+                "checkpoint": str(reference_checkpoint),
+                "metrics": reference_metrics,
+                "result_path": reference["result_path"],
+            },
+            "delta": {
+                name: candidate_metrics[name] - reference_metrics[name]
+                for name in candidate_metrics
+            },
+        },
+    )
+    return {
+        **candidate,
+        "metrics": comparison_metrics,
+        "comparison_path": str(comparison_path),
+        "reference_result_path": reference["result_path"],
+    }
 
 
 def _post_mip_kd_settings(
@@ -720,6 +767,15 @@ def _aggregate_filter(
     execution_identity: str,
 ) -> tuple[list[NodeObservation], CandidateSet]:
     selected, excluded, scores = apply_filter(ledger, input_set.revision_ids, node.config)
+    if node.config.get("require_match") and not selected:
+        reasons = "; ".join(
+            f"{revision_id}: {excluded.get(revision_id, 'not selected')}"
+            for revision_id in input_set.revision_ids
+        )
+        raise RuntimeError(
+            f"required post-MIP filter {node.node_id!r} selected no candidates"
+            + (f": {reasons}" if reasons else "")
+        )
     observations = [
         NodeObservation(
             node_id=node.node_id,

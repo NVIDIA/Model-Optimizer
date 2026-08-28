@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Deterministic selection modes for post-MIP candidate sets."""
 
@@ -43,7 +58,15 @@ def _metric_entries(config: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 
 def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
-    common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
+    common = {
+        "type",
+        "input",
+        "model_source",
+        "failure_policy",
+        "config",
+        "mode",
+        "require_match",
+    }
     allowed = {
         "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
         "threshold": common | {"metric", "min", "max"},
@@ -52,6 +75,8 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     }
     if mode not in allowed:
         raise ValueError("filter.mode must be top_k, threshold, pareto, or aggregate_rank")
+    if not isinstance(config.get("require_match", False), bool):
+        raise TypeError("filter.require_match must be a boolean")
     unknown = set(config) - allowed[mode]
     if unknown:
         raise ValueError(f"unknown {mode} filter fields: {sorted(unknown)}")

@@ -19,12 +19,13 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.future as future_stages
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
-from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
+from modelopt.torch.puzzletron.post_mip.records import ArtifactKind, CandidateSet
 from modelopt.torch.puzzletron.post_mip.runner import (
     _exception_diagnostics,
     _needs_puzzletron_process_group,
@@ -384,3 +385,72 @@ def test_downstream_evaluation_routes_the_pinned_vlm_profile(monkeypatch, tmp_pa
     assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
     assert captured["checkpoint"] == str(checkpoint)
     assert captured["settings"] == {"batch_size": 1, "timeout_seconds": 600}
+
+
+def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tmp_path):
+    candidate = tmp_path / "candidate"
+    reference = tmp_path / "teacher"
+    candidate.mkdir()
+    reference.mkdir()
+    calls = []
+
+    def fake_evaluate(checkpoint_path, *, output_root, settings):
+        calls.append((Path(checkpoint_path), output_root, settings))
+        score = 0.4 if Path(checkpoint_path) == candidate else 0.5
+        result_path = tmp_path / f"{Path(checkpoint_path).name}.json"
+        result_path.write_text("{}")
+        return {"metrics": {"ifeval.accuracy": score}, "result_path": str(result_path)}
+
+    monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
+    node = SimpleNamespace(
+        node_id="full_benchmarks",
+        config={
+            "config": {
+                "tasks": ["ifeval"],
+                "reference_checkpoint": str(reference),
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(candidate)},
+    )
+
+    result = runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
+
+    assert [call[0] for call in calls] == [candidate, reference]
+    assert all(call[2] == {"tasks": ["ifeval"]} for call in calls)
+    assert result["metrics"] == {
+        "ifeval.accuracy": 0.4,
+        "candidate.ifeval.accuracy": 0.4,
+        "reference.ifeval.accuracy": 0.5,
+        "delta.ifeval.accuracy": pytest.approx(-0.1),
+    }
+    comparison = json.loads(Path(result["comparison_path"]).read_text())
+    assert comparison["candidate"]["metrics"] == {"ifeval.accuracy": 0.4}
+    assert comparison["reference"]["metrics"] == {"ifeval.accuracy": 0.5}
+    assert comparison["delta"]["ifeval.accuracy"] == pytest.approx(-0.1)
+
+
+def test_required_filter_fails_when_no_candidate_matches(monkeypatch):
+    monkeypatch.setattr(
+        runner,
+        "apply_filter",
+        lambda *_args, **_kwargs: ((), {"revision": "quality regression"}, {}),
+    )
+    node = SimpleNamespace(node_id="quality_gate", flow_id="flow", config={"require_match": True})
+    candidate_set = CandidateSet.create(
+        "flow",
+        "source",
+        ("revision",),
+        producer_execution_identity="source-execution",
+    )
+
+    with pytest.raises(RuntimeError, match="selected no candidates.*quality regression"):
+        runner._aggregate_filter(
+            SimpleNamespace(),
+            node,
+            candidate_set,
+            "gate-execution",
+        )

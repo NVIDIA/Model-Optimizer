@@ -28,7 +28,6 @@ import json
 import logging
 import math
 import os
-import shutil
 import time
 from collections import defaultdict
 from contextlib import ExitStack
@@ -44,6 +43,7 @@ from ...anymodel.model_descriptor import ModelDescriptorFactory
 from ...block_config import maybe_cast_block_configs
 from ...bypass_distillation.bypass_utils import normalize_keys_to_learn
 from ...bypass_distillation.checkpointing import (
+    copy_hf_auxiliary_assets,
     quarantine_incomplete_checkpoint,
     require_distributed_path_consensus,
     validate_automodel_bypass_checkpoint,
@@ -2370,7 +2370,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             "consolidated": checkpoint_validation,
         }
         if export_consolidated and self.dist_env.is_main:
-            _copy_hf_auxiliary_assets(
+            copy_hf_auxiliary_assets(
                 Path(self.cfg.model.pretrained_model_name_or_path),
                 checkpoint_path / "model" / "consolidated",
             )

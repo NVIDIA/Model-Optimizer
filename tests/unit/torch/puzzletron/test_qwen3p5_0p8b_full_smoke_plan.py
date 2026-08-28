@@ -36,6 +36,8 @@ RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke.yaml"
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_smoke.yaml"
+QUALITY_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/quality_regression.yaml"
+QUALITY_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.quality_regression.yaml"
 
 
 def _compile_plan(monkeypatch, tmp_path: Path):
@@ -45,6 +47,17 @@ def _compile_plan(monkeypatch, tmp_path: Path):
         experiment_config_path=RUN_PATH,
         runner=load_runner_config(RUNNER_PATH),
         execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+
+def _compile_quality_plan(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "quality-results"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    return compile_campaign_plan(
+        experiment_config_path=QUALITY_RUN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(QUALITY_EXECUTION_PATH),
         stage_filter="full",
     )
 
@@ -148,3 +161,39 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
     assert nodes["best"]["top_k"] == 1
+
+
+def test_qwen3p5_0p8b_quality_regression_is_opt_in_and_compares_teacher(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = _compile_quality_plan(monkeypatch, tmp_path)
+    config = plan.experiment_config
+    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
+    benchmark = nodes["full_benchmarks"]
+    stage_ids = tuple(stage.stage_id for stage in plan.stages)
+
+    assert "post.params-90.full_benchmarks" in stage_ids
+    assert stage_ids[-2:] == (
+        "post.params-90.ifeval_quality_gate",
+        "post.params-90.gsm8k_quality_gate",
+    )
+    assert benchmark["input"] == "short_kd"
+    assert benchmark["failure_policy"] == "strict"
+    assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
+    assert benchmark["config"]["tasks"] == ["ifeval", "gsm8k"]
+    assert benchmark["config"]["compatibility_tasks"] == ["gsm8k"]
+    assert benchmark["config"]["batch_size"] == 8
+    assert "limit" not in benchmark["config"]
+    assert benchmark["config"]["gen_kwargs"] == {
+        "do_sample": False,
+        "temperature": 0,
+    }
+    assert nodes["ifeval_quality_gate"]["require_match"] is True
+    assert nodes["ifeval_quality_gate"]["min"] == -0.26
+    assert nodes["gsm8k_quality_gate"]["metric"].endswith(
+        "modelopt_gsm8k.exact_match_flexible-extract"
+    )
+    assert nodes["gsm8k_quality_gate"]["min"] == -0.50
+    assert nodes["gsm8k_quality_gate"]["require_match"] is True
+    assert all(stage.total_gpus == 1 for stage in plan.stages)

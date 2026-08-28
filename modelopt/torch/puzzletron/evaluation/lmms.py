@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import math
 import os
@@ -86,6 +87,7 @@ DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 _PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
 _TIMEOUT_ERRORS = (TimeoutError, asyncio.TimeoutError)
+_COMPATIBILITY_TASK_ALIASES = {"gsm8k": "modelopt_gsm8k"}
 
 
 class LmmsEvalTimeoutError(TimeoutError):
@@ -366,6 +368,53 @@ def _build_command(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("lmms-eval timeout must be a finite positive number")
     return argv, env, timeout
+
+
+def _prepare_compatibility_tasks(output: Path, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve explicitly requested task fixes without modifying the pinned evaluator."""
+
+    prepared = dict(settings)
+    raw_requested = prepared.pop("compatibility_tasks", None)
+    requested = (
+        tuple(
+            task.strip()
+            for task in _join_cli_values(
+                raw_requested,
+                path="evaluation settings.compatibility_tasks",
+            ).split(",")
+        )
+        if raw_requested is not None
+        else ()
+    )
+    unknown = sorted(set(requested) - _COMPATIBILITY_TASK_ALIASES.keys())
+    if unknown:
+        raise ValueError(f"unknown lmms-eval compatibility tasks: {unknown}")
+    if "gsm8k" not in requested:
+        return prepared
+
+    spec = importlib.util.find_spec("lmms_eval")
+    locations = spec.submodule_search_locations if spec is not None else None
+    if not locations:
+        raise RuntimeError("lmms_eval is not installed")
+    upstream = Path(next(iter(locations))) / "tasks/gsm8k/gsm8k.yaml"
+    if not upstream.is_file():
+        raise RuntimeError(f"installed lmms_eval has no GSM8K task config: {upstream}")
+
+    tasks = [_COMPATIBILITY_TASK_ALIASES.get(task, task) for task in _configured_tasks(prepared)]
+    task_root = output / "task_configs"
+    task_root.mkdir(parents=True, exist_ok=True)
+    _atomic_json(
+        task_root / "modelopt_gsm8k.yaml",
+        {
+            "dataset_path": "openai/gsm8k",
+            "fewshot_config": {"sampler": "default"},
+            "include": str(upstream.resolve()),
+            "task": "modelopt_gsm8k",
+        },
+    )
+    prepared["tasks"] = tasks
+    prepared["extra_args"] = [*_extra_args(prepared), "--include_path", str(task_root)]
+    return prepared
 
 
 def _numeric_metrics(task_payload: Mapping[str, Any]) -> dict[str, float]:
@@ -657,13 +706,13 @@ def run_lmms_eval_checkpoint(
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"checkpoint is not a local directory: {checkpoint_path}")
     output = Path(output_root).expanduser().absolute() / f"attempt_{uuid.uuid4().hex}"
-    settings = dict(settings)
+    output.mkdir(parents=True, exist_ok=True)
+    settings = _prepare_compatibility_tasks(output, settings)
     argv, env, timeout = _build_command(
         settings,
         checkpoint=str(checkpoint_path),
         output_path=output,
     )
-    output.mkdir(parents=True, exist_ok=True)
     command_path = _atomic_json(
         output / "command.json",
         {

@@ -78,3 +78,43 @@ nodes under `artifacts/post_mip/nodes`. Their summaries must name the correspond
 pre-KD and post-KD checkpoints, report two effective IFEval samples, and contain
 finite metrics. Also verify the cumulative report and confirm that resuming
 submits no work for completed stages.
+
+## Run the opt-in quality regression
+
+`quality_regression.yaml` keeps the lifecycle smoke unchanged and adds a
+non-default quality tier. It evaluates the complete IFEval and GSM8K task
+datasets for both the final distilled student and the pinned teacher with the
+same greedy-decoding contract. The result publishes candidate, reference, and
+candidate-minus-reference metrics. Strict filters fail the DAG if either
+accuracy regression exceeds its checked-in margin.
+
+The fixed batch size of eight keeps the complete datasets inside the bounded
+evaluation timeout. Treat batch size as part of the regression contract: even
+with greedy decoding, changing it can alter some generated outputs.
+Repeated runs with the same contract can still differ by a small number of
+outputs because of backend numerical variation, so acceptance uses checked-in
+metric margins rather than bit-for-bit equality.
+
+Use
+`execution.quality_regression.yaml` with a site-specific runner whose walltime
+covers both serial evaluations. Set a distinct `PUZZLETRON_RUN_ROOT`; the full
+task run is intentionally not part of default CI:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/quality_regression.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.quality_regression.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_quality_regression
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+After inspecting the plan, omit `--dry-run` to launch or resume it. Keep the
+checkpoint revision, evaluator revision, task list, seed, and generation
+settings fixed when comparing runs. The tiny model remains appropriate for
+pipeline exception coverage, but its floor-level task scores are not a useful
+quality-regression oracle.

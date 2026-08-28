@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import math
 
 import pytest
@@ -261,6 +260,18 @@ def test_best_selection_mode_is_rejected_on_non_top_k_filter():
                 "metric": "serving.output_token_throughput",
                 "min": 1,
                 "best_selection_mode": "individual_best",
+            }
+        )
+
+
+def test_require_match_must_be_boolean():
+    with pytest.raises(TypeError, match="require_match"):
+        validate_filter_config(
+            {
+                "mode": "threshold",
+                "metric": "serving.output_token_throughput",
+                "min": 1,
+                "require_match": "yes",
             }
         )
 

@@ -20,10 +20,38 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from modelopt.torch.puzzletron.evaluation import lmms
+
+
+def test_compatibility_task_namespaces_gsm8k_dataset(monkeypatch, tmp_path):
+    package = tmp_path / "lmms_eval"
+    upstream = package / "tasks/gsm8k/gsm8k.yaml"
+    upstream.parent.mkdir(parents=True)
+    upstream.write_text("task: gsm8k\n")
+    monkeypatch.setattr(
+        lmms.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(submodule_search_locations=[str(package)]),
+    )
+
+    settings = lmms._prepare_compatibility_tasks(
+        tmp_path / "attempt",
+        {"tasks": ["ifeval", "gsm8k"], "compatibility_tasks": "gsm8k"},
+    )
+
+    assert settings["tasks"] == ["ifeval", "modelopt_gsm8k"]
+    task_root = Path(settings["extra_args"][-1])
+    assert settings["extra_args"][-2] == "--include_path"
+    assert json.loads((task_root / "modelopt_gsm8k.yaml").read_text()) == {
+        "dataset_path": "openai/gsm8k",
+        "fewshot_config": {"sampler": "default"},
+        "include": str(upstream),
+        "task": "modelopt_gsm8k",
+    }
 
 
 def _settings(*tasks: str) -> dict:
