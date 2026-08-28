@@ -402,7 +402,7 @@ Before running, update the following fields in the `nemo_evaluator.yaml` file or
 
 The yaml is set up for a **BF16** checkpoint. For **FP8** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
 - append `--kv-cache-dtype fp8` to `deployment.extra_args`
-- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
+- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8: lit:1` plus `VLLM_FLASHINFER_MOE_BACKEND: lit:throughput`)
 
 ```bash
 pip install "nemo-evaluator-launcher[all]==0.2.6"
