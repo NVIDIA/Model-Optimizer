@@ -133,7 +133,15 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, HybridModel, LLaVAModel)):
+        # VLM wrappers (MCore ``LLaVAModel``, Megatron-Bridge ``Qwen3VLModel``, ...) keep the decoder
+        # under ``.language_model``; only that inner model is exported, the vision tower is copied
+        # over from the HF checkpoint as-is.
+        language_model = (
+            model
+            if isinstance(model, (GPTModel, HybridModel))
+            else getattr(model, "language_model", None)
+        )
+        if not isinstance(language_model, (GPTModel, HybridModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
@@ -153,19 +161,18 @@ class GPTModelExporter:
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
 
         # Update hf_config
-        self._hf_text_config.num_hidden_layers = model.config.num_layers
-        self._hf_text_config.hidden_size = model.config.hidden_size
-        self._hf_text_config.head_dim = model.config.kv_channels
-        self._hf_text_config.num_attention_heads = model.config.num_attention_heads
-        self._hf_text_config.num_key_value_heads = model.config.num_query_groups
+        self._hf_text_config.num_hidden_layers = language_model.config.num_layers
+        self._hf_text_config.hidden_size = language_model.config.hidden_size
+        self._hf_text_config.head_dim = language_model.config.kv_channels
+        self._hf_text_config.num_attention_heads = language_model.config.num_attention_heads
+        self._hf_text_config.num_key_value_heads = language_model.config.num_query_groups
         self.is_multimodal = isinstance(model, LLaVAModel)
         if not self.is_multimodal:
-            self._hf_text_config.intermediate_size = model.config.ffn_hidden_size
+            self._hf_text_config.intermediate_size = language_model.config.ffn_hidden_size
         self._hf_quant_config: dict = {}
         self._hf_extra_config = None
         self.export_extra_modules = export_extra_modules
-        self.is_multimodal = isinstance(model, LLaVAModel)
-        self.model = model.language_model if self.is_multimodal else model
+        self.model = language_model
         self.dtype = dtype
         self.trust_remote_code = trust_remote_code
         self.arch = self._hf_config.architectures[0]

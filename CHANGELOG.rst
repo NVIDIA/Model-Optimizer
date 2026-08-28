@@ -19,6 +19,7 @@ Changelog
 - Add SFT-masked data support to ``examples/megatron_bridge/distill.py``: ``--sft --sft_dataset_root <dir>`` distills on raw prompt-completion JSONL (``{"input", "output"}`` records) with the loss masked to the response tokens, using Megatron-Bridge's ``FinetuningDatasetConfig`` and the model's own HuggingFace tokenizer instead of the pretraining ``GPTDataset`` and ``NullTokenizer``.
 - Add per-expert weight quantization for Transformer Engine ``TEGroupedMLP`` (fused MoE experts): each expert now has its own ``weight_quantizer`` (a ``GroupedQuantizer`` holding one ``TensorQuantizer`` per expert) with an independent ``amax``, instead of a single shared ``amax`` across all experts. Applies to ``mtq.quantize`` calibration, HF / Megatron export, and QAD.
 - Add opt-in ``torch.compile`` execution for Transformer Engine grouped-linear per-expert weight quantizers while preserving their native checkpoint amax shapes. Set ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP=1`` before quantized-module conversion; the default path remains eager.
+- Add HuggingFace unified export of quantized Qwen3-VL checkpoints (PTQ or QAD) via ``examples/megatron_bridge/export_quantized_megatron_to_hf.py``. Only the language model is quantized; the vision tower is copied from the source HuggingFace checkpoint. Other VLM architectures (e.g. Qwen3.5-VL, Gemma3-VL) are still saved in Megatron checkpoint format only.
 
 *Misc*
 
@@ -46,6 +47,7 @@ Changelog
 
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
+- Fix Megatron-Bridge Quantization Aware Distillation of a vision-language model silently discarding the ModelOpt state, so the distilled checkpoint restored no quantizers and exported as an unquantized model. Re-run QAD to regenerate any affected checkpoint.
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.

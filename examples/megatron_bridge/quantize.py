@@ -416,8 +416,8 @@ def main(args: argparse.Namespace):
     )
     if is_vlm:
         print_rank_0(
-            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format "
-            "(HuggingFace unified export of a quantized VLM is not yet supported)."
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
+            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py (Qwen3-VL only)."
         )
     else:
         print_rank_0(

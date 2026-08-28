@@ -144,9 +144,8 @@ def main(args: argparse.Namespace):
     print_rank_0(
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
     )
-    # TODO (OMNIML-5366): quantized-VLM HF export. export_mcore_gpt_to_hf's per-arch mappings don't
-    # cover Qwen3.5-VL / Gemma3-VL; See if Megatron-Bridge's AutoBridge.export_hf_weights_quant can be
-    # used instead.
+    # TODO (OMNIML-5366): Qwen3-VL is the only VLM in export_mcore_gpt_to_hf's per-arch mappings;
+    # Qwen3.5-VL / Gemma3-VL are not covered yet.
     export_mcore_gpt_to_hf(
         unwrapped_model,
         args.hf_model_name_or_path,

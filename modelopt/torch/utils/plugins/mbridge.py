@@ -30,6 +30,7 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
+from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoTokenizer
 
 from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
@@ -118,6 +119,12 @@ def load_mbridge_model_from_hf(
     return bridge, provider, model, unwrapped_model, tokenizer
 
 
+def _has_vision_model_weights(checkpoint_path: str) -> bool:
+    """Whether a Megatron distributed checkpoint holds a VLM's vision tower (``vision_model.*``)."""
+    metadata = FileSystemReader(checkpoint_path).read_metadata()
+    return any(key.startswith("vision_model.") for key in metadata.state_dict_metadata)
+
+
 def load_modelopt_megatron_checkpoint(
     model: list[MegatronModule], megatron_path: str, restore_modelopt_state: bool = True
 ) -> None:
@@ -130,9 +137,20 @@ def load_modelopt_megatron_checkpoint(
             weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
             student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
     """
+    # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
+    checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
+
+    # ``distill.py`` distills a VLM's language model only, so its checkpoint holds no ``vision_model.*``
+    # weights and must be loaded into ``.language_model`` rather than the full VLM wrapper.
+    unwrapped_model = unwrap_model(model)
+    if any(hasattr(m, "language_model") for m in unwrapped_model) and not _has_vision_model_weights(
+        checkpoint_path
+    ):
+        print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
+        model = [getattr(m, "language_model", m) for m in unwrapped_model]
+
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
     if restore_modelopt_state and has_modelopt_state(megatron_path):
         load_modelopt_state(model, megatron_path)
-    # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
-    _load_model_weights_from_checkpoint(_get_modelopt_checkpoint_path(megatron_path), model)
+    _load_model_weights_from_checkpoint(checkpoint_path, model)

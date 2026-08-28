@@ -54,6 +54,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
 
@@ -420,9 +421,13 @@ def main(args: argparse.Namespace):
             print_rank_0(
                 f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
             )
-            load_modelopt_megatron_checkpoint(
-                [unwrap_model(model_chunks[0])], args.student_megatron_path
-            )
+            student = unwrap_model(model_chunks[0])
+            load_modelopt_megatron_checkpoint([student], args.student_megatron_path)
+            if is_vlm and student_has_modelopt_state:
+                # PTQ stores the state on the VLM root (it quantizes and saves the whole VLM), but
+                # only ``language_model`` is distilled and checkpointed here, so move it there to
+                # keep the quantizers across the QAD checkpoint's save / restore.
+                ModeloptStateManager.transfer_state_dict(student, student.language_model)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)

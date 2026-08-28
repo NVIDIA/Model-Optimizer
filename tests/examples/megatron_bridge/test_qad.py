@@ -22,14 +22,18 @@ from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
+    create_tiny_qwen3vl_dir,
 )
 
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
-    ("create_student", "is_vlm", "is_moe"),
+    ("create_student", "exports_hf"),
     [
-        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), False, False),
+        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), True),
+        # Qwen3-VL is the only VLM architecture in the Megatron HF export mapping, so it is the one
+        # VLM case that runs the export step end-to-end.
+        (lambda tmp_path: create_tiny_qwen3vl_dir(tmp_path, with_tokenizer=True), True),
         # Dense-VLM QAD path; the MoE VLM below covers it in CI, so run this one on demand only.
         pytest.param(
             lambda tmp_path: create_tiny_gemma3vl_dir(
@@ -39,7 +43,6 @@ from _test_utils.torch.transformers_models import (
                 intermediate_size=128,
                 max_position_embeddings=512,
             ),
-            True,
             False,
             marks=pytest.mark.manual,
         ),
@@ -47,19 +50,19 @@ from _test_utils.torch.transformers_models import (
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
                 tmp_path, with_processor=True, num_hidden_layers=2
             ),
-            True,
-            True,
+            False,
         ),
     ],
-    ids=["qwen3", "gemma3vl", "qwen3_5_moe_vl"],
+    ids=["qwen3", "qwen3vl", "gemma3vl", "qwen3_5_moe_vl"],
 )
-def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
+def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
 
     For VLMs only the language model is quantized and distilled (vision tower / projector untouched),
-    and a text calibration dataset infers text-only LM calibration. VLM quantized-HF export is
-    unsupported, so the VLM case stops at the distilled Megatron checkpoint and verifies the ModelOpt
-    (quantize) state survived distillation; the LLM case additionally exports a unified HF checkpoint.
+    and a text calibration dataset infers text-only LM calibration. Quantized-HF export needs the
+    architecture in the Megatron export mapping, so the cases whose architecture is missing there
+    (Gemma3-VL, Qwen3.5-VL) stop at the distilled Megatron checkpoint and only verify the ModelOpt
+    (quantize) state survived distillation.
     """
     hf_model_path = create_student(tmp_path)
     quantized_megatron_path = tmp_path / "quantized_megatron"
@@ -117,8 +120,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
         "Expected modelopt_state to be preserved in the distilled (QAD) checkpoint"
     )
 
-    if is_vlm:
-        return  # VLM quantized-HF export is unsupported; stop at the distilled Megatron checkpoint
+    if not exports_hf:
+        return  # architecture missing from the export mapping; stop at the distilled checkpoint
 
     # Step 3: export the distilled quantized checkpoint to a unified HF checkpoint. hf_quant_config.json
     # is only written for a quantized model, so its presence confirms the quantizers survived QAD.

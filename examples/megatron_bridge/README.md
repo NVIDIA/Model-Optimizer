@@ -120,7 +120,7 @@ For a vision-language model (e.g. Qwen3.5-VL, Gemma3-VL), `quantize.py` automati
 - A **text** dataset runs text-only calibration of the language model (vision tower idle).
 
 > [!NOTE]
-> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM is not yet supported; the quantized VLM is saved in Megatron checkpoint format only.
+> HuggingFace unified export (`export_quantized_megatron_to_hf.py`) of a quantized VLM covers **Qwen3-VL** only -- the architecture must be in ModelOpt's Megatron export mapping. For other VLMs (Qwen3.5-VL, Gemma3-VL) the quantized model is saved in Megatron checkpoint format only.
 
 ## Distillation
 
