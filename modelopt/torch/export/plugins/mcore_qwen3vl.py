@@ -17,12 +17,12 @@
 
 Qwen3-VL differs from Qwen3 in one structural way: language-model weights live
 under ``model.language_model.`` instead of ``model.``, while ``lm_head.weight``
-remains at the root level.  The mappings below are derived automatically from
-the Qwen3 mappings by inserting ``language_model.`` after ``model.`` for every
-prefix that starts with ``model.``.
+remains at the root level, so the mappings below are derived from the Qwen3 ones
+with :func:`with_language_model_prefix`.
 
-Note: the visual encoder (``model.visual.*``) is intentionally excluded — this
-mapping covers only the language-model decoder used for quantization and export.
+The visual encoder (``model.visual.*``) is not mapped: only the language model is
+quantized, and the vision tower is copied verbatim from the Hugging Face checkpoint
+via ``QWEN3VL_VISION_PREFIXES``.
 
 Note: ``Qwen3VLMoeForConditionalGeneration`` is **not** supported here.  The MoE
 variant stores expert weights as 3-D tensors (``mlp.experts.gate_up_proj``,
@@ -32,31 +32,11 @@ cannot reuse the dense Qwen3 rules.
 Reference: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/blob/main/model.safetensors.index.json
 """
 
-import copy
-
-from .mcore_custom import CustomModuleMapping
+from .mcore_custom import with_language_model_prefix
 from .mcore_qwen import qwen3_causal_lm_export, qwen3_causal_lm_import
 
+# Vision-tower weights copied straight from the HF checkpoint (never quantized).
+QWEN3VL_VISION_PREFIXES = ("model.visual.",)
 
-def _with_language_model_prefix(
-    mapping: dict[str, CustomModuleMapping],
-) -> dict[str, CustomModuleMapping]:
-    """Derive a VL mapping from a base Qwen3 mapping.
-
-    Rewrites every ``target_name_or_prefix`` that starts with ``model.`` to
-    ``model.language_model.<rest>``.  Prefixes that do not start with
-    ``model.`` (e.g. ``lm_head.``) are left unchanged.
-    """
-    result = {}
-    for key, m in mapping.items():
-        prefix = m.target_name_or_prefix
-        if prefix.startswith("model."):
-            prefix = "model.language_model." + prefix[len("model.") :]
-        result[key] = type(m)(
-            target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
-        )
-    return result
-
-
-qwen3vl_causal_lm_import = _with_language_model_prefix(qwen3_causal_lm_import)
-qwen3vl_causal_lm_export = _with_language_model_prefix(qwen3_causal_lm_export)
+qwen3vl_causal_lm_import = with_language_model_prefix(qwen3_causal_lm_import)
+qwen3vl_causal_lm_export = with_language_model_prefix(qwen3_causal_lm_export)

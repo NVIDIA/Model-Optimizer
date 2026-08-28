@@ -17,6 +17,7 @@
 from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
+from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
@@ -65,7 +66,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
-    assert list(hf_export_path.glob("*.safetensors")), "Expected exported safetensors weights"
+    assert_exported_checkpoint_matches(hf_export_path, hf_model_path)
 
     # The exported unified checkpoint should be loadable and runnable by vLLM. The deployment check below
     # is disabled because it takes too long in CI (likely because of first run)

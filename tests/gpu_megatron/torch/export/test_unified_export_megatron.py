@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import torch
 import transformers
+from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
@@ -166,20 +167,11 @@ def _test_unified_export_megatron(
     if quant_config:
         _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
+    if rank == 0 and extra_module is None:
+        # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
+        assert_exported_checkpoint_matches(tmp_export_dir, model_dir, check_values=False)
+
     if model_type == "qwen3vl" and rank == 0:
-        # sanity check that vision weights were merged by export_mcore_gpt_to_hf
-        keys = []
-        for sf in sorted(tmp_export_dir.glob("*.safetensors")):
-            with safe_open(str(sf), framework="pt", device="cpu") as f:
-                keys.extend(f.keys())
-        # every decoder layer should be present, not just some
-        for i in range(num_layers):
-            assert any(k.startswith(f"model.language_model.layers.{i}.") for k in keys), (
-                f"language model layer {i} keys missing from export"
-            )
-        assert any(k.startswith("model.visual.") for k in keys), (
-            "vision encoder keys missing from export"
-        )
         # try to load the model and run a forward pass
         vl_model = Qwen3VLForConditionalGeneration.from_pretrained(
             tmp_export_dir, torch_dtype=torch.bfloat16

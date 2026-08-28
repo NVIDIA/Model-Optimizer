@@ -72,6 +72,14 @@ def get_args() -> argparse.Namespace:
     )
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
+            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+        ),
+    )
+    parser.add_argument(
         "--export_extra_modules",
         action="store_true",
         help="Export extra modules such as Medusa heads, EAGLE, or MTP.",
@@ -108,6 +116,7 @@ def main(args: argparse.Namespace):
     _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=trust_remote_code,
+        moe_grouped_gemm=not args.no_moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,

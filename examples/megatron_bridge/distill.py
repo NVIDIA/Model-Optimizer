@@ -94,6 +94,15 @@ def get_args():
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
+            "TEGroupedMLP (grouped GEMM). Must match the checkpoint passed to "
+            "--student_megatron_path. Only affects MoE models."
+        ),
+    )
+    parser.add_argument(
         "--student_megatron_path",
         type=str,
         default=None,
@@ -344,6 +353,9 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        if (provider.num_moe_experts or 0) > 0:
+            # Must match the expert layout of --student_megatron_path (see quantize.py).
+            provider.moe_grouped_gemm = not args.no_moe_grouped_gemm
         if args.sft:
             # A response-only loss mask needs per-token reduction to combine across CP ranks.
             # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.

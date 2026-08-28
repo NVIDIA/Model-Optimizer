@@ -62,12 +62,13 @@ import copy
 import gc
 
 import torch
-from transformers import AutoProcessor
+from transformers import AutoConfig, AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
+from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
@@ -96,6 +97,14 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
+            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+        ),
+    )
     parser.add_argument(
         "--export_megatron_path",
         type=str,
@@ -279,6 +288,7 @@ def main(args: argparse.Namespace):
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=args.trust_remote_code,
+        moe_grouped_gemm=not args.no_moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
@@ -320,6 +330,24 @@ def main(args: argparse.Namespace):
             "model's calibration statistics will not see vision tokens."
         )
     print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
+
+    # Fused (grouped GEMM) experts are only exportable for architectures with an
+    # "experts.linear_fc1" rule. Fail now rather than at export: the layout is baked into the
+    # checkpoint, so recovering means re-running this whole calibration.
+    if not args.no_moe_grouped_gemm and any(
+        hasattr(m, "experts") and not hasattr(m.experts, "local_experts")
+        for m in unwrapped_model.modules()
+        if type(m).__name__.endswith("MoELayer")
+    ):
+        arch = AutoConfig.from_pretrained(
+            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+        ).architectures[0]
+        if "experts.linear_fc1" not in all_mcore_hf_export_mapping.get(arch, {}):
+            raise NotImplementedError(
+                f"{arch} has fused (grouped GEMM) MoE experts, which "
+                "export_quantized_megatron_to_hf.py cannot export. Re-run with "
+                "--no_moe_grouped_gemm to build the experts as SequentialMLP instead."
+            )
 
     mtq_config = get_quant_config(args)
 

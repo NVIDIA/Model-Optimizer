@@ -16,6 +16,7 @@
 
 """Custom Megatron mapping and safetensors utility."""
 
+import copy
 import json
 import math
 import os
@@ -175,6 +176,18 @@ class GatedMLPSlicing(CustomModuleMapping):
         )
 
 
+class GatedDeltaNetSlicing(CustomModuleMapping):
+    """A custom module mapping that splits GatedDeltaNet's fused ``in_proj``."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that splits the fused GatedDeltaNet input projection."""
+        super().__init__(
+            func_name="gated_delta_net_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class PackNameRemapping(CustomModuleMapping):
     """A custom module mapping that packs module after name remapping."""
 
@@ -221,6 +234,29 @@ class UnpackNameRemappingGPT(CustomModuleMapping):
             target_name_or_prefix=target_name_or_prefix,
             func_kwargs=func_kwargs,
         )
+
+
+# LLaVA-style checkpoints keep the vision tower under these prefixes; see
+# ``all_mcore_hf_vision_passthrough_mapping`` for the per-architecture overrides.
+LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
+
+
+def with_language_model_prefix(
+    mapping: dict[str, CustomModuleMapping],
+) -> dict[str, CustomModuleMapping]:
+    """Derive a VLM mapping from a text-model mapping by nesting it under ``model.language_model.``.
+
+    Prefixes that do not start with ``model.`` (e.g. ``lm_head.``) are left unchanged.
+    """
+    result = {}
+    for key, m in mapping.items():
+        prefix = m.target_name_or_prefix
+        if prefix.startswith("model."):
+            prefix = "model.language_model." + prefix[len("model.") :]
+        result[key] = type(m)(
+            target_name_or_prefix=prefix, func_kwargs=copy.deepcopy(m.func_kwargs)
+        )
+    return result
 
 
 def save_safetensors(state_dict, save_directory: str | os.PathLike):

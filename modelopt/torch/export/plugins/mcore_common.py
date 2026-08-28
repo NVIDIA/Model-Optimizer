@@ -39,7 +39,12 @@ from .mcore_qwen import (
     qwen25_causal_lm_export,
     qwen25_causal_lm_import,
 )
-from .mcore_qwen3vl import qwen3vl_causal_lm_export, qwen3vl_causal_lm_import
+from .mcore_qwen3vl import (
+    QWEN3VL_VISION_PREFIXES,
+    qwen3vl_causal_lm_export,
+    qwen3vl_causal_lm_import,
+)
+from .mcore_qwen35vl import QWEN3_5_VL_VISION_PREFIXES, qwen3_5_vl_causal_lm_export
 
 all_mcore_hf_export_mapping: dict[str, Any] = {
     "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
@@ -56,6 +61,15 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
     "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
+    "Qwen3_5MoeForConditionalGeneration": qwen3_5_vl_causal_lm_export,
+}
+
+# VLM architectures whose Megatron export covers the language model only: the vision tower is copied
+# verbatim from the HF checkpoint under these key prefixes. Architectures absent here fall back to
+# ``LLAVA_VISION_PREFIXES`` when the model is an MCore ``LLaVAModel``, and to no copy otherwise.
+all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
+    "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
+    "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
 }
 
 all_mcore_hf_import_mapping: dict[str, Any] = {

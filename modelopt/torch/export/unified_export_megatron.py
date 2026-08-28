@@ -53,8 +53,12 @@ from .plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
 )
-from .plugins.mcore_common import all_mcore_hf_export_mapping
+from .plugins.mcore_common import (
+    all_mcore_hf_export_mapping,
+    all_mcore_hf_vision_passthrough_mapping,
+)
 from .plugins.mcore_custom import (
+    LLAVA_VISION_PREFIXES,
     CustomModuleMapping,
     get_safetensor,
     save_safetensors_by_layer_index,
@@ -176,6 +180,11 @@ class GPTModelExporter:
         self.dtype = dtype
         self.trust_remote_code = trust_remote_code
         self.arch = self._hf_config.architectures[0]
+        # A VLM's vision tower is never quantized: copy it verbatim from the HF checkpoint. ``None``
+        # means there is nothing to copy.
+        self.vision_passthrough_prefixes = all_mcore_hf_vision_passthrough_mapping.get(
+            self.arch, LLAVA_VISION_PREFIXES if self.is_multimodal else None
+        )
         # TODO: May modify this later according to what quantization exported ckpt is, currently only support BF16.
         if self.arch == "GptOssForCausalLM":
             if hasattr(self._hf_config, "quantization_config"):
@@ -400,14 +409,13 @@ class GPTModelExporter:
             # Merge the multimodal components into that shard so they land in a file
             # the index builder picks up (it scans shards 1..num_layers).
             first_layer_key = next(iter(layer_state_dicts))
-            if self.is_multimodal:
-                multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
-                layer_state_dicts[first_layer_key].update(multimodal_state_dict)
-            elif self.arch == "Qwen3VLForConditionalGeneration":
-                vision_state_dict = load_multimodal_components(
-                    pretrained_model_name_or_path, prefixes=("model.visual.",)
+            if self.vision_passthrough_prefixes is not None:
+                layer_state_dicts[first_layer_key].update(
+                    load_multimodal_components(
+                        pretrained_model_name_or_path,
+                        prefixes=self.vision_passthrough_prefixes,
+                    )
                 )
-                layer_state_dicts[first_layer_key].update(vision_state_dict)
 
         # Bracket the writer's config.json read-modify-write with barriers so peers
         # never observe a truncated file (also ensures export_dir exists).
@@ -504,8 +512,12 @@ class GPTModelExporter:
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id, is_mtp=is_mtp)
         else:
+            # GatedDeltaNet fuses the input layernorm into ``in_proj`` rather than ``linear_qkv``.
+            qkv_module = getattr(layer.self_attention, "linear_qkv", None)
+            if qkv_module is None:
+                qkv_module = getattr(layer.self_attention, "in_proj", None)
             fused_key, norm_weight = self._get_fused_norm_weight(
-                getattr(layer.self_attention, "linear_qkv", None),
+                qkv_module,
                 primary_key="fused_input_layernorm",
             )
             if norm_weight is not None:
@@ -538,6 +550,9 @@ class GPTModelExporter:
                     layer.self_attention.linear_kv_up_proj, layer_id, is_mtp=is_mtp
                 )
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id, is_mtp=is_mtp)
+            elif "linear_attn" in self.rules and hasattr(layer.self_attention, "in_proj"):
+                # GatedDeltaNet (Qwen3.5 linear attention): no q/k layernorm, no core_attention.
+                self._get_gated_delta_net_state_dict(layer, layer_id, is_mtp=is_mtp)
             else:
                 if layer.self_attention.q_layernorm is not None and not isinstance(
                     layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
@@ -592,6 +607,13 @@ class GPTModelExporter:
                     self.rules["shared_experts.linear_fc2"](
                         layer.mlp.shared_experts.linear_fc2, layer_id, is_mtp=is_mtp
                     )
+                    if (
+                        "shared_experts.gate_weight" in self.rules
+                        and getattr(layer.mlp.shared_experts, "gate_weight", None) is not None
+                    ):
+                        self.rules["shared_experts.gate_weight"](
+                            layer.mlp.shared_experts.gate_weight, layer_id, is_mtp=is_mtp
+                        )
                 if hasattr(layer.mlp.experts, "local_experts"):
                     if not self.rules.get("use_packed_local_experts", False):
                         for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
@@ -619,6 +641,15 @@ class GPTModelExporter:
                     )
                     self.rules["experts.linear_fc2"](
                         layer.mlp.experts.linear_fc2, layer_id, is_mtp=is_mtp
+                    )
+                else:
+                    # Without this the routed experts are silently dropped and the exported
+                    # checkpoint looks valid but has no expert weights.
+                    raise NotImplementedError(
+                        f"No export rule for {type(layer.mlp.experts).__name__} experts of "
+                        f"{self.arch}: fused (grouped GEMM) experts need an 'experts.linear_fc1' "
+                        "rule. Re-run quantization and export with --no_moe_grouped_gemm to build "
+                        "the experts as SequentialMLP instead."
                     )
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
@@ -734,6 +765,16 @@ class GPTModelExporter:
         if mtp_exists:
             self.exclude_modules.append("mtp*")
         return mtp_state_dict
+
+    def _get_gated_delta_net_state_dict(self, layer, layer_id, is_mtp=False):
+        """Export a GatedDeltaNet (Qwen3.5 linear-attention) layer's ``self_attention``."""
+        gdn = layer.self_attention
+        self.rules["linear_attn"](gdn, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.conv1d"](gdn.conv1d, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.A_log"](gdn.A_log, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.dt_bias"](gdn.dt_bias, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.out_norm"](gdn.out_norm, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.out_proj"](gdn.out_proj, layer_id, is_mtp=is_mtp)
 
     def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):
@@ -870,6 +911,7 @@ class GPTModelExporter:
                 "qkv_slicing": self._qkv_slicing,
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
+                "gated_delta_net_slicing": self._gated_delta_net_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
@@ -1028,6 +1070,7 @@ class GPTModelExporter:
         mapping={},
         dtype: torch.dtype | None = None,
         is_mtp: bool = False,
+        zero_centered_gamma: bool = False,
     ):
         if is_mtp:
             prefix = self._mtp_prefix(prefix)
@@ -1035,13 +1078,16 @@ class GPTModelExporter:
             dtype = self.dtype
 
         if isinstance(module, torch.Tensor):
-            self._state_dict[prefix] = module
+            self._state_dict[prefix] = (module + 1.0) if zero_centered_gamma else module
             return
 
         name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
         self._record_layer_quant_config(prefix, qformat, block_size)
 
         weight = name_to_value.pop("weight")
+        if zero_centered_gamma:
+            # Megatron stores this norm's gamma centered on 0; HF centers it on 1.
+            weight = weight + 1.0
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         if weight_scale is None:
@@ -1447,6 +1493,81 @@ class GPTModelExporter:
                 self._state_dict[q_proj_key] = val.detach().clone()
                 self._state_dict[k_proj_key] = val.detach().clone()
                 self._state_dict[v_proj_key] = val.detach().clone()
+
+    def _gated_delta_net_slicing(self, module, prefix, is_mtp=False):
+        """Split GatedDeltaNet's fused ``in_proj`` into the four HF projections.
+
+        Megatron-Core packs ``[query, key, value, z, beta, alpha]`` along dim 0 of a single
+        ``in_proj``; HF stores ``in_proj_qkv`` (query+key+value), ``in_proj_z``, ``in_proj_b``
+        (beta) and ``in_proj_a`` (alpha).  The sections are contiguous and in that order, so
+        the split is a plain ``torch.split`` -- sizes come from the module itself so TP
+        sharding is handled without re-deriving them here.
+        """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        in_proj = module.in_proj
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            in_proj, self.dtype, prefix=prefix
+        )
+
+        sections = dict(zip(module.in_proj_split_names, module.in_proj_split_sections))
+        split_sizes = [
+            sections["query"] + sections["key"] + sections["value"],
+            sections["z"],
+            sections["beta"],
+            sections["alpha"],
+        ]
+        proj_prefixes = [
+            prefix + name + "." for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+        ]
+
+        for proj_prefix in proj_prefixes:
+            self._record_layer_quant_config(proj_prefix, qformat, block_size)
+        if qformat in (None, QUANTIZATION_NONE):
+            # Split the fused in_proj exclude entry into the per-HF-name projections.
+            self.exclude_modules = [
+                m for m in self.exclude_modules if m != prefix.removesuffix(".")
+            ]
+            for proj_prefix in proj_prefixes:
+                self._record_excluded_module(proj_prefix)
+
+        weight = name_to_value.pop("weight")
+        proj_weights = list(torch.split(weight, split_sizes, dim=0))
+        proj_keys = [p + "weight" for p in proj_prefixes]
+        weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+
+        if weight_scale is None:
+            for key, proj_weight in zip(proj_keys, proj_weights):
+                self._state_dict[key] = proj_weight
+        else:
+            if len(weight_scale.shape) > 0:
+                # Per-channel / per-block scales are laid out along the same (output) dim.
+                proj_scales = list(torch.split(weight_scale, split_sizes, dim=0))
+            else:
+                proj_scales = [weight_scale.detach().clone() for _ in proj_keys]
+            for proj_weight, scale, key in zip(proj_weights, proj_scales, proj_keys):
+                self._state_dict[key] = to_quantized_weight(
+                    proj_weight, scale, qformat, weight_scale_2, block_size
+                )
+                self._state_dict[key + "_scale"] = scale
+
+        if weight_scale_2 is not None:
+            if len(weight_scale_2.shape) > 0:
+                raise ValueError("weight_scale_2 must be a scalar!")
+            for key in proj_keys:
+                self._state_dict[key + "_scale_2"] = weight_scale_2.detach().clone()
+
+        # weight and weight_scale have been popped; the rest (bias, input_scale, ...) is
+        # either split like the weight or replicated onto every projection.
+        for key, val in name_to_value.items():
+            if key == "bias":
+                for proj_bias, proj_prefix in zip(
+                    torch.split(val.detach().clone(), split_sizes, dim=0), proj_prefixes
+                ):
+                    self._state_dict[proj_prefix + key] = proj_bias
+            else:
+                for proj_prefix in proj_prefixes:
+                    self._state_dict[proj_prefix + key] = val.detach().clone()
 
     def _self_attention_scaling(
         self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale", is_mtp=False
