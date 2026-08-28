@@ -128,13 +128,13 @@ def test_failed_probe_records_exceptions(synthetic_onnx_path, monkeypatch):
     )
 
 
-@pytest.mark.slow
+@pytest.mark.manual(reason="CoAtNet-0 integration; ~14 min on H100, needs pre-staged fixtures")
 def test_coatnet_op_type_matches_manual_groundtruth():
     """CoAtNet-0 op-type ranking surfaces the ops that ``--op_types_to_quantize Conv`` avoids.
 
     Top-4 = ``Add`` / ``Mul`` / ``LayerNormalization`` / ``ReduceMean`` (all > 1.5 KL); ``Conv``
     sits ~10x below. Matches the manual "Conv-only wins 82% top-1" ground truth. Wall-clock
-    ~14 min on H100.
+    ~14 min on H100. Opt-in via ``pytest --run-manual``.
     """
     onnx_path, calib_path = get_coatnet_paths()
 
@@ -162,11 +162,13 @@ def test_coatnet_op_type_matches_manual_groundtruth():
         assert scores.get(op, 0.0) < 0.001, f"{op} score {scores.get(op, 0.0):.3g} should be ~0"
 
 
-@pytest.mark.slow_gpu
+@pytest.mark.manual(
+    reason="CoAtNet-0 per-node integration; ~30-60 min on H100, needs pre-staged fixtures"
+)
 def test_coatnet_per_node_matches_manual_groundtruth():
     """CoAtNet-0 per-node ranking: LN / MHA nodes in top-10, individual Conv nodes in bottom-10.
 
-    Wall-clock ~30-60 min on H100.
+    Wall-clock ~30-60 min on H100. Opt-in via ``pytest --run-manual``.
     """
     onnx_path, calib_path = get_coatnet_paths()
 
