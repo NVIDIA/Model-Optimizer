@@ -46,16 +46,7 @@ import sys
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-
-try:  # nemo:26.08+
-    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-
-    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
-    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
-except ImportError:  # nemo:26.06 and earlier
-    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
-
+from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -593,7 +584,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
+    if isinstance(provider, HybridModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -696,7 +687,7 @@ def main(args: argparse.Namespace):
                 )
         # Only older remote-code configs need this; native configs carry the cadence in layer_types.
         if (
-            isinstance(provider, _HYBRID_PROVIDER_TYPES)
+            isinstance(provider, HybridModelProvider)
             and not hasattr(text_cfg, "layer_types")
             and hasattr(text_cfg, "hybrid_override_pattern")
         ):
@@ -712,39 +703,15 @@ def main(args: argparse.Namespace):
 
         # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
         # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
-        exported_config_only = False
-        if (
-            hasattr(AutoBridge, "from_hf_config")
-            and isinstance(provider, _HYBRID_PROVIDER_TYPES)
-            and not is_vlm
-        ):
+        if isinstance(provider, HybridModelProvider) and not is_vlm:
             pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
             # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
             pruned_bridge.trust_remote_code = args.trust_remote_code
-            try:
-                pruned_bridge.save_hf_pretrained(
-                    model, args.output_hf_path, source_path=args.hf_model_name_or_path
-                )
-                exported_config_only = True
-            except ValueError as e:
-                # nemo:26.06+ exposes from_hf_config but rejects config-only save_hf_pretrained;
-                # fall back to the dummy-model path below.
-                if "requires a pretrained HuggingFace model" not in str(e):
-                    raise
-                warn_rank_0(f"Config-only HF export unsupported ({e}); using dummy-model export.")
-
-        if not exported_config_only:
-            if (
-                not hasattr(AutoBridge, "from_hf_config")
-                and isinstance(provider, _HYBRID_PROVIDER_TYPES)
-                and not is_vlm
-            ):
-                warn_rank_0(
-                    "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
-                    "path, which cannot round-trip a pruned native NemotronH config. Use "
-                    "transformers<5 or a newer Megatron-Bridge if the save fails."
-                )
+            pruned_bridge.save_hf_pretrained(
+                model, args.output_hf_path, source_path=args.hf_model_name_or_path
+            )
+        else:
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
             dummy_model_cls.from_config(
                 hf_cfg, trust_remote_code=args.trust_remote_code

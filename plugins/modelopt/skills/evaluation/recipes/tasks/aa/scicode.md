@@ -19,6 +19,12 @@ harvesting requirements beyond the task YAML fragment.
   it unless you have a memory reason to.
 - **Parallelism:** set task-level `parallelism: 8` exactly. Use the same value
   for baseline and candidate.
+- **One run is not enough to gate on.** Scored single-shot at `temperature 1.0`,
+  SciCode's run-to-run noise rivals a 1 % gate: a paired comparison moved **3.92 pp
+  and changed sign** once it was repeated. Keep `num_repeats: 1` and instead submit
+  the benchmark **multiple times**, pooling across runs — repeating inside one run
+  multiplies exposure to code-execution sandbox errors. Pool until the standard
+  error is below the threshold, or report the task `INDETERMINATE`.
 
 ## YAML Fragment
 
@@ -33,7 +39,7 @@ Use this inside the top-level `evaluation.tasks` list:
         parallelism: 8
         extra:
           args: ++prompt_config=eval/scicode/default ++with_background=true
-          num_repeats: 1
+          num_repeats: 1 # keep at 1; pool across multiple runs to gate (see above)
 ```
 
 ## Score Extraction from mlflow

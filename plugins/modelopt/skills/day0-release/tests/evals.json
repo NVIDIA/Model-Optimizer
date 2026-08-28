@@ -9,7 +9,8 @@
     "expected_behavior": [
       "Selects the day0-release skill for the full goal-driven release",
       "Resolves model, recipe/qformat, cluster, eval set, and threshold before starting",
-      "Runs stages in fixed order: setup, PTQ, baseline eval, quantized eval, compare, closeout",
+      "Runs stages in fixed order: setup, PTQ, serving canary, baseline eval, quantized eval, compare, verbosity gate, closeout",
+      "Does not treat the accuracy compare as the final verdict: runs gate_verbosity.py before the closeout and reports both gates",
       "Runs the gate after each stage and does not advance past a failed gate",
       "Returns a publish decision (ACCEPT / REGRESSION / ANOMALOUS / INFEASIBLE), not just raw scores"
     ]
@@ -48,7 +49,7 @@
     "files": [],
     "expected_behavior": [
       "Runs gate_ptq.py on the exported checkpoint before evaluating",
-      "Treats a size ratio >= 1.0 or zero quantized-layer coverage as a gate failure",
+      "Treats zero quantized-layer coverage and a size ratio at or above 1.0 as gate failures, waiving the size failure only when the summary declares a source precision already at or below the recipe's target bits and the growth stays within the inherent limit (1.10x)",
       "Does not evaluate a checkpoint that failed the PTQ gate",
       "Branches on the failure_class (e.g. MODEL_UNSUPPORTED or QUANT_COVERAGE_FAILURE) rather than silently continuing"
     ]
