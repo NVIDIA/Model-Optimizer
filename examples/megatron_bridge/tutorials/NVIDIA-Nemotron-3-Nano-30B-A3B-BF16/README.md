@@ -413,12 +413,6 @@ export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 export HF_HOME=<path_to_huggingface_cache>
 export VLLM_CACHE_ROOT=<path_to_vllm_cache>
 
-# Set additional unused but required environment variables:
-export API_KEY=xxxxxx
-export INFERENCE_API_KEY=xxxxxx
-export OPENAI_CLIENT_ID=xxxxxx
-export OPENAI_CLIENT_SECRET=xxxxxx
-
 # Run the evaluation
 # To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)
 # To restrict which tasks run, add `-t <task_name>` to the command.
