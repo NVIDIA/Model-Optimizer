@@ -227,6 +227,45 @@ def test_range_download_resumes_without_forwarding_credentials_and_verifies_hash
     assert not partial.exists()
 
 
+def test_range_download_reuses_only_repository_cache_symlinks(tmp_path):
+    payload = b"cached-range-download"
+    entry = SimpleNamespace(
+        path="archives/video.zip",
+        size=len(payload),
+        lfs={"sha256": hashlib.sha256(payload).hexdigest()},
+    )
+    repository_cache = tmp_path / "hub/datasets--owner--repository"
+    snapshot = repository_cache / "snapshots/revision"
+    destination = snapshot / entry.path
+    destination.parent.mkdir(parents=True)
+    blob = repository_cache / "blobs/pinned"
+    blob.parent.mkdir()
+    blob.write_bytes(payload)
+    destination.symlink_to(blob)
+
+    report = preparation._download_range_file(
+        repository="owner/repository",
+        revision="revision",
+        entry=entry,
+        snapshot=snapshot,
+        destination=destination,
+    )
+
+    assert report["status"] == "reused"
+    destination.unlink()
+    outside = tmp_path / "outside"
+    outside.write_bytes(payload)
+    destination.symlink_to(outside)
+    with pytest.raises(ValueError, match="escapes its repository cache"):
+        preparation._download_range_file(
+            repository="owner/repository",
+            revision="revision",
+            entry=entry,
+            snapshot=snapshot,
+            destination=destination,
+        )
+
+
 def test_range_snapshot_records_exact_revision_and_rejects_unsafe_repository_paths(
     monkeypatch, tmp_path
 ):

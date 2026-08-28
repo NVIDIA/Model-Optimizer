@@ -141,7 +141,10 @@ def unit(session, torch_ver, tf_ver):
     )
 
 
-@nox.session(python=PUZZLETRON_V2_CI_ENVIRONMENT["python"])
+@nox.session(
+    python=PUZZLETRON_V2_CI_ENVIRONMENT["python"],
+    venv_backend="virtualenv",
+)
 def puzzletron_v2(session):
     """Run Puzzletron v2 CPU-eligible tests in its pinned Python runtime."""
     session.install(

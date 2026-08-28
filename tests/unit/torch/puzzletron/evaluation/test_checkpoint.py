@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,24 @@ from examples.puzzletron.evaluation import checkpoint
 
 def _distribution(provenance):
     return SimpleNamespace(read_text=lambda filename: json.dumps(provenance))
+
+
+def test_load_runner_restores_import_state(monkeypatch):
+    package = "modelopt.torch.puzzletron.evaluation"
+    original = ModuleType(package)
+    monkeypatch.setitem(sys.modules, package, original)
+    for name in (
+        "modelopt.torch.puzzletron.orchestration.mesh",
+        "modelopt.torch.puzzletron.evaluation.lmms",
+    ):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    runner = checkpoint._load_runner()
+
+    assert callable(runner)
+    assert sys.modules[package] is original
+    assert "modelopt.torch.puzzletron.orchestration.mesh" not in sys.modules
+    assert "modelopt.torch.puzzletron.evaluation.lmms" not in sys.modules
 
 
 def test_verify_lmms_eval_revision_accepts_pinned_vcs_install(monkeypatch):

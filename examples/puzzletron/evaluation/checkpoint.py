@@ -82,7 +82,7 @@ def _load_source_module(name: str, relative_path: str) -> ModuleType:
 
 def _load_runner() -> Callable[..., dict[str, object]]:
     """Load the narrow evaluator without importing unrelated ModelOpt plugins."""
-    for package, relative_path in (
+    packages = (
         ("modelopt", "modelopt"),
         ("modelopt.torch", "modelopt/torch"),
         ("modelopt.torch.puzzletron", "modelopt/torch/puzzletron"),
@@ -94,21 +94,36 @@ def _load_runner() -> Callable[..., dict[str, object]]:
             "modelopt.torch.puzzletron.evaluation",
             "modelopt/torch/puzzletron/evaluation",
         ),
-    ):
-        if package not in sys.modules:
-            module = ModuleType(package)
-            module.__path__ = [str(REPOSITORY_ROOT / relative_path)]
-            sys.modules[package] = module
-    with redirect_stdout(sys.stderr):
-        _load_source_module(
-            "modelopt.torch.puzzletron.orchestration.mesh",
-            "modelopt/torch/puzzletron/orchestration/mesh.py",
-        )
-        module = _load_source_module(
-            "modelopt.torch.puzzletron.evaluation.lmms",
-            "modelopt/torch/puzzletron/evaluation/lmms.py",
-        )
-    return cast("Callable[..., dict[str, object]]", module.run_lmms_eval_checkpoint)
+    )
+    source_modules = (
+        "modelopt.torch.puzzletron.orchestration.mesh",
+        "modelopt.torch.puzzletron.evaluation.lmms",
+    )
+    module_names = (*(package for package, _ in packages), *source_modules)
+    missing = object()
+    original_modules = {name: sys.modules.get(name, missing) for name in module_names}
+    try:
+        for package, relative_path in packages:
+            if package not in sys.modules:
+                module = ModuleType(package)
+                module.__path__ = [str(REPOSITORY_ROOT / relative_path)]
+                sys.modules[package] = module
+        with redirect_stdout(sys.stderr):
+            _load_source_module(
+                source_modules[0],
+                "modelopt/torch/puzzletron/orchestration/mesh.py",
+            )
+            module = _load_source_module(
+                source_modules[1],
+                "modelopt/torch/puzzletron/evaluation/lmms.py",
+            )
+        return cast("Callable[..., dict[str, object]]", module.run_lmms_eval_checkpoint)
+    finally:
+        for name, original in original_modules.items():
+            if original is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
 
 
 def run_lmms_eval_checkpoint(*args, **kwargs) -> dict[str, object]:

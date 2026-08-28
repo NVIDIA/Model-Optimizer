@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -206,6 +207,7 @@ def settings(
     prepared: PreparedSuite,
 ) -> dict[str, object]:
     """Build shared runner settings for a validated VLM suite."""
+    _verify_video_reader(prepared.suite)
     execution_policy = prepared.execution_policy
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
@@ -236,3 +238,16 @@ def settings(
         },
         "extra_args": ["--include_path", str(tasks_root)],
     }
+
+
+def _verify_video_reader(suite: str) -> None:
+    """Fail before evaluation when a selected video task has no decord reader."""
+    video_selected = any(
+        profile.VLM_BENCHMARK_DATASETS[task].media_dir is not None
+        for task in suites.source_tasks(suite)
+    )
+    if video_selected and importlib.util.find_spec("decord") is None:
+        raise RuntimeError(
+            "video evaluation requires a decord-compatible reader; use Python below 3.12 "
+            "on macOS or run in the supported Linux Puzzletron environment"
+        )

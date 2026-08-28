@@ -181,9 +181,16 @@ def _download_range_file(
     expected_sha256 = _lfs_sha256(entry)
     partial = destination.with_name(f".{destination.name}.modelopt-part")
     _ensure_directory_path(snapshot, destination.parent)
-    for candidate in (destination, partial):
-        if candidate.is_symlink():
-            raise ValueError(f"range-download path must not be a symlink: {candidate}")
+    if partial.is_symlink():
+        raise ValueError(f"range-download path must not be a symlink: {partial}")
+    if destination.is_symlink():
+        try:
+            resolved = destination.resolve(strict=True)
+        except OSError as error:
+            raise ValueError(f"range-download symlink is invalid: {destination}") from error
+        repository_cache = snapshot.parent.parent.resolve()
+        if not resolved.is_relative_to(repository_cache) or not resolved.is_file():
+            raise ValueError(f"range-download path escapes its repository cache: {destination}")
     if destination.exists():
         if not destination.is_file() or destination.stat().st_size != expected_size:
             raise ValueError(f"downloaded file size differs from pinned metadata: {destination}")

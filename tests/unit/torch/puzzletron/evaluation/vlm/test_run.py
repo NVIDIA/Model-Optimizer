@@ -437,6 +437,14 @@ def test_profile_contract_pins_every_task_and_revision():
     assert all(len(item.revision) == 40 for item in profile.VLM_BENCHMARK_DATASETS.values())
 
 
+def test_video_reader_validation_is_limited_to_video_suites(monkeypatch):
+    monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda _name: None)
+
+    preflight._verify_video_reader("short")
+    with pytest.raises(RuntimeError, match="decord-compatible reader"):
+        preflight._verify_video_reader("quick")
+
+
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
     requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
     assert (
