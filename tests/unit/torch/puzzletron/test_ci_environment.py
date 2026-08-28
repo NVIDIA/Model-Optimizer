@@ -165,6 +165,7 @@ def test_puzzletron_nox_session_verifies_environment_before_pytest(monkeypatch):
 
     noxfile.puzzletron_v2.func(session)
 
+    assert ("run", ("python", "-m", "pip", "check")) in events
     verify_index = events.index(("verify", session))
     pytest_index = next(
         index
