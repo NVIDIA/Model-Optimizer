@@ -36,29 +36,15 @@ conversion, training, evaluation, and benchmarking run in the worker
 environment or container selected during setup. Prepare the
 [worker environment](docs/environment_setup.md) before launching a campaign.
 
-### Standalone runtime image
+### Initial runtime image recipe
 
-The repository-owned [`Dockerfile`](Dockerfile) builds the validated Qwen and
-Nemotron runtime with ModelOpt, the patched vLLM fork, AutoModel, AIPerf,
-flash-linear-attention, Mamba, causal-convolution, and grouped-GEMM installed
-against one PyTorch and CUDA environment. The
-[environment manifest](ci_environment.json) records the immutable CUDA base,
-exact VCS revisions, verified core package versions, and CUDA architectures.
-The Dockerfile is the sole installation recipe for this environment.
+The repository-owned [`Dockerfile`](Dockerfile) is an initial pinned recipe for
+the Puzzletron CUDA environment. The [environment manifest](ci_environment.json)
+records its immutable CUDA base, package versions, VCS revisions, compatibility
+patch, and CUDA architecture targets.
 
-The Mamba package is built from the exact official `state-spaces/mamba` release
-commit. Its release metadata pins TileLang 0.1.8, while the pinned vLLM revision
-requires 0.1.9, so the build applies a repository-owned compatibility patch to
-Mamba's dependency metadata. The manifest records the upstream commit and
-patch checksum, and the final `pip check` rejects an inconsistent environment.
-
-The grouped-GEMM revision used by the Nemotron path only declares CUDA
-architectures through Hopper, so its build is recorded separately as
-`8.0;8.6;9.0`. The remaining runtime extensions retain the broader architecture
-set in the manifest.
-
-Build the image from the repository root and record the ModelOpt revision in
-its OCI metadata:
+Build the image from the repository root and record the ModelOpt revision in its
+OCI metadata:
 
 ```bash
 docker build \
@@ -69,42 +55,23 @@ docker build \
   .
 ```
 
-The build verifies package versions, immutable VCS sources, CUDA compatibility,
-and imports without requiring a GPU. Run the same checks again with the
-standalone verifier:
+The build checks package consistency, recorded versions and sources, CUDA
+compatibility, and core imports. Run those checks again with the standalone
+verifier:
 
 ```bash
 docker run --rm modelopt-puzzletron-runtime:local \
   python /opt/puzzletron/verify_image_environment.py \
-    --environment /opt/puzzletron/ci_environment.json \
-    --profile runtime
+    --environment /opt/puzzletron/ci_environment.json
 ```
 
-Mount only the model, data, and result paths needed by a run:
-
-```bash
-export PUZZLETRON_WORKSPACE=/absolute/path/to/workspace
-docker run --gpus all --ipc=host --rm -it \
-  -v "${PUZZLETRON_WORKSPACE}:/workspace" \
-  -e PUZZLETRON_RUN_ROOT=/workspace/results \
-  modelopt-puzzletron-runtime:local
-```
-
-CI uses the same full image. A pull-request checkout is mounted over the baked
-source and installed with `--no-deps`, so CI tests new ModelOpt code without
-changing the image's third-party environment. The image workflow also runs the
-focused lifecycle test in that overlay mode.
-
-This change defines and validates the image but does not publish it. Image
-publication is a separate trusted workflow that will push the verified build
-to an approved registry and expose its immutable digest. CI, cluster jobs, and
-external users should consume that same digest instead of rebuilding the
-environment independently.
-
-Successful image construction proves the environment contract only. Exact
-vLLM runtime-stat replay remains a separate GPU workload whose cache identity,
-hardware, workload, and measured endpoints must be recorded with the campaign;
-image-build validation does not make a performance claim.
+This initial recipe is not yet a complete replacement for the worker
+environment. In particular, checkpoint teacher evaluation still needs a
+compatible LMMS-Eval revision, task templates, optional runtime packages, and
+NLTK data to be installed and tested without manual repair. Known manual
+additions include `decord`, `langdetect`, and NLTK's `punkt_tab` data. GitHub
+image building, image publication, and digest-based GPU consumption are
+follow-up work.
 
 ### 2. Generate a campaign
 

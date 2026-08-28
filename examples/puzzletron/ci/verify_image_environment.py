@@ -71,21 +71,8 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
         if not _REVISION_PATTERN.fullmatch(str(source.get("commit", ""))):
             raise ValueError(f"Puzzletron image source {key!r} must use a full Git revision")
 
-    expected_metadata = {
-        "grouped_gemm": ("nv-grouped-gemm", "setup.py"),
-        "lmms_eval": ("lmms-eval", "pyproject.toml"),
-        "nemo_automodel": ("nemo-automodel", "pyproject.toml"),
-    }
-    for key, (distribution, metadata_path) in expected_metadata.items():
-        source = sources[key]
-        if (source.get("distribution"), source.get("metadata_path")) != (
-            distribution,
-            metadata_path,
-        ):
-            raise ValueError(
-                f"Puzzletron image source {key!r} must declare distribution "
-                f"{distribution!r} from {metadata_path!r}"
-            )
+    if sources["grouped_gemm"].get("distribution") != "nv-grouped-gemm":
+        raise ValueError("Puzzletron grouped_gemm source must declare nv-grouped-gemm")
 
     runtime_image = environment.get("runtime_image") or {}
     for key in ("causal_conv1d", "flash_linear_attention", "tilelang"):
@@ -109,40 +96,28 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
             raise ValueError(f"Puzzletron runtime image must declare explicit {key}")
 
 
-def _expected_versions(environment: dict[str, Any], profile: str) -> dict[str, str]:
-    expected = {
+def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
+    return {
         "python": environment["python"],
         "torch": environment["torch"],
         "torchvision": environment["torchvision"],
         "transformers": environment["transformers"],
         "lmms-eval": environment["lmms_eval"]["base_version"],
         "nemo-automodel": environment["nemo_automodel"]["base_version"],
+        "aiperf": environment["gpu_image"]["aiperf"],
+        "nox": environment["gpu_image"]["nox"],
+        "causal-conv1d": environment["runtime_image"]["causal_conv1d"],
+        "flash-linear-attention": environment["runtime_image"]["flash_linear_attention"],
+        environment["runtime_image"]["grouped_gemm"]["distribution"]: environment["runtime_image"][
+            "grouped_gemm"
+        ]["base_version"],
+        "mamba-ssm": environment["runtime_image"]["mamba_ssm"]["base_version"],
+        "tilelang": environment["runtime_image"]["tilelang"],
     }
-    if profile in {"ci", "runtime"}:
-        expected.update(
-            {
-                "aiperf": environment["gpu_image"]["aiperf"],
-                "nox": environment["gpu_image"]["nox"],
-            }
-        )
-    if profile == "runtime":
-        expected.update(
-            {
-                "causal-conv1d": environment["runtime_image"]["causal_conv1d"],
-                "flash-linear-attention": environment["runtime_image"]["flash_linear_attention"],
-                environment["runtime_image"]["grouped_gemm"]["distribution"]: environment[
-                    "runtime_image"
-                ]["grouped_gemm"]["base_version"],
-                "mamba-ssm": environment["runtime_image"]["mamba_ssm"]["base_version"],
-                "tilelang": environment["runtime_image"]["tilelang"],
-            }
-        )
-    return expected
 
 
 def verify_installed_environment(
     environment: dict[str, Any],
-    profile: str,
     *,
     package_version: Callable[[str], str] = metadata.version,
     source_verifier: Callable[[str, dict[str, Any]], None] = verify_installed_vcs_source,
@@ -150,13 +125,11 @@ def verify_installed_environment(
     python_version: str | None = None,
     torch_cuda: object = _UNSET,
 ) -> None:
-    """Verify package, VCS, CUDA, and runtime-profile invariants."""
+    """Verify package, VCS, CUDA, and runtime invariants."""
 
-    if profile not in {"cpu", "ci", "runtime"}:
-        raise ValueError(f"Unsupported Puzzletron image profile: {profile!r}")
     validate_environment_contract(environment)
 
-    expected = _expected_versions(environment, profile)
+    expected = _expected_versions(environment)
     actual = {
         "python": python_version or f"{sys.version_info.major}.{sys.version_info.minor}",
         **{
@@ -176,45 +149,29 @@ def verify_installed_environment(
     sources = {
         "lmms-eval": environment["lmms_eval"],
         "nemo-automodel": environment["nemo_automodel"],
+        environment["runtime_image"]["grouped_gemm"]["distribution"]: environment["runtime_image"][
+            "grouped_gemm"
+        ],
+        "vllm": environment["vllm"],
     }
-    if profile == "runtime":
-        sources.update(
-            {
-                environment["runtime_image"]["grouped_gemm"]["distribution"]: environment[
-                    "runtime_image"
-                ]["grouped_gemm"],
-                "vllm": environment["vllm"],
-            }
-        )
     for package, source in sources.items():
         source_verifier(package, source)
 
-    if profile in {"ci", "runtime"}:
-        if torch_cuda is _UNSET:
-            torch_cuda = module_importer("torch").version.cuda
-        expected_cuda = environment["gpu_image"]["torch_cuda"]
-        if torch_cuda != expected_cuda:
-            raise RuntimeError(
-                f"Pinned Puzzletron CUDA mismatch: actual={torch_cuda!r}, "
-                f"expected={expected_cuda!r}"
-            )
+    if torch_cuda is _UNSET:
+        torch_cuda = module_importer("torch").version.cuda
+    expected_cuda = environment["gpu_image"]["torch_cuda"]
+    if torch_cuda != expected_cuda:
+        raise RuntimeError(
+            f"Pinned Puzzletron CUDA mismatch: actual={torch_cuda!r}, expected={expected_cuda!r}"
+        )
 
-    if profile == "runtime":
-        for module in (
-            "causal_conv1d",
-            "fla",
-            "grouped_gemm",
-            "mamba_ssm",
-            "tilelang",
-            "vllm",
-        ):
-            module_importer(module)
+    for module in ("causal_conv1d", "fla", "grouped_gemm", "mamba_ssm", "tilelang", "vllm"):
+        module_importer(module)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--environment", type=Path, required=True)
-    parser.add_argument("--profile", choices=("cpu", "ci", "runtime"), required=True)
     parser.add_argument("--manifest-only", action="store_true")
     return parser.parse_args()
 
@@ -224,7 +181,7 @@ def main() -> None:
     environment = json.loads(args.environment.read_text(encoding="utf-8"))
     validate_environment_contract(environment)
     if not args.manifest_only:
-        verify_installed_environment(environment, args.profile)
+        verify_installed_environment(environment)
 
 
 if __name__ == "__main__":

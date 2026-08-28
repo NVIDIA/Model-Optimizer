@@ -5,18 +5,18 @@ checkpoint without creating or running a Puzzletron campaign.
 
 ## Quick start
 
-Use the repository-owned Puzzletron runtime image described in the
-[installation guide](../README.md#installation). Mount the checkpoint and result
-directories rather than installing a second worker environment:
+Install the Puzzletron worker requirements:
 
 ```bash
-docker run --gpus all --ipc=host --rm \
-  -v /path/to/checkpoint:/checkpoint:ro \
-  -v /path/to/results:/results \
-  modelopt-puzzletron-runtime:local \
-  python examples/puzzletron/evaluate_lmms_checkpoint.py \
-    --checkpoint /checkpoint \
-    --output-dir /results/checkpoint-smoke
+python -m pip install -r examples/puzzletron/requirements.txt
+```
+
+Then run the default smoke:
+
+```bash
+python examples/puzzletron/evaluate_lmms_checkpoint.py \
+  --checkpoint /path/to/checkpoint \
+  --output-dir /path/to/results/checkpoint-smoke
 ```
 
 This evaluates eight samples each from IFEval and GSM8K on one GPU. Results and

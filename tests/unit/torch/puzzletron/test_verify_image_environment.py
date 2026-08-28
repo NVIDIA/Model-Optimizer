@@ -49,7 +49,6 @@ def test_runtime_verifier_reports_a_package_version_mismatch(project_root_path):
     with pytest.raises(RuntimeError, match="flash-linear-attention"):
         verify_image_environment.verify_installed_environment(
             environment,
-            "runtime",
             package_version=_version_lookup(versions),
             source_verifier=lambda *_args: None,
             module_importer=lambda _name: object(),
@@ -83,7 +82,6 @@ def test_runtime_verifier_reports_a_mamba_version_mismatch(project_root_path):
     with pytest.raises(RuntimeError, match="mamba-ssm"):
         verify_image_environment.verify_installed_environment(
             environment,
-            "runtime",
             package_version=_version_lookup(versions),
             source_verifier=lambda *_args: None,
             module_importer=lambda _name: object(),
@@ -92,109 +90,50 @@ def test_runtime_verifier_reports_a_mamba_version_mismatch(project_root_path):
         )
 
 
-@pytest.mark.parametrize(
-    (
-        "profile",
-        "expected_version_queries",
-        "expected_sources",
-        "expected_imports",
-        "torch_cuda",
-    ),
-    [
-        (
-            "cpu",
-            ["torch", "torchvision", "transformers", "lmms-eval", "nemo-automodel"],
-            [("lmms-eval", "lmms_eval"), ("nemo-automodel", "nemo_automodel")],
-            [],
-            "not-installed",
-        ),
-        (
-            "ci",
-            [
-                "torch",
-                "torchvision",
-                "transformers",
-                "lmms-eval",
-                "nemo-automodel",
-                "aiperf",
-                "nox",
-            ],
-            [("lmms-eval", "lmms_eval"), ("nemo-automodel", "nemo_automodel")],
-            [],
-            None,
-        ),
-        (
-            "runtime",
-            [
-                "torch",
-                "torchvision",
-                "transformers",
-                "lmms-eval",
-                "nemo-automodel",
-                "aiperf",
-                "nox",
-                "causal-conv1d",
-                "flash-linear-attention",
-                "nv-grouped-gemm",
-                "mamba-ssm",
-                "tilelang",
-            ],
-            [
-                ("lmms-eval", "lmms_eval"),
-                ("nemo-automodel", "nemo_automodel"),
-                ("nv-grouped-gemm", "grouped_gemm"),
-                ("vllm", "vllm"),
-            ],
-            ["causal_conv1d", "fla", "grouped_gemm", "mamba_ssm", "tilelang", "vllm"],
-            None,
-        ),
-    ],
-)
-def test_verifier_applies_each_profile_contract(
-    project_root_path,
-    profile,
-    expected_version_queries,
-    expected_sources,
-    expected_imports,
-    torch_cuda,
-):
+def test_verifier_applies_runtime_contract(project_root_path):
     environment = _load_environment(project_root_path)
     sources = []
     imports = []
     version_queries = []
-    torch_cuda = environment["gpu_image"]["torch_cuda"] if torch_cuda is None else torch_cuda
 
     verify_image_environment.verify_installed_environment(
         environment,
-        profile,
         package_version=_version_lookup(_version_catalog(environment), version_queries),
         source_verifier=lambda package, source: sources.append((package, source)),
         module_importer=lambda name: imports.append(name),
         python_version=environment["python"],
-        torch_cuda=torch_cuda,
+        torch_cuda=environment["gpu_image"]["torch_cuda"],
     )
 
-    assert version_queries == expected_version_queries
-    assert sources == [
-        (
-            package,
-            environment["runtime_image"][source_key]
-            if source_key == "grouped_gemm"
-            else environment[source_key],
-        )
-        for package, source_key in expected_sources
+    assert version_queries == [
+        "torch",
+        "torchvision",
+        "transformers",
+        "lmms-eval",
+        "nemo-automodel",
+        "aiperf",
+        "nox",
+        "causal-conv1d",
+        "flash-linear-attention",
+        "nv-grouped-gemm",
+        "mamba-ssm",
+        "tilelang",
     ]
-    assert imports == expected_imports
+    assert sources == [
+        ("lmms-eval", environment["lmms_eval"]),
+        ("nemo-automodel", environment["nemo_automodel"]),
+        ("nv-grouped-gemm", environment["runtime_image"]["grouped_gemm"]),
+        ("vllm", environment["vllm"]),
+    ]
+    assert imports == ["causal_conv1d", "fla", "grouped_gemm", "mamba_ssm", "tilelang", "vllm"]
 
 
-@pytest.mark.parametrize("profile", ["ci", "runtime"])
-def test_gpu_profiles_reject_a_cuda_mismatch(project_root_path, profile):
+def test_verifier_rejects_a_cuda_mismatch(project_root_path):
     environment = _load_environment(project_root_path)
 
     with pytest.raises(RuntimeError, match="CUDA mismatch"):
         verify_image_environment.verify_installed_environment(
             environment,
-            profile,
             package_version=_version_lookup(_version_catalog(environment)),
             source_verifier=lambda *_args: None,
             module_importer=lambda _name: object(),

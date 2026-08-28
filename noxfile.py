@@ -58,11 +58,61 @@ PUZZLETRON_V2_CI_ENVIRONMENT_PATH = (
 with PUZZLETRON_V2_CI_ENVIRONMENT_PATH.open(encoding="utf-8") as environment_file:
     PUZZLETRON_V2_CI_ENVIRONMENT = json.load(environment_file)
 PUZZLETRON_V2_AUTOMODEL_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["nemo_automodel"]
+PUZZLETRON_V2_LMMS_SOURCE = PUZZLETRON_V2_CI_ENVIRONMENT["lmms_eval"]
 PUZZLETRON_V2_AUTOMODEL = (
     "nemo-automodel @ git+"
     f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['repository']}@"
     f"{PUZZLETRON_V2_AUTOMODEL_SOURCE['commit']}"
 )
+
+
+def _verify_puzzletron_v2_environment(session):
+    """Fail before collection when the dedicated Puzzletron runtime drifts."""
+    expected_versions = {
+        "python": PUZZLETRON_V2_CI_ENVIRONMENT["python"],
+        "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
+        "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
+        "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE["base_version"],
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
+    }
+    expected_vcs = {
+        "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE,
+        "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE,
+    }
+    session.run(
+        "python",
+        "-c",
+        f"""
+import sys
+from importlib.metadata import version
+
+from packaging.version import Version
+
+from examples.puzzletron.ci_environment import verify_installed_vcs_source
+
+expected = {expected_versions!r}
+expected_vcs = {expected_vcs!r}
+actual = {{
+    "python": f"{{sys.version_info.major}}.{{sys.version_info.minor}}",
+    "torch": Version(version("torch")).base_version,
+    "torchvision": Version(version("torchvision")).base_version,
+    "transformers": Version(version("transformers")).base_version,
+    "lmms-eval": Version(version("lmms-eval")).base_version,
+    "nemo-automodel": Version(version("nemo-automodel")).base_version,
+}}
+mismatches = {{
+    name: (actual[name], expected_version)
+    for name, expected_version in expected.items()
+    if actual[name] != expected_version
+}}
+
+for name, source in expected_vcs.items():
+    verify_installed_vcs_source(name, source)
+
+assert not mismatches, f"Pinned Puzzletron CI environment mismatch: {{mismatches}}"
+""",
+    )
 
 
 def _cov_args():
@@ -109,15 +159,7 @@ def puzzletron_v2(session):
         PUZZLETRON_V2_AUTOMODEL,
     )
     session.run("uv", "pip", "check")
-    session.run(
-        "python",
-        "-m",
-        "examples.puzzletron.ci.verify_image_environment",
-        "--environment",
-        "examples/puzzletron/ci_environment.json",
-        "--profile",
-        "cpu",
-    )
+    _verify_puzzletron_v2_environment(session)
     session.run(
         "python",
         "-m",
@@ -191,31 +233,11 @@ def gpu(session):
     )
 
 
-# Container: canonical Puzzletron image with the pinned ci_environment.json runtime.
+# Container: dedicated Puzzletron v2 GPU image with the pinned ci_environment.json runtime.
 @nox.session(venv_backend="none")
 def gpu_puzzletron(session):
-    """Overlay the checkout and run the focused suite in the canonical image."""
-    session.run("python", "-m", "pip", "uninstall", "-y", "nvidia-modelopt")
-    session.run(
-        "python",
-        "-m",
-        "pip",
-        "install",
-        "--no-build-isolation",
-        "--no-deps",
-        "-e",
-        ".[hf,puzzletron,dev-test]",
-    )
-    session.run("python", "-m", "pip", "check")
-    session.run(
-        "python",
-        "-m",
-        "examples.puzzletron.ci.verify_image_environment",
-        "--environment",
-        "examples/puzzletron/ci_environment.json",
-        "--profile",
-        "ci",
-    )
+    """Run the focused Puzzletron suite in its pinned one-GPU image."""
+    _verify_puzzletron_v2_environment(session)
     session.run(
         "python",
         "-c",
@@ -224,9 +246,8 @@ def gpu_puzzletron(session):
             "assert torch.cuda.is_available(), 'Puzzletron GPU CI requires CUDA'; "
             "assert torch.cuda.device_count() == 1, "
             "f'Puzzletron GPU CI requires exactly one visible GPU, got {torch.cuda.device_count()}'; "
-            f"assert torch.version.cuda == "
-            f"{PUZZLETRON_V2_CI_ENVIRONMENT['gpu_image']['torch_cuda']!r}, "
-            "f'Puzzletron GPU CI requires the pinned CUDA runtime, got {torch.version.cuda}'"
+            "assert torch.version.cuda == '12.9', "
+            "f'Puzzletron GPU CI requires CUDA 12.9, got {torch.version.cuda}'"
         ),
     )
     session.run(

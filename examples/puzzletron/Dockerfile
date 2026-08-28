@@ -34,7 +34,6 @@ RUN apt-get update && \
         "packaging>=24.2" "cmake>=3.26.1" ninja jinja2 && \
     python "${PUZZLETRON_VERIFY_SCRIPT}" \
         --environment "${PUZZLETRON_CI_ENVIRONMENT}" \
-        --profile runtime \
         --manifest-only
 
 RUN torch_version="$(python -c \
@@ -143,8 +142,7 @@ RUN python -m pip install --no-build-isolation --no-deps -e \
         "/opt/puzzletron/src/modelopt[hf,puzzletron,dev-test]" && \
     python -m pip check && \
     python "${PUZZLETRON_VERIFY_SCRIPT}" \
-        --environment "${PUZZLETRON_CI_ENVIRONMENT}" \
-        --profile runtime && \
+        --environment "${PUZZLETRON_CI_ENVIRONMENT}" && \
     python -c "import aiperf, causal_conv1d, fla, grouped_gemm, lmms_eval, mamba_ssm, modelopt, nemo_automodel, puzzletron_orchestrator, puzzletron_setup, tilelang, torch, transformers, vllm"
 
 LABEL org.opencontainers.image.source="https://github.com/NVIDIA/Model-Optimizer" \

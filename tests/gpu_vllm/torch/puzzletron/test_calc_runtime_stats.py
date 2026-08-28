@@ -21,7 +21,6 @@ checks the returned per-subblock runtime dict and no-block overhead.
 """
 
 import math
-import os
 from pathlib import Path
 
 import pytest
@@ -34,19 +33,15 @@ from modelopt.torch.puzzletron.block_config import AttentionConfig, FFNConfig
 from modelopt.torch.puzzletron.subblock_stats.calc_runtime_stats import calc_runtime_for_subblocks
 
 
-@pytest.mark.skipif(
-    os.environ.get("PUZZLETRON_VLLM_ANYMODEL") != "1",
-    reason="requires the Puzzletron runtime image with AnyModel-enabled vLLM",
-)
-@pytest.mark.timeout(600)
+@pytest.mark.skip(reason="AnyModel is not supported in vLLM yet")
 def test_calc_runtime_for_subblocks(tmp_path: Path):
-    """End-to-end: a tiny subblock set yields finite typed runtime measurements."""
+    """End-to-end: a tiny subblock set yields a runtime dict + positive no-block overhead."""
     tokenizer = get_tiny_tokenizer()
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer.save_pretrained(str(tokenizer_dir))
 
-    attn = AttentionConfig(no_op=False, num_kv_heads=2)
-    ffn = FFNConfig(no_op=False, intermediate_size=256)
+    attn = AttentionConfig(no_op=False, num_key_value_heads=2)
+    ffn = FFNConfig(no_op=False, intermediate_size=256, moe=None)
     attn_noop = AttentionConfig(no_op=True)
     subblock_set = {attn, ffn, attn_noop}
 
@@ -71,10 +66,9 @@ def test_calc_runtime_for_subblocks(tmp_path: Path):
     )
 
     assert set(runtime_by_subblock) == subblock_set
-    assert runtime_by_subblock[attn_noop].total_ms == 0.0
-    assert runtime_by_subblock[attn_noop].prefill_ms == 0.0
-    for runtime in (runtime_by_subblock[attn], runtime_by_subblock[ffn]):
-        assert math.isfinite(runtime.total_ms)
-        assert math.isfinite(runtime.prefill_ms)
-    assert math.isfinite(no_block_runtime_ms.total_ms)
-    assert math.isfinite(no_block_runtime_ms.prefill_ms)
+    assert runtime_by_subblock[attn_noop] == 0.0
+    assert math.isfinite(runtime_by_subblock[attn])
+    assert math.isfinite(runtime_by_subblock[ffn])
+    # The 1-block model is always slower than the per-block extrapolation from
+    # the 10-block model, so the (embedding + LM-head) overhead is positive.
+    assert no_block_runtime_ms > 0
