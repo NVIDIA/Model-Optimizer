@@ -181,6 +181,14 @@ def _all_shipped_ptq_recipe_paths():
 _BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
 
 
+def test_ptq_recipes_are_discovered():
+    """Discovery must find recipes; otherwise the parametrized smoke tests below get an
+    empty parameter set and silently *skip* (pytest default) instead of running."""
+    assert _BUILTIN_PTQ_RECIPES, (
+        "No shipped PTQ recipes discovered under modelopt_recipes/ — recipe discovery is broken."
+    )
+
+
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_load_recipe_all_builtins(recipe_path):
     """Smoke-test: every built-in PTQ recipe loads without error and has quantize."""
