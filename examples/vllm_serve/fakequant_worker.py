@@ -133,6 +133,7 @@ def _fakequant_run_prolog_worker(self, mlflow_tracker: FakeQuantMlflowTracker) -
             # on every quantizer -- that would fake-quantize already-quantized NVFP4 weights.
             quant_cfg = {"quant_cfg": [{"quantizer_name": "*", "enable": False}]}
         validate_quant_cfg_against_vllm_quant_method(model, quant_cfg.get("quant_cfg", []))
+
         # Before calibration, which is the run this artifact is most wanted for if it dies.
         mlflow_tracker.log_quant_config(quant_cfg)
 
@@ -186,6 +187,7 @@ class FakeQuantWorker(BaseWorker):
             return super().determine_available_memory()
 
     def compile_or_warm_up_model(self) -> float:
+        print(f"quant_config: {quant_config}")
         with self.mlflow_tracker.fail_on_error():
             if (
                 quant_config["quant_cfg"]
