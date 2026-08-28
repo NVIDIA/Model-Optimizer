@@ -231,7 +231,7 @@ For more fine-tuned Autotune flags, please refer to the [API guide](https://nvid
 
 ### Recover accuracy with sensitivity-driven node exclusion
 
-Post-training quantization of ONNX models can result in accuracy degradation, and it is often unclear which ops or nodes are more sensitive to precision lowering. To aid in this debugging, we proppose using a sensitivity score function to rank each quantizable target (op type or individual node) by its impact on model output and then using a downstream picker to decide which targets to keep in higher precision. See the [Quantization Sensitivity Scan guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#quantization-sensitivity-scan) for more details.
+Post-training quantization of ONNX models can result in accuracy degradation, and it is often unclear which ops or nodes are more sensitive to precision lowering. To aid in this debugging, we propose using a sensitivity score function to rank each quantizable target (op type or individual node) by its impact on model output and then using a downstream picker to decide which targets to keep in higher precision. See the [Quantization Sensitivity Scan guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#quantization-sensitivity-scan) for more details.
 
 End-to-end workflow:
 
@@ -270,7 +270,7 @@ quantize(
 )
 ```
 
-An optional `blocks=` / `block_agg=` argument to `suggest_exclusion` ranks entire blocks instead of individual nodes.See the [guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#grouping-per-node-scores-into-architectural-blocks) for more details.
+An optional `blocks=` / `block_agg=` argument to `suggest_exclusion` ranks entire blocks instead of individual nodes. See the [guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html#grouping-per-node-scores-into-architectural-blocks) for more details.
 
 ## Resources
 
