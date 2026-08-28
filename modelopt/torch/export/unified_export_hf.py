@@ -614,6 +614,7 @@ def _export_quantized_weight(
         try:
             state = capture_quantized_weight_export_state(sub_module, weight_name)
         except _UnsupportedQuantizedWeightExportFormatError:
+            # AWQ and SmoothQuant remain on the legacy format-specific path below.
             pass
         else:
             exported = export_quantized_weight_tensors(weight, state, dtype, weight_name)
