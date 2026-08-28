@@ -565,8 +565,8 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
 
     Requirements validated here: eager execution (``enforce_eager=True`` —
     the per-request calibration loop cannot be CUDA-graph captured), fp16/bf16
-    model and KV-cache dtypes, no active attention Q/K/P/V fakequant, and a
-    FlashAttention or FlashInfer backend per layer.
+    model and KV-cache dtypes, pipeline-parallel size 1, no active attention
+    Q/K/P/V fakequant, and a FlashAttention or FlashInfer backend per layer.
     """
     from vllm.config.compilation import CUDAGraphMode
 
@@ -579,6 +579,9 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
 
     _require_supported_vllm()
     errors = _global_errors(model_runner)
+    parallel = getattr(getattr(model_runner, "vllm_config", None), "parallel_config", None)
+    if getattr(parallel, "pipeline_parallel_size", 1) != 1:
+        errors.append("pipeline_parallel_size must be 1 for skip-softmax calibration")
     if _cudagraph_mode(model_runner) != CUDAGraphMode.NONE:
         errors.append(
             "skip-softmax calibration requires eager execution (enforce_eager=True); "

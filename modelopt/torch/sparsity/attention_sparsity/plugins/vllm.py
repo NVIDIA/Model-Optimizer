@@ -45,7 +45,10 @@ from modelopt.torch.kernels.common.attention.decode_attention import (
 )
 from modelopt.torch.kernels.common.attention.triton_fa import attention as triton_attention
 from modelopt.torch.kernels.quantization.attention.bmm2_qdq import fake_quant_v_onwrite
-from modelopt.torch.kernels.sparsity.attention.calibrate import attention_calibrate
+from modelopt.torch.kernels.sparsity.attention.calibrate import (
+    _validate_threshold_trials,
+    attention_calibrate,
+)
 
 from .sparse_attn_calibration import merge_phase_counts, split_records_by_phase
 
@@ -70,6 +73,16 @@ def _flash_attention_kv_cache_layout() -> str:
     if cache_shape == (3, 1, 16, 32):
         return "packed"
     raise RuntimeError(f"Unsupported vLLM FlashAttention KV cache shape {cache_shape}")
+
+
+def _flash_attention_kv_cache_views(kv_cache: torch.Tensor, head_size: int):
+    """Return logical K/V cache views for the installed FlashAttention layout."""
+    cache_layout = _flash_attention_kv_cache_layout()
+    if cache_layout == "kv-first":
+        return kv_cache.unbind(0)
+    if cache_layout == "blocks-first":
+        return kv_cache.unbind(1)
+    return kv_cache.transpose(1, 2).split(head_size, dim=-1)
 
 
 def _target_sparse_ratio_for_phase(target_sparse_ratio, phase: str) -> float:
@@ -326,8 +339,8 @@ def _forward_calibrate(
     b_seq_len_i32 = (cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]).to(torch.int32)
     seq_lens_i32 = seq_lens[:batch].to(torch.int32)
     b_start_loc_zero = torch.zeros(1, device=query.device, dtype=torch.int32)
-    # vLLM v1 metadata tensors are GPU-resident: take one host copy per launch
-    # instead of stalling the stream with per-request ``.item()`` syncs.
+    # Copy scheduling metadata once per launch. The calibration wrapper and
+    # counter collection still synchronize once per measured request.
     cu_seqlens_q_cpu = cu_seqlens_q[: batch + 1].cpu()
     seq_lens_cpu = seq_lens[:batch].cpu()
     # Per-request prompt lengths (same request order as the metadata rows)
@@ -680,7 +693,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
                 return native_forward()
             # vLLM >= 0.15 writes the current K/V to the paged cache before
             # impl.forward, so the calibrate kernel reads a complete cache.
-            key_cache, value_cache = kv_cache.unbind(0)
+            key_cache, value_cache = _flash_attention_kv_cache_views(kv_cache, self.head_size)
             return _forward_calibrate(
                 self,
                 query=query,
@@ -703,13 +716,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         if resolved is None:
             return native_forward()
 
-        cache_layout = _flash_attention_kv_cache_layout()
-        if cache_layout == "kv-first":
-            key_cache, value_cache = kv_cache.unbind(0)
-        elif cache_layout == "blocks-first":
-            key_cache, value_cache = kv_cache.unbind(1)
-        else:
-            key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = _flash_attention_kv_cache_views(kv_cache, self.head_size)
         is_decode_only = attn_metadata.max_query_len <= 1
         common_kw = {
             "layer": layer,
@@ -1080,8 +1087,7 @@ def iter_sparse_impls(model):
 
 def enable_calibration(impls, threshold_trials: list[float]) -> None:
     """Put a set of sparse impls into calibration mode and clear prior records."""
-    if not threshold_trials:
-        raise ValueError("threshold_trials must be a non-empty list for calibration.")
+    threshold_trials = _validate_threshold_trials(threshold_trials)
     for impl in impls:
         impl._calibrate = True
         impl._calib_threshold_trials = list(threshold_trials)

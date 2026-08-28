@@ -8,7 +8,8 @@ Changelog
 
 *Sparsity*
 
-- Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. See ``examples/vllm_serve/calibrate_sparse_attn.py`` for usage and compatibility constraints.
+- Add skip-softmax threshold calibration through vLLM for FlashAttention and FlashInfer, exporting prefill and decode fits as ``sparse_attention_config``. Skip-softmax serving now uses fixed 128x128 tiles instead of autotuning so runtime sparsity matches calibration.
+- Sparse-only vLLM installs now reject unsupported DCP, DBO/ubatching, speculative decoding, and FULL mixed-batch CUDA graphs; calibrated decode also rejects FULL decode graphs.
 
 *Quantization*
 
