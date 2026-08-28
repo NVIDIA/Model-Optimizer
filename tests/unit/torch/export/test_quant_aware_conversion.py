@@ -516,6 +516,7 @@ def test_revert_quant_config_names_mapper():
             "lm_head",
         ],
         "quantized_layers": {"model.layers.0.mlp.experts.0.w1": {"quant_algo": "NVFP4"}},
+        "kv_cache_quantized_layers": {"model.layers.0.mlp.experts.0": {"quant_algo": "FP8"}},
     }
     revert_quant_config_names(quant, mapper)
     assert quant["exclude_modules"] == [
@@ -524,6 +525,7 @@ def test_revert_quant_config_names_mapper():
         "lm_head",
     ]
     assert "model.layers.0.block_sparse_moe.experts.0.w1" in quant["quantized_layers"]
+    assert "model.layers.0.block_sparse_moe.experts.0" in quant["kv_cache_quantized_layers"]
     # mapper(None) is a no-op
     q2 = {"exclude_modules": ["x*"]}
     revert_quant_config_names(q2, None)

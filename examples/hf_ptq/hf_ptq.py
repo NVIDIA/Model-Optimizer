@@ -96,6 +96,23 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+_FSDP2_AUTOQUANT_ERROR = (
+    "AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
+    "selection, and checkpoint writes are synchronized across ranks."
+)
+
+
+def _select_unpadded_logits(logits: torch.Tensor, batch: dict[str, Any]) -> torch.Tensor:
+    """Return logits only for token positions selected by ``attention_mask``."""
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is None:
+        return logits
+    if logits.shape[:-1] != attention_mask.shape:
+        raise ValueError(
+            "AutoQuant KL logits and attention_mask must have matching token dimensions; "
+            f"got {tuple(logits.shape[:-1])} and {tuple(attention_mask.shape)}."
+        )
+    return logits[attention_mask.bool()]
 
 
 def _kv_cfg_uses_constant_amax(kv_quant_cfg: list[dict[str, Any]]) -> bool:
@@ -338,8 +355,41 @@ def _mtq_candidate_formats(formats) -> list[dict]:
     return quantization_formats
 
 
+def _mtq_kv_candidate_formats(formats) -> list[tuple[dict, str]]:
+    """Translate format-agnostic KV candidates while preserving useful preset names."""
+    candidates = []
+    for idx, fmt in enumerate(formats):
+        quant_cfg = fmt.model_dump(exclude_none=True)
+        candidate_quantizers = quant_cfg.get("quant_cfg", [])
+        name = None
+        nvfp4_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["nvfp4"]).model_dump(exclude_none=True)[
+            "quant_cfg"
+        ]
+        fp8_quantizers = type(fmt)(**KV_QUANT_CFG_CHOICES["fp8"]).model_dump(exclude_none=True)[
+            "quant_cfg"
+        ]
+        if len(fp8_quantizers) != 1:
+            raise RuntimeError("The FP8 KV preset must contain exactly one quantizer entry.")
+        fp8_k_quantizer = copy.deepcopy(fp8_quantizers[0])
+        fp8_k_quantizer["quantizer_name"] = "*.k_bmm_quantizer"
+        if candidate_quantizers == [*nvfp4_quantizers, fp8_k_quantizer]:
+            name = "fp8_k_nvfp4_v"
+        for preset_name, preset in KV_QUANT_CFG_CHOICES.items():
+            normalized_preset_quantizers = (
+                type(fmt)(**preset).model_dump(exclude_none=True).get("quant_cfg", [])
+            )
+            if normalized_preset_quantizers == candidate_quantizers:
+                name = preset_name
+                break
+        candidates.append((quant_cfg, name or f"KV_CACHE_FORMAT_{idx}"))
+    return candidates
+
+
 def _mtq_inputs_from_auto_quantize_config(
-    aq_config, args: argparse.Namespace, fixed_quantize_config=None
+    aq_config,
+    args: argparse.Namespace,
+    fixed_quantize_config=None,
+    allow_uniform_kv: bool = True,
 ) -> dict:
     """Map a resolved AutoQuantizeConfig to mtq.auto_quantize inputs.
 
@@ -349,6 +399,16 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
+    is_kv_search = aq_config.constraints.kv_effective_bits is not None
+    if is_kv_search:
+        return {
+            "search_domain": "kv_cache",
+            "constraints": {"kv_effective_bits": constraints["kv_effective_bits"]},
+            "quantization_formats": _mtq_kv_candidate_formats(aq_config.candidate_formats),
+            "disabled_layers": aq_config.disabled_layers,
+            "method": aq_config.auto_quantize_method,
+            "score_size": aq_config.score_size,
+        }
     # cost_excluded_layers (sibling of disabled_layers) maps to the mtq cost key: these layers are
     # kept out of the bit-budget denominator (cost_weight 0) — e.g. VL vision towers — distinct from
     # disabled_layers, which removes them from the search.
@@ -356,7 +416,9 @@ def _mtq_inputs_from_auto_quantize_config(
         constraints.setdefault("cost", {})["excluded_module_name_patterns"] = (
             aq_config.cost_excluded_layers
         )
-    if aq_config.kv_cache is not None:
+    if not allow_uniform_kv:
+        kv_cache_quant_cfg = None
+    elif aq_config.kv_cache is not None:
         kv_cache_quant_cfg = aq_config.kv_cache.model_dump()
     elif args.kv_cache_qformat == KV_CACHE_NONE:
         kv_cache_quant_cfg = None
@@ -380,6 +442,7 @@ def _mtq_inputs_from_auto_quantize_config(
         for search_space in aq_config.module_search_spaces
     ]
     return {
+        "search_domain": "weight",
         "constraints": constraints,
         "quantization_formats": quantization_formats,
         "fixed_quantization_config": fixed_quantization_config,
@@ -391,6 +454,22 @@ def _mtq_inputs_from_auto_quantize_config(
     }
 
 
+def _assert_kv_autoquantize_input_is_clean(model: torch.nn.Module) -> None:
+    """Fail closed if an upstream stage left actual K/V quantizers enabled."""
+    enabled = [
+        name
+        for name, module in model.named_modules(remove_duplicate=False)
+        if name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+        and getattr(module, "is_enabled", False)
+    ]
+    if enabled:
+        raise ValueError(
+            "The preceding weight/activation stage left K/V quantizers enabled on the converted "
+            f"model: {enabled}. Disable them in that stage before running mixed-KV AutoQuant; "
+            "clearing them now would not undo its calibration or sensitivity measurements."
+        )
+
+
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -398,6 +477,8 @@ def auto_quantize(
     aq_config,
     full_model: torch.nn.Module | None = None,
     fixed_quantize_config=None,
+    allow_uniform_kv: bool = True,
+    checkpoint_attr: str = "auto_quantize_checkpoint",
 ):
     """Recipe-driven auto_quantize, organized around an AutoQuantizeConfig.
 
@@ -414,15 +495,17 @@ def auto_quantize(
     )
 
     if args.use_fsdp2:
-        warnings.warn(
-            "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
-            "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
-            "synchronization across ranks); use at your own risk."
-        )
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
 
     inputs = _mtq_inputs_from_auto_quantize_config(
-        aq_config, args, fixed_quantize_config=fixed_quantize_config
+        aq_config,
+        args,
+        fixed_quantize_config=fixed_quantize_config,
+        allow_uniform_kv=allow_uniform_kv,
     )
+    if inputs["search_domain"] == "kv_cache":
+        _assert_kv_autoquantize_input_is_clean(language_model)
+    checkpoint = getattr(args, checkpoint_attr, None)
 
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -461,13 +544,32 @@ def auto_quantize(
             output = model(**inputs_)
             if is_base_model:
                 assert full_model is not None
-                return full_model.lm_head(output.last_hidden_state)
-            return output.logits
+                logits = full_model.lm_head(output.last_hidden_state)
+            else:
+                logits = output.logits
+            return _select_unpadded_logits(logits, batch)
 
     else:
         raise ValueError(
             f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
         )
+
+    if inputs["search_domain"] == "kv_cache":
+        language_model, _ = mtq.auto_quantize_kv_cache(
+            language_model,
+            constraints=inputs["constraints"],
+            data_loader=calib_dataloader,
+            forward_step=forward_step,
+            quantization_formats=inputs["quantization_formats"],
+            num_calib_steps=len(calib_dataloader),
+            num_score_steps=min(
+                len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+            ),
+            verbose=True,
+            disabled_layers=inputs["disabled_layers"],
+            checkpoint=checkpoint,
+        )
+        return language_model
 
     language_model, _ = mtq.auto_quantize(
         language_model,
@@ -483,7 +585,7 @@ def auto_quantize(
         verbose=True,
         disabled_layers=inputs["disabled_layers"],
         method=inputs["method"],
-        checkpoint=args.auto_quantize_checkpoint,
+        checkpoint=checkpoint,
     )
 
     # KV cache quantization is uniform; applied after the LP search.
@@ -512,6 +614,8 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
+    if args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
@@ -766,6 +870,81 @@ def mono_quantize(
 
     else:
         warnings.warn("Skipping quantization: model is already quantized.")
+
+
+def _prepare_quant_cfg(
+    args: argparse.Namespace, quant_cfg: dict[str, Any], full_model: torch.nn.Module
+) -> dict[str, Any]:
+    """Apply shared checkpoint-local adjustments to a PTQ configuration."""
+    mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
+    if mtp_layer_prefixes:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        for prefix in mtp_layer_prefixes:
+            pattern = f"*{prefix}*"
+            quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
+            print(f"Excluding MTP layer from quantization: {pattern}")
+
+    if needs_checkpoint_path_update(quant_cfg):
+        quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
+        print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
+
+    if args.cast_mxfp4_to_nvfp4:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        force_weight_quantizers_static(quant_cfg["quant_cfg"])
+    return quant_cfg
+
+
+def _run_auto_quantize_recipe(
+    args: argparse.Namespace,
+    recipe: ModelOptAutoQuantizeRecipe,
+    full_model: torch.nn.Module,
+    language_model: torch.nn.Module,
+    model_type: str | None,
+    calibration_only: bool,
+    calib_dataloader: DataLoader,
+    is_nemotron_vl_model: bool,
+) -> None:
+    """Run the recipe's fixed PTQ, weight search, and KV search in order."""
+    primary = recipe.auto_quantize
+    followup_kv = recipe.kv_auto_quantize
+    primary_is_kv = primary.constraints.kv_effective_bits is not None
+    fixed_quantize_config = recipe.quantize
+
+    if primary_is_kv and fixed_quantize_config is not None:
+        quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
+        mono_quantize(
+            args,
+            quant_cfg,
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            calib_dataloader,
+            is_nemotron_vl_model,
+        )
+        fixed_quantize_config = None
+
+    auto_quantize(
+        args,
+        full_model,
+        calib_dataloader,
+        aq_config=primary,
+        full_model=full_model,
+        fixed_quantize_config=fixed_quantize_config,
+        allow_uniform_kv=followup_kv is None,
+        checkpoint_attr="auto_quantize_checkpoint",
+    )
+
+    if followup_kv is not None:
+        auto_quantize(
+            args,
+            full_model,
+            calib_dataloader,
+            aq_config=followup_kv,
+            full_model=full_model,
+            allow_uniform_kv=False,
+            checkpoint_attr="kv_auto_quantize_checkpoint",
+        )
 
 
 def export_quantized(
@@ -1123,10 +1302,8 @@ def quantize_main(
     # AutoQuantize is recipe-driven: everything downstream reads the resolved AutoQuantizeConfig.
     if isinstance(recipe, ModelOptAutoQuantizeRecipe):
         aq_config = recipe.auto_quantize
-        fixed_quantize_config = recipe.quantize
     else:
         aq_config = None
-        fixed_quantize_config = None
 
     def _is_layerwise(obj):
         if isinstance(obj, ModelOptPTQRecipe):
@@ -1202,7 +1379,11 @@ def quantize_main(
         device,
         model_type,
         autoquant_gradient_recipe=(
-            aq_config is not None and aq_config.auto_quantize_method == "gradient"
+            isinstance(recipe, ModelOptAutoQuantizeRecipe)
+            and any(
+                config is not None and config.auto_quantize_method == "gradient"
+                for config in (recipe.auto_quantize, recipe.kv_auto_quantize)
+            )
         ),
     )
 
@@ -1214,16 +1395,16 @@ def quantize_main(
     )
 
     if aq_config is not None:
-        # AutoQuantize (recipe-driven). For VL models the search walks the OUTER CausalLM (which
-        # carries lm_head and the LM-head forward path); architecture-specific exclusions come
-        # from aq_config.disabled_layers.
-        auto_quantize(
+        assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
+        _run_auto_quantize_recipe(
             args,
+            recipe,
             full_model,
+            language_model,
+            model_type,
+            calibration_only,
             calib_dataloader,
-            aq_config,
-            full_model=full_model,
-            fixed_quantize_config=fixed_quantize_config,
+            is_nemotron_vl_model,
         )
 
     else:
@@ -1258,25 +1439,7 @@ def quantize_main(
                     KV_QUANT_CFG_CHOICES[args.kv_cache_qformat]["quant_cfg"],
                 )
 
-        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92).
-        # These layers are typically speculative decoding layers that should be exported as-is.
-        # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
-        # identified by index.
-        mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
-        if mtp_layer_prefixes:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            for prefix in mtp_layer_prefixes:
-                pattern = f"*{prefix}*"
-                quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
-                print(f"Excluding MTP layer from quantization: {pattern}")
-
-        if needs_checkpoint_path_update(quant_cfg):
-            quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
-            print(f"Auto-resolved layerwise checkpoint_dir: {resolved_dir}")
-
-        if args.cast_mxfp4_to_nvfp4:
-            quant_cfg = copy.deepcopy(quant_cfg)
-            force_weight_quantizers_static(quant_cfg["quant_cfg"])
+        quant_cfg = _prepare_quant_cfg(args, quant_cfg, full_model)
 
         if quant_cfg:
             mono_quantize(
@@ -1342,7 +1505,7 @@ def parse_args() -> argparse.Namespace:
             "general/ptq/nvfp4_default-kv_fp8_cast, general/auto_quantize/nvfp4_fp8_at_4p8bits). "
             "KV cache source depends on the recipe type: PTQ recipes bake KV cache into quant_cfg "
             "and --kv_cache_qformat is ignored; AutoQuantize recipes fall back to --kv_cache_qformat "
-            "unless the recipe sets an explicit kv_cache field."
+            "unless the recipe sets an explicit kv_cache or kv_auto_quantize field."
         ),
         default=None,
     )
@@ -1514,6 +1677,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Used with an AutoQuantize --recipe."
+        ),
+    )
+    parser.add_argument(
+        "--kv_auto_quantize_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path for saving/restoring the KV-cache search checkpoint in a composed recipe. "
+            "Use a new path whenever the preceding weight/activation quantization stage changes."
         ),
     )
     parser.add_argument(

@@ -36,9 +36,13 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.model_config import KV_CACHE_FP8, KV_CACHE_FP8_K_NVFP4_V, KV_CACHE_NVFP4
 from modelopt.torch.export.model_utils import TiedWeightMap
-from modelopt.torch.export.quant_utils import _postprocess_single_tensor
+from modelopt.torch.export.quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    _resolve_kv_cache_format_for_key,
+)
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
@@ -317,6 +321,53 @@ def test_postprocess_kv_scale_renamed_and_divided():
     )
     assert key == "model.layers.0.self_attn.k_proj.k_scale"
     assert abs(val.item() - 0.5) < 1e-5
+
+
+@pytest.mark.parametrize(
+    ("layer_name", "quant_algo", "side", "resolved_format"),
+    [
+        ("model.layers.0.self_attn", KV_CACHE_FP8_K_NVFP4_V, "k", KV_CACHE_FP8),
+        ("model.layers.0.self_attn", KV_CACHE_FP8_K_NVFP4_V, "v", KV_CACHE_NVFP4),
+        ("model.layers.1.self_attn", KV_CACHE_NVFP4, "k", KV_CACHE_NVFP4),
+    ],
+)
+def test_postprocess_resolves_mixed_kv_format_per_layer_and_side(
+    layer_name, quant_algo, side, resolved_format
+):
+    quantization = {
+        "kv_cache_quant_algo": "MIXED_PRECISION",
+        "kv_cache_quantized_layers": {layer_name: {"quant_algo": quant_algo}},
+    }
+    postprocess_config = _get_kv_cache_postprocess_config(quantization)
+    original_key = f"{layer_name}.{side}_bmm_quantizer._amax"
+
+    assert _resolve_kv_cache_format_for_key(original_key, postprocess_config) == resolved_format
+
+    key, val = _postprocess_single_tensor(
+        original_key,
+        torch.tensor(224.0),
+        448.0,
+        postprocess_config,
+    )
+
+    assert key == f"{layer_name}.{side}_proj.{side}_scale"
+    assert val.item() == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(("side", "resolved_format"), [("k", KV_CACHE_FP8), ("v", KV_CACHE_NVFP4)])
+def test_postprocess_resolves_uniform_asymmetric_kv_format(side, resolved_format):
+    original_key = f"model.layers.0.self_attn.{side}_bmm_quantizer._amax"
+
+    assert _resolve_kv_cache_format_for_key(original_key, KV_CACHE_FP8_K_NVFP4_V) == resolved_format
+    key, val = _postprocess_single_tensor(
+        original_key,
+        torch.tensor(224.0),
+        448.0,
+        KV_CACHE_FP8_K_NVFP4_V,
+    )
+
+    assert key == f"model.layers.0.self_attn.{side}_proj.{side}_scale"
+    assert val.item() == pytest.approx(0.5)
 
 
 def test_postprocess_scale_squeezed():

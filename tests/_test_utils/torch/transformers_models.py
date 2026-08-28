@@ -220,6 +220,7 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "head_dim": 8,
         "max_position_embeddings": 32,
         "vocab_size": 32,
+        "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
     }
     text_kwargs.update(config_kwargs)
     # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles

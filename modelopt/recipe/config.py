@@ -149,10 +149,19 @@ class AutoQuantizeCost(ModeloptBaseConfig):
 class AutoQuantizeConstraints(ModeloptBaseConfig):
     """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
 
-    effective_bits: float = ModeloptField(
+    effective_bits: float | None = ModeloptField(
         default=4.8,
         title="Effective bits per weight",
-        description="Average weight-storage bits target for the LP, in (0, 16].",
+        description=("Average weight-storage bits target for the LP, in (0, 16]. Defaults to 4.8."),
+    )
+    kv_effective_bits: float | None = ModeloptField(
+        default=None,
+        title="Effective bits per KV-cache scalar",
+        description=(
+            "Average KV-cache storage bits target across eligible layers for layer-wise KV "
+            "AutoQuant, in (0, 16]. Exactly one of effective_bits and kv_effective_bits may "
+            "be set."
+        ),
     )
     cost_model: Literal["weight", "active_moe"] = ModeloptField(
         default="weight",
@@ -165,12 +174,34 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         description="Extra cost-model parameters; omit for the 'weight' cost model.",
     )
 
-    @field_validator("effective_bits")
+    @model_validator(mode="before")
     @classmethod
-    def _validate_effective_bits(cls, v: float) -> float:
-        if not (0 < v <= 16):
+    def _select_kv_constraint(cls, data):
+        if isinstance(data, dict) and "kv_effective_bits" in data and "effective_bits" not in data:
+            data = dict(data)
+            data["effective_bits"] = None
+        return data
+
+    @field_validator("effective_bits", "kv_effective_bits")
+    @classmethod
+    def _validate_effective_bits(cls, v: float | None) -> float | None:
+        if v is not None and not (0 < v <= 16):
             raise ValueError(f"effective_bits must be in (0, 16], got {v}")
         return v
+
+    @model_validator(mode="after")
+    def _exactly_one_bit_constraint(self):
+        if (self.effective_bits is None) == (self.kv_effective_bits is None):
+            raise ValueError(
+                "Exactly one of effective_bits and kv_effective_bits must be specified."
+            )
+        if self.kv_effective_bits is not None and (
+            self.cost_model != "weight" or self.cost is not None
+        ):
+            raise ValueError(
+                "KV-cache AutoQuant does not support weight or active-MoE cost settings."
+            )
+        return self
 
 
 class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):
@@ -272,6 +303,25 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
                 "entry. For uniform quantization, use a PTQ recipe instead."
             )
+        if self.constraints.kv_effective_bits is not None:
+            if self.auto_quantize_method != "kl_div":
+                raise ValueError(
+                    "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."
+                )
+            if self.module_search_spaces:
+                raise ValueError(
+                    "KV-cache AutoQuant uses one candidate space for all eligible attention "
+                    "layers; module_search_spaces is not supported."
+                )
+            if self.kv_cache is not None:
+                raise ValueError(
+                    "KV-cache AutoQuant candidate_formats replace the uniform kv_cache post-step."
+                )
+            if self.cost_excluded_layers:
+                raise ValueError(
+                    "KV-cache AutoQuant does not support cost_excluded_layers; use "
+                    "disabled_layers to exclude non-KV-cache modules from the search."
+                )
         return self
 
 
@@ -283,9 +333,9 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
     quantize: QuantizeConfig | None = ModeloptField(
         default=None,
         title="Fixed PTQ baseline",
-        description="Optional normal PTQ QuantizeConfig for modules outside the explicit "
-        "AutoQuantize module_search_spaces. Fixed and searched modules are calibrated, scored, "
-        "costed, and exported in one integrated AutoQuantize operation.",
+        description="Optional normal PTQ QuantizeConfig. A weight AutoQuantize stage uses it for "
+        "modules outside explicit module_search_spaces; a KV AutoQuantize stage applies it first "
+        "as the fixed GEMM weight/activation configuration.",
     )
 
     auto_quantize: AutoQuantizeConfig = Field(
@@ -293,22 +343,42 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
         description="AutoQuantize search configuration. Required.",
     )
 
+    kv_auto_quantize: AutoQuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Follow-up KV-cache AutoQuantize config",
+        description="Optional KV-cache search run after the primary weight AutoQuantize search.",
+    )
+
     @model_validator(mode="after")
     def _validate_fixed_and_searched_spaces(self):
+        primary_is_kv = self.auto_quantize.constraints.kv_effective_bits is not None
+        if self.kv_auto_quantize is not None:
+            if primary_is_kv:
+                raise ValueError(
+                    "kv_auto_quantize cannot follow an auto_quantize stage that already searches "
+                    "the KV cache."
+                )
+            if self.kv_auto_quantize.constraints.kv_effective_bits is None:
+                raise ValueError("kv_auto_quantize must use a kv_effective_bits constraint.")
+            if self.auto_quantize.kv_cache is not None:
+                raise ValueError(
+                    "A weight AutoQuantize stage followed by kv_auto_quantize must omit the "
+                    "uniform auto_quantize.kv_cache post-step."
+                )
         has_fixed_baseline = self.quantize is not None
         has_global_search = bool(self.auto_quantize.candidate_formats)
-        if has_fixed_baseline and has_global_search:
+        if not primary_is_kv and has_fixed_baseline and has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "
                 "auto_quantize.candidate_formats and explicitly list searched modules under "
                 "auto_quantize.module_search_spaces."
             )
-        if has_fixed_baseline and not self.auto_quantize.module_search_spaces:
+        if not primary_is_kv and has_fixed_baseline and not self.auto_quantize.module_search_spaces:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline requires at least one "
                 "auto_quantize.module_search_spaces entry."
             )
-        if not has_fixed_baseline and not has_global_search:
+        if not primary_is_kv and not has_fixed_baseline and not has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
                 "auto_quantize.candidate_formats for unmatched modules."

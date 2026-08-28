@@ -15,6 +15,8 @@
 
 """Tests for tied-weight helpers in unified_export_hf."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from _test_utils.torch.quantization.tied_modules import (
@@ -23,13 +25,36 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.model_utils import (
+    TiedWeightMap,
+    get_language_model_from_vl,
+    is_multimodal_model,
+)
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
     postprocess_state_dict,
     sync_tied_input_amax,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+def test_multimodal_detection_accepts_null_architectures():
+    """Unified export treats absent architecture metadata as an empty list."""
+    model = SimpleNamespace(config=SimpleNamespace(architectures=None))
+
+    assert not is_multimodal_model(model)
+
+
+@pytest.mark.parametrize("aliased", [False, True])
+def test_language_model_extraction_rejects_competing_or_aliased_roots(aliased):
+    """Language-model extraction must not select ambiguous roots by traversal order."""
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = model.model.language_model if aliased else torch.nn.Module()
+
+    with pytest.raises(ValueError, match="multiple language-model roots"):
+        get_language_model_from_vl(model)
 
 
 def test_hf_all_tied_weights_keys_contract():

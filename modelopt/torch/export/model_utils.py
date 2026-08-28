@@ -108,7 +108,7 @@ def is_multimodal_model(model):
     config = model.config
 
     # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
+    architectures = getattr(config, "architectures", None) or []
     is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
     return (
@@ -137,12 +137,17 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
         >>> # lineage[0] is vlm_model
         >>> # lineage[1] is vlm_model.language_model
     """
-    # always prioritize model.model.langauge_model
+    candidates = []
     if hasattr(model, "model") and hasattr(model.model, "language_model"):
-        return [model, model.model, model.model.language_model]
-
+        candidates.append([model, model.model, model.model.language_model])
     if hasattr(model, "language_model"):
-        return [model, model.language_model]
+        candidates.append([model, model.language_model])
+    if len(candidates) > 1:
+        raise ValueError(
+            "Found multiple language-model roots; refusing to select one by traversal order."
+        )
+    if candidates:
+        return candidates[0]
 
     # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model.
     # Only match if the model is detected as multimodal to avoid matching non-VLM encoder-decoder
