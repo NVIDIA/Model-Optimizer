@@ -24,9 +24,9 @@ modelopt_recipes/models/
         [README.md]            # optional; describes what's checkpoint-specific
 ```
 
-For example, the recipe for the hub checkpoint `nvidia/Nemotron-3-Nano-4B-BF16`
-(`https://huggingface.co/nvidia/Nemotron-3-Nano-4B-BF16`) lives at
-`models/nvidia/Nemotron-3-Nano-4B-BF16/ptq/`. Because the folder path *is* the
+For example, the recipe for the hub checkpoint `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`
+(`https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`) lives at
+`models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/`. Because the folder path *is* the
 hub path, you can go straight from a checkpoint id to its recipe — and back —
 with no lookup table.
 
@@ -66,7 +66,7 @@ or from Python:
 ```python
 from modelopt.recipe import load_recipe
 
-recipe = load_recipe("models/nvidia/Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16")
+recipe = load_recipe("models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16")
 ```
 
 ## What belongs here

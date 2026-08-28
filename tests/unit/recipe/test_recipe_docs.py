@@ -23,6 +23,8 @@ import re
 from importlib.resources import files
 from pathlib import Path
 
+import pytest
+
 RECIPES_DIR = Path(str(files("modelopt_recipes")))
 GENERAL_PTQ_DIR = RECIPES_DIR / "general" / "ptq"
 PTQ_MD = RECIPES_DIR / "ptq.md"
@@ -89,7 +91,7 @@ def test_every_model_specific_ptq_dir_is_mentioned():
 
     ``huggingface/<model_type>/ptq/`` recipes are checked by their ``model_type``
     (e.g. ``gemma4``); ``models/<org>/<model_id>/ptq/`` recipes are checked by their
-    full ``<org>/<model_id>`` hub path (e.g. ``nvidia/Nemotron-3-Nano-4B-BF16``), so
+    full ``<org>/<model_id>`` hub path (e.g. ``nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16``), so
     the org — the whole point of the top-level tier — is verified too and an org
     re-key (e.g. ``step3p5`` → ``stepfun-ai``) can't silently drift from the doc.
     """
@@ -148,4 +150,42 @@ def test_checkpoint_recipes_live_in_the_top_level_models_tier():
     )
     assert not misplaced, (
         f"Recipes under models/ must be <org>/<model_id>/<task>/<file>; found: {misplaced}"
+    )
+
+
+def test_launcher_yaml_recipe_paths_resolve():
+    """Every modelopt_recipes recipe path a launcher example selects must resolve on disk.
+
+    Guards against a recipe rename — e.g. keying ``models/nvidia/<id>`` by the canonical Hub id,
+    which carries the ``NVIDIA-`` prefix — drifting from the launcher YAML that loads it. The
+    depth/doc tests can't catch a launcher pointing at a recipe path that no longer exists.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    launcher_dir = repo_root / "tools" / "launcher" / "examples"
+    if not launcher_dir.is_dir():
+        pytest.skip("tools/launcher/examples not available in this checkout")
+
+    def _resolves(rel: str) -> bool:
+        return any((RECIPES_DIR / f"{rel}{suffix}").exists() for suffix in ("", ".yaml", ".yml"))
+
+    # ``--recipe <p>`` / ``QUANT_CFG: <p>`` are modelopt_recipes-relative — only tier-prefixed
+    # values are recipe paths; bare names like ``auto`` or ``FP8_DEFAULT_CFG`` are not. The
+    # ``modelopt_recipes/<p>.yaml`` form (e.g. ``--config``) embeds the path directly.
+    tier = r"(?:general|huggingface|models|configs)/[A-Za-z0-9._/-]+"
+    rel_re = re.compile(rf"(?:--recipe\s+|QUANT_CFG:\s*)({tier})")
+    abs_re = re.compile(rf"modelopt_recipes/({tier}\.ya?ml)")
+
+    missing = []
+    for yaml_path in sorted(launcher_dir.rglob("*.yaml")):
+        text = yaml_path.read_text(encoding="utf-8")
+        candidates = set(rel_re.findall(text)) | {
+            re.sub(r"\.ya?ml$", "", m) for m in abs_re.findall(text)
+        }
+        missing.extend(
+            f"{yaml_path.relative_to(repo_root)} -> {rel}"
+            for rel in sorted(candidates)
+            if not _resolves(rel)
+        )
+    assert not missing, "Launcher YAMLs reference recipe paths that do not resolve:\n" + "\n".join(
+        missing
     )

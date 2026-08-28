@@ -241,7 +241,7 @@ that baseline. The deviations come in four kinds:
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
-| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
+| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
@@ -358,7 +358,7 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
-- **`models/nvidia/Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
+- **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
   - MoE routed experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
@@ -369,17 +369,17 @@ checkpoint's** quant config verbatim:
   `nvfp4-mse.yaml` uses MSE calibration with an FP8-scale sweep (matches the
   release); `nvfp4-max-calib.yaml` is the identical layer map under plain `max`
   calibration, kept for comparison.
-- **`models/nvidia/Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
+- **`models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
   component map (routed experts NVFP4 W4A4 block-16; shared experts + Mamba
   `in/out_proj` + KV cache FP8; everything else BF16), but the routed-expert
   weights use **Four-over-Six (4/6)** NVFP4: an MSE search picks each weight's
   amax multiplier from `[1.0, 1.5]` (M=6 vs. M=4). Activations stay dynamic
   NVFP4 (not MSE-calibrated).
-- **`models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
+- **`models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
   Four-over-Six NVFP4 W4A16 to routed experts, shared experts, and the language
   model head; Mamba `in/out_proj` weights and inputs plus the KV cache use FP8,
   while attention remains BF16.
-- **`models/nvidia/Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
+- **`models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
   allocation of the Nemotron-H hybrid, mapped onto NVFP4/FP8 **per layer**:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4

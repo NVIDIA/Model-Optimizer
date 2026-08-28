@@ -43,7 +43,7 @@ huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`.
 |-----------|-----------------|
 | `general/` | **Model-agnostic** recipes — a good starting point for any model. PTQ combos, speculative-decoding training, and distillation. |
 | `huggingface/<model_type>/` | **Architecture-specific** recipes keyed by a HF `model_type`; one recipe covers every checkpoint of that architecture. |
-| `models/<org>/<model_id>/` | **Checkpoint-specific** recipes that mirror a particular published checkpoint, keyed by its model-hub path (e.g. `nvidia/Nemotron-3-Nano-4B-BF16`). |
+| `models/<org>/<model_id>/` | **Checkpoint-specific** recipes that mirror a particular published checkpoint, keyed by its model-hub path (e.g. `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16`). |
 | `configs/` | Shared building blocks (`numerics/`, `ptq/units/`, `ptq/presets/`) that recipes compose from via `$import`. Not run directly. |
 
 **Choosing where to look:** check `models/<org>/<model_id>/` for your exact
