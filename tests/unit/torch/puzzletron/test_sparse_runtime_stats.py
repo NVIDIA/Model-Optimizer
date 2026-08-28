@@ -281,10 +281,22 @@ def test_block_runtime_deduplicates_base_scaffold_measurement_pair(monkeypatch):
         batch_size=1,
     )
 
+    key_by_layout = {layout: key for key, (_runtime, layout) in captured["specs"].items()}
+    base_pair = (
+        key_by_layout[(base_block,) * 2],
+        key_by_layout[(base_block,) * 4],
+    )
+    scaffolded_pair = (
+        key_by_layout[(base_block, scaffolded_block, scaffolded_block)],
+        key_by_layout[(base_block,) + (scaffolded_block,) * 4],
+    )
+    measurement_pairs = captured["measurement_pairs"]
+
     assert len(captured["specs"]) == 4
-    assert len(captured["measurement_pairs"]) == 3
-    assert len(set(captured["measurement_pairs"])) == 2
-    assert {key for pair in captured["measurement_pairs"] for key in pair} == set(captured["specs"])
+    assert set(measurement_pairs) == {base_pair, scaffolded_pair}
+    assert measurement_pairs.count(base_pair) == 2
+    assert measurement_pairs.count(scaffolded_pair) == 1
+    assert {key for pair in measurement_pairs for key in pair} == set(captured["specs"])
     assert runtime[base_block] == RuntimeMeasurement(total_ms=5.0, prefill_ms=1.0)
     assert runtime[scaffolded_block] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
     assert non_block == RuntimeMeasurement(total_ms=10.0, prefill_ms=3.0)
