@@ -27,10 +27,13 @@ export workflow for the framework that produced it.
 
 QAD workflow and rationale
 ==========================
-
-For a broad overview of PTQ, QAT, and QAD, including how QAT uses simulated
-quantization during the training forward pass, see `How Quantization-Aware
-Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_.
+The paper `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_ recommends QAD for accuracy
+recovery after aggressive quantization, particularly for models that have gone
+through multi-stage post-training such as SFT, RL, or model merging. It reports that
+QAD is more stable and less complex to engineer than conventional QAT in these
+settings, and that the teacher signal makes recovery more robust when training data
+quality or coverage is limited. QAT remains the direct choice when task-specific CE
+fine-tuning is the objective.
 
 QAD is a two-stage workflow:
 
@@ -46,17 +49,12 @@ scales from max-calibrated PTQ checkpoints can be recomputed during training;
 scales from MSE-based static PTQ checkpoints should remain frozen, because repeating
 the scale search each step is prohibitively expensive.
 
-`Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
+For a broad overview of how QAT and QAD can recover accuracy lost to quantization, see `How Quantization-Aware
+Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_. For information on applying QAD to Nemotron models, see our blog on `Developing Nemotron 3.5 Lightning NVFP4 with QAD <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_, which
 walks through this PTQ-to-QAD-to-export process, including selection of the student
 recipe, training data and sequence length, and scale handling.
 
-The paper `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_ recommends QAD for accuracy
-recovery after aggressive quantization, particularly for models that have gone
-through multi-stage post-training such as SFT, RL, or model merging. It reports that
-QAD is more stable and less complex to engineer than conventional QAT in these
-settings, and that the teacher signal makes recovery more robust when training data
-quality or coverage is limited. QAT remains the direct choice when task-specific CE
-fine-tuning is the objective.
+
 
 Choose a framework
 ==================
@@ -108,7 +106,7 @@ provide end-to-end QAT and QAD commands. In summary:
 
 For example, the QAT and QAD training configurations in the examples are
 ``configs/train/qat_nvfp4.yaml`` and ``configs/train/qad_nvfp4.yaml`` respectively.
-The ``Quick Start: QAT (Hugging Face)`` navigation entry links to these examples.
+
 
 Run the Megatron workflows in a NeMo container
 ----------------------------------------------
@@ -120,8 +118,8 @@ Run them on a host with NVIDIA GPUs and Docker configured for GPU access.
 
 Prepare a directory for checkpoints and Hugging Face caches, then start an
 interactive container. Replace ``$HF_TOKEN`` with a token that can read the selected
-model and dataset. The default command uses the Model Optimizer version bundled in
-the container; it does not overlay a host checkout.
+model and dataset. The default command uses the Model Optimizer package bundled in
+the container and is sufficient for the Megatron-LM workflow.
 
 .. code-block:: bash
 
@@ -140,15 +138,20 @@ directory preserves checkpoints after the container exits. The examples below us
 small Qwen model and one GPU to demonstrate the command shape; increase the GPU
 count and choose TP, PP, CP, and EP to fit the target model and sequence length.
 
-To use a Model Optimizer version newer than the one bundled in the container, overlay
-your checkout explicitly by adding this mount to the ``docker run`` command:
+The Megatron-Bridge examples are source entry points and are not bundled in the
+NeMo image. Before running the Megatron-Bridge commands below, mount the
+Model-Optimizer checkout and its Python packages by adding these mounts to the
+``docker run`` command (run the command from the repository root):
 
 .. code-block:: bash
 
     -v "$PWD":/opt/Model-Optimizer
+    -v "$PWD/modelopt":/opt/venv/lib/python3.12/site-packages/modelopt
+    -v "$PWD/modelopt_recipes":/opt/venv/lib/python3.12/site-packages/modelopt_recipes
 
-Use the overlay only when needed for newer source changes; otherwise retain the
-container's tested Model Optimizer installation.
+These mounts keep the Megatron-Bridge scripts and ModelOpt package at the same
+revision. For Megatron-LM alone, omit them and use the bundled scripts at
+``/opt/Megatron-Bridge/3rdparty/Megatron-LM``.
 
 Megatron-Bridge
 ---------------
@@ -233,27 +236,36 @@ objective. From the NeMo container started above, run:
 
 .. code-block:: bash
 
-    cd /opt/Model-Optimizer/tools/launcher/modules/Megatron-LM/examples/post_training/modelopt
+    cd /opt/Megatron-Bridge/3rdparty/Megatron-LM/examples/post_training/modelopt
     export MODEL=meta-llama/Llama-3.2-1B-Instruct
     export HF_MODEL_CKPT="$MODEL"
     export PTQ_CKPT=/workspace/llama-3.2-1b-nvfp4-ptq
 
     TP=1 PP=1 EP=1 ETP=1 \
         MLM_MODEL_SAVE="$PTQ_CKPT" \
-        MLM_EXTRA_ARGS="--calib-size 128" \
-        ./quantize.sh "$MODEL" NVFP4_DEFAULT_CFG
+        MLM_EXTRA_ARGS="--calib-size 128 --calib-max-sequence-length 4096" \
+        bash ./quantize.sh "$MODEL" NVFP4_DEFAULT_CFG
+
+.. note::
+
+   Megatron-LM defaults to the `NVIDIA Nemotron Post-Training Dataset v2
+   <https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2>`_
+   for PTQ calibration. It is gated on Hugging Face, but is the preferred
+   calibration dataset for this workflow. Request access and provide ``HF_TOKEN``
+   as shown above. To use another dataset, set
+   ``--calib-dataset-path-or-name`` in ``MLM_EXTRA_ARGS``; choose data that is
+   representative of the target workload.
 
     TP=1 PP=1 EP=1 ETP=1 \
         MLM_MODEL_CKPT="$PTQ_CKPT" \
         MLM_MODEL_SAVE=/workspace/llama-3.2-1b-nvfp4-qat \
         DATASET=Magpie-Align/Magpie-Llama-3.1-Pro-MT-300K-Filtered \
-        MLM_EXTRA_ARGS="--modelopt-enabled --train-samples 1000 --lr-decay-samples 1000" \
-        ./finetune.sh "$MODEL"
+        MLM_EXTRA_ARGS="--train-samples 1000 --lr-decay-samples 1000" \
+        bash ./finetune.sh "$MODEL"
 
 Replace the example ``DATASET`` value with a dataset appropriate for the task. The
-second command loads the quantized checkpoint, retains simulated quantization, and
-uses the normal supervised objective. ``--modelopt-enabled`` is required because
-the Megatron-LM script does not enable ModelOpt automatically. Export it after
+second command detects the ModelOpt state in the quantized checkpoint, retains
+simulated quantization, and uses the normal supervised objective. Export it after
 training:
 
 .. code-block:: bash
@@ -261,33 +273,34 @@ training:
     TP=1 PP=1 EP=1 ETP=1 \
         MLM_MODEL_CKPT=/workspace/llama-3.2-1b-nvfp4-qat \
         EXPORT_DIR=/workspace/llama-3.2-1b-nvfp4-qat-hf \
-        ./export.sh "$MODEL"
+        bash ./export.sh "$MODEL"
 
-For QAD, manually convert the BF16 Hugging Face model to a Megatron-Core teacher,
-then use the PTQ checkpoint as the student. Megatron-LM requires a NeMo-style
-``model_config.yaml`` for the teacher checkpoint; place it in the teacher directory
-or pass its path with ``--export-kd-teacher-model-config``. The
-`Megatron-LM ModelOpt post-training examples <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_
-are the authoritative reference for the conversion, quantization, and training
-configuration.
+For QAD, import the BF16 Hugging Face model as a Megatron-Core teacher with
+Megatron-Bridge, then use the PTQ checkpoint as the student. This follows the
+`Megatron-LM checkpoint prerequisite <https://github.com/NVIDIA/Megatron-LM/blob/main/examples/post_training/modelopt/README.md#megatron-core-checkpoint-prerequisite>`_.
+The imported checkpoint includes the Megatron-Core configuration required by the
+Megatron-LM QAD workflow.
 
 .. code-block:: bash
 
     export TEACHER_CKPT=/workspace/llama-3.2-1b-bf16-mcore
 
-    TP=1 PP=1 EP=1 ETP=1 \
-        MLM_MODEL_SAVE="$TEACHER_CKPT" \
-        ./convert.sh "$MODEL"
+    bash /opt/Megatron-Bridge/scripts/conversion/convert.sh import \
+        --executor local \
+        --device gpu \
+        --gpus-per-node 1 \
+        --hf-model "$MODEL" \
+        --megatron-path "$TEACHER_CKPT"
 
     TP=1 PP=1 EP=1 ETP=1 \
         MLM_MODEL_CKPT="$PTQ_CKPT" \
         MLM_MODEL_SAVE=/workspace/llama-3.2-1b-nvfp4-qad \
         DATASET=Magpie-Align/Magpie-Llama-3.1-Pro-MT-300K-Filtered \
-        MLM_EXTRA_ARGS="--modelopt-enabled --export-kd-teacher-load $TEACHER_CKPT --train-samples 1000 --lr-decay-samples 1000" \
-        ./finetune.sh "$MODEL"
+        MLM_EXTRA_ARGS="--export-kd-teacher-load $TEACHER_CKPT --train-samples 1000 --lr-decay-samples 1000" \
+        bash ./finetune.sh "$MODEL"
 
 The second command adds the frozen teacher and the default logit-level distillation
-loss to the quantized student training. Use ``./export.sh "$MODEL"`` as in the QAT
+loss to the quantized student training. Use ``bash ./export.sh "$MODEL"`` as in the QAT
 flow, replacing ``MLM_MODEL_CKPT`` and ``EXPORT_DIR`` with the QAD output paths.
 
 The following launcher example runs the complete Megatron-LM QAD flow: import the
@@ -312,5 +325,6 @@ Additional resources
 * `Hugging Face QAT/QAD examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat>`_
 * `Megatron-Bridge examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
 * `Megatron-LM ModelOpt post-training examples <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_
-* `Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
 * `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_
+* `How Quantization-Aware Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_
+* `Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
