@@ -121,6 +121,7 @@ def test_checkpoint_recipes_live_in_the_top_level_models_tier():
     silently shipping both tiers — e.g. on a bad merge that re-adds the old layout.
     """
     hf = RECIPES_DIR / "huggingface"
+    models = RECIPES_DIR / "models"
     assert not (hf / "models").exists(), (
         "huggingface/models/ must not exist — checkpoint-mirror recipes live in the "
         "top-level modelopt_recipes/models/ tier."
@@ -136,4 +137,15 @@ def test_checkpoint_recipes_live_in_the_top_level_models_tier():
     assert not nested, (
         f"Recipes under huggingface/ must be <model_type>/<task>/<file>; found nested "
         f"paths (a checkpoint recipe belongs under models/<org>/<model_id>/): {nested}"
+    )
+    # Every recipe under models/ must be <org>/<model_id>/<task>/<file> (4 parts) so the
+    # path is exactly the model-hub path; a different depth breaks that convention.
+    misplaced = sorted(
+        str(p.relative_to(RECIPES_DIR))
+        for ext in ("*.yaml", "*.yml")
+        for p in models.glob(f"**/{ext}")
+        if len(p.relative_to(models).parts) != 4
+    )
+    assert not misplaced, (
+        f"Recipes under models/ must be <org>/<model_id>/<task>/<file>; found: {misplaced}"
     )
