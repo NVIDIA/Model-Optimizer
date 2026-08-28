@@ -2,7 +2,7 @@
 
 This example quantizes the PETRv1 and PETRv2 image backbones and detection heads to INT8 or FP8 with Model Optimizer. It follows the [NVIDIA DL4AGX PETR TensorRT workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/petr-trt) and evaluates TensorRT engines on the nuScenes validation set.
 
-The provided image uses `nvcr.io/nvidia/pytorch:25.06-py3`, CUDA 12.9, and TensorRT 10.11. PETR runs in an isolated Python 3.9 environment with PyTorch 2.8 `cu129` and MMCV compiled against the container's CUDA toolkit; Model Optimizer uses the base Python 3.12 environment.
+The provided image uses the Python 3.12, PyTorch 2.8, CUDA 12.9, and TensorRT 10.11 environment from `nvcr.io/nvidia/pytorch:25.06-py3`. MMCV is compiled against the container's PyTorch and CUDA toolkit.
 
 ## 1. Prepare PETR and nuScenes
 
@@ -50,7 +50,7 @@ The default MMCV build targets SM 8.9 and includes PTX for newer GPUs. Set `--bu
 ```bash
 docker run --rm -it --gpus=all --shm-size=64G \
   --user "$(id -u):$(id -g)" \
-  -e HOME=/tmp \
+  -e HOME=/tmp -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
   -v /path/to/Model-Optimizer:/opt/Model-Optimizer \
   -v /path/to/PETR:/workspace/PETR \
   -v /path/to/DL4AGX:/workspace/DL4AGX \
@@ -58,19 +58,19 @@ docker run --rm -it --gpus=all --shm-size=64G \
   petr-modelopt
 ```
 
-The image builds MMCV 1.7.0 and MMDetection3D v1.0.0rc6 from verified upstream commits. The included patches add PyTorch 2.8 compatibility, remove the unused Lyft integration and the `plyfile`, TensorBoard, and KITTI-only scikit-image dependencies, and update the Python 3.9 runtime pins while preserving the nuScenes path used here.
+The image builds MMCV 1.7.0 and MMDetection3D v1.0.0rc6 from verified upstream commits. The included patches add PyTorch 2.8 and Python 3.12 compatibility while removing the unused Lyft integration and the `plyfile`, TensorBoard, and KITTI-only scikit-image dependencies.
 
-Use the isolated Python 3.9 environment for PETR export, calibration preparation, and evaluation. Keep its site-packages first so the installed MMDetection3D 1.0.0rc6 package takes precedence over the v0.17.1 source tree used by the configs:
+Use the same Python environment for PETR export, calibration, quantization, and evaluation:
 
 ```bash
-export PYTHONPATH=/opt/petr/lib/python3.9/site-packages:/workspace/PETR:/workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
+export PYTHONPATH=/workspace/PETR:/workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
 ```
 
 Inside the container, generate `nuscenes_infos_val.pkl` from the local nuScenes tables with the converter included in the pinned PETR checkout:
 
 ```bash
 cd /workspace/PETR
-/opt/petr/bin/python - <<'PY'
+python - <<'PY'
 from tools.data_converter.nuscenes_converter import create_nuscenes_infos
 
 create_nuscenes_infos(
@@ -85,7 +85,7 @@ PY
 PETRv2 also needs metadata for the previous camera sweeps. Run this step in the same container:
 
 ```bash
-/opt/petr/bin/python \
+python \
   /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_sweep_metadata.py \
   /workspace/PETR/data/nuscenes \
   --split val
@@ -102,12 +102,12 @@ cd /workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
 ln -s /workspace/PETR/data data
 mkdir -p onnx_files engines
 
-/opt/petr/bin/python v1/v1_export_to_onnx.py \
+python v1/v1_export_to_onnx.py \
   /workspace/PETR/projects/configs/petr/petr_vovnet_gridmask_p4_800x320.py \
   /workspace/PETR/ckpts/PETR-vov-p4-800x320_e24.pth \
   --eval bbox
 
-/opt/petr/bin/python v2/v2_export_to_onnx.py \
+python v2/v2_export_to_onnx.py \
   /workspace/PETR/projects/configs/petrv2/petrv2_vovnet_gridmask_p4_800x320.py \
   /workspace/PETR/ckpts/PETRv2-vov-p4-800x320_e24.pth \
   --eval bbox
@@ -118,10 +118,10 @@ The exporters create a backbone graph and a head graph. Simplify both graphs:
 ```bash
 for version in v1 v2; do
   model="PETR${version}"
-  /opt/petr/bin/python -m onnxsim \
+  python -m onnxsim \
     "onnx_files/${model}.extract_feat.onnx" \
     "onnx_files/sim_${model}.extract_feat.onnx"
-  /opt/petr/bin/python -m onnxsim \
+  python -m onnxsim \
     "onnx_files/${model}.pts_bbox_head.forward.onnx" \
     "onnx_files/sim_${model}.pts_bbox_head.forward.onnx"
 done
@@ -148,7 +148,7 @@ done
 Collect 512 representative backbone and head input batches. The default interval samples across the 6,019-frame validation set:
 
 ```bash
-/opt/petr/bin/python /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_calibration.py \
+python /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_calibration.py \
   v1 \
   /workspace/PETR/projects/configs/petr/petr_vovnet_gridmask_p4_800x320.py \
   /workspace/PETR/ckpts/PETR-vov-p4-800x320_e24.pth \
@@ -161,9 +161,7 @@ Collect 512 representative backbone and head input batches. The default interval
 
 Repeat with `v2`, the PETRv2 config, checkpoint, graphs, engines, and `calibration/PETRv2` output directory.
 
-Use the base Python environment for Model Optimizer AutoCast, preserving FP32
-model inputs and outputs, then build the reference engines. The example below
-uses one representative batch for AutoCast node classification:
+Run Model Optimizer AutoCast in the same Python environment, preserving FP32 model inputs and outputs, then build the reference engines. The example below uses one representative batch for AutoCast node classification:
 
 ```bash
 for version in v1 v2; do
@@ -197,7 +195,7 @@ done
 
 ## 4. Quantize the ONNX models
 
-Use the base Python environment for Model Optimizer. This command quantizes the backbone and keeps the head in FP16:
+This command quantizes the backbone and keeps the head in FP16:
 
 ```bash
 env -u PYTHONPATH python /opt/Model-Optimizer/examples/onnx_ptq/petr/quantize.py \
@@ -230,7 +228,7 @@ If `--quantize-head` was used, build the generated head graph with the same `trt
 Evaluate any backbone/head pairing. For example, INT8 backbone with FP16 head:
 
 ```bash
-/opt/petr/bin/python /opt/Model-Optimizer/examples/onnx_ptq/petr/evaluate.py \
+python /opt/Model-Optimizer/examples/onnx_ptq/petr/evaluate.py \
   v1 \
   /workspace/PETR/projects/configs/petr/petr_vovnet_gridmask_p4_800x320.py \
   /workspace/PETR/ckpts/PETR-vov-p4-800x320_e24.pth \

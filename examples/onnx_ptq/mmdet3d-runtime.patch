@@ -17,17 +17,35 @@ index dab7502..ae58b25 100644
 -    'build_dataset', 'NuScenesDataset', 'NuScenesMonoDataset', 'LyftDataset',
 +    'build_dataset', 'NuScenesDataset', 'NuScenesMonoDataset',
 diff --git a/requirements/runtime.txt b/requirements/runtime.txt
-index 643cb0c..73dac63 100644
+index 643cb0c..55cfe45 100644
 --- a/requirements/runtime.txt
 +++ b/requirements/runtime.txt
-@@ -1,3 +1,2 @@
+@@ -1,5 +1,3 @@
 -lyft_dataset_sdk
 -networkx>=2.2,<2.3
 -numba==0.53.0
-+networkx==2.8.8
-+numba==0.60.0
-@@ -6,4 +5,0 @@ nuscenes-devkit
++numba>=0.59.1
+ numpy
+ nuscenes-devkit
+@@ -6,4 +4,0 @@ nuscenes-devkit
 -plyfile
 -scikit-image
 -# by default we also use tensorboard to log results
 -tensorboard
+@@ -10 +4 @@ tensorboard
+-trimesh>=2.35.39,<2.35.40
++trimesh==3.9.29
+diff --git a/mmdet3d/datasets/pipelines/transforms_3d.py b/mmdet3d/datasets/pipelines/transforms_3d.py
+index 9978b82..30ed5c7 100644
+--- a/mmdet3d/datasets/pipelines/transforms_3d.py
++++ b/mmdet3d/datasets/pipelines/transforms_3d.py
+@@ -925 +925 @@ class ObjectRangeFilter(object):
+-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
++        gt_labels_3d = gt_labels_3d[mask.numpy().astype(bool)]
+diff --git a/mmdet3d/core/visualizer/show_result.py b/mmdet3d/core/visualizer/show_result.py
+index 0dc676a..c8b004d 100644
+--- a/mmdet3d/core/visualizer/show_result.py
++++ b/mmdet3d/core/visualizer/show_result.py
+@@ -71 +71 @@ def _write_oriented_bbox(scene_bbox, out_filename):
+-    trimesh.io.export.export_mesh(mesh_list, out_filename, file_type='obj')
++    trimesh.exchange.export.export_mesh(mesh_list, out_filename, file_type='obj')

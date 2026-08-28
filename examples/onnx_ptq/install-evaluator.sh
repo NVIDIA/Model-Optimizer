@@ -16,31 +16,21 @@
 
 set -euo pipefail
 
-prefix=$1
-cuda_arch_list=$2
-shift 2
-python="${prefix}/bin/python"
+cuda_arch_list=$1
 
-unset PIP_CONSTRAINT
-"${python}" -m pip install --no-cache-dir \
-    -r /tmp/evaluator/requirements-torch-cu129.txt
-"${python}" -m pip install --no-cache-dir \
-    -r /tmp/evaluator/requirements-evaluator-cu129.txt "$@"
+python -m pip install --no-cache-dir -r /tmp/evaluator/requirements-25.06.txt
 
 git clone --branch v1.7.0 --depth 1 https://github.com/open-mmlab/mmcv.git /tmp/mmcv
 test "$(git -C /tmp/mmcv rev-parse HEAD)" = 270c293c9b4bfa90211ccab212d55ccd27bdc09f
 git -C /tmp/mmcv apply --unidiff-zero /tmp/evaluator/mmcv-torch2.patch
 MMCV_WITH_OPS=1 FORCE_CUDA=1 MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${cuda_arch_list}" \
-    "${python}" -m pip install --no-cache-dir --no-build-isolation --no-deps /tmp/mmcv
+    python -m pip install --no-cache-dir --no-build-isolation --no-deps /tmp/mmcv
 
 git clone --branch v1.0.0rc6 --depth 1 \
     https://github.com/open-mmlab/mmdetection3d.git /tmp/mmdetection3d
 test "$(git -C /tmp/mmdetection3d rev-parse HEAD)" = \
     47285b3f1e9dba358e98fcd12e523cfd0769c876
 git -C /tmp/mmdetection3d apply --unidiff-zero /tmp/evaluator/mmdet3d-runtime.patch
-"${python}" -m pip install --no-cache-dir --no-build-isolation /tmp/mmdetection3d
-"${python}" -m pip check
+python -m pip install --no-cache-dir --no-build-isolation /tmp/mmdetection3d
 
-site_packages=$("${python}" -c 'import site; print(site.getsitepackages()[0])')
-ln -s tensorrt_bindings "${site_packages}/tensorrt"
 rm -rf /tmp/mmcv /tmp/mmdetection3d

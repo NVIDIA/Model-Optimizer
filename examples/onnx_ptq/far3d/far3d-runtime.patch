@@ -1,0 +1,17 @@
+--- a/projects/mmdet3d_plugin/models/utils/attention.py
++++ b/projects/mmdet3d_plugin/models/utils/attention.py
+@@ -16 +16,2 @@
+-from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
++from flash_attn.flash_attn_interface import \
++    flash_attn_varlen_kvpacked_func as flash_attn_unpadded_kvpacked_func
+--- a/projects/mmdet3d_plugin/datasets/pipelines/custom_pipeline.py
++++ b/projects/mmdet3d_plugin/datasets/pipelines/custom_pipeline.py
+@@ -10 +9,0 @@
+-import refile
+--- a/projects/mmdet3d_plugin/datasets/av2_eval_util.py
++++ b/projects/mmdet3d_plugin/datasets/av2_eval_util.py
+@@ -5 +4,0 @@
+-import refile
+@@ -190 +189 @@ def read_feather_remote(path: Path, columns: Optional[Tuple[str, ...]] = None) -> pd.DataFrame:
+-    with refile.smart_open(str(path), "rb") as f:
++    with Path(path).open("rb") as f:

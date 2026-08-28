@@ -15,37 +15,25 @@
 
 FROM nvcr.io/nvidia/pytorch:25.06-py3
 
-ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-ARG EXAMPLE
 ARG TORCH_CUDA_ARCH_LIST=8.9+PTX
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgl1 && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN case "${EXAMPLE}" in \
-        far3d|petr) ;; \
-        *) echo "EXAMPLE must be far3d or petr" >&2; exit 1 ;; \
-    esac && \
-    python -m pip install --no-cache-dir uv==0.12.3 && \
-    UV_PYTHON_INSTALL_DIR=/opt/python uv venv --seed --python 3.9.23 "/opt/${EXAMPLE}"
-
-COPY examples/onnx_ptq/install-evaluator-cu129.sh \
+COPY examples/onnx_ptq/install-evaluator.sh \
     examples/onnx_ptq/mmcv-torch2.patch \
     examples/onnx_ptq/mmdet3d-runtime.patch \
-    examples/onnx_ptq/requirements-evaluator-cu129.txt \
-    examples/onnx_ptq/requirements-modelopt-25.06.txt \
-    examples/onnx_ptq/requirements-torch-cu129.txt \
+    examples/onnx_ptq/requirements-25.06.txt \
     /tmp/evaluator/
+RUN bash /tmp/evaluator/install-evaluator.sh "${TORCH_CUDA_ARCH_LIST}"
+
 COPY examples/onnx_ptq/far3d/requirements.txt /tmp/evaluator/requirements-far3d.txt
-RUN if [ "${EXAMPLE}" = far3d ]; then \
-        set -- -r /tmp/evaluator/requirements-far3d.txt; \
-    else \
-        set --; \
-    fi && \
-    bash /tmp/evaluator/install-evaluator-cu129.sh \
-        "/opt/${EXAMPLE}" "${TORCH_CUDA_ARCH_LIST}" "$@" && \
-    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
-        -r /tmp/evaluator/requirements-modelopt-25.06.txt
+ARG EXAMPLE
+# AV2 declares development-only tooling and a second OpenCV distribution.
+RUN case "${EXAMPLE}" in \
+        far3d) python -m pip install --no-cache-dir \
+            -r /tmp/evaluator/requirements-far3d.txt && \
+            python -m pip install --no-cache-dir --no-deps av2==0.2.1 ;; \
+        petr) ;; \
+        *) echo "EXAMPLE must be far3d or petr" >&2; exit 1 ;; \
+    esac
 
 COPY . /opt/Model-Optimizer
 RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps \

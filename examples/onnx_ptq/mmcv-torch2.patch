@@ -16,3 +16,9 @@ index 4359a19..8c8ab09 100644
 -            streams = [_get_stream(device) for device in target_gpus]
 +            streams = [
 +                _get_stream(torch.device('cuda', device)) for device in target_gpus]
+diff --git a/mmcv/utils/config.py b/mmcv/utils/config.py
+--- a/mmcv/utils/config.py
++++ b/mmcv/utils/config.py
+@@ -508 +508 @@ class Config:
+-        text, _ = FormatCode(text, style_config=yapf_style, verify=True)
++        text, _ = FormatCode(text, style_config=yapf_style)
