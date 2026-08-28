@@ -34,7 +34,7 @@ from safetensors.torch import load_file
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_per_token
 from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
 from modelopt.torch.speculative.plugins.modeling_dspark import DSparkModule
 
@@ -311,3 +311,81 @@ class TestDSparkExporter:
         assert dc["shift_label"] is True
         assert "mask_token_id" in dc
         assert "target_layer_ids" in dc
+
+
+class TestTvdPerTokenChunking:
+    """``_tvd_per_token`` must be chunk-size-invariant, and must chunk via ``split``.
+
+    No other DSpark test reaches a second chunk: the tiny fixture yields N = 2 * 12 * 4
+    = 96 rows against the default ``chunk_size=1024``, so every existing test runs in a
+    single chunk and any chunk-boundary bug -- a mis-ordered ``cat``, a ragged tail
+    handled wrong, a row/label misalignment -- passes CI silently. These tests call the
+    helper directly so they can force many chunks on a tiny tensor.
+    """
+
+    @staticmethod
+    def _run(chunk_size, n=12, vocab=32):
+        """Forward + backward through ``_tvd_per_token`` from a fixed seed."""
+        torch.manual_seed(0)
+        final = torch.randn(n, vocab, requires_grad=True)
+        teacher = torch.randn(n, vocab)
+        out = _tvd_per_token(final, teacher, chunk_size=chunk_size)
+        # Weight the rows unequally, so a cat that reassembles the chunks in the wrong
+        # order cannot cancel out in the reduction.
+        (out * torch.arange(1, n + 1, dtype=out.dtype)).sum().backward()
+        return out.detach(), final.grad.detach()
+
+    # 12 rows: 5 and 7 leave a ragged last chunk (5+5+2, 7+5); 13 and 1024 exceed n.
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 12, 13, 1024])
+    def test_chunk_size_invariant(self, chunk_size):
+        ref_out, ref_grad = self._run(12)  # one chunk == the unchunked reference
+        out, grad = self._run(chunk_size)
+        assert torch.equal(out, ref_out), f"TVD value changed at chunk_size={chunk_size}"
+        assert torch.equal(grad, ref_grad), f"TVD grad changed at chunk_size={chunk_size}"
+
+    def test_chunks_via_split_not_slice(self):
+        """Pin the optimization itself, not just its result.
+
+        Slicing and splitting agree on every value, so no numerical test can tell them
+        apart -- only the backward graph can. Slicing costs O(n_chunks * N * vocab)
+        because each ``SliceBackward0`` zero-fills a full [N, vocab] tensor; at the
+        Gemma-4 shape that was 93.2 ms/step. This test is what stops the loop being
+        "simplified" back to ``final_logits[i : i + chunk_size]``.
+        """
+        final = torch.randn(8, 4, requires_grad=True)
+        teacher = torch.randn(8, 4)
+        out = _tvd_per_token(final, teacher, chunk_size=2)
+
+        # `alive` is load-bearing, not debris: accessing `.next_functions` hands back a
+        # FRESH python wrapper for each node every time, so a node we do not hold a
+        # reference to is freed the moment we pop it -- and CPython happily reuses that
+        # address for a later, different node. Without `alive` the id() check reports a
+        # false "already visited" and the walk truncates after three nodes, missing the
+        # Split/Slice node entirely (verified: both variants returned the same
+        # ['AbsBackward0', 'CatBackward0', 'SumBackward1']).
+        seen, visited, alive, stack = set(), set(), [], [out.grad_fn]
+        while stack:
+            fn = stack.pop()
+            if fn is None or id(fn) in visited:
+                continue
+            visited.add(id(fn))
+            alive.append(fn)
+            seen.add(type(fn).__name__)
+            stack.extend(nxt for nxt, _ in fn.next_functions)
+
+        assert any(name.startswith("SplitBackward") for name in seen), (
+            f"expected a SplitBackward node in the graph, saw: {sorted(seen)}"
+        )
+        assert not any(name.startswith("SliceBackward") for name in seen), (
+            f"chunking regressed to per-chunk slicing, saw: {sorted(seen)}"
+        )
+
+    def test_no_grad_path_matches_grad_path(self):
+        """The ``requires_grad=False`` branch skips checkpointing; values must not move."""
+        torch.manual_seed(0)
+        final = torch.randn(12, 32)
+        teacher = torch.randn(12, 32)
+        with torch.no_grad():
+            plain = _tvd_per_token(final, teacher, chunk_size=5)
+        grad_out = _tvd_per_token(final.requires_grad_(True), teacher, chunk_size=5)
+        assert torch.equal(plain, grad_out.detach())
