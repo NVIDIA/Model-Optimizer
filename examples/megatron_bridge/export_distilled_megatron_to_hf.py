@@ -65,6 +65,7 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import copy_hf_ckpt_remote_code
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
 )
@@ -226,10 +227,7 @@ def get_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace):
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
+    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
 
     if is_vlm:
         # Build the full VLM (vision tower / projector + original LM from HF), then overwrite the LM

@@ -31,12 +31,33 @@ from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from torch.distributed.checkpoint import FileSystemReader
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
 from modelopt.torch.utils import print_rank_0
 
-__all__ = ["load_mbridge_model_from_hf", "load_modelopt_megatron_checkpoint"]
+__all__ = [
+    "get_language_model",
+    "is_vlm_config",
+    "load_mbridge_model_from_hf",
+    "load_modelopt_megatron_checkpoint",
+]
+
+
+def get_language_model(model: MegatronModule) -> tuple[MegatronModule, bool]:
+    """Return ``(language_model, is_vlm)``; VLM wrappers nest it under ``.language_model``.
+
+    Must agree with :func:`is_vlm_config`, which answers the same question before the
+    Megatron model exists.
+    """
+    language_model = getattr(model, "language_model", None)
+    return (model, False) if language_model is None else (language_model, True)
+
+
+def is_vlm_config(hf_model_name_or_path: str, trust_remote_code: bool = False) -> bool:
+    """Whether a HuggingFace checkpoint describes a VLM, from its config alone."""
+    config = AutoConfig.from_pretrained(hf_model_name_or_path, trust_remote_code=trust_remote_code)
+    return hasattr(config, "vision_config")
 
 
 def load_mbridge_model_from_hf(
@@ -100,9 +121,9 @@ def load_mbridge_model_from_hf(
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
-    # VLMs (e.g. Qwen3-VL) wrap the language model as ``.language_model``; the pruning target is the
-    # inner GPTModel/HybridModel, but we still return the full wrapper so callers can save the VLM.
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
+    # The optimization target is the inner GPTModel/HybridModel, but callers get the full
+    # wrapper back so they can save the whole VLM.
+    language_model, _ = get_language_model(unwrapped_model)
     assert isinstance(language_model, GPTModel | HybridModel), (
         f"Expected a GPTModel/HybridModel (optionally wrapped as `.language_model`), "
         f"got {type(unwrapped_model)}"
@@ -119,10 +140,14 @@ def load_mbridge_model_from_hf(
     return bridge, provider, model, unwrapped_model, tokenizer
 
 
+def _checkpoint_keys(checkpoint_path: str) -> list[str]:
+    """Tensor names in a Megatron distributed checkpoint."""
+    return list(FileSystemReader(checkpoint_path).read_metadata().state_dict_metadata)
+
+
 def _has_vision_model_weights(checkpoint_path: str) -> bool:
     """Whether a Megatron distributed checkpoint holds a VLM's vision tower (``vision_model.*``)."""
-    metadata = FileSystemReader(checkpoint_path).read_metadata()
-    return any(key.startswith("vision_model.") for key in metadata.state_dict_metadata)
+    return any(key.startswith("vision_model.") for key in _checkpoint_keys(checkpoint_path))
 
 
 def load_modelopt_megatron_checkpoint(
@@ -143,14 +168,23 @@ def load_modelopt_megatron_checkpoint(
     # ``distill.py`` distills a VLM's language model only, so its checkpoint holds no ``vision_model.*``
     # weights and must be loaded into ``.language_model`` rather than the full VLM wrapper.
     unwrapped_model = unwrap_model(model)
-    if any(hasattr(m, "language_model") for m in unwrapped_model) and not _has_vision_model_weights(
+    if any(get_language_model(m)[1] for m in unwrapped_model) and not _has_vision_model_weights(
         checkpoint_path
     ):
         print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
-        model = [getattr(m, "language_model", m) for m in unwrapped_model]
+        model = [get_language_model(m)[0] for m in unwrapped_model]
 
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
-    if restore_modelopt_state and has_modelopt_state(megatron_path):
-        load_modelopt_state(model, megatron_path)
+    if restore_modelopt_state:
+        if has_modelopt_state(megatron_path):
+            load_modelopt_state(model, megatron_path)
+        elif any("_quantizer." in key for key in _checkpoint_keys(checkpoint_path)):
+            # The quantizers cannot be rebuilt without the state, and the loader ignores the
+            # leftover amax tensors, so the model would silently load unquantized.
+            raise RuntimeError(
+                f"{megatron_path} holds quantizer tensors but no restorable ModelOpt state. "
+                "The state was dropped when the checkpoint was written -- re-run the step that "
+                "produced it."
+            )
     _load_model_weights_from_checkpoint(checkpoint_path, model)

@@ -50,13 +50,13 @@ from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
+from modelopt.torch.utils.plugins.mbridge import is_vlm_config, load_modelopt_megatron_checkpoint
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -403,10 +403,7 @@ def main(args: argparse.Namespace):
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
     # ``language_model`` (used as ``distill_submodule`` below).
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
+    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
 
     if is_vlm:
         warn_rank_0(
