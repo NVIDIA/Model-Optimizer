@@ -144,32 +144,16 @@ selection, materialization, and report lineage remain connected. Configure
 that route with the
 [post-MIP pipeline guide](docs/post_mip_pipeline.md#downstream-evaluation).
 
-To evaluate a compatible local Hugging Face checkpoint without creating a
-campaign, run the default one-GPU smoke in the Puzzletron worker environment:
+For standalone evaluation in the Puzzletron worker environment, choose the
+route that matches the checkpoint and task:
 
-```bash
-python -m examples.puzzletron.evaluation.text \
-  --checkpoint /path/to/checkpoint \
-  --output-dir /path/to/results/checkpoint-smoke
-```
+| Route | Default smoke | Guide |
+| --- | --- | --- |
+| Text | `python -m examples.puzzletron.evaluation.text` runs eight IFEval and GSM8K samples with `lmms-eval`; the same command can prepare selected NeMo Evaluator task contracts. | [Text checkpoint evaluation](docs/checkpoint_evaluation.md) |
+| Qwen 3.5 0.8B VLM | `python -m examples.puzzletron.evaluation.vlm.run` runs the pinned RealWorldQA and MMMU short suite. | [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) |
 
-The smoke evaluates eight samples each from IFEval and GSM8K. See
-[checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
-full evaluation, model detection, runtime options, results, and troubleshooting.
-
-Puzzletron uses `lmms-eval` as the default text evaluator. For benchmarks that
-are missing from the pinned revision, or for an explicitly requested alternate
-task contract, select the NeMo backend through the same entry point:
-
-```bash
-python -m examples.puzzletron.evaluation.text --backend nemo \
-  --base-config path/to/base_nel_config.yaml \
-  --output path/to/text_benchmarks.yaml
-```
-
-The NeMo route prepares configuration but does not launch an evaluation. See
-[checkpoint evaluation](docs/checkpoint_evaluation.md) for benchmark routing,
-available alternatives, full-run guidance, results, and troubleshooting.
+The guides own installation, complete commands, suite or task selection,
+runtime constraints, results, and troubleshooting for their respective routes.
 
 ## Configure a campaign
 
