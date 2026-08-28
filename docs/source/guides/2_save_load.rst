@@ -4,14 +4,16 @@ Saving & Restoring
 
 .. _save-restore:
 
-ModelOpt optimization methods such as quantization, pruning<sup>1</sup>, distillation<sup>1</sup>, sparsity etc. modifies the original model
+ModelOpt optimization methods such as quantization, pruning :ref:`[1] <save-restore-note>`, distillation :ref:`[1] <save-restore-note>`, sparsity etc. modifies the original model
 architecture and weights.
 Hence it is important to save and restore the model architecture followed by the new weights to use the modified
 model for downstream tasks.
 
+.. _save-restore-note:
+
 .. note::
 
-    <sup>1</sup> Some pruning and distillation methods don't need special handling for saving and restoring model optimizer states and can be saved and restored using their standard APIs.
+    Some pruning and distillation methods don't need special handling for saving and restoring ModelOpt states and can be saved and restored using their standard APIs.
 
 This guide describes various options for saving and restoring the ModelOpt-modified models correctly.
 

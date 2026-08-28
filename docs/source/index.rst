@@ -70,7 +70,7 @@ Release notes, technical updates, examples, and deployment stories from the Mode
    Quick Start: PTQ - ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq>
    Quick Start: PTQ - PyTorch to ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx>
    Quick Start: PTQ - Windows <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows>
-   Quick Start: QAT and QAD <https://nvidia.github.io/Model-Optimizer/guides/12_quantization_aware_training.html>
+   Quick Start: QAT and QAD <guides/quantization_aware_training>
    Quick Start: Pruning <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>
    Quick Start: Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill>
    Quick Start: Speculative Decoding <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding>
@@ -78,11 +78,22 @@ Release notes, technical updates, examples, and deployment stories from the Mode
 
 .. toctree::
    :hidden:
-   :glob:
    :maxdepth: 1
    :caption: Guides
 
-   guides/[0-9]*
+   guides/0_support_matrix
+   guides/1_quantization
+   guides/quantization_aware_training
+   guides/2_save_load
+   guides/3_pruning
+   guides/4_distillation
+   guides/5_speculative_decoding
+   guides/6_sparsity
+   guides/7_nas
+   guides/8_autocast
+   guides/9_autotune
+   guides/10_recipes
+   guides/11_config_system
 
 .. toctree::
    :hidden:

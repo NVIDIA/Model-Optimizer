@@ -50,7 +50,7 @@ the scale search each step is prohibitively expensive.
 walks through this PTQ-to-QAD-to-export process, including selection of the student
 recipe, training data and sequence length, and scale handling.
 
-The `QAD paper <https://arxiv.org/abs/2601.20088>`_ recommends QAD for accuracy
+The paper `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_ recommends QAD for accuracy
 recovery after aggressive quantization, particularly for models that have gone
 through multi-stage post-training such as SFT, RL, or model merging. It reports that
 QAD is more stable and less complex to engineer than conventional QAT in these
