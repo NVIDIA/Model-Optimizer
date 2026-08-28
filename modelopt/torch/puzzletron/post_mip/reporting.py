@@ -21,6 +21,7 @@ import hashlib
 import html
 import json
 import math
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -326,22 +327,41 @@ def render_aiperf_report(section_id: str, payload: Mapping[str, Any]) -> str:
         metrics = dict(row.get("metrics") or {})
         selected = bool(row.get("selected_by"))
         selection = "Selected by Fastest" if selected else ""
-        rows.append(
-            f"<tr class='{'selected-candidate' if selected else ''}'>"
-            f"<td>{_text(row.get('label') or row.get('architecture_id') or 'unknown')}</td>"
-            f"<td>{_text(row.get('status') or 'pending')}</td>"
-            f"<td>{_text(selection)}</td>"
-            f"<td>{_number(metrics.get('request_throughput'))}</td>"
-            f"<td>{_number(metrics.get('output_token_throughput'))}</td>"
-            f"<td>{_number(metrics.get('ttft_mean_ms'))}</td>"
-            f"<td>{_number(metrics.get('tpot_mean_ms'))}</td>"
-            f"<td>{_text(row.get('error') or '')}</td>"
-            "</tr>"
+        namespaces = sorted(
+            {
+                match.group(1)
+                for name in metrics
+                if (
+                    match := re.fullmatch(
+                        r"((?:images_[1-9][0-9]*\.)?concurrency_[1-9][0-9]*)\..+",
+                        name,
+                    )
+                )
+            }
         )
+        if not namespaces:
+            namespaces = [""]
+        for namespace in namespaces:
+            prefix = f"{namespace}." if namespace else ""
+            workload = namespace.replace(".", " / ").replace("_", " ") or "single run"
+            rows.append(
+                f"<tr class='{'selected-candidate' if selected else ''}'>"
+                f"<td>{_text(row.get('label') or row.get('architecture_id') or 'unknown')}</td>"
+                f"<td>{_text(workload)}</td>"
+                f"<td>{_text(row.get('status') or 'pending')}</td>"
+                f"<td>{_text(selection)}</td>"
+                f"<td>{_number(metrics.get(prefix + 'request_throughput'))}</td>"
+                f"<td>{_number(metrics.get(prefix + 'image_throughput'))}</td>"
+                f"<td>{_number(metrics.get(prefix + 'output_token_throughput'))}</td>"
+                f"<td>{_number(metrics.get(prefix + 'ttft_mean_ms'))}</td>"
+                f"<td>{_number(metrics.get(prefix + 'tpot_mean_ms'))}</td>"
+                f"<td>{_text(row.get('error') or '')}</td>"
+                "</tr>"
+            )
     table = (
         "<div class='table-wrap'><table><thead><tr>"
-        "<th>Candidate</th><th>Status</th><th>Selection</th>"
-        "<th>Requests/s</th><th>Output tokens/s</th><th>TTFT mean (ms)</th>"
+        "<th>Candidate</th><th>Workload</th><th>Status</th><th>Selection</th>"
+        "<th>Requests/s</th><th>Images/s</th><th>Output tokens/s</th><th>TTFT mean (ms)</th>"
         "<th>TPOT mean (ms)</th><th>Error</th>"
         f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
         if rows

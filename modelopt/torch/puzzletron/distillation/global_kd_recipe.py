@@ -32,7 +32,7 @@ import json
 import os
 import types
 from collections import deque
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -75,6 +75,8 @@ from nemo_automodel.recipes.vlm.kd import _validate_cp_pre_embed_teacher_compati
 from nemo_automodel.recipes.vlm.kd import _verify_tokenizer_compatibility as _verify_vlm_tokenizers
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils.checkpoint import checkpoint
+
+from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.local_kd_recipe import _copy_hf_auxiliary_assets
@@ -235,7 +237,11 @@ def install_unsharded_checkpoint_state_dict_support() -> None:
                 not in str(error)
             ):
                 raise
-            state_dict = model.state_dict()
+            with ExitStack() as stack:
+                for module in model.modules():
+                    if isinstance(module, DynamicModule):
+                        stack.enter_context(module.reset_dynamic_attributes())
+                state_dict = model.state_dict()
             if not state_dict:
                 raise
             return state_dict

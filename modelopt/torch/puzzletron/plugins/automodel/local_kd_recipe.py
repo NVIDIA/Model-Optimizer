@@ -90,6 +90,8 @@ def _consolidated_export_enabled(value) -> bool:
     from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
 
     return value != SaveConsolidatedMode.FALSE
+
+
 from .solution_recipe import ReplaceBlockScoringRecipe
 
 logger = logging.getLogger(__name__)
@@ -97,13 +99,26 @@ logger = logging.getLogger(__name__)
 __all__ = ["AutoModelLocalDistillationRecipe"]
 
 
-_HF_WEIGHT_FILENAMES = {
-    "model.safetensors",
-    "model.safetensors.index.json",
-    "pytorch_model.bin",
-    "pytorch_model.bin.index.json",
-    "config.json",
+_HF_AUXILIARY_FILENAMES = {
+    "added_tokens.json",
+    "chat_template.json",
+    "chat_template.jinja",
+    "generation_config.json",
+    "merges.txt",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "sentencepiece.bpe.model",
+    "special_tokens_map.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "video_preprocessor_config.json",
+    "vocab.json",
+    "vocab.txt",
 }
+_HF_AUXILIARY_FILE_SIZE_LIMIT = 64 * 1024 * 1024
+_HF_AUXILIARY_TOTAL_SIZE_LIMIT = 256 * 1024 * 1024
 
 
 def _mask_local_kd_tensors(
@@ -120,9 +135,7 @@ def _mask_local_kd_tensors(
         return student, teacher
     mask = hidden_mask.bool()
     if student.ndim < 2:
-        raise RuntimeError(
-            "padded/packed local KD requires replay tensors with token dimensions"
-        )
+        raise RuntimeError("padded/packed local KD requires replay tensors with token dimensions")
     if tuple(student.shape[:2]) == tuple(mask.shape):
         return student[mask], teacher[mask]
     if tuple(student.shape[:2]) == tuple(reversed(mask.shape)):
@@ -386,8 +399,7 @@ def _loss_trend_summary(
         if summary:
             per_hidden_width[str(width)] = summary
     relative_decrease = (
-        (aggregate["first_median"] - aggregate["last_median"])
-        / abs(aggregate["first_median"])
+        (aggregate["first_median"] - aggregate["last_median"]) / abs(aggregate["first_median"])
         if aggregate["first_median"] != 0
         else None
     )
@@ -428,22 +440,49 @@ def _copy_hf_auxiliary_assets(source_dir: Path, consolidated_dir: Path) -> None:
     NeMo AutoModel's consolidated saver persists the tokenizer but does not
     currently preserve every multimodal processor file.  Copying only absent,
     non-weight files keeps the consolidated model/config authoritative while
-    retaining image/video processors and custom-code assets needed by
+    retaining bounded tokenizer and image/video processor assets needed by
     ``AutoProcessor.from_pretrained``.
     """
     if not source_dir.is_dir() or not consolidated_dir.is_dir():
         return
-    for source in source_dir.rglob("*"):
-        if not source.is_file():
+    if source_dir.is_symlink() or consolidated_dir.is_symlink():
+        raise ValueError("checkpoint asset directories must not be symbolic links")
+
+    candidates = [source_dir / name for name in sorted(_HF_AUXILIARY_FILENAMES)]
+    chat_templates = source_dir / "chat_templates"
+    if chat_templates.is_symlink():
+        raise ValueError("checkpoint chat_templates directory must not be a symbolic link")
+    if chat_templates.is_dir():
+        candidates.extend(sorted(chat_templates.glob("*.jinja")))
+
+    validated = []
+    total_size = 0
+    for source in candidates:
+        if not source.exists() and not source.is_symlink():
             continue
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"checkpoint asset must be a regular file: {source.name}")
         relative = source.relative_to(source_dir)
-        if source.name in _HF_WEIGHT_FILENAMES or source.suffix in {".safetensors", ".bin"}:
-            continue
         destination = consolidated_dir / relative
+        if destination.is_symlink():
+            raise ValueError(f"checkpoint destination must not be a symbolic link: {relative}")
         if destination.exists():
             continue
+        size = source.stat().st_size
+        if size > _HF_AUXILIARY_FILE_SIZE_LIMIT:
+            raise ValueError(f"checkpoint asset exceeds the per-file size limit: {relative}")
+        total_size += size
+        if total_size > _HF_AUXILIARY_TOTAL_SIZE_LIMIT:
+            raise ValueError("checkpoint assets exceed the aggregate size limit")
+        validated.append((source, destination))
+
+    for source, destination in validated:
+        if destination.parent.is_symlink():
+            raise ValueError(
+                f"checkpoint destination directory must not be a symbolic link: {destination.parent.name}"
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        shutil.copyfile(source, destination)
 
 
 def _detach_tree(value):
@@ -708,10 +747,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             native_dataloader
             if (
                 self._use_vlm_recipe
-                or (
-                    self._data_spec is not None
-                    and self._data_spec.layout is not DataLayout.FIXED
-                )
+                or (self._data_spec is not None and self._data_spec.layout is not DataLayout.FIXED)
             )
             else self._build_puzzletron_train_dataloader()
         )
@@ -760,9 +796,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                 if axis not in mesh.mesh_dim_names or mesh[axis].size() <= 1:
                     continue
                 group = mesh[axis].get_group()
-                local_peer_sets.append(
-                    tuple(torch.distributed.get_process_group_ranks(group))
-                )
+                local_peer_sets.append(tuple(torch.distributed.get_process_group_ranks(group)))
         gathered = [None] * torch.distributed.get_world_size()
         torch.distributed.all_gather_object(gathered, tuple(local_peer_sets))
         lane, lane_count = logical_data_lane_from_peer_sets(
@@ -779,9 +813,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
     def _architecture_sample_index(self, step: int, micro_step: int = 0) -> int:
         hydra_cfg = getattr(self, "_hydra_cfg", None)
         grad_accum = (
-            int(hydra_cfg.bypass.training.grad_accumulation_steps)
-            if hydra_cfg is not None
-            else 1
+            int(hydra_cfg.bypass.training.grad_accumulation_steps) if hydra_cfg is not None else 1
         )
         iteration = (int(step) - 1) * grad_accum + int(micro_step)
         return iteration * self._logical_dp_size + self._logical_dp_lane
@@ -829,10 +861,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             trust_remote_code=bool(self.cfg.model.get("trust_remote_code", True)),
             token=True,
         )
-        if (
-            self._data_spec is not None
-            and self._data_spec.layout is not DataLayout.FIXED
-        ):
+        if self._data_spec is not None and self._data_spec.layout is not DataLayout.FIXED:
             from ...utils.data.dataloaders import prepare_validation_dataloader
 
             validation_args = OmegaConf.to_container(data_cfg, resolve=True)
@@ -1078,8 +1107,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                     for subblock in elastic.parent_block_config.subblock_configs
                 }
                 teacher_counts = {
-                    key: subblock_cost(subblock)
-                    for key, subblock in teacher_subblocks.items()
+                    key: subblock_cost(subblock) for key, subblock in teacher_subblocks.items()
                 }
                 for candidate in elastic.sampler.sizes:
                     candidate_id = str(candidate.identity.value)
@@ -1153,9 +1181,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             return self._teacher_hidden_width
         sample_index = self._architecture_sample_index(step, micro_step)
         generator = torch.Generator().manual_seed(
-            int(self._hydra_cfg.bypass.get("elastic_seed", 42))
-            + 7_919
-            + 104_729 * sample_index
+            int(self._hydra_cfg.bypass.get("elastic_seed", 42)) + 7_919 + 104_729 * sample_index
         )
         width = _select_hidden_width(
             self._hidden_widths,
@@ -1175,11 +1201,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         # cycle so the combined global axes cover their Cartesian product.
         hidden_period = max(1, len(self._hidden_widths))
         sample_index = self._architecture_sample_index(step, micro_step)
-        width = int(
-            self._ple_widths[
-                (sample_index // hidden_period) % len(self._ple_widths)
-            ]
-        )
+        width = int(self._ple_widths[(sample_index // hidden_period) % len(self._ple_widths)])
         self._ple_width_counts[width] += 1
         return width
 
@@ -1561,17 +1583,13 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         validation_result: list[dict[str, object] | None] = [None]
         if self.dist_env.is_main:
             try:
-                if require_completed and not (
-                    checkpoint_path / "saving_completed"
-                ).is_file():
+                if require_completed and not (checkpoint_path / "saving_completed").is_file():
                     raise RuntimeError(
                         f"checkpoint has no saving_completed marker: {checkpoint_path}"
                     )
                 validation_result[0] = validate_automodel_bypass_checkpoint(
                     checkpoint_path,
-                    expected_rng_ranks=range(
-                        self._get_dp_group_size(include_cp=True)
-                    ),
+                    expected_rng_ranks=range(self._get_dp_group_size(include_cp=True)),
                 )
             except BaseException as error:
                 validation_result[0] = {
@@ -1608,8 +1626,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         torch.distributed.broadcast_object_list(quarantine_error, src=0)
         if quarantine_error[0] is not None:
             raise RuntimeError(
-                f"cannot prepare checkpoint transaction {checkpoint_path}: "
-                f"{quarantine_error[0]}"
+                f"cannot prepare checkpoint transaction {checkpoint_path}: {quarantine_error[0]}"
             )
         torch.distributed.barrier()
 
@@ -1798,9 +1815,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                     hidden_width=hidden_width,
                     ple_width=ple_width,
                     targets=(
-                        self._last_elastic_targets
-                        if self._elastic_masker is not None
-                        else {}
+                        self._last_elastic_targets if self._elastic_masker is not None else {}
                     ),
                     parameter_counts=self._elastic_parameter_counts_by_width.get(
                         int(hidden_width), {}
@@ -1880,9 +1895,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
                                 "dp_lane": self._logical_dp_lane,
                                 "selection": selection_record,
                                 "per_layer_loss": dict(layer_metrics),
-                                "per_subblock_loss": dict(
-                                    self._current_subblock_metrics
-                                ),
+                                "per_subblock_loss": dict(self._current_subblock_metrics),
                             }
                         )
                 self._teacher_records.clear()
@@ -2067,16 +2080,13 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             save_at_steps = {
                 int(value)
                 for value in (
-                    self._hydra_cfg.bypass.model.model_overrides.get("save_at_steps", [])
-                    or []
+                    self._hydra_cfg.bypass.model.model_overrides.get("save_at_steps", []) or []
                 )
             }
             save_interval_seconds = float(
                 self._hydra_cfg.bypass.model.model_overrides.get("save_interval_seconds", 0) or 0
             )
-            step_due = step in save_at_steps or (
-                save_interval > 0 and step % save_interval == 0
-            )
+            step_due = step in save_at_steps or (save_interval > 0 and step % save_interval == 0)
             time_due = (
                 save_interval_seconds > 0
                 and time.monotonic() - last_checkpoint_time >= save_interval_seconds
@@ -2135,9 +2145,8 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
         global_hidden_width_counts = dict(self._hidden_width_counts)
         global_ple_width_counts = dict(self._ple_width_counts)
         if (
-            (self._embedding_spec is not None or self._ple_spec is not None)
-            and not single_batch_overfit
-        ):
+            self._embedding_spec is not None or self._ple_spec is not None
+        ) and not single_batch_overfit:
             payload = {
                 "dp_lane": self._logical_dp_lane,
                 "hidden_width_counts": dict(self._hidden_width_counts),
@@ -2158,9 +2167,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             )
 
         if self._embedding_spec is not None and not single_batch_overfit:
-            missing_widths = sorted(
-                set(self._hidden_widths) - set(global_hidden_width_counts)
-            )
+            missing_widths = sorted(set(self._hidden_widths) - set(global_hidden_width_counts))
             if missing_widths:
                 raise RuntimeError(
                     "nested bypass did not sample every configured hidden width: "
@@ -2185,9 +2192,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             }
 
         if self._ple_spec is not None and not single_batch_overfit:
-            missing_ple_widths = sorted(
-                set(self._ple_widths) - set(global_ple_width_counts)
-            )
+            missing_ple_widths = sorted(set(self._ple_widths) - set(global_ple_width_counts))
             if missing_ple_widths:
                 raise RuntimeError(
                     "nested bypass did not sample every configured PLE width: "
@@ -2227,9 +2232,7 @@ class AutoModelLocalDistillationRecipe(ReplaceBlockScoringRecipe):
             fixed_targets = overfit_structure[3] if overfit_structure is not None else {}
             structure_identities = set()
             for record in loss_history:
-                selections = record.get("elastic_selections") or (
-                    record.get("elastic_selection"),
-                )
+                selections = record.get("elastic_selections") or (record.get("elastic_selection"),)
                 for raw_selection in selections:
                     selection = dict(raw_selection or {})
                     selection.pop("step", None)

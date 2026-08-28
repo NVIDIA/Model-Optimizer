@@ -22,18 +22,20 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from nemo_automodel.components.checkpoint import stateful_wrappers
 
+from modelopt.torch.puzzletron.distillation import global_kd_recipe
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
     GlobalKDResult,
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
+from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
+from modelopt.torch.puzzletron.plugins.automodel import local_kd_recipe
 
 
 def test_global_kd_pp_shape_reset_uses_pipeline_activation_dtype(monkeypatch):
-    from modelopt.torch.puzzletron.distillation import global_kd_recipe
-
     calls = []
     monkeypatch.setattr(
         global_kd_recipe,
@@ -59,7 +61,6 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
 ):
     """Checkpoint conversion keeps the student’s per-layer MoE geometry."""
     from modelopt.torch.puzzletron.anymodel.automodel import AutoModelDescriptorFactory
-    from modelopt.torch.puzzletron.distillation import global_kd_recipe
 
     observed = []
 
@@ -86,10 +87,6 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
 
 
 def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
-    from nemo_automodel.components.checkpoint import stateful_wrappers
-
-    from modelopt.torch.puzzletron.distillation import global_kd_recipe
-
     failure = [
         "The option indicates that model state_dict is required to save or load, "
         "but model state_dict is empty.rank = dist.get_rank()=0."
@@ -101,10 +98,28 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
     monkeypatch.setattr(stateful_wrappers, "get_model_state_dict", failed_dcp_state)
     global_kd_recipe.install_unsharded_checkpoint_state_dict_support()
 
-    model = torch.nn.Linear(2, 3)
+    class DynamicModel:
+        reset = False
+
+        def modules(self):
+            return [self]
+
+        @contextmanager
+        def reset_dynamic_attributes(self):
+            self.reset = True
+            try:
+                yield
+            finally:
+                self.reset = False
+
+        def state_dict(self):
+            return {"weight": torch.ones(1)} if self.reset else {}
+
+    monkeypatch.setattr(global_kd_recipe, "DynamicModule", DynamicModel)
+    model = DynamicModel()
     state_dict = stateful_wrappers.get_model_state_dict(model)
 
-    assert set(state_dict) == {"bias", "weight"}
+    assert set(state_dict) == {"weight"}
     failure[0] = "unrelated checkpoint failure"
     with pytest.raises(RuntimeError, match="unrelated checkpoint failure"):
         stateful_wrappers.get_model_state_dict(model)
@@ -388,14 +403,13 @@ def test_global_kd_preserves_physical_dp_mesh_when_ep_overlays_shards(tmp_path, 
 
 
 def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monkeypatch):
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
-
     checkpoint_config = {"text_config": {"block_configs": [{"subblock_configs": []}]}}
     source = tmp_path / "student"
     source.mkdir()
     (source / "preprocessor_config.json").write_text('{"source": true}')
     (source / "processor_config.json").write_text('{"processor": true}')
     (source / "model.safetensors").write_bytes(b"source weights")
+    (source / "modeling_untrusted.py").write_text("raise RuntimeError\n")
 
     class BaseRecipe:
         def save_checkpoint(
@@ -443,14 +457,49 @@ def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monk
     assert json.loads((consolidated / "processor_config.json").read_text()) == {"processor": True}
     assert json.loads((consolidated / "config.json").read_text()) == checkpoint_config
     assert (consolidated / "model.safetensors").read_bytes() == b"consolidated weights"
+    assert not (consolidated / "modeling_untrusted.py").exists()
     assert (checkpoint / "saving_completed").is_file()
+
+
+def test_hf_auxiliary_assets_reject_symlinks_before_copying(tmp_path):
+    source = tmp_path / "source"
+    consolidated = tmp_path / "consolidated"
+    source.mkdir()
+    consolidated.mkdir()
+    (source / "preprocessor_config.json").write_text("{}")
+    (source / "target.json").write_text("{}")
+    (source / "tokenizer_config.json").symlink_to(source / "target.json")
+
+    with pytest.raises(ValueError, match="regular file"):
+        local_kd_recipe._copy_hf_auxiliary_assets(source, consolidated)
+
+    assert list(consolidated.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("file_limit", "total_limit", "expected"),
+    [(1, 10, "per-file"), (10, 3, "aggregate")],
+)
+def test_hf_auxiliary_assets_enforce_size_limits_before_copying(
+    tmp_path, monkeypatch, file_limit, total_limit, expected
+):
+    source = tmp_path / "source"
+    consolidated = tmp_path / "consolidated"
+    source.mkdir()
+    consolidated.mkdir()
+    (source / "preprocessor_config.json").write_bytes(b"{}")
+    (source / "processor_config.json").write_bytes(b"{}")
+    monkeypatch.setattr(local_kd_recipe, "_HF_AUXILIARY_FILE_SIZE_LIMIT", file_limit)
+    monkeypatch.setattr(local_kd_recipe, "_HF_AUXILIARY_TOTAL_SIZE_LIMIT", total_limit)
+
+    with pytest.raises(ValueError, match=expected):
+        local_kd_recipe._copy_hf_auxiliary_assets(source, consolidated)
+
+    assert list(consolidated.iterdir()) == []
 
 
 def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, monkeypatch):
     """Preserve the failing rank's exception while every rank completes collectives."""
-
-    # Import the dynamic mixin at test runtime to preserve lightweight module collection.
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 
     publication = {"error": None, "broadcasts": 0}
     parent_save_errors = [None, None]
@@ -568,10 +617,6 @@ def test_global_kd_checkpoint_publication_failure_reaches_all_ranks(tmp_path, mo
 
 
 def test_global_kd_text_optimizer_excludes_inactive_modality_branches():
-    import torch
-
-    from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
-
     class ToyModel(torch.nn.Module):
         def __init__(self):
             super().__init__()

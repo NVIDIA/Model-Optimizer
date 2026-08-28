@@ -4650,7 +4650,21 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
     const observations=payload.observations||[];
     const throughput=document.getElementById(`${{section}}-throughput`);
     if(throughput){{
-      const points=observations.filter(row=>row.status==='success'&&finite((row.metrics||{{}}).output_token_throughput)&&finite((row.metrics||{{}}).request_throughput));
+      const points=observations.flatMap(row=>{{
+        if(row.status!=='success')return [];
+        const metrics=row.metrics||{{}};
+        const namespaces=[...new Set(Object.keys(metrics).map(name=>name.match(/^((?:images_[1-9][0-9]*\\.)?concurrency_[1-9][0-9]*)\\./)?.[1]).filter(Boolean))];
+        if(!namespaces.length&&finite(metrics.output_token_throughput)&&finite(metrics.request_throughput))return [{{...row,metrics,workload:''}}];
+        return namespaces.map(namespace=>{{
+          const prefix=`${{namespace}}.`;
+          return {{...row,metrics:{{
+            output_token_throughput:metrics[`${{prefix}}output_token_throughput`],
+            request_throughput:metrics[`${{prefix}}request_throughput`],
+            ttft_mean_ms:metrics[`${{prefix}}ttft_mean_ms`],
+            tpot_mean_ms:metrics[`${{prefix}}tpot_mean_ms`]
+          }},workload:namespace.replaceAll('_',' ')}};
+        }}).filter(point=>finite(point.metrics.output_token_throughput)&&finite(point.metrics.request_throughput));
+      }});
       const groups=[
         ['Candidates',points.filter(row=>!selected(row))],
         ['Selected by downstream filter',points.filter(selected)],
@@ -4658,10 +4672,10 @@ pre{{max-height:480px;overflow:auto;background:#07101b;border:1px solid #1d2a3d;
       const traces=groups.filter(([,rows])=>rows.length).map(([name,rows],index)=>({{
         x:rows.map(row=>Number(row.metrics.output_token_throughput)),
         y:rows.map(row=>Number(row.metrics.request_throughput)),
-        text:rows.map(label),customdata:rows.map(row=>[row.metrics.ttft_mean_ms,row.metrics.tpot_mean_ms]),
+        text:rows.map(label),customdata:rows.map(row=>[row.metrics.ttft_mean_ms,row.metrics.tpot_mean_ms,row.workload]),
         mode:'markers',type:'scatter',name,
         marker:{{size:index?15:9,color:rows.map(row=>row.color||'#4f8cff'),symbol:index?'diamond-open':'circle',line:{{color:index?'#ffffff':'rgba(0,0,0,0)',width:index?2:0}}}},
-        hovertemplate:'%{{text}}<br>output=%{{x:.6g}} tokens/s<br>requests=%{{y:.6g}}/s<br>TTFT=%{{customdata[0]:.6g}} ms<br>TPOT=%{{customdata[1]:.6g}} ms<extra></extra>'
+        hovertemplate:'%{{text}}<br>%{{customdata[2]}}<br>output=%{{x:.6g}} tokens/s<br>requests=%{{y:.6g}}/s<br>TTFT=%{{customdata[0]:.6g}} ms<br>TPOT=%{{customdata[1]:.6g}} ms<extra></extra>'
       }}));
       Plotly.react(throughput,traces,{{...charts.theme,title:charts.chartTitle('Output throughput vs request throughput',16),xaxis:{{...charts.theme.xaxis,title:'Output token throughput (tokens/s)'}},yaxis:{{...charts.theme.yaxis,title:'Request throughput (requests/s)'}},hovermode:'closest'}},charts.config);
     }}

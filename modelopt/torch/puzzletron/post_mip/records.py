@@ -266,7 +266,12 @@ class CandidateLedger:
         observation = self._observation_for_revision(owner, revision_id)
         if observation is None:
             return {}
-        pattern = re.compile(rf"^concurrency_([1-9][0-9]*)\.{re.escape(metric)}$")
+        image_namespace = ""
+        image_match = re.fullmatch(r"(images_[1-9][0-9]*)\.(.+)", metric)
+        if image_match is not None:
+            image_namespace = re.escape(image_match.group(1)) + r"\."
+            metric = image_match.group(2)
+        pattern = re.compile(rf"^{image_namespace}concurrency_([1-9][0-9]*)\.{re.escape(metric)}$")
         values = {}
         for name, value in observation.metrics.items():
             match = pattern.fullmatch(name)
