@@ -283,12 +283,12 @@ class NVFP4QTensor(BaseQuantizedTensor):
 
         # try call trtllm fp4 quantization if possible
         if (
-            fp4_compatible()
-            and weights_scaling_factor is None
-            and try_tensorrt
+            try_tensorrt
             and block_size == 16
             and input.is_cuda
             and input.dtype in [torch.half, torch.bfloat16]
+            and weights_scaling_factor is None
+            and fp4_compatible()
         ):
             try:
                 import tensorrt_llm  # noqa: F401

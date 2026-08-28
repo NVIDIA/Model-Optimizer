@@ -16,6 +16,7 @@ Before moving to deployment/evaluation, report a table in this shape:
 | Check | Result |
 | --- | --- |
 | Size vs source | `<output> GB / <source> GB = <ratio>x`; PASS only if the ratio matches the recipe's compression intent |
+| Source precision | dtype of the **source** weights. A recipe can only shrink a source wider than its target, so this is what distinguishes inherent growth from a failed compression (mxfp4 under an nvfp4 recipe, or fp8 under an fp8 recipe, cannot shrink; bf16 under either should). Record it as `source_precision` in the validation summary, using one of the exact tokens `bf16` / `fp16` / `fp32` / `fp8` / `int8` / `mxfp4` / `nvfp4` / `fp4` / `int4` / `w4a16` / `awq` / `4bit` — a free-form value is treated as undeclared and blocks. For a **mixed** source, record the precision of the dominant weight mass (a model with MXFP4 experts at ~96% of bytes and BF16 attention is `mxfp4`) |
 | Layer precision counts | `<count> NVFP4 / <count> FP8 / <count> INT4 / <count> BF16-or-excluded / <count> unexpected / <count> declaration mismatches` |
 | Metadata | `no unexpected diffs` or list exact diffs |
 | Checkpoint workspace/path | `<exact workspace>` / `<exact checkpoint path>`; these exact locations must be inherited by deployment and evaluation |
@@ -24,7 +25,9 @@ Before moving to deployment/evaluation, report a table in this shape:
 
 Stop instead of proceeding if:
 
-- Output/source ratio is `>= 1.0` for a compression recipe, unless the user explicitly accepts the explanation.
+- Output/source ratio is `>= 1.0` for a compression recipe, unless the recorded `source_precision`
+  already explains it (a source already at or below the recipe's target bits) or the user
+  explicitly accepts the explanation.
 - Any layer group intended to be quantized has zero or unexpectedly low coverage.
 - Any layer has quantization metadata inconsistent with its declared precision.
 - Prompting, tokenizer, generation, architecture, context-length, or special-token metadata changed unexpectedly.
@@ -95,7 +98,8 @@ print(f'Output/source ratio: {ratio:.2f}x')
 "
 ```
 
-Treat the ratio as the first-order bits-per-weight proxy unless you separately load tensors and compute exact parameter bit counts. For compression recipes, a ratio at or above `1.0x` is blocking unless the user explicitly accepts the explanation.
+Treat the ratio as the first-order bits-per-weight proxy unless you separately load tensors and compute exact parameter bit counts. For compression recipes, a ratio at or above `1.0x` is blocking unless `source_precision` shows the
+source is already at or below the recipe's target bits, or the user explicitly accepts the explanation.
 
 ## Layer coverage and precision script
 

@@ -20,7 +20,7 @@ This directory contains examples of using Model Optimizer with the [NeMo Megatro
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.06`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.08`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -30,7 +30,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.06
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.08
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -47,18 +47,27 @@ docker run \
 > [!WARNING]
 > Use `python -m pip` instead of `pip` to avoid conflicts with the system-wide installed packages in the NeMo containers. You may also refer to this [doc](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/docker/common/README.md#installing-packages-inside-the-container) on how to correctly install packages in the NeMo containers without breaking existing torch installation.
 
-> [!NOTE]
-> **Working with MoE Vision-Language Models (e.g. Qwen3.5-VL-MoE)?** The `nemo:26.06` container's Megatron-Bridge lacks the MoE expert weight mappings these models need (dense VLMs such as Gemma3-VL and Qwen3-VL work as-is). Until the `nemo:26.08` container is released, mount the latest [Megatron-Bridge `main`](https://github.com/NVIDIA-NeMo/Megatron-Bridge) source over the pre-installed copy by adding this to the `docker run` command above:
->
-> ```bash
-> -v ${MEGATRON_BRIDGE_SRC_DIR}:/opt/Megatron-Bridge
-> ```
-
 You also need to login with your HuggingFace token to download gated datasets / models.
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
 
 ```bash
 hf auth login --token <your token>
+```
+
+### Importing a HuggingFace Checkpoint (optional)
+
+The scripts below take a HuggingFace checkpoint directly, but if you want a Megatron distributed
+checkpoint (e.g. to reuse across runs), convert it with Megatron-Bridge's conversion script — use
+`--tp` / `--pp` / `--ep` to shard a model that does not fit on one GPU (`--ep` for MoE models), or
+`--device cpu` to convert in a single process without GPUs:
+
+```bash
+bash /opt/Megatron-Bridge/scripts/conversion/convert.sh import \
+    --executor local \
+    --device gpu \
+    --gpus-per-node 8 \
+    --hf-model Qwen/Qwen3-8B \
+    --megatron-path /tmp/Qwen3-8B-megatron
 ```
 
 ## Post-Training Quantization
