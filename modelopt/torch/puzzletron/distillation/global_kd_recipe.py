@@ -32,7 +32,7 @@ import json
 import os
 import types
 from collections import deque
-from contextlib import ExitStack, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -75,8 +75,6 @@ from nemo_automodel.recipes.vlm.kd import _validate_cp_pre_embed_teacher_compati
 from nemo_automodel.recipes.vlm.kd import _verify_tokenizer_compatibility as _verify_vlm_tokenizers
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils.checkpoint import checkpoint
-
-from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..plugins.automodel.batch_adapter import VisionForwardMonitor
 from ..plugins.automodel.local_kd_recipe import _copy_hf_auxiliary_assets
@@ -230,13 +228,6 @@ def install_unsharded_checkpoint_state_dict_support() -> None:
             error
         )
 
-    def dynamic_attributes_reset(model):
-        stack = ExitStack()
-        for module in model.modules():
-            if isinstance(module, DynamicModule):
-                stack.enter_context(module.reset_dynamic_attributes())
-        return stack
-
     original_get = stateful_wrappers.get_model_state_dict
     if not getattr(original_get, "_puzzletron_unsharded_fallback", False):
 
@@ -246,16 +237,15 @@ def install_unsharded_checkpoint_state_dict_support() -> None:
             except RuntimeError as error:
                 if not is_empty_dcp_state(error):
                     raise
-                with dynamic_attributes_reset(model):
-                    state_dict = {
-                        name: parameter.detach()
-                        for name, parameter in model.named_parameters(remove_duplicate=False)
-                    }
-                    for name, buffer in model.named_buffers(remove_duplicate=False):
-                        module_name, _, buffer_name = name.rpartition(".")
-                        owner = model.get_submodule(module_name)
-                        if buffer_name not in owner._non_persistent_buffers_set:
-                            state_dict[name] = buffer.detach()
+                state_dict = {
+                    name: parameter.detach()
+                    for name, parameter in model.named_parameters(remove_duplicate=False)
+                }
+                for name, buffer in model.named_buffers(remove_duplicate=False):
+                    module_name, _, buffer_name = name.rpartition(".")
+                    owner = model.get_submodule(module_name)
+                    if buffer_name not in owner._non_persistent_buffers_set:
+                        state_dict[name] = buffer.detach()
                 if not state_dict:
                     raise
                 return state_dict
@@ -272,11 +262,10 @@ def install_unsharded_checkpoint_state_dict_support() -> None:
             except RuntimeError as error:
                 if not is_empty_dcp_state(error):
                     raise
-                with dynamic_attributes_reset(model):
-                    return model.load_state_dict(
-                        state_dict,
-                        strict=True if options is None else bool(options.strict),
-                    )
+                return model.load_state_dict(
+                    state_dict,
+                    strict=True if options is None else bool(options.strict),
+                )
 
         setattr(set_model_state_dict, "_puzzletron_unsharded_fallback", True)
         stateful_wrappers.set_model_state_dict = set_model_state_dict

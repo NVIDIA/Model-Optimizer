@@ -100,20 +100,9 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
     global_kd_recipe.install_unsharded_checkpoint_state_dict_support()
 
     class DynamicModel(torch.nn.Linear):
-        reset = False
-
-        @contextmanager
-        def reset_dynamic_attributes(self):
-            self.reset = True
-            try:
-                yield
-            finally:
-                self.reset = False
-
         def state_dict(self):
             return {}
 
-    monkeypatch.setattr(global_kd_recipe, "DynamicModule", DynamicModel)
     model = DynamicModel(2, 3)
     state_dict = stateful_wrappers.get_model_state_dict(model)
 
