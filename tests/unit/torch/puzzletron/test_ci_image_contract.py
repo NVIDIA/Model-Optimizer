@@ -172,7 +172,10 @@ def test_worker_image_workflow_builds_a_revision_identified_image(project_root_p
     job = workflow["jobs"]["build-worker-image"]
     assert job["timeout-minutes"] == 240
     assert "linux-amd64-gpu-rtxpro6000" in job["runs-on"]
-    assert job["env"]["IMAGE"] == "modelopt-puzzletron-worker:sha-${{ github.sha }}"
+    define_tag = next(
+        step for step in job["steps"] if "revision-specific image tag" in step.get("name", "")
+    )
+    assert "modelopt-puzzletron:amd64-sha-${GITHUB_SHA:0:12}" in define_tag["run"]
     assert "--platform linux/amd64" in workflow_text
     assert '--build-arg "MODELOPT_REVISION=${GITHUB_SHA}"' in workflow_text
     assert "org.opencontainers.image.revision" in workflow_text

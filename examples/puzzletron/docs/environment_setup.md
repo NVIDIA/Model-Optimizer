@@ -43,11 +43,12 @@ Build the Linux amd64 image from the repository root:
 ```bash
 test -z "$(git status --porcelain)"
 revision="$(git rev-parse HEAD)"
+image="modelopt-puzzletron:amd64-sha-$(git rev-parse --short=12 HEAD)"
 docker build \
   --platform linux/amd64 \
   --file examples/puzzletron/Dockerfile \
   --build-arg MODELOPT_REVISION="${revision}" \
-  --tag "modelopt-puzzletron-worker:sha-${revision}" \
+  --tag "${image}" \
   .
 ```
 
@@ -58,7 +59,7 @@ Run the image locally with GPU access:
 
 ```bash
 docker run --gpus all --ipc=host --rm -it \
-  "modelopt-puzzletron-worker:sha-${revision}"
+  "${image}"
 ```
 
 Inside the image, the runner contract is:

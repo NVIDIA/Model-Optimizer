@@ -10,23 +10,25 @@ Build and verify the image from the repository root:
 ```bash
 test -z "$(git status --porcelain)"
 revision="$(git rev-parse HEAD)"
+image="modelopt-puzzletron:amd64-sha-$(git rev-parse --short=12 HEAD)"
 docker build \
   --platform linux/amd64 \
   --file examples/puzzletron/Dockerfile \
   --build-arg MODELOPT_REVISION="${revision}" \
-  --tag "modelopt-puzzletron-worker:sha-${revision}" \
+  --tag "${image}" \
   .
 
-docker run --rm "modelopt-puzzletron-worker:sha-${revision}" \
+docker run --rm "${image}" \
   python /opt/puzzletron/verify_image_environment.py \
     --environment /opt/puzzletron/ci_environment.json
 ```
 
-The full source commit in the tag and the
-`org.opencontainers.image.revision` label identify the exact Dockerfile and
-repository inputs used for the build. When an image is published, retain the
-commit tag and record the registry digest; consumers should prefer the digest
-when they need an immutable reference.
+The `amd64-sha-<12-character commit>` tag identifies the platform and gives
+people a compact source reference. The `org.opencontainers.image.revision`
+label retains the full source commit that identifies the exact Dockerfile and
+repository inputs. When an image is published, retain the commit tag and record
+the registry digest; consumers should prefer the digest when they need an
+immutable reference.
 
 The image is Linux amd64-only because the current CUDA extension set and Linux
 `eva-decord 0.6.1` dependency do not have a validated ARM build path.

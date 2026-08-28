@@ -32,12 +32,12 @@ jobs:
     name: Build and smoke-test linux/amd64 image
     runs-on: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
     timeout-minutes: 240
-    env:
-      IMAGE: modelopt-puzzletron-worker:sha-${{ github.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Define the revision-specific image tag
+        run: echo "IMAGE=modelopt-puzzletron:amd64-sha-${GITHUB_SHA:0:12}" >> "${GITHUB_ENV}"
       - name: Build the pinned worker image
         run: |
           docker build \
