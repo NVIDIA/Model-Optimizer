@@ -144,8 +144,8 @@ selection, materialization, and report lineage remain connected. Configure
 that route with the
 [post-MIP pipeline guide](docs/post_mip_pipeline.md#downstream-evaluation).
 
-To evaluate a compatible local Hugging Face checkpoint without creating a
-campaign, run the default one-GPU smoke in the Puzzletron worker environment:
+To evaluate a compatible local text checkpoint without creating a campaign,
+run the default one-GPU smoke in the Puzzletron worker environment:
 
 ```bash
 python examples/puzzletron/evaluate_lmms_checkpoint.py \
@@ -154,8 +154,23 @@ python examples/puzzletron/evaluate_lmms_checkpoint.py \
 ```
 
 The smoke evaluates eight samples each from IFEval and GSM8K. See
-[checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
+[text checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
 full evaluation, model detection, runtime options, results, and troubleshooting.
+
+For a Qwen 3.5 0.8B vision-language checkpoint, use the separate pinned image
+and video benchmark workflow:
+
+```bash
+python -m examples.puzzletron.evaluation.vlm.run \
+  --checkpoint /path/to/checkpoint \
+  --output-dir /path/to/results/vlm-smoke \
+  --hf-home /path/to/huggingface-cache \
+  --suite short
+```
+
+See [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) for the
+available smoke, quick, and full suites, pinned data preparation, evaluator
+compatibility, video requirements, and result interpretation.
 
 ## Configure a campaign
 

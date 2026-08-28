@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,6 +132,40 @@ def test_cache_dir_precedence(monkeypatch, tmp_path):
         output_path=tmp_path / "results",
     )
     assert env["LMMS_EVAL_HOME"] == "/explicit/cache"
+
+
+def test_command_installs_existing_vllm_subprocess_compatibility(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/inherited")
+
+    _, env, _ = lmms._build_command(
+        {**_settings("ifeval"), "env": {"PYTHONPATH": "/explicit"}},
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    python_paths = env["PYTHONPATH"].split(os.pathsep)
+    assert Path(python_paths[0]).name == "vllm_compat"
+    assert (Path(python_paths[0]) / "sitecustomize.py").is_file()
+    assert python_paths[1:] == ["/explicit"]
+
+
+def test_vllm_subprocess_compatibility_runs_inherited_sitecustomize(tmp_path):
+    inherited = tmp_path / "inherited"
+    inherited.mkdir()
+    marker = tmp_path / "loaded"
+    (inherited / "sitecustomize.py").write_text(
+        "import os\nfrom pathlib import Path\nPath(os.environ['MARKER']).write_text('loaded')\n"
+    )
+    compatibility = Path(lmms.__file__).parents[1] / "benchmarks" / "vllm_compat"
+    environment = {
+        **os.environ,
+        "MARKER": str(marker),
+        "PYTHONPATH": os.pathsep.join((str(compatibility), str(inherited))),
+    }
+
+    subprocess.run([sys.executable, "-c", "pass"], check=True, env=environment)
+
+    assert marker.read_text() == "loaded"
 
 
 def test_command_uses_bounded_default_timeout(tmp_path):
