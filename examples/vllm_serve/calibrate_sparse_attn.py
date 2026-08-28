@@ -46,6 +46,7 @@ per line) overrides the RULER set with custom calibration data.
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -57,6 +58,38 @@ from modelopt.torch.sparsity.attention_sparsity.plugins.sparse_attn_calibration 
     fit_from_counts,
     merge_phase_counts,
 )
+
+_LOCKED_ENGINE_KWARGS = frozenset({"model", "worker_cls", "enforce_eager", "enable_prefix_caching"})
+
+
+def _sparse_ratio(value: str) -> float:
+    ratio = float(value)
+    if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+        raise argparse.ArgumentTypeError("must be a finite value between 0.0 and 1.0")
+    return ratio
+
+
+def _nonnegative_int(value: str) -> int:
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return result
+
+
+def _engine_kwargs(value: str) -> dict:
+    try:
+        kwargs = json.loads(value)
+    except json.JSONDecodeError as err:
+        raise argparse.ArgumentTypeError(f"must be a JSON object: {err.msg}") from err
+    if not isinstance(kwargs, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
+    if locked := sorted(_LOCKED_ENGINE_KWARGS & kwargs.keys()):
+        raise argparse.ArgumentTypeError(
+            "cannot override calibration-controlled option(s): " + ", ".join(locked)
+        )
+    if kwargs.get("pipeline_parallel_size", 1) != 1:
+        raise argparse.ArgumentTypeError("pipeline_parallel_size must be 1 for calibration")
+    return kwargs
 
 
 def _load_prompts(llm, args) -> list[str]:
@@ -112,8 +145,9 @@ def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> No
 
     if not update_checkpoint:
         print(
-            "[ModelOpt] Re-run with --update_checkpoint_config to merge this into "
-            f"{ckpt}/config.json (required for vllm_serve_sparse_attn.py to pick it up)."
+            "[ModelOpt] Checkpoint not modified. Merge the generated configuration as "
+            f"'sparse_attention_config' in {ckpt}/config.json before serving. On future "
+            "calibration runs, pass --update_checkpoint_config to do this automatically."
         )
         return
 
@@ -128,7 +162,7 @@ def _write_config(ckpt: str, sparse_config: dict, update_checkpoint: bool) -> No
     print(f"[ModelOpt] Merged sparse_attention_config into {config_json}")
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Calibrate skip-softmax thresholds via vLLM")
     parser.add_argument("model", type=str, help="Path to the HF checkpoint to calibrate")
     parser.add_argument(
@@ -160,13 +194,13 @@ def main():
     )
     parser.add_argument(
         "--target_sparse_ratio",
-        type=float,
+        type=_sparse_ratio,
         default=0.5,
         help="Target sparsity baked into the exported config (applied to both phases)",
     )
     parser.add_argument(
         "--decode_tokens",
-        type=int,
+        type=_nonnegative_int,
         default=32,
         help="Decode attention steps per prompt (drives decode-phase calibration). "
         "Generation runs decode_tokens + 1 output tokens: the first output token "
@@ -200,7 +234,7 @@ def main():
     )
     parser.add_argument(
         "--engine_kwargs",
-        type=str,
+        type=_engine_kwargs,
         default=None,
         help="JSON dict of extra vLLM engine kwargs, e.g. "
         '\'{"enable_expert_parallel": true, "mamba_cache_mode": "align"}\' '
@@ -216,6 +250,11 @@ def main():
         action="store_true",
         help="Merge the calibrated config into <ckpt>/config.json in place",
     )
+    return parser
+
+
+def main():
+    parser = _build_parser()
     args = parser.parse_args()
 
     if args.update_checkpoint_config and not (Path(args.model) / "config.json").is_file():
@@ -260,10 +299,7 @@ def main():
     if args.attention_backend is not None:
         llm_kwargs["attention_backend"] = args.attention_backend
     if args.engine_kwargs:
-        extra = json.loads(args.engine_kwargs)
-        if not isinstance(extra, dict):
-            raise ValueError("--engine_kwargs must be a JSON object")
-        llm_kwargs.update(extra)
+        llm_kwargs.update(args.engine_kwargs)
     llm = LLM(**llm_kwargs)
 
     # Built after engine init so the RULER builder reuses the engine's tokenizer.

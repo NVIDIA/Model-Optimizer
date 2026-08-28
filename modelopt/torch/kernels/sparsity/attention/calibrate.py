@@ -280,6 +280,23 @@ def _log2_threshold_tensor(
     )
 
 
+def _validate_threshold_trials(threshold_trials) -> list[float]:
+    """Return finite skip thresholds in the kernel's open interval ``(0, 1)``."""
+    if not threshold_trials:
+        raise ValueError("threshold_trials must be a non-empty list")
+    try:
+        trials = [float(value) for value in threshold_trials]
+    except (TypeError, ValueError) as err:
+        raise ValueError("threshold_trials must contain only real numbers") from err
+    invalid = [value for value in trials if not math.isfinite(value) or not 0.0 < value < 1.0]
+    if invalid:
+        raise ValueError(
+            "threshold_trials must contain only finite values strictly between 0 and 1; "
+            f"got {invalid}"
+        )
+    return trials
+
+
 def attention_calibrate(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -331,8 +348,7 @@ def attention_calibrate(
           ``[:, 0]`` = total tile evaluations, ``[:, 1]`` = skipped tiles.
           Sparsity per threshold = ``counters[:, 1] / counters[:, 0]``.
     """
-    if threshold_trials is None or len(threshold_trials) == 0:
-        raise ValueError("threshold_trials must be a non-empty list")
+    threshold_trials = _validate_threshold_trials(threshold_trials)
 
     is_paged = k_cache is not None
     if is_paged and block_table is None:

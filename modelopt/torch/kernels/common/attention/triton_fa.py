@@ -1039,7 +1039,7 @@ class _Attention(torch.autograd.Function):
         # kernel dereferences the right pointers instead of triggering an
         # illegal memory access.
         with torch.cuda.device(q.device):
-            if do_measure or apply_skip:
+            if apply_skip:
                 # Fixed-tile launches, bypassing autotune:
                 # - Measurement: runtime counters mutate global tensors, so they
                 #   must not run through autotune candidate trials.

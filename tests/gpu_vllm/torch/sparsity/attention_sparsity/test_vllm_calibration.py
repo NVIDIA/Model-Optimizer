@@ -101,6 +101,12 @@ class TestCalibrationInstaller:
         with pytest.raises(NotImplementedError, match="enforce_eager"):
             vllm_runtime.install_vllm_skip_softmax_calibration(runner)
 
+    def test_rejects_pipeline_parallelism(self):
+        runner = _model_runner(nn.ModuleDict({"attn": _bare_attention()}))
+        runner.vllm_config.parallel_config.pipeline_parallel_size = 2
+        with pytest.raises(NotImplementedError, match="pipeline_parallel_size must be 1"):
+            vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+
     def test_rejects_active_attention_quantizers_atomically(self):
         quantized = _bare_attention()
         quantized.q_bmm_quantizer = SimpleNamespace(is_enabled=True)
@@ -285,6 +291,14 @@ def _sdpa_reference(q, k, v, is_causal):
     else:
         out = torch.nn.functional.scaled_dot_product_attention(qh, kh, vh, is_causal=is_causal)
     return out.squeeze(0).transpose(0, 1).to(q.dtype)
+
+
+@pytest.mark.parametrize("trials", [[], [0.0], [-1e-3], [1.0], [float("inf")], [float("nan")]])
+def test_enable_rejects_invalid_threshold_trials(trials):
+    impl = object.__new__(ModelOptSparseAttentionImpl)
+    with pytest.raises(ValueError, match="threshold_trials"):
+        enable_calibration([impl], trials)
+    assert not hasattr(impl, "_calibrate")
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
