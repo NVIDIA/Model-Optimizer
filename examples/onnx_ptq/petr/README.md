@@ -39,7 +39,8 @@ Build and start the example image from the Model Optimizer checkout:
 
 ```bash
 docker build \
-  -f examples/onnx_ptq/petr/Dockerfile \
+  --build-arg EXAMPLE=petr \
+  -f examples/onnx_ptq/Dockerfile \
   -t petr-modelopt \
   .
 ```

@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TensorRT 10.11 from the base image builds and runs the FAR3D engines.
 FROM nvcr.io/nvidia/pytorch:25.06-py3
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ARG EXAMPLE
 ARG TORCH_CUDA_ARCH_LIST=8.9+PTX
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --no-cache-dir uv==0.12.3 && \
-    UV_PYTHON_INSTALL_DIR=/opt/python uv venv --seed --python 3.9.23 /opt/far3d
+RUN case "${EXAMPLE}" in \
+        far3d|petr) ;; \
+        *) echo "EXAMPLE must be far3d or petr" >&2; exit 1 ;; \
+    esac && \
+    python -m pip install --no-cache-dir uv==0.12.3 && \
+    UV_PYTHON_INSTALL_DIR=/opt/python uv venv --seed --python 3.9.23 "/opt/${EXAMPLE}"
 
 COPY examples/onnx_ptq/install-evaluator-cu129.sh \
     examples/onnx_ptq/mmcv-torch2.patch \
@@ -31,11 +35,15 @@ COPY examples/onnx_ptq/install-evaluator-cu129.sh \
     examples/onnx_ptq/requirements-evaluator-cu129.txt \
     examples/onnx_ptq/requirements-modelopt-25.06.txt \
     examples/onnx_ptq/requirements-torch-cu129.txt \
-    examples/onnx_ptq/far3d/requirements.txt \
     /tmp/evaluator/
-RUN bash /tmp/evaluator/install-evaluator-cu129.sh \
-        /opt/far3d "${TORCH_CUDA_ARCH_LIST}" \
-        -r /tmp/evaluator/requirements.txt && \
+COPY examples/onnx_ptq/far3d/requirements.txt /tmp/evaluator/requirements-far3d.txt
+RUN if [ "${EXAMPLE}" = far3d ]; then \
+        set -- -r /tmp/evaluator/requirements-far3d.txt; \
+    else \
+        set --; \
+    fi && \
+    bash /tmp/evaluator/install-evaluator-cu129.sh \
+        "/opt/${EXAMPLE}" "${TORCH_CUDA_ARCH_LIST}" "$@" && \
     env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
         -r /tmp/evaluator/requirements-modelopt-25.06.txt
 

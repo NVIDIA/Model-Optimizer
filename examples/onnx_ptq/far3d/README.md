@@ -36,7 +36,8 @@ Build the example image from the Model Optimizer checkout:
 
 ```bash
 docker build \
-  -f /path/to/Model-Optimizer/examples/onnx_ptq/far3d/Dockerfile \
+  --build-arg EXAMPLE=far3d \
+  -f /path/to/Model-Optimizer/examples/onnx_ptq/Dockerfile \
   -t far3d-modelopt \
   /path/to/Model-Optimizer
 ```
