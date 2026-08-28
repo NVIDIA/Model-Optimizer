@@ -47,12 +47,14 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     )
     assert 'python "${PUZZLETRON_VERIFY_SCRIPT}"' in dockerfile
 
-    assert '"langdetect==${langdetect_version}"' in dockerfile
-    assert '"nltk==${nltk_version}"' in dockerfile
-    assert "nltk_data/${nltk_data_commit}/packages/tokenizers/${nltk_resource}.zip" in dockerfile
+    assert "git jq ninja-build" in dockerfile
+    assert '"langdetect==$(pin gpu_image.langdetect)"' in dockerfile
+    assert '"nltk==$(pin gpu_image.nltk)"' in dockerfile
+    assert "nltk_data/$(pin gpu_image.nltk_data_commit)/packages/tokenizers" in dockerfile
     assert (
         'echo "${nltk_resource_sha256}  ${nltk_archive}" | sha256sum --check --strict' in dockerfile
     )
+    assert "python -m pip check" not in dockerfile
 
 
 def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_path):

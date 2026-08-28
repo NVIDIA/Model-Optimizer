@@ -45,75 +45,105 @@ _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _BASE_IMAGE_PATTERN = re.compile(r"nvidia/cuda:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}")
 _UNSET = object()
+_REQUIRED_MODULES = (
+    "aiperf",
+    "causal_conv1d",
+    "decord",
+    "fla",
+    "grouped_gemm",
+    "langdetect",
+    "lmms_eval",
+    "mamba_ssm",
+    "modelopt",
+    "nemo_automodel",
+    "nltk",
+    "puzzletron_orchestrator",
+    "puzzletron_setup",
+    "tilelang",
+    "torch",
+    "transformers",
+    "vllm",
+)
 
 
-def validate_environment_contract(environment: dict[str, Any]) -> None:
-    """Reject mutable or unexpected repositories before trusting the manifest."""
+def _environment_sources(environment: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    runtime_image = environment.get("runtime_image") or {}
+    return {
+        "grouped_gemm": runtime_image.get("grouped_gemm") or {},
+        "lmms_eval": environment.get("lmms_eval") or {},
+        "mamba_ssm": runtime_image.get("mamba_ssm") or {},
+        "nemo_automodel": environment.get("nemo_automodel") or {},
+        "vllm": environment.get("vllm") or {},
+    }
 
-    if environment.get("schema_version") != 1:
-        raise ValueError("Puzzletron image environment schema_version must be 1")
-    if environment.get("scope") != "puzzletron_v2_worker_ci":
-        raise ValueError("Puzzletron image environment has an unexpected scope")
 
+def _require_exact_public_version(value: object, name: str) -> None:
+    version = str(value or "")
+    parsed = Version(version)
+    if str(parsed) != version or parsed.local is not None:
+        raise ValueError(f"Puzzletron runtime package {name!r} must use an exact public version")
+
+
+def _validate_image_identity(environment: dict[str, Any]) -> None:
     gpu_image = environment.get("gpu_image") or {}
-    base_image = gpu_image.get("base_image", "")
-    if not _BASE_IMAGE_PATTERN.fullmatch(base_image):
+    if not _BASE_IMAGE_PATTERN.fullmatch(gpu_image.get("base_image", "")):
         raise ValueError("Puzzletron image base must be an immutable NVIDIA CUDA digest")
     if gpu_image.get("platform") != "linux/amd64":
         raise ValueError("Puzzletron worker image platform must be linux/amd64")
 
-    sources = {
-        "grouped_gemm": (environment.get("runtime_image") or {}).get("grouped_gemm") or {},
-        "mamba_ssm": (environment.get("runtime_image") or {}).get("mamba_ssm") or {},
-        **{key: environment.get(key) or {} for key in ("lmms_eval", "nemo_automodel", "vllm")},
-    }
-    for key, approved_repository in _APPROVED_REPOSITORIES.items():
-        source = sources[key]
+
+def _validate_pinned_sources(environment: dict[str, Any]) -> None:
+    sources = _environment_sources(environment)
+    for name, approved_repository in _APPROVED_REPOSITORIES.items():
+        source = sources[name]
         if source.get("repository") != approved_repository:
-            raise ValueError(f"Puzzletron image source {key!r} must use {approved_repository!r}")
+            raise ValueError(f"Puzzletron image source {name!r} must use {approved_repository!r}")
         if not _REVISION_PATTERN.fullmatch(str(source.get("commit", ""))):
-            raise ValueError(f"Puzzletron image source {key!r} must use a full Git revision")
+            raise ValueError(f"Puzzletron image source {name!r} must use a full Git revision")
 
     if sources["grouped_gemm"].get("distribution") != "nv-grouped-gemm":
         raise ValueError("Puzzletron grouped_gemm source must declare nv-grouped-gemm")
 
+
+def _validate_cuda_extensions(environment: dict[str, Any]) -> None:
     runtime_image = environment.get("runtime_image") or {}
-    for key in ("causal_conv1d", "flash_linear_attention", "tilelang"):
-        version = runtime_image.get(key, "")
-        parsed_version = Version(str(version))
-        if str(parsed_version) != version or parsed_version.local is not None:
-            raise ValueError(f"Puzzletron runtime package {key!r} must use an exact public version")
+    for name in ("causal_conv1d", "flash_linear_attention", "tilelang"):
+        _require_exact_public_version(runtime_image.get(name), name)
+
     mamba_source = runtime_image.get("mamba_ssm") or {}
-    mamba_version = mamba_source.get("base_version", "")
-    parsed_mamba_version = Version(str(mamba_version))
-    if str(parsed_mamba_version) != mamba_version or parsed_mamba_version.local is not None:
-        raise ValueError("Puzzletron runtime package 'mamba_ssm' must use an exact public version")
+    _require_exact_public_version(mamba_source.get("base_version"), "mamba_ssm")
     if not re.fullmatch(
         r"[A-Za-z0-9._-]+\.patch", str(mamba_source.get("compatibility_patch", ""))
     ):
         raise ValueError("Puzzletron mamba_ssm compatibility patch must use a safe patch filename")
     if not _SHA256_PATTERN.fullmatch(str(mamba_source.get("compatibility_patch_sha256", ""))):
         raise ValueError("Puzzletron mamba_ssm compatibility patch must declare a SHA-256")
-    for key in ("grouped_gemm_cuda_arch_list", "torch_cuda_arch_list"):
-        if not re.fullmatch(r"[0-9.]+(?:;[0-9.]+)*", runtime_image.get(key, "")):
-            raise ValueError(f"Puzzletron runtime image must declare explicit {key}")
+
+    for name in ("grouped_gemm_cuda_arch_list", "torch_cuda_arch_list"):
+        if not re.fullmatch(r"[0-9.]+(?:;[0-9.]+)*", runtime_image.get(name, "")):
+            raise ValueError(f"Puzzletron runtime image must declare explicit {name}")
+
+
+def _validate_worker_assets(environment: dict[str, Any]) -> None:
+    gpu_image = environment.get("gpu_image") or {}
     video_decoder = gpu_image.get("video_decoder") or {}
     if video_decoder.get("distribution") != "eva-decord":
         raise ValueError("Puzzletron worker image must use the Linux eva-decord distribution")
     if video_decoder.get("version") != "0.6.1":
         raise ValueError("Puzzletron worker image must pin eva-decord 0.6.1")
-    if gpu_image.get("nltk_resources") != ["punkt", "punkt_tab"]:
+
+    resources = gpu_image.get("nltk_resources")
+    if resources != ["punkt", "punkt_tab"]:
         raise ValueError("Puzzletron worker image must declare the required NLTK resources")
     if not _REVISION_PATTERN.fullmatch(str(gpu_image.get("nltk_data_commit", ""))):
         raise ValueError("Puzzletron worker image must pin the NLTK data revision")
-    nltk_resource_sha256 = gpu_image.get("nltk_resource_sha256")
-    if not isinstance(nltk_resource_sha256, dict) or set(nltk_resource_sha256) != set(
-        gpu_image["nltk_resources"]
-    ):
+    checksums = gpu_image.get("nltk_resource_sha256")
+    if not isinstance(checksums, dict) or set(checksums) != set(resources):
         raise ValueError("Puzzletron worker image must checksum every NLTK resource")
-    if not all(_SHA256_PATTERN.fullmatch(str(value)) for value in nltk_resource_sha256.values()):
+    if not all(_SHA256_PATTERN.fullmatch(str(value)) for value in checksums.values()):
         raise ValueError("Puzzletron NLTK resource checksums must be SHA-256 values")
-    task_configs = environment.get("lmms_eval", {}).get("task_configs")
+
+    task_configs = (environment.get("lmms_eval") or {}).get("task_configs")
     if not isinstance(task_configs, list) or not task_configs:
         raise ValueError("Puzzletron worker image must declare LMMS-Eval task configs")
     for task_config in task_configs:
@@ -121,6 +151,19 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
             raise ValueError(
                 "Puzzletron LMMS-Eval task configs must use safe package-relative paths"
             )
+
+
+def validate_environment_contract(environment: dict[str, Any]) -> None:
+    """Validate the immutable inputs and worker assets recorded by the manifest."""
+
+    if environment.get("schema_version") != 1:
+        raise ValueError("Puzzletron image environment schema_version must be 1")
+    if environment.get("scope") != "puzzletron_v2_worker_ci":
+        raise ValueError("Puzzletron image environment has an unexpected scope")
+    _validate_image_identity(environment)
+    _validate_pinned_sources(environment)
+    _validate_cuda_extensions(environment)
+    _validate_worker_assets(environment)
 
 
 def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
@@ -148,22 +191,14 @@ def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def verify_installed_environment(
+def _verify_package_versions(
     environment: dict[str, Any],
-    *,
-    package_version: Callable[[str], str] = metadata.version,
-    source_verifier: Callable[[str, dict[str, Any]], None] = verify_installed_vcs_source,
-    module_importer: Callable[[str], Any] = import_module,
-    python_version: str | None = None,
-    torch_cuda: object = _UNSET,
+    package_version: Callable[[str], str],
+    python_version: str,
 ) -> None:
-    """Verify package, VCS, CUDA, and runtime invariants."""
-
-    validate_environment_contract(environment)
-
     expected = _expected_versions(environment)
     actual = {
-        "python": python_version or f"{sys.version_info.major}.{sys.version_info.minor}",
+        "python": python_version,
         **{
             package: Version(package_version(package)).public
             for package in expected
@@ -178,53 +213,65 @@ def verify_installed_environment(
     if mismatches:
         raise RuntimeError(f"Pinned Puzzletron image mismatch: {mismatches}")
 
+
+def _verify_vcs_sources(
+    environment: dict[str, Any],
+    source_verifier: Callable[[str, dict[str, Any]], None],
+) -> None:
+    runtime_image = environment["runtime_image"]
     sources = {
         "lmms-eval": environment["lmms_eval"],
         "nemo-automodel": environment["nemo_automodel"],
-        environment["runtime_image"]["grouped_gemm"]["distribution"]: environment["runtime_image"][
-            "grouped_gemm"
-        ],
+        runtime_image["grouped_gemm"]["distribution"]: runtime_image["grouped_gemm"],
         "vllm": environment["vllm"],
     }
     for package, source in sources.items():
         source_verifier(package, source)
 
-    if torch_cuda is _UNSET:
-        torch_cuda = module_importer("torch").version.cuda
+
+def _verify_cuda_version(environment: dict[str, Any], actual_cuda: object) -> None:
     expected_cuda = environment["gpu_image"]["torch_cuda"]
-    if torch_cuda != expected_cuda:
+    if actual_cuda != expected_cuda:
         raise RuntimeError(
-            f"Pinned Puzzletron CUDA mismatch: actual={torch_cuda!r}, expected={expected_cuda!r}"
+            f"Pinned Puzzletron CUDA mismatch: actual={actual_cuda!r}, expected={expected_cuda!r}"
         )
 
-    imported = {
-        module: module_importer(module)
-        for module in (
-            "aiperf",
-            "causal_conv1d",
-            "decord",
-            "fla",
-            "grouped_gemm",
-            "langdetect",
-            "lmms_eval",
-            "mamba_ssm",
-            "modelopt",
-            "nemo_automodel",
-            "nltk",
-            "puzzletron_orchestrator",
-            "puzzletron_setup",
-            "tilelang",
-            "torch",
-            "transformers",
-            "vllm",
-        )
-    }
+
+def _verify_runtime_assets(environment: dict[str, Any], imported: dict[str, Any]) -> None:
     lmms_roots = tuple(Path(path) for path in imported["lmms_eval"].__path__)
     for task_config in environment["lmms_eval"]["task_configs"]:
         if not any((root / task_config).is_file() for root in lmms_roots):
             raise RuntimeError(f"Pinned LMMS-Eval task config is missing: {task_config}")
+
     for resource in environment["gpu_image"]["nltk_resources"]:
         imported["nltk"].data.find(f"tokenizers/{resource}")
+
+
+def verify_installed_environment(
+    environment: dict[str, Any],
+    *,
+    package_version: Callable[[str], str] = metadata.version,
+    source_verifier: Callable[[str, dict[str, Any]], None] = verify_installed_vcs_source,
+    module_importer: Callable[[str], Any] = import_module,
+    python_version: str | None = None,
+    torch_cuda: object = _UNSET,
+) -> None:
+    """Verify the installed packages, sources, CUDA ABI, and runtime assets."""
+
+    validate_environment_contract(environment)
+    _verify_package_versions(
+        environment,
+        package_version,
+        python_version or f"{sys.version_info.major}.{sys.version_info.minor}",
+    )
+    _verify_vcs_sources(environment, source_verifier)
+
+    if torch_cuda is _UNSET:
+        torch_cuda = module_importer("torch").version.cuda
+    _verify_cuda_version(environment, torch_cuda)
+
+    imported = {module: module_importer(module) for module in _REQUIRED_MODULES}
+    _verify_runtime_assets(environment, imported)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -237,9 +284,12 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     environment = json.loads(args.environment.read_text(encoding="utf-8"))
-    validate_environment_contract(environment)
-    if not args.manifest_only:
-        verify_installed_environment(environment)
+    if args.manifest_only:
+        validate_environment_contract(environment)
+        print("Puzzletron image manifest: OK")
+        return
+    verify_installed_environment(environment)
+    print("Puzzletron worker environment: OK")
 
 
 if __name__ == "__main__":
