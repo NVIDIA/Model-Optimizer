@@ -167,7 +167,7 @@ def score(
             ``Shape`` / ...) is skipped by default because it produces zero-drift probes.
             Ops that slip past the filter but that the underlying
             :func:`modelopt.onnx.quantization.quantize` still cannot quantize are appended
-            to the returned ``failed`` list so callers can tell "unprobed" from 
+            to the returned ``failed`` list so callers can tell "unprobed" from
             "quantizing this target is free."
         work_dir: Directory to place intermediate per-target quantized ONNX files. Defaults to a
             fresh temporary directory that is removed after the call returns.

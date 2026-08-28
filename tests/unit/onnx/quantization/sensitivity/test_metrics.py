@@ -57,7 +57,7 @@ class TestCosDistOrthogonal:
         assert cos_dist(p, q) == pytest.approx(2.0, abs=1e-6)
 
     def test_both_zero_vectors_return_zero_distance(self):
-        # A probe whose reference and quantized outputs are both all-zero (e.g. a hard-relu / 
+        # A probe whose reference and quantized outputs are both all-zero (e.g. a hard-relu /
         # masked-out branch) should score as identical, not maximally sensitive.
         p = np.zeros((2, 4), dtype=np.float32)
         q = np.zeros((2, 4), dtype=np.float32)

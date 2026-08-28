@@ -43,7 +43,7 @@ def suggest_exclusion(
 
     Coverage mode (default) walks targets in descending score order, accumulating them until
     the next one would push the cumulative score above ``coverage * total_mass``, at which
-    point it stops (rank-prefix). Threshold mode (when ``threshold`` is set; ``coverage`` 
+    point it stops (rank-prefix). Threshold mode (when ``threshold`` is set; ``coverage``
     is then ignored) picks every target whose individual score exceeds ``threshold``.
 
     Args:
