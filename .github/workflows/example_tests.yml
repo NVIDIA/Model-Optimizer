@@ -153,7 +153,7 @@ jobs:
       contents: read
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/nemo:26.06"
+      docker_image: "nvcr.io/nvidia/nemo:26.08"
       example: megatron_bridge
       timeout_minutes: 60
       pip_install_extras: "[hf,puzzletron,dev-test]"

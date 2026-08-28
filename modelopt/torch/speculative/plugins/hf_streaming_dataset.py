@@ -370,6 +370,15 @@ class EagleVllmStreamingConfig(StreamingConfig):
     # vLLM captures the residual stream BEFORE the final norm, so the trainer must re-apply it
     # before lm_head (see HFDFlashModel.forward). Set False for a post-norm producer.
     base_hidden_prenorm: bool = True
+    # Whether the LAST captured plane doubles as both the final aux feature and the base
+    # (KD/distillation-target) hidden. Normally they are distinct: the draft's aux layers
+    # sit below the base's last layer, so the producer captures ``aux + [final]`` and the
+    # trainer peels the extra plane off. A draft whose top aux id already IS the base's
+    # final layer (e.g.
+    # nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark, aux ids [2,6,20,30,42,52]
+    # on a 52-layer base) cannot supply a distinct extra id — vLLM captures each layer at
+    # most once — so the final plane is reused for both roles.
+    final_aux_is_base_hidden: bool = False
 
     @field_validator("server_urls", mode="before")
     @classmethod
@@ -579,8 +588,15 @@ class EagleVllmStreamingDataset(StreamingDataset):
         hidden_states = fetched["hidden_states"]
         loss_mask = fetched["loss_mask"]
 
+        # The last plane is always the base (KD-target) hidden. It is normally an extra
+        # plane on top of the aux features; when the draft's top aux layer already is the
+        # base's final layer the producer cannot emit a distinct extra plane, so the same
+        # plane serves both roles (see ``final_aux_is_base_hidden``).
         base_model_hidden_states = hidden_states[:, -1, :]
-        aux_hidden_states = hidden_states[:, :-1, :].reshape(hidden_states.shape[0], -1)
+        aux_planes = (
+            hidden_states if self.config.final_aux_is_base_hidden else hidden_states[:, :-1, :]
+        )
+        aux_hidden_states = aux_planes.reshape(hidden_states.shape[0], -1)
 
         input_ids = token_ids.to(torch.int64)
         labels = torch.full_like(input_ids, IGNORE_TOKEN_ID)
