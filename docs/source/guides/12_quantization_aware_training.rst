@@ -249,7 +249,9 @@ objective. From the NeMo container started above, run:
 
 Replace the example ``DATASET`` value with a dataset appropriate for the task. The
 second command loads the quantized checkpoint, retains simulated quantization, and
-uses the normal supervised objective. Export it after training:
+uses the normal supervised objective. ``--modelopt-enabled`` is required because
+the Megatron-LM script does not enable ModelOpt automatically. Export it after
+training:
 
 .. code-block:: bash
 
@@ -307,5 +309,6 @@ Additional resources
 * `Hugging Face QAT/QAD examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat>`_
 * `Megatron-Bridge examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
 * `Megatron-LM ModelOpt post-training examples <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_
+* `How Quantization-Aware Training Enables Low-Precision Accuracy Recovery <https://developer.nvidia.com/blog/how-quantization-aware-training-enables-low-precision-accuracy-recovery/>`_
 * `Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer <https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/>`_
 * `Quantization-Aware Distillation for NVFP4 Inference Accuracy Recovery <https://arxiv.org/abs/2601.20088>`_
