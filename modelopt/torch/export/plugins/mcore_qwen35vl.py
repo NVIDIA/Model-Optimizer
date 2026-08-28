@@ -18,7 +18,8 @@
 Qwen3.5 interleaves GatedDeltaNet linear-attention layers (fused ``in_proj``, split here into
 HF's ``in_proj_qkv`` / ``_z`` / ``_b`` / ``_a``) with gated full-attention layers, and adds MoE
 shared experts. Only the language model is exported; the vision tower is copied from HF.
-Requires ``--no_moe_grouped_gemm``: fused ``TEGroupedMLP`` experts have no gated split.
+Fused ``TEGroupedMLP`` experts have no gated split, so the scripts build these experts as
+``SequentialMLP`` automatically.
 """
 
 from .mcore_custom import (

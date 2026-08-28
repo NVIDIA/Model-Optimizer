@@ -447,12 +447,39 @@ def create_tiny_nemotron_dir(
 
 
 ##### NEMOTRON-H (Mamba + Attention + MoE/MLP hybrid) #####
+def _match_released_nemotron_h_embedding_name() -> None:
+    """Save NemotronH's embedding as ``backbone.embeddings`` like released checkpoints do.
+
+    transformers <= 5.15 renames it to the legacy singular on save, so a saved fixture disagrees
+    with every real checkpoint on one tensor. Dropped upstream in 5.16, where this is a no-op
+    since there is no such rule left to remove.
+    """
+    # Optional dependency: conversion_mapping is transformers 5.x only, while NemotronH also
+    # exists on the 4.57 floor of the support matrix.
+    try:
+        from transformers.conversion_mapping import (
+            get_checkpoint_conversion_mapping,
+            register_checkpoint_conversion_mapping,
+        )
+    except ImportError:
+        return
+
+    mapping = get_checkpoint_conversion_mapping("nemotron_h")
+    if mapping is None:
+        return
+    kept = [m for m in mapping if getattr(m, "source_patterns", None) != ["embedding.weight"]]
+    if len(kept) != len(mapping):
+        register_checkpoint_conversion_mapping("nemotron_h", kept, overwrite=True)
+
+
 def get_tiny_nemotron_h(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
 
     # Lazy import — NemotronHConfig only exists in newer transformers builds, and this
     # module is imported broadly (including by the min-transformers CI job).
     from transformers import NemotronHConfig
+
+    _match_released_nemotron_h_embedding_name()
 
     # Tiny NemotronH hybrid. hybrid_override_pattern letters: M=Mamba, E=MoE/FFN, *=Attention.
     # "ME*E" matches the NemotronH default and exercises Mamba + MoE + attention layers.

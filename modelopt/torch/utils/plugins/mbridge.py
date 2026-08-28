@@ -14,6 +14,7 @@
 # limitations under the License.
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
+from functools import cache
 from typing import Any
 
 from megatron.bridge import AutoBridge
@@ -33,31 +34,91 @@ from megatron.core.utils import unwrap_model
 from torch.distributed.checkpoint import FileSystemReader
 from transformers import AutoConfig, AutoTokenizer
 
+from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, warn_rank_0
 
 __all__ = [
     "get_language_model",
     "is_vlm_config",
     "load_mbridge_model_from_hf",
     "load_modelopt_megatron_checkpoint",
+    "set_moe_expert_layout",
+    "use_moe_grouped_gemm",
 ]
 
 
 def get_language_model(model: MegatronModule) -> tuple[MegatronModule, bool]:
     """Return ``(language_model, is_vlm)``; VLM wrappers nest it under ``.language_model``.
 
-    Must agree with :func:`is_vlm_config`, which answers the same question before the
-    Megatron model exists.
+    Must agree with :func:`is_vlm_config`, which answers the same question before the Megatron
+    model exists, and with ``GPTModelExporter``, which repeats this because ``modelopt.torch.export``
+    cannot import this module.
     """
+    if isinstance(model, GPTModel | HybridModel):
+        return model, False
     language_model = getattr(model, "language_model", None)
     return (model, False) if language_model is None else (language_model, True)
 
 
+@cache
+def _hf_config(hf_model_name_or_path: str, trust_remote_code: bool = False):
+    """Cached ``AutoConfig`` for the helpers below; a script asks the same questions repeatedly.
+
+    Shared, so treat the result as read-only.
+    """
+    return AutoConfig.from_pretrained(hf_model_name_or_path, trust_remote_code=trust_remote_code)
+
+
 def is_vlm_config(hf_model_name_or_path: str, trust_remote_code: bool = False) -> bool:
     """Whether a HuggingFace checkpoint describes a VLM, from its config alone."""
-    config = AutoConfig.from_pretrained(hf_model_name_or_path, trust_remote_code=trust_remote_code)
-    return hasattr(config, "vision_config")
+    return hasattr(_hf_config(hf_model_name_or_path, trust_remote_code), "vision_config")
+
+
+def use_moe_grouped_gemm(
+    hf_model_name_or_path: str,
+    trust_remote_code: bool = False,
+    force_sequential: bool = False,
+) -> bool:
+    """Pick the MoE expert layout: grouped GEMM unless that would not be HF-exportable.
+
+    Grouped GEMM calibrates faster, but only architectures with an ``experts.linear_fc1`` export
+    rule can be converted to HuggingFace from it. Every script that builds the model must agree,
+    since the layout is baked into the Megatron checkpoint -- hence a pure function of the config.
+    """
+    if force_sequential:
+        return False
+    config = _hf_config(hf_model_name_or_path, trust_remote_code)
+    text_config = getattr(config, "text_config", config)
+    is_moe = any(
+        getattr(text_config, name, None)
+        for name in ("num_experts", "num_local_experts", "n_routed_experts")
+    )
+    if not is_moe:
+        return True  # ignored for dense models
+    architectures = getattr(config, "architectures", None) or [""]
+    exportable = "experts.linear_fc1" in all_mcore_hf_export_mapping.get(architectures[0], {})
+    if not exportable:
+        warn_rank_0(
+            f"{architectures[0]} has no export rule for fused (grouped GEMM) MoE experts; "
+            "building them as SequentialMLP so the checkpoint stays exportable."
+        )
+    return exportable
+
+
+def set_moe_expert_layout(provider, moe_grouped_gemm: bool) -> None:
+    """Apply the MoE expert layout to a provider, hybrid stack spec included.
+
+    Set ``moe_grouped_gemm`` on the provider (the bridge's native, possibly custom/hybrid spec
+    reads it at build time) rather than replacing the whole layer spec -- overwriting it would
+    drop custom layers (e.g. Qwen3.5's GatedDeltaNet or Gemma3's custom spec). A hybrid provider
+    additionally needs its stack spec rebuilt, since the native one pins ``TEGroupedMLP``.
+    """
+    if isinstance(provider, HybridModelProvider):
+        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+        provider.moe_grouped_gemm = moe_grouped_gemm
+    elif (provider.num_moe_experts or 0) > 0:
+        provider.moe_grouped_gemm = moe_grouped_gemm
 
 
 def load_mbridge_model_from_hf(
@@ -106,14 +167,7 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    # Set moe_grouped_gemm on the provider (the bridge's native, possibly custom/hybrid spec reads
-    # it at build time) rather than replacing the whole layer spec -- overwriting it would drop
-    # custom layers (e.g. Qwen3.5's GatedDeltaNet + gated-attention or Gemma3's custom spec).
-    if isinstance(provider, HybridModelProvider):
-        provider.hybrid_stack_spec = get_te_hybrid_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
-        provider.moe_grouped_gemm = moe_grouped_gemm
-    elif (provider.num_moe_experts or 0) > 0:
-        provider.moe_grouped_gemm = moe_grouped_gemm
+    set_moe_expert_layout(provider, moe_grouped_gemm)
     provider.finalize()
     if init_model_parallel:
         provider.initialize_model_parallel(seed=0)
@@ -145,14 +199,9 @@ def _checkpoint_keys(checkpoint_path: str) -> list[str]:
     return list(FileSystemReader(checkpoint_path).read_metadata().state_dict_metadata)
 
 
-def _has_vision_model_weights(checkpoint_path: str) -> bool:
-    """Whether a Megatron distributed checkpoint holds a VLM's vision tower (``vision_model.*``)."""
-    return any(key.startswith("vision_model.") for key in _checkpoint_keys(checkpoint_path))
-
-
 def load_modelopt_megatron_checkpoint(
     model: list[MegatronModule], megatron_path: str, restore_modelopt_state: bool = True
-) -> None:
+) -> list[MegatronModule]:
     """Load Megatron checkpoint weights (with modelopt_state).
 
     Args:
@@ -161,15 +210,21 @@ def load_modelopt_megatron_checkpoint(
         restore_modelopt_state: Whether to restore the ModelOpt state (e.g. quantizers) before loading
             weights. Set ``False`` to load weights only -- e.g. to reload a full-precision distilled
             student without reconstructing the ``kd_loss`` mode (which would require a teacher model).
+
+    Returns:
+        The modules loaded into: ``.language_model`` for a language-model-only VLM checkpoint,
+        otherwise the modules passed in. Callers that then move the ModelOpt state need this to
+        know where it landed.
     """
     # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
     checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
 
     # ``distill.py`` distills a VLM's language model only, so its checkpoint holds no ``vision_model.*``
     # weights and must be loaded into ``.language_model`` rather than the full VLM wrapper.
+    checkpoint_keys = _checkpoint_keys(checkpoint_path)
     unwrapped_model = unwrap_model(model)
-    if any(get_language_model(m)[1] for m in unwrapped_model) and not _has_vision_model_weights(
-        checkpoint_path
+    if any(get_language_model(m)[1] for m in unwrapped_model) and not any(
+        key.startswith("vision_model.") for key in checkpoint_keys
     ):
         print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
         model = [get_language_model(m)[0] for m in unwrapped_model]
@@ -179,7 +234,7 @@ def load_modelopt_megatron_checkpoint(
     if restore_modelopt_state:
         if has_modelopt_state(megatron_path):
             load_modelopt_state(model, megatron_path)
-        elif any("_quantizer." in key for key in _checkpoint_keys(checkpoint_path)):
+        elif any("_quantizer." in key for key in checkpoint_keys):
             # The quantizers cannot be rebuilt without the state, and the loader ignores the
             # leftover amax tensors, so the model would silently load unquantized.
             raise RuntimeError(
@@ -188,3 +243,4 @@ def load_modelopt_megatron_checkpoint(
                 "produced it."
             )
     _load_model_weights_from_checkpoint(checkpoint_path, model)
+    return model

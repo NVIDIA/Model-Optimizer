@@ -68,6 +68,7 @@ from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
+    use_moe_grouped_gemm,
 )
 
 # Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
@@ -214,6 +215,15 @@ def get_args() -> argparse.Namespace:
         "correct for homogeneous students; unused for VLMs.",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
+        ),
+    )
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
@@ -236,6 +246,11 @@ def main(args: argparse.Namespace):
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
             hf_model_name_or_path=args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
+            moe_grouped_gemm=use_moe_grouped_gemm(
+                args.student_hf_path,
+                trust_remote_code=args.trust_remote_code,
+                force_sequential=args.no_moe_grouped_gemm,
+            ),
             provider_overrides={
                 "tensor_model_parallel_size": args.tp_size,
                 "pipeline_model_parallel_size": args.pp_size,

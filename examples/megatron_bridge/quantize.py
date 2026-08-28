@@ -62,16 +62,20 @@ import copy
 import gc
 
 import torch
-from transformers import AutoConfig, AutoProcessor
+from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
+from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.utils.distributed as dist
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
-from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mapping
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -101,8 +105,9 @@ def get_args() -> argparse.Namespace:
         "--no_moe_grouped_gemm",
         action="store_true",
         help=(
-            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
-            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
         ),
     )
     parser.add_argument(
@@ -285,10 +290,20 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    trust_remote_code = is_safe_repo(
+        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+    )
+
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+    )
+
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
-        trust_remote_code=args.trust_remote_code,
-        moe_grouped_gemm=not args.no_moe_grouped_gemm,
+        trust_remote_code=trust_remote_code,
+        moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
@@ -329,24 +344,6 @@ def main(args: argparse.Namespace):
             "model's calibration statistics will not see vision tokens."
         )
     print_rank_0(f"Using calibration dataset: {args.calib_dataset_name}")
-
-    # Fused (grouped GEMM) experts are only exportable for architectures with an
-    # "experts.linear_fc1" rule. Fail now rather than at export: the layout is baked into the
-    # checkpoint, so recovering means re-running this whole calibration.
-    if not args.no_moe_grouped_gemm and any(
-        hasattr(m, "experts") and not hasattr(m.experts, "local_experts")
-        for m in unwrapped_model.modules()
-        if type(m).__name__.endswith("MoELayer")
-    ):
-        arch = AutoConfig.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
-        ).architectures[0]
-        if "experts.linear_fc1" not in all_mcore_hf_export_mapping.get(arch, {}):
-            raise NotImplementedError(
-                f"{arch} has fused (grouped GEMM) MoE experts, which "
-                "export_quantized_megatron_to_hf.py cannot export. Re-run with "
-                "--no_moe_grouped_gemm to build the experts as SequentialMLP instead."
-            )
 
     mtq_config = get_quant_config(args)
 
@@ -404,7 +401,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -439,12 +436,12 @@ def main(args: argparse.Namespace):
         model,
         args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
-        hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+        hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
     if is_vlm:
         print_rank_0(
             f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
-            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py (Qwen3-VL only)."
+            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py."
         )
     else:
         print_rank_0(

@@ -47,6 +47,7 @@ from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
+    use_moe_grouped_gemm,
 )
 
 
@@ -75,8 +76,9 @@ def get_args() -> argparse.Namespace:
         "--no_moe_grouped_gemm",
         action="store_true",
         help=(
-            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
-            "TEGroupedMLP (grouped GEMM). Only affects MoE models."
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
         ),
     )
     parser.add_argument(
@@ -116,7 +118,11 @@ def main(args: argparse.Namespace):
     _bridge, _provider, model, _unwrapped_model, _tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=trust_remote_code,
-        moe_grouped_gemm=not args.no_moe_grouped_gemm,
+        moe_grouped_gemm=use_moe_grouped_gemm(
+            args.hf_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            force_sequential=args.no_moe_grouped_gemm,
+        ),
         provider_overrides={
             "tensor_model_parallel_size": 1,  # Tensor parallelism is not supported
             "pipeline_model_parallel_size": args.pp_size,
@@ -153,8 +159,7 @@ def main(args: argparse.Namespace):
     print_rank_0(
         f"Exporting to HuggingFace (unified) checkpoint at {args.export_unified_hf_path}..."
     )
-    # TODO (OMNIML-5366): Qwen3-VL is the only VLM in export_mcore_gpt_to_hf's per-arch mappings;
-    # Qwen3.5-VL / Gemma3-VL are not covered yet.
+    # TODO: Gemma3-VL is not in export_mcore_gpt_to_hf's per-arch mappings yet.
     export_mcore_gpt_to_hf(
         unwrapped_model,
         args.hf_model_name_or_path,

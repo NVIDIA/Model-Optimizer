@@ -24,61 +24,36 @@ from _test_utils.torch.megatron.modelopt_state import (
     assert_no_quantizers_matching,
 )
 from _test_utils.torch.transformers_models import (
-    create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_dir,
-    create_tiny_qwen3vl_dir,
 )
 
 
 @pytest.mark.timeout(720)  # Multiple steps in one test hence takes longer than the default timeout
 @pytest.mark.parametrize(
-    ("create_student", "exports_hf", "no_moe_grouped_gemm"),
+    "create_student",
     [
-        (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), True, False),
-        # Qwen3-VL is the only VLM architecture in the Megatron HF export mapping, so it is the one
-        # VLM case that runs the export step end-to-end.
-        (lambda tmp_path: create_tiny_qwen3vl_dir(tmp_path, with_tokenizer=True), True, False),
-        # Dense-VLM QAD path; the MoE VLM below covers it in CI, so run this one on demand only.
-        pytest.param(
-            lambda tmp_path: create_tiny_gemma3vl_dir(
-                tmp_path,
-                with_processor=True,
-                num_hidden_layers=2,
-                intermediate_size=128,
-                max_position_embeddings=512,
-            ),
-            False,
-            False,
-            marks=pytest.mark.manual,
-        ),
+        lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
                 tmp_path,
                 with_processor=True,
-                # Cover both Qwen3.5 decoder kinds at the same layer count: auto-generated
-                # layer_types would give linear attention only at this depth.
+                # Cover both Qwen3.5 decoder kinds at the same layer count
                 num_hidden_layers=2,
                 layer_types=["linear_attention", "full_attention"],
             ),
-            True,
-            # Gated MoE experts are only exportable as SequentialMLP; grouped GEMM raises.
-            True,
         ),
     ],
-    ids=["qwen3", "qwen3vl", "gemma3vl", "qwen3_5_moe_vl"],
+    ids=["qwen3", "qwen3_5_moe_vl"],
 )
-def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_grouped_gemm):
+def test_qad(tmp_path: Path, num_gpus, create_student):
     """Quantize a tiny model, run QAD from the quantized student, and export the result.
 
-    For VLMs only the language model is quantized and distilled (vision tower / projector untouched),
-    and a text calibration dataset infers text-only LM calibration. Quantized-HF export needs the
-    architecture in the Megatron export mapping, so a case missing there (Gemma3-VL) stops at the
-    distilled Megatron checkpoint and only verifies the ModelOpt (quantize) state survived.
+    Covers what only QAD exercises: that the ModelOpt state survives distillation. Per-architecture
+    export is covered more cheaply by test_quantize_export.py, so keep this to one LLM and one VLM.
     """
     hf_model_path = create_student(tmp_path)
     is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
-    moe_flag = ["--no_moe_grouped_gemm"] if no_moe_grouped_gemm else []
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
     train_iters = 3
@@ -86,7 +61,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
 
     # Step 1: PTQ the (language) model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
     quantize_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate", *moe_flag],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/fp8_default-kv_fp8",
         tp_size=num_gpus,
@@ -106,7 +81,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     # quantizers) and distill from the (unquantized) HF teacher. The distilled checkpoint must keep the
     # ModelOpt state so the quantizers survive distillation.
     distill_cmd = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data", *moe_flag],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=hf_model_path,
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
@@ -132,9 +107,6 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     assert (distilled_megatron_path / "iter_0000001").is_dir()
     assert_has_modelopt_state(distilled_megatron_path)
 
-    if not exports_hf:
-        return  # architecture missing from the export mapping; stop at the distilled checkpoint
-
     # Step 3: export the distilled quantized checkpoint to a unified HF checkpoint. hf_quant_config.json
     # is only written for a quantized model, so its presence confirms the quantizers survived QAD.
     hf_export_path = tmp_path / "qad_fp8_hf"
@@ -143,7 +115,6 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
             "torchrun",
             f"--nproc_per_node={num_gpus}",
             "export_quantized_megatron_to_hf.py",
-            *moe_flag,
         ],
         hf_model_name_or_path=hf_model_path,
         megatron_path=distilled_megatron_path,

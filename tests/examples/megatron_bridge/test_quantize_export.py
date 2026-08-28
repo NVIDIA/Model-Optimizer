@@ -16,28 +16,49 @@
 
 from pathlib import Path
 
+import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
-from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
+from _test_utils.torch.transformers_models import (
+    create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_dir,
+    create_tiny_qwen3_moe_dir,
+    create_tiny_qwen3vl_dir,
+)
+
+# Per-architecture export *mappings* are covered in-process by
+# tests/gpu_megatron/torch/export/test_unified_export_megatron.py; these cases cover the script
+# wiring (CLI, recipe, checkpoint hand-off) that only running quantize.py + the exporter exercises.
+# Use a vLLM-friendly head_dim (64): the default tiny config (head_dim=2) is unsupported.
+_DENSE_KWARGS = {
+    "hidden_size": 128,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 2,
+    "num_hidden_layers": 2,
+    "intermediate_size": 256,
+    "max_position_embeddings": 512,
+}
 
 
-# NOTE: Qwen3.5-VL covered by test_qad.py
-def test_quantize_and_export(tmp_path: Path, num_gpus):
-    """Quantize a tiny Qwen3 via a YAML recipe and export it to a unified HF checkpoint."""
-    # Use a vLLM-friendly head_dim (64) since the default tiny config (head_dim=2) is unsupported.
-    hf_model_path = create_tiny_qwen3_dir(
-        tmp_path,
-        with_tokenizer=True,
-        hidden_size=128,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_hidden_layers=2,
-        intermediate_size=256,
-        max_position_embeddings=512,
-    )
-    megatron_path = tmp_path / "qwen3_fp8_megatron"
-    hf_export_path = tmp_path / "qwen3_fp8_hf"
+@pytest.mark.parametrize(
+    ("create_model", "model_kwargs"),
+    [
+        (create_tiny_qwen3_dir, _DENSE_KWARGS),
+        # MoE: routed experts used to be dropped silently from the export.
+        (create_tiny_qwen3_moe_dir, _DENSE_KWARGS),
+        # Dense VLM: only the language model is quantized, vision is copied through.
+        (create_tiny_qwen3vl_dir, {}),
+        # Mamba hybrid + MoE, and the one architecture that keeps grouped-GEMM experts.
+        (create_tiny_nemotron_h_dir, {}),
+    ],
+    ids=["qwen3", "qwen3_moe", "qwen3vl", "nemotron_h"],
+)
+def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwargs):
+    """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint."""
+    hf_model_path = create_model(tmp_path, with_tokenizer=True, **model_kwargs)
+    megatron_path = tmp_path / "fp8_megatron"
+    hf_export_path = tmp_path / "fp8_hf"
 
     # Step 1: quantize and save a Megatron checkpoint
     quantize_cmd = extend_cmd_parts(

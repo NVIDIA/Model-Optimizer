@@ -138,9 +138,8 @@ class GPTModelExporter:
         moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
-        # VLM wrappers (MCore ``LLaVAModel``, Megatron-Bridge ``Qwen3VLModel``, ...) keep the decoder
-        # under ``.language_model``; only that inner model is exported, the vision tower is copied
-        # over from the HF checkpoint as-is.
+        # VLM wrappers keep the decoder under ``.language_model``; only that is exported, the
+        # vision tower being copied from the HF checkpoint as-is.
         language_model = (
             model
             if isinstance(model, (GPTModel, HybridModel))
@@ -181,8 +180,7 @@ class GPTModelExporter:
         self.dtype = dtype
         self.trust_remote_code = trust_remote_code
         self.arch = self._hf_config.architectures[0]
-        # A VLM's vision tower is never quantized: copy it verbatim from the HF checkpoint. ``None``
-        # means there is nothing to copy.
+        # ``None`` when there is no vision tower to copy through.
         self.vision_passthrough_prefixes = all_mcore_hf_vision_passthrough_mapping.get(
             self.arch, LLAVA_VISION_PREFIXES if self.is_multimodal else None
         )
@@ -446,10 +444,7 @@ class GPTModelExporter:
             self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
 
     def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
-        """Raise if the export dropped tensors the source checkpoint has.
-
-        A missing export rule emits nothing rather than failing, so the checkpoint looks valid.
-        """
+        """Raise if the export dropped tensors the source has: a missing rule emits nothing."""
         if pretrained_model_name_or_path is None or not os.path.isdir(
             str(pretrained_model_name_or_path)
         ):
@@ -463,20 +458,29 @@ class GPTModelExporter:
         if not source:
             return
 
+        # Narrow on purpose: compare module prefixes, not tensor names, since a quantized source
+        # carries extras with no export counterpart, and only inside decoder layers, whose naming
+        # is stable. A dropped decoder module is the case that loads fine and produces garbage.
         num_layers = self.model.config.num_layers
+        exported_modules = {key.rsplit(".", 1)[0] for key in exported}
         missing = set()
         for key in source - exported:
             layer = re.search(r"\.layers\.(\d+)\.", key)
-            if layer is not None and int(layer.group(1)) >= num_layers:
+            if layer is None:
+                continue  # see the note above: decoder layers only
+            if int(layer.group(1)) >= num_layers:
                 continue  # depth-pruned model: the source has layers this export does not
-            if key == "lm_head.weight" and self.model.share_embeddings_and_output_weights:
-                continue  # tied embeddings: no separate output layer to export
+            if key.rsplit(".", 1)[0] in exported_modules:
+                continue  # module is exported; this name is a source-side quantization artifact
+            if "rotary_emb" in key:
+                continue  # non-persistent buffer some conversions still ship
             missing.add(key)
         if missing:
             raise RuntimeError(
                 f"Export dropped {len(missing)} tensor(s) present in "
-                f"{pretrained_model_name_or_path}, e.g. {sorted(missing)[:8]}. This usually means "
-                "an architecture has no export rule for one of its modules."
+                f"{pretrained_model_name_or_path}, e.g. {sorted(missing)[:8]}. The checkpoint "
+                f"written to {save_directory} is incomplete -- the architecture has no export "
+                "rule for one of its decoder modules."
             )
 
     @property
@@ -683,8 +687,7 @@ class GPTModelExporter:
                         layer.mlp.experts.linear_fc2, layer_id, is_mtp=is_mtp
                     )
                 else:
-                    # Without this the routed experts are silently dropped and the exported
-                    # checkpoint looks valid but has no expert weights.
+                    # Otherwise the routed experts are dropped and the checkpoint looks valid.
                     raise NotImplementedError(
                         f"No export rule for {type(layer.mlp.experts).__name__} experts of "
                         f"{self.arch}: fused (grouped GEMM) experts need an 'experts.linear_fc1' "
@@ -1126,7 +1129,13 @@ class GPTModelExporter:
 
         weight = name_to_value.pop("weight")
         if zero_centered_gamma:
-            # Megatron stores this norm's gamma centered on 0; HF centers it on 1.
+            # Megatron centres this gamma on 0, HF on 1. Assert, don't derive: the config flag
+            # is model-wide while this one is per-norm.
+            module_config = getattr(module, "config", None)
+            assert getattr(module_config, "layernorm_zero_centered_gamma", True), (
+                f"{prefix} is mapped as zero-centered gamma but its config disables it; "
+                "exporting would shift the weights by 1.0"
+            )
             weight = weight + 1.0
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
@@ -1431,8 +1440,8 @@ class GPTModelExporter:
         head_num = config.num_attention_heads
         head_size = config.kv_channels
         heads_per_group = head_num // num_query_groups
-        # Gated attention (e.g. Qwen3.5) packs a per-head output gate next to every query head, so a
-        # group holds [q, gate, k, v] instead of [q, k, v]. HF keeps the gate inside ``q_proj``.
+        # Gated attention (Qwen3.5) packs a gate beside every query head, so a group holds
+        # [q, gate, k, v]; HF keeps the gate inside ``q_proj``.
         output_gate = getattr(config, "attention_output_gate", False)
         group_dim = (2 * heads_per_group if output_gate else heads_per_group) + 2
         qkv_total_dim = num_query_groups * group_dim
@@ -1487,14 +1496,16 @@ class GPTModelExporter:
         slices = [q_slice, k_slice, v_slice]
         prefixes = [q_proj_prefix, k_proj_prefix, v_proj_prefix]
 
-        def _take(tensor, index, last_dim):
-            """Gather ``index`` heads; for q under gated attention also append the gate heads."""
+        def _take(tensor, index, last_dim, with_gate=False):
+            """Gather ``index`` heads, appending the gate heads for q under gated attention."""
             taken = tensor[index]
-            if output_gate and index is q_slice:
+            if with_gate:
                 taken = torch.cat([taken, tensor[gate_slice]], dim=1)
             return taken.reshape(-1, last_dim)
 
-        proj_weights = [_take(weight, s, hidden_size) for s in slices]
+        gated = [output_gate, False, False]  # q carries the gate; k and v do not
+
+        proj_weights = [_take(weight, s, hidden_size, g) for s, g in zip(slices, gated)]
         proj_keys = [p + "weight" for p in prefixes]
 
         if weight_scale is None:
@@ -1509,8 +1520,8 @@ class GPTModelExporter:
                     [per_rank_qkv_dim, head_size, weight_scale_hidden_size]
                 )
                 proj_weight_scales = [
-                    _take(weight_scale, s, weight_scale_hidden_size).to(dtype=weight_scale_dtype)
-                    for s in slices
+                    _take(weight_scale, s, weight_scale_hidden_size, g).to(dtype=weight_scale_dtype)
+                    for s, g in zip(slices, gated)
                 ]
             else:
                 # per-tensor scaling
@@ -1546,7 +1557,7 @@ class GPTModelExporter:
                 # Slice bias similar to weight
                 bias = val.detach().clone()
                 bias = bias.reshape([per_rank_qkv_dim, head_size])
-                proj_biases = [_take(bias, s, 1).reshape(-1) for s in slices]
+                proj_biases = [_take(bias, s, 1, g).reshape(-1) for s, g in zip(slices, gated)]
                 proj_bias_keys = [q_proj_prefix + key, k_proj_prefix + key, v_proj_prefix + key]
                 for bias_tensor, bias_key in zip(proj_biases, proj_bias_keys):
                     self._state_dict[bias_key] = bias_tensor

@@ -56,7 +56,12 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.mbridge import is_vlm_config, load_modelopt_megatron_checkpoint
+from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
+    load_modelopt_megatron_checkpoint,
+    set_moe_expert_layout,
+    use_moe_grouped_gemm,
+)
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -97,9 +102,9 @@ def get_args():
         "--no_moe_grouped_gemm",
         action="store_true",
         help=(
-            "Use SequentialMLP for MoE experts instead of the (default) efficient fused "
-            "TEGroupedMLP (grouped GEMM). Must match the checkpoint passed to "
-            "--student_megatron_path. Only affects MoE models."
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
         ),
     )
     parser.add_argument(
@@ -336,6 +341,12 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace):
+    # Same layout choice as quantize.py -- it must match --student_megatron_path.
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.student_hf_path,
+        trust_remote_code=args.trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+    )
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
@@ -353,9 +364,8 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
-        if (provider.num_moe_experts or 0) > 0:
-            # Must match the expert layout of --student_megatron_path (see quantize.py).
-            provider.moe_grouped_gemm = not args.no_moe_grouped_gemm
+        # Must match the expert layout of --student_megatron_path (see quantize.py).
+        set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.sft:
             # A response-only loss mask needs per-token reduction to combine across CP ranks.
             # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.
@@ -431,11 +441,12 @@ def main(args: argparse.Namespace):
                 f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
             )
             student = unwrap_model(model_chunks[0])
-            load_modelopt_megatron_checkpoint([student], args.student_megatron_path)
-            if is_vlm and student_has_modelopt_state:
+            loaded = load_modelopt_megatron_checkpoint([student], args.student_megatron_path)
+            if is_vlm and student_has_modelopt_state and loaded[0] is student:
                 # PTQ stores the state on the VLM root (it quantizes and saves the whole VLM), but
                 # only ``language_model`` is distilled and checkpointed here, so move it there to
-                # keep the quantizers across the QAD checkpoint's save / restore.
+                # keep the quantizers across the QAD checkpoint's save / restore. Resuming from a
+                # language-model-only checkpoint already restores it there.
                 ModeloptStateManager.transfer_state_dict(student, student.language_model)
             return model_chunks
 
