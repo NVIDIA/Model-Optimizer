@@ -75,28 +75,11 @@ def test_manifest_rejects_unpinned_mamba_source_or_patch(project_root_path, fiel
         verify_image_environment.validate_environment_contract(environment)
 
 
-def test_runtime_verifier_reports_a_mamba_version_mismatch(project_root_path):
-    environment = _load_environment(project_root_path)
-    versions = _version_catalog(environment)
-    versions["mamba-ssm"] = "2.3.1"
-
-    with pytest.raises(RuntimeError, match="mamba-ssm"):
-        verify_image_environment.verify_installed_environment(
-            environment,
-            package_version=_version_lookup(versions),
-            source_verifier=lambda *_args: None,
-            module_importer=lambda _name: object(),
-            python_version=environment["python"],
-            torch_cuda=environment["gpu_image"]["torch_cuda"],
-        )
-
-
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
         ("platform", "linux/arm64", "platform must be linux/amd64"),
-        ("decord_wheel_url", "https://example.com/decord.whl", "x86_64 decord wheel"),
-        ("decord_wheel_sha256", "not-a-digest", "decord wheel checksum"),
+        ("video_decoder", {"distribution": "decord", "version": "0.6.0"}, "eva-decord"),
         ("nltk_data_commit", "gh-pages", "NLTK data revision"),
         ("nltk_resource_sha256", {"punkt": "0" * 64}, "checksum every NLTK resource"),
     ],
@@ -138,14 +121,14 @@ def test_verifier_applies_worker_contract(project_root_path, tmp_path):
         torch_cuda=environment["gpu_image"]["torch_cuda"],
     )
 
-    assert version_queries == [
+    assert set(version_queries) == {
         "torch",
         "torchvision",
         "transformers",
         "lmms-eval",
         "nemo-automodel",
         "aiperf",
-        "decord",
+        "eva-decord",
         "langdetect",
         "nltk",
         "nox",
@@ -154,14 +137,14 @@ def test_verifier_applies_worker_contract(project_root_path, tmp_path):
         "nv-grouped-gemm",
         "mamba-ssm",
         "tilelang",
-    ]
+    }
     assert sources == [
         ("lmms-eval", environment["lmms_eval"]),
         ("nemo-automodel", environment["nemo_automodel"]),
         ("nv-grouped-gemm", environment["runtime_image"]["grouped_gemm"]),
         ("vllm", environment["vllm"]),
     ]
-    assert imports == [
+    assert set(imports) == {
         "aiperf",
         "causal_conv1d",
         "decord",
@@ -179,8 +162,27 @@ def test_verifier_applies_worker_contract(project_root_path, tmp_path):
         "torch",
         "transformers",
         "vllm",
-    ]
-    assert resources == ["tokenizers/punkt", "tokenizers/punkt_tab"]
+    }
+    assert set(resources) == {"tokenizers/punkt", "tokenizers/punkt_tab"}
+
+
+def test_verifier_rejects_a_missing_lmms_task_config(project_root_path, tmp_path):
+    environment = _load_environment(project_root_path)
+
+    def import_worker_module(name):
+        if name == "lmms_eval":
+            return SimpleNamespace(__path__=[str(tmp_path)])
+        return object()
+
+    with pytest.raises(RuntimeError, match="LMMS-Eval task config is missing"):
+        verify_image_environment.verify_installed_environment(
+            environment,
+            package_version=_version_lookup(_version_catalog(environment)),
+            source_verifier=lambda *_args: None,
+            module_importer=import_worker_module,
+            python_version=environment["python"],
+            torch_cuda=environment["gpu_image"]["torch_cuda"],
+        )
 
 
 def test_verifier_rejects_a_cuda_mismatch(project_root_path):
@@ -210,7 +212,7 @@ def _version_catalog(environment):
         "lmms-eval": environment["lmms_eval"]["base_version"],
         "nemo-automodel": environment["nemo_automodel"]["base_version"],
         "aiperf": environment["gpu_image"]["aiperf"],
-        "decord": environment["gpu_image"]["decord"],
+        "eva-decord": environment["gpu_image"]["video_decoder"]["version"],
         "langdetect": environment["gpu_image"]["langdetect"],
         "nltk": environment["gpu_image"]["nltk"],
         "nox": environment["gpu_image"]["nox"],

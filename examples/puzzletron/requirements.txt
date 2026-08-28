@@ -1,6 +1,10 @@
 aiohttp>=3.9,<4
+decord==0.6.0; platform_system != "Darwin" and platform_system != "Linux"
+eva-decord==0.6.1; platform_system == "Linux"
+eva-decord; platform_system == "Darwin" and python_version < "3.12"
+# Keep the source tree so extensionless task templates remain available.
 # v0.7.2 pins wandb==0.25.0, conflicting with the pinned AutoModel branch's wandb>=0.28.0.
-lmms-eval @ git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@15c32bfec165df13c269ddd3cda03b2ed9137825
+-e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@15c32bfec165df13c269ddd3cda03b2ed9137825#egg=lmms-eval
 math-verify
 ray
 # Transformers comes from nvidia-modelopt[hf]; CPU CI overlays the exact

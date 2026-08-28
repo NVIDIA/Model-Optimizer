@@ -30,14 +30,11 @@ from puzzletron_orchestrator.schema import (
     AttemptSpec,
     CampaignPlan,
     ExecutionContract,
-    ExecutionStrategy,
-    FailurePolicy,
     JobHandle,
     JobState,
     JobStatus,
     RunnerEnvironment,
     SlurmRunnerConfig,
-    StagePlanNode,
     TaskLauncher,
 )
 
@@ -179,6 +176,43 @@ def test_clean_completion_generates_and_returns_final_report(tmp_path: Path):
     assert result["report_log_paths"] == [executor.submitted[0].command.log_path]
 
 
+def test_clean_completion_reuses_sealed_final_report(tmp_path: Path):
+    plan = _plan(tmp_path)
+    executor = _ReportExecutor(JobState.COMPLETED)
+
+    first = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+    resumed = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+
+    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report"]
+    assert resumed == first
+
+
+def test_clean_completion_regenerates_tampered_final_report(tmp_path: Path):
+    plan = _plan(tmp_path)
+    executor = _ReportExecutor(JobState.COMPLETED)
+    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+    report_path = plan.puzzle_dir / "artifacts/campaign_report/campaign_report.html"
+    report_path.write_text("tampered\n")
+
+    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+
+    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
+    assert result["report_status"] == "completed"
+
+
+def test_clean_completion_regenerates_oversized_completion_record(tmp_path: Path):
+    plan = _plan(tmp_path)
+    executor = _ReportExecutor(JobState.COMPLETED)
+    CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+    completion_path = plan.puzzle_dir / "artifacts/campaign_report/completion.json"
+    completion_path.write_bytes(completion_path.read_bytes() + b" " * (1 << 20))
+
+    result = CampaignController(plan, executor=executor, poll_interval_seconds=0).run()
+
+    assert [attempt.stage_id for attempt in executor.submitted] == ["final_report", "final_report"]
+    assert result["report_status"] == "completed"
+
+
 def test_final_report_failure_is_nonfatal(tmp_path: Path):
     plan = _plan(tmp_path)
     executor = _ReportExecutor(JobState.FAILED)
@@ -192,44 +226,3 @@ def test_final_report_failure_is_nonfatal(tmp_path: Path):
     assert result["report_path"] is None
     assert result["report_manifest_path"] is None
     assert result["report_log_paths"] == [executor.submitted[0].command.log_path]
-
-
-def test_partial_invocation_skips_final_report(tmp_path: Path, monkeypatch):
-    base = _plan(tmp_path)
-    node = StagePlanNode(
-        stage_id="sort_sanity",
-        strategy=ExecutionStrategy.SINGLE,
-        instances=1,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={},
-        gpus_per_instance=1,
-        gpus_per_node=1,
-        nodes=1,
-        total_gpus=1,
-        exclusive=False,
-        parents=(),
-        distributed=False,
-    )
-    plan = CampaignPlan(
-        experiment_config_path=base.experiment_config_path,
-        puzzle_dir=base.puzzle_dir,
-        experiment_config=base.experiment_config,
-        runner=base.runner,
-        execution_defaults=base.execution_defaults,
-        stages=(node,),
-        contract_hash=base.contract_hash,
-    )
-    monkeypatch.setattr(
-        "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda *_args, **_kwargs: False,
-    )
-    executor = _ReportExecutor(JobState.COMPLETED)
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=0)
-
-    result = controller.run(max_iterations=0)
-
-    assert executor.submitted == []
-    assert result["report_status"] == "skipped"
-    assert result["report_path"] is None
-    assert result["report_manifest_path"] is None
-    assert result["report_log_paths"] == []

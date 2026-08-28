@@ -49,9 +49,8 @@ docker build \
   .
 ```
 
-The amd64 platform is required because `decord 0.6.0` does not publish a Linux
-ARM wheel. The Dockerfile pins the available wheel and its checksum so the
-same dependency is installed during every build.
+The amd64 platform is required because the current CUDA extension set and
+Linux `eva-decord 0.6.1` dependency do not have a validated ARM build path.
 
 Run the image locally with GPU access:
 

@@ -86,63 +86,6 @@ def test_qwen3p5_0p8b_run_uses_the_accepted_quick_smoke_budgets(
     }
 
 
-def test_qwen3p5_0p8b_run_keeps_non_ffn_mip_dimensions_at_teacher(
-    monkeypatch, tmp_path: Path
-) -> None:
-    config = _compile_plan(monkeypatch, tmp_path).experiment_config
-
-    assert config["embedding_pruning"]["enabled"] is True
-    assert config["embedding_pruning"]["widths"] == [1024]
-    assert config["width_sanity"]["hidden_width_diagnostic"] is False
-    assert config["width_sanity"]["axes"] == ["ffn_intermediate"]
-    assert config["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-
-
-def test_qwen3p5_0p8b_full_plan_has_mip_as_its_exact_terminal_stage(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    plan = _compile_plan(monkeypatch, tmp_path)
-    config = plan.experiment_config
-    stage_ids = [stage.stage_id for stage in plan.stages]
-
-    assert stage_ids[-1] == "mip"
-    assert {
-        "convert",
-        "tokenize_data",
-        "width_importance",
-        "sort",
-        "sort_sanity",
-        "width_sanity",
-        "slicing_sanity",
-        "build_library",
-        "replacement_scoring",
-        "mip",
-    } == set(stage_ids)
-    assert not {
-        "vllm_stats",
-        "bypass_sanity",
-        "bypass",
-        "zero_shot_evaluation",
-        "aiperf",
-        "global_distillation_sanity",
-        "global_distillation",
-        "post_distillation_evaluation",
-    } & set(stage_ids)
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
-    assert config["model"]["revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
-    assert config["build_library"]["include_bypass"] is False
-    assert config["depth_importance"]["enabled"] is False
-    assert config["depth_importance"]["max_subblocks_to_remove"] == 0
-    assert config["width_sanity"]["axes"] == ["ffn_intermediate"]
-    assert config["width_sanity"]["physical_realization"] is True
-
-
 def test_qwen3p5_0p8b_runner_requires_an_explicit_site_contract() -> None:
     runner = load_runner_config(RUNNER_PATH)
 
@@ -157,15 +100,3 @@ def test_qwen3p5_0p8b_runner_requires_an_explicit_site_contract() -> None:
     assert runner.contract.container.startswith("REPLACE_WITH_")
     assert runner.contract.container_mounts is not None
     assert runner.contract.container_mounts.startswith("REPLACE_WITH_")
-
-
-def test_qwen3p5_0p8b_plan_uses_worker_visible_experiment_path(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    plan = _compile_plan(monkeypatch, tmp_path)
-    expected = Path(plan.runner.contract.repository) / RUN_PATH.resolve().relative_to(
-        REPOSITORY_ROOT.resolve()
-    )
-
-    assert plan.experiment_config_path == str(expected)

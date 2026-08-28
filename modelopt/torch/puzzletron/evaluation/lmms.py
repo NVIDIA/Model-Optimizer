@@ -350,6 +350,11 @@ def _build_command(
     for key, value in env_overrides.items():
         if value is not None:
             env[str(key)] = str(value)
+    compatibility = Path(__file__).parents[1] / "benchmarks" / "vllm_compat"
+    python_paths = [str(compatibility)]
+    if inherited_python_path := env.get("PYTHONPATH"):
+        python_paths.append(inherited_python_path)
+    env["PYTHONPATH"] = os.pathsep.join(python_paths)
     if settings.get("cache_dir") is not None and "LMMS_EVAL_HOME" not in env_overrides:
         env["LMMS_EVAL_HOME"] = str(settings["cache_dir"])
     timeout = settings.get("timeout_seconds")
@@ -641,17 +646,17 @@ def run_lmms_eval_checkpoint(
     Args:
         checkpoint: Local Hugging Face checkpoint directory.
         output_root: Root under which a unique attempt directory is created.
-        settings: lmms-eval tasks, vLLM model arguments, topology, and runtime controls.
+        settings: lmms-eval tasks, backend model arguments, topology, and runtime controls.
 
     Returns:
         Flattened metrics and paths to the normalized summary, raw result, command,
         stdout, and stderr artifacts.
     """
 
-    checkpoint_path = Path(checkpoint).expanduser().resolve()
+    checkpoint_path = Path(checkpoint).expanduser().absolute()
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"checkpoint is not a local directory: {checkpoint_path}")
-    output = Path(output_root).expanduser().resolve() / f"attempt_{uuid.uuid4().hex}"
+    output = Path(output_root).expanduser().absolute() / f"attempt_{uuid.uuid4().hex}"
     settings = dict(settings)
     argv, env, timeout = _build_command(
         settings,

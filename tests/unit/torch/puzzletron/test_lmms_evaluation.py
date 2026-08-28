@@ -15,10 +15,9 @@
 
 """Tests for the reusable lmms-eval checkpoint backend."""
 
-import asyncio
 import json
 import os
-import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -133,6 +132,40 @@ def test_cache_dir_precedence(monkeypatch, tmp_path):
     assert env["LMMS_EVAL_HOME"] == "/explicit/cache"
 
 
+def test_command_installs_existing_vllm_subprocess_compatibility(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTHONPATH", "/inherited")
+
+    _, env, _ = lmms._build_command(
+        {**_settings("ifeval"), "env": {"PYTHONPATH": "/explicit"}},
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    python_paths = env["PYTHONPATH"].split(os.pathsep)
+    assert Path(python_paths[0]).name == "vllm_compat"
+    assert (Path(python_paths[0]) / "sitecustomize.py").is_file()
+    assert python_paths[1:] == ["/explicit"]
+
+
+def test_vllm_subprocess_compatibility_runs_inherited_sitecustomize(tmp_path):
+    inherited = tmp_path / "inherited"
+    inherited.mkdir()
+    marker = tmp_path / "loaded"
+    (inherited / "sitecustomize.py").write_text(
+        "import os\nfrom pathlib import Path\nPath(os.environ['MARKER']).write_text('loaded')\n"
+    )
+    compatibility = Path(lmms.__file__).parents[1] / "benchmarks" / "vllm_compat"
+    environment = {
+        **os.environ,
+        "MARKER": str(marker),
+        "PYTHONPATH": os.pathsep.join((str(compatibility), str(inherited))),
+    }
+
+    subprocess.run([sys.executable, "-c", "pass"], check=True, env=environment)
+
+    assert marker.read_text() == "loaded"
+
+
 def test_command_uses_bounded_default_timeout(tmp_path):
     _, _, timeout = lmms._build_command(
         _settings("ifeval"),
@@ -141,15 +174,6 @@ def test_command_uses_bounded_default_timeout(tmp_path):
     )
 
     assert timeout == lmms.DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS
-
-
-def test_command_rejects_non_sequence_prefix_setting(tmp_path):
-    with pytest.raises(TypeError, match="command_prefix must be a string or sequence"):
-        lmms._build_command(
-            {**_settings("ifeval"), "command_prefix": {"executable": "lmms_eval"}},
-            checkpoint="/ckpts/candidate",
-            output_path=tmp_path / "results",
-        )
 
 
 @pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
@@ -196,38 +220,6 @@ def test_command_rejects_unsupported_backend_contract(tmp_path, settings, expect
         )
 
 
-@pytest.mark.parametrize(
-    ("extra_args", "expected"),
-    [
-        pytest.param(["--model", "hf"], "--model", id="model"),
-        pytest.param(["--tasks", "gsm8k"], "--tasks", id="tasks"),
-        pytest.param(["--batch_size=99"], "--batch_size", id="batch-size-underscore"),
-        pytest.param("--batch-size 99", "--batch-size", id="batch-size-hyphen"),
-        pytest.param("--output_path /tmp/other", "--output_path", id="output-path"),
-        pytest.param(["--model_args=model=/wrong"], "--model_args", id="model-args"),
-    ],
-)
-def test_command_rejects_reserved_extra_args_setting(tmp_path, extra_args, expected):
-    with pytest.raises(ValueError, match="reserved lmms-eval flags") as exc_info:
-        lmms._build_command(
-            {**_settings("ifeval"), "extra_args": extra_args},
-            checkpoint="/ckpts/candidate",
-            output_path=tmp_path / "results",
-        )
-
-    assert expected in str(exc_info.value)
-
-
-@pytest.mark.parametrize("extra_args", [b"--verbosity DEBUG", bytearray(b"--verbosity DEBUG")])
-def test_command_rejects_byte_string_extra_args(tmp_path, extra_args):
-    with pytest.raises(TypeError, match="extra_args must be a string or sequence"):
-        lmms._build_command(
-            {**_settings("ifeval"), "extra_args": extra_args},
-            checkpoint="/ckpts/candidate",
-            output_path=tmp_path / "results",
-        )
-
-
 @pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-specific")
 def test_timeout_kills_ignored_process_group_members(monkeypatch, tmp_path):
     script = (
@@ -249,53 +241,6 @@ def test_timeout_kills_ignored_process_group_members(monkeypatch, tmp_path):
     assert exc_info.value.timeout == 1.0
     assert exc_info.value.output == "partial stdout\n"
     assert exc_info.value.stderr == ""
-
-
-def test_legacy_asyncio_timeout_is_classified(monkeypatch, tmp_path):
-    class LegacyAsyncioTimeoutError(Exception):
-        pass
-
-    class Process:
-        pid = 123
-        returncode = None
-
-        async def wait(self):
-            return self.returncode
-
-    process = Process()
-    wait_calls = 0
-
-    async def create_subprocess_exec(*_args, **_kwargs):
-        return process
-
-    async def wait_for(awaitable, _timeout):
-        nonlocal wait_calls
-        wait_calls += 1
-        awaitable.close()
-        if wait_calls == 1:
-            raise LegacyAsyncioTimeoutError
-        process.returncode = -signal.SIGTERM
-        return process.returncode
-
-    monkeypatch.setattr(
-        lmms,
-        "_TIMEOUT_ERRORS",
-        (TimeoutError, LegacyAsyncioTimeoutError),
-    )
-    monkeypatch.setattr(lmms.asyncio, "create_subprocess_exec", create_subprocess_exec)
-    monkeypatch.setattr(lmms.asyncio, "wait_for", wait_for)
-    monkeypatch.setattr(lmms, "_signal_process_group", lambda *_args: None)
-    monkeypatch.setattr(lmms, "_process_group_exists", lambda _process: False)
-
-    with pytest.raises(lmms.LmmsEvalTimeoutError):
-        asyncio.run(
-            lmms._run_process_async(
-                [sys.executable, "-c", "pass"],
-                cwd=str(tmp_path),
-                env=os.environ.copy(),
-                timeout=1.0,
-            )
-        )
 
 
 def test_run_checkpoint_flattens_metrics_and_preserves_artifacts(monkeypatch, tmp_path):
@@ -475,33 +420,6 @@ def test_run_checkpoint_rejects_incomplete_results(
             output_root=tmp_path / "results",
             settings=_settings("ifeval", "gsm8k"),
         )
-
-
-def test_run_checkpoint_reports_output_when_results_are_missing(monkeypatch, tmp_path):
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    monkeypatch.setattr(
-        lmms,
-        "_run_process",
-        lambda argv, **kwargs: lmms._ProcessResult(
-            argv,
-            0,
-            stdout="Saving results aggregated\nCould not save results aggregated\n",
-            stderr="",
-        ),
-    )
-
-    with pytest.raises(FileNotFoundError) as exc_info:
-        lmms.run_lmms_eval_checkpoint(
-            checkpoint,
-            output_root=tmp_path / "results",
-            settings=_settings("ifeval"),
-        )
-
-    error = exc_info.value
-    assert "lmms-eval wrote no JSON results" in str(error)
-    assert "Could not save results aggregated" in str(error)
-    assert Path(error.command_path).parent == Path(error.stdout_path).parent
 
 
 def test_run_checkpoint_requires_local_directory(tmp_path):

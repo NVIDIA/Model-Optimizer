@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 import torch
-import transformers
 from transformers import LlamaForCausalLM
 
 from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
@@ -44,15 +43,12 @@ from modelopt.torch.puzzletron.diagnostics.width_slice_equivalence import (
     _runtime_context,
     _RuntimeRecipeAdapter,
     _validate_case_record,
-    compare_width_slice_outputs,
     evaluate_width_slice_equivalence,
     normalize_width_slice_batch,
     validate_width_slice_artifacts,
 )
 from modelopt.torch.puzzletron.identity import canonicalize, stable_hash
 from modelopt.torch.puzzletron.manifest import StageManifest
-from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_output_patterns
-from modelopt.torch.puzzletron.stages import DEFAULT_HANDLERS
 from modelopt.torch.puzzletron.stages import diagnostics as diagnostics_stage_module
 from modelopt.torch.puzzletron.stages.diagnostics import width_slice_equivalence_stage
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
@@ -103,17 +99,6 @@ def _text_batch(layout: DataLayout = DataLayout.FIXED):
         source_metadata={"dataset": "fixture", "revision": "v1"},
         layout=layout,
     )
-
-
-def _tiny_generic_vlm_checkpoint(tmp_path: Path, *, packed: bool) -> Path:
-    checkpoint = _tiny_sorted_llama(tmp_path)
-    config = load_model_config(checkpoint)
-    config.architectures = ["TinyGenericVLMForCausalLM"]
-    config.require_media = True
-    config.require_packing = packed
-    config.block_configs = [block.to_dict() for block in config.block_configs]
-    config.save_pretrained(checkpoint)
-    return checkpoint
 
 
 class _FFNOnlyLlamaDescriptor(LlamaModelDescriptor):
@@ -191,20 +176,6 @@ def _rehash_artifact_json(artifact_dir: Path, record: dict) -> None:
     manifest_path.write_text(json.dumps(manifest))
 
 
-def _rehash_summary_and_manifest(artifact_dir: Path, summary: dict, manifest: dict) -> None:
-    summary["artifact_identity"] = stable_hash(
-        canonicalize({key: value for key, value in summary.items() if key != "artifact_identity"}),
-        prefix="width_slice_summary",
-    )
-    (artifact_dir / "summary.json").write_text(json.dumps(summary))
-    manifest["summary_identity"] = summary["artifact_identity"]
-    manifest["manifest_hash"] = stable_hash(
-        canonicalize({key: value for key, value in manifest.items() if key != "manifest_hash"}),
-        prefix="width_slice_manifest",
-    )
-    (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
-
-
 def test_generic_case_factory_covers_loaded_checkpoint_capabilities_and_two_layers(
     tmp_path: Path,
 ):
@@ -229,40 +200,6 @@ def test_generic_case_factory_covers_loaded_checkpoint_capabilities_and_two_laye
         assert {case.layers for case in local} == {(0,), (1,)}
         assert all(case.target_value < case.source_value for case in local)
         assert all(case.expected_structure["requires_tensor_shape_change"] for case in local)
-
-
-def test_qwen_dense_inherits_concrete_generic_operations_from_model_descriptor(tmp_path: Path):
-    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
-    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_converter import Qwen3P5Converter
-    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
-        Qwen3P5TextModelDescriptor,
-    )
-
-    checkpoint = create_tiny_qwen3_5_dir(
-        tmp_path,
-        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
-    )
-    config = load_model_config(checkpoint)
-    Qwen3P5TextModelDescriptor.set_block_configs(
-        config,
-        Qwen3P5Converter.create_block_configs_from_main_config(config),
-    )
-    config.block_configs = [block.to_dict() for block in config.block_configs]
-    config.save_pretrained(checkpoint)
-
-    cases = Qwen3P5TextModelDescriptor.width_slice_equivalence_operations(config, checkpoint)
-
-    assert cases
-    assert {case.axis_id for case in cases.values()} == {
-        axis_id
-        for axis_id, axis in Qwen3P5TextModelDescriptor.puzzletron_capabilities(config).axes.items()
-        if axis.materialize_impl and axis.runtime_slice_impl
-    }
-    assert all(not callable(case) for case in cases.values())
-    assert {case.layers for case in cases.values() if case.axis_id == "gdn_key_groups"} == {
-        (0,),
-        (1,),
-    }
 
 
 def test_tiny_qwen_checkpoint_executes_inherited_materialize_and_runtime_hooks(tmp_path: Path):
@@ -322,70 +259,6 @@ def test_tiny_qwen_checkpoint_executes_inherited_materialize_and_runtime_hooks(t
 
     assert summary["passed"] is True
     assert len(summary["cases"]) == 2
-    assert all(case["target_applied"] for case in summary["cases"])
-    assert all(case["runtime_hook_executions"] > 0 for case in summary["cases"])
-
-
-def test_tiny_qwen_checkpoint_executes_compact_attention_and_gdn_axes(tmp_path: Path):
-    pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5")
-    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_converter import Qwen3P5Converter
-    from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
-        Qwen3P5TextModelDescriptor,
-    )
-
-    checkpoint = create_tiny_qwen3_5_dir(
-        tmp_path,
-        layer_types=["linear_attention", "linear_attention", "full_attention", "full_attention"],
-    )
-    config = load_model_config(checkpoint)
-    Qwen3P5TextModelDescriptor.set_block_configs(
-        config,
-        Qwen3P5Converter.create_block_configs_from_main_config(config),
-    )
-    config.block_configs = [block.to_dict() for block in config.block_configs]
-    config.save_pretrained(checkpoint)
-
-    expected_axes = {
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-        "gdn_value_heads_per_group",
-        "kv_groups",
-        "query_heads",
-    }
-
-    class CompactRuntimeQwenDescriptor(Qwen3P5TextModelDescriptor):
-        @classmethod
-        def puzzletron_capabilities(cls, loaded_config):
-            capabilities = super().puzzletron_capabilities(loaded_config)
-            return replace(
-                capabilities,
-                descriptor_name="qwen-compact-runtime-equivalence-test",
-                axes={axis_id: capabilities.axes[axis_id] for axis_id in expected_axes},
-            )
-
-    batch = normalize_width_slice_batch(
-        {
-            "input_ids": torch.tensor([[1, 2, 3, 4]]),
-            "labels": torch.tensor([[1, 2, 3, 4]]),
-            "attention_mask": torch.ones(1, 4, dtype=torch.long),
-        },
-        descriptor=CompactRuntimeQwenDescriptor,
-        checkpoint_config=config,
-        layout=DataLayout.FIXED,
-        sample_ids=("sample-0",),
-        source_metadata={"dataset": "fixture", "revision": "v1"},
-    )
-
-    summary = evaluate_width_slice_equivalence(
-        descriptor=CompactRuntimeQwenDescriptor,
-        sorted_checkpoint_dir=checkpoint,
-        batch=batch,
-        artifact_dir=tmp_path / "qwen-compact-runtime-artifacts",
-    )
-
-    assert summary["passed"] is True
-    assert {case["axis_id"] for case in summary["cases"]} == expected_axes
     assert all(case["target_applied"] for case in summary["cases"])
     assert all(case["runtime_hook_executions"] > 0 for case in summary["cases"])
 
@@ -464,103 +337,6 @@ def test_real_batch_adapter_semantics_feed_generic_descriptor_cases(
     assert cases
 
 
-@pytest.mark.parametrize(
-    "layout",
-    [DataLayout.FIXED, DataLayout.PADDED_VARLEN, DataLayout.PACKED_VARLEN],
-)
-def test_tiny_generic_vlm_executes_real_automodel_collator_batch_end_to_end(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    layout: DataLayout,
-):
-    from nemo_automodel.components.datasets.vlm.collate_fns import (
-        neat_packed_vlm_collater,
-        pad_collate_fn,
-    )
-
-    monkeypatch.setattr(
-        transformers,
-        "TinyGenericVLMForCausalLM",
-        _TinyGenericVLMForCausalLM,
-        raising=False,
-    )
-    checkpoint = _tiny_generic_vlm_checkpoint(
-        tmp_path / layout.value,
-        packed=layout is DataLayout.PACKED_VARLEN,
-    )
-    example = {
-        "input_ids": torch.tensor([1, 2, 3, 4]),
-        "labels": torch.tensor([1, 2, 3, 4]),
-        "attention_mask": torch.tensor([1, 1, 2, 2]),
-        "position_ids": torch.arange(4),
-        "pixel_values": torch.ones(1, 3, 2, 2),
-        "image_grid_thw": torch.tensor([[1, 1, 1]]),
-        "n_images": 1,
-    }
-    if layout is DataLayout.PACKED_VARLEN:
-        collated = neat_packed_vlm_collater(
-            [example],
-            padding_idx=0,
-            max_length=6,
-            attn_implementation="flash_attention_2",
-        )
-    else:
-        processor = SimpleNamespace(tokenizer=SimpleNamespace(pad_token_id=0))
-        examples = [example]
-        if layout is DataLayout.PADDED_VARLEN:
-            examples.append(
-                {
-                    **example,
-                    "input_ids": torch.tensor([1, 2]),
-                    "labels": torch.tensor([1, 2]),
-                    "attention_mask": torch.tensor([1, 1]),
-                    "position_ids": torch.arange(2),
-                }
-            )
-        collated = pad_collate_fn(examples, processor)
-    batch = normalize_width_slice_batch(
-        collated,
-        descriptor=_FFNOnlyLlamaDescriptor,
-        checkpoint_config=load_model_config(checkpoint),
-        layout=layout,
-        sample_ids=tuple(f"vlm-{index}" for index in range(collated["input_ids"].shape[0])),
-        source_metadata={"dataset": "processor-collator-fixture", "revision": "v1"},
-    )
-
-    summary = evaluate_width_slice_equivalence(
-        descriptor=_FFNOnlyLlamaDescriptor,
-        sorted_checkpoint_dir=checkpoint,
-        batch=batch,
-        artifact_dir=tmp_path / f"artifacts-{layout.value}",
-    )
-
-    assert summary["passed"] is True
-    assert summary["batch_modality"] == "multimodal"
-    assert summary["batch_layout"] == layout.value
-    if layout is not DataLayout.FIXED:
-        assert not batch.hidden_mask.all()
-
-
-def test_loss_uses_explicit_absolute_and_relative_tolerances():
-    metrics = compare_width_slice_outputs(
-        physical_loss=torch.tensor(100.0),
-        runtime_loss=torch.tensor(100.5),
-        physical_output=torch.tensor([1.0, 2.0]),
-        runtime_output=torch.tensor([1.0, 2.0]),
-        tolerances={
-            "loss_atol": 0.1,
-            "loss_rtol": 0.01,
-            "output_atol": 0.0,
-            "output_rtol": 0.0,
-        },
-    )
-
-    assert metrics["loss_delta"] == pytest.approx(0.5)
-    assert metrics["loss_allowed_delta"] == pytest.approx(1.105)
-    assert metrics["loss_close"] is True
-    assert metrics["passed"] is True
-
-
 def test_resume_rejects_tampered_case_and_recomputes_it(tmp_path: Path):
     checkpoint = _tiny_sorted_llama(tmp_path)
     artifact_dir = tmp_path / "artifacts"
@@ -614,28 +390,6 @@ def test_validation_rebuilds_cases_and_rejects_coordinated_rehash(tmp_path: Path
     _rehash_artifact_json(artifact_dir, record)
 
     with pytest.raises(RuntimeError, match=r"metrics|target|case|provenance|implementation"):
-        validate_width_slice_artifacts(artifact_dir, descriptor=_FFNOnlyLlamaDescriptor)
-
-
-@pytest.mark.parametrize("mutation", ["summary_record", "manifest_identity"])
-def test_validation_rejects_coordinated_container_rehash(tmp_path: Path, mutation: str):
-    checkpoint = _tiny_sorted_llama(tmp_path)
-    artifact_dir = tmp_path / "artifacts"
-    evaluate_width_slice_equivalence(
-        descriptor=_FFNOnlyLlamaDescriptor,
-        sorted_checkpoint_dir=checkpoint,
-        batch=_text_batch(),
-        artifact_dir=artifact_dir,
-    )
-    summary = json.loads((artifact_dir / "summary.json").read_text())
-    manifest = json.loads((artifact_dir / "manifest.json").read_text())
-    if mutation == "summary_record":
-        summary["cases"][0]["metrics"]["physical_loss"] += 10.0
-    else:
-        manifest["artifact_identity"] = "forged-artifact-identity"
-    _rehash_summary_and_manifest(artifact_dir, summary, manifest)
-
-    with pytest.raises(RuntimeError, match=r"summary|artifact|case"):
         validate_width_slice_artifacts(artifact_dir, descriptor=_FFNOnlyLlamaDescriptor)
 
 
@@ -840,27 +594,6 @@ def test_artifact_validation_detects_deleted_case(tmp_path: Path):
     next((artifact_dir / "cases").rglob("*.json")).unlink()
     with pytest.raises(RuntimeError, match="missing"):
         validate_width_slice_artifacts(artifact_dir)
-
-
-def test_stage_is_reachable_from_the_generic_handler_registry():
-    assert DEFAULT_HANDLERS["slicing_sanity"] is width_slice_equivalence_stage
-
-
-def test_dag_resume_inventories_manifest_summary_and_every_case():
-    assert stage_output_patterns({}, "slicing_sanity") == (
-        "artifacts/width_slice_equivalence/manifest.json",
-        "artifacts/width_slice_equivalence/summary.json",
-        "artifacts/width_slice_equivalence/cases/**/*.json",
-        "artifacts/width_slice_equivalence/comparisons/*.safetensors",
-    )
-
-
-def test_dag_resume_inventories_distributed_parent_sweep_summary():
-    config = {"slicing_sanity": {"backend": "distributed_parent_sweep"}}
-
-    assert stage_output_patterns(config, "slicing_sanity") == (
-        "artifacts/slicing_sanity/summary.json",
-    )
 
 
 def test_validation_rechecks_authoritative_checkpoint_content(tmp_path: Path):

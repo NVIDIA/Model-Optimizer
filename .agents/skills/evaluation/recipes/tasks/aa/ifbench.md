@@ -6,19 +6,10 @@
 
 ## Params
 
-## YAML Fragment
+## Contract Source
 
-Use this inside the top-level `evaluation.tasks` list:
-
-```yaml
-- name: ns_ifbench
-  container: nvcr.io/nvidia/eval-factory/nemo-skills:26.03
-  nemo_evaluator_config:
-    config:
-      params:
-        extra:
-          num_repeats: 5
-```
+Select `ns_ifbench` through `examples/llm_eval/nel_config.py`. Its container and
+repeat count live only in `examples/llm_eval/task_contracts.yaml`.
 
 ## Score Extraction from mlflow
 

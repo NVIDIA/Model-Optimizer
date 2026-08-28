@@ -1,44 +1,66 @@
-# Qwen 3.5 0.8B MIP smoke
+# Qwen 3.5 0.8B full-lifecycle smoke
 
-The focused Qwen 3.5 0.8B example pins the public checkpoint revision. Its
-default model config searches only the FFN intermediate sizes `[3072, 2048]`.
-The `mip_smoke.yaml` run enables the composite scenario route required by
-named-profile MIP while keeping depth, attention, GDN, and embedding width at
-their teacher values.
+The checked-in Qwen 3.5 0.8B `full_smoke` recipe pins the public checkpoint revision and
+searches only the FFN intermediate sizes `[3072, 2048]`. The checked-in
+`full_smoke.yaml` experiment extends the bounded MIP smoke through evaluation,
+physical materialization, comparative AIPerf measurement, two
+global-distillation steps, final evaluation, and final selection. It keeps the
+two strongest candidates by language-model loss through materialization and
+AIPerf, then sends the candidate with higher measured output-token throughput
+to distillation.
 
-The experimental `advanced.yaml` overlay covers more axes. Its target values
-were derived from the pinned 0.8B geometry rather than selected by a completed
-campaign, and the overlay has not been fully runtime-validated. In particular,
-the `gdn_key_head_dim` reduction from 128 to 96 does not yet have physical
-runtime equivalence evidence. This does not affect the FFN-only smoke route.
+## Run and resume the full lifecycle
 
-## Inspect the plan
+Use the checked-in `full_smoke.yaml` experiment and
+`execution.full_smoke.yaml` execution config as the canonical inputs. The
+checked-in `runner.slurm.yaml` is a portable template, not a runnable site
+configuration. Copy it to a site-specific location once and replace its
+`REPLACE_WITH_` values before launching. Dry-run accepts the portable template
+for plan inspection, but the orchestrator rejects unresolved placeholders
+before submitting work.
 
-The checked-in one-GPU execution plan ends at `mip`. It does not run bypass,
-vLLM serving statistics, evaluation, AIPerf, or distillation. Replace every
-site placeholder in the runner, then inspect the plan without launching work:
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_smoke.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_full_smoke
+```
+
+Inspect the complete one-GPU plan without submitting work:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
-  --experiment examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml \
-  --runner examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml \
-  --execution examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.smoke.yaml \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
   --stage full --dry-run
 ```
 
-## Run the GPU acceptance test
-
-CPU plan tests cover composition and scheduling only. The real-checkpoint test
-is a manual gate and is not part of generic GPU CI. Run it from a reviewed,
-worker-visible checkout on one H100 80GB GPU with model access configured:
+After reviewing the dry-run, launch with the same three inputs and omit only
+`--dry-run`:
 
 ```bash
-python -m pytest -v -s --run-manual \
-  tests/gpu/torch/puzzletron/test_qwen3p5_0p8b_smoke.py
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full
 ```
 
-Treat the route as runtime-validated only when the test passes and confirms a
-successful MIP manifest, the `params-90` active profile, and at least one
-feasible MIP scenario. Retain the source revision, environment or container,
-GPU model, command, and complete pytest log with the result. The test uses
-isolated temporary data and cache roots and does not submit scheduler work.
+Resume by rerunning that exact launch command with the same experiment,
+materialized runner, and execution config:
+
+```bash
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full
+```
+
+The checked-in flow deliberately uses two evaluation samples per candidate,
+four AIPerf requests per serving candidate, and two distillation steps. These
+budgets validate lifecycle correctness, comparative serving selection, and
+resumability; they are not quality or throughput claims. Final acceptance must
+reload the selected checkpoint, verify the cumulative report, and confirm that
+the resume submits no work for completed stages.

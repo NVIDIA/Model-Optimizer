@@ -30,42 +30,42 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     dockerfile = (puzzletron_root / "Dockerfile").read_text()
+    requirements = (puzzletron_root / "requirements.txt").read_text()
 
     assert not (puzzletron_root / "ci/Dockerfile").exists()
     assert not (puzzletron_root / "ci/setup_env.sh").exists()
     base_image = environment["gpu_image"]["base_image"]
     assert re.fullmatch(r"nvidia/cuda:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", base_image)
     assert f"FROM {base_image}" in dockerfile
-    assert '"causal-conv1d==${causal_conv1d_version}"' in dockerfile
-    assert 'checkout --detach "${mamba_ssm_revision}"' in dockerfile
-    assert "sha256sum --check --strict" in dockerfile
-    assert 'apply "/opt/puzzletron/patches/${mamba_ssm_patch}"' in dockerfile
-    grouped_gemm_ref = (
-        '"${grouped_gemm_distribution} @ git+${grouped_gemm_repository}@${grouped_gemm_revision}"'
-    )
-    assert grouped_gemm_ref in dockerfile
-    assert '"flash-linear-attention[cuda]==${linear_attention_version}"' in dockerfile
-    assert 'export TORCH_CUDA_ARCH_LIST="${recorded_cuda_architectures}"' in dockerfile
-    assert 'export TORCH_CUDA_ARCH_LIST="${grouped_gemm_cuda_architectures}"' in dockerfile
     assert "ARG TARGETPLATFORM" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' in dockerfile
-    assert '"decord @ ${decord_wheel_url}#sha256=${decord_wheel_sha256}"' in dockerfile
+    assert (
+        "COPY examples/puzzletron/requirements.txt /opt/puzzletron/requirements.txt" in dockerfile
+    )
+    assert "COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json" in (
+        dockerfile
+    )
+    assert 'python "${PUZZLETRON_VERIFY_SCRIPT}"' in dockerfile
+
+    video_decoder = environment["gpu_image"]["video_decoder"]
+    assert (
+        f'{video_decoder["distribution"]}=={video_decoder["version"]}; platform_system == "Linux"'
+    ) in requirements
+    lmms_source = environment["lmms_eval"]
+    assert (
+        f"-e git+{lmms_source['repository']}@{lmms_source['commit']}#egg=lmms-eval" in requirements
+    )
     assert '"langdetect==${langdetect_version}"' in dockerfile
     assert '"nltk==${nltk_version}"' in dockerfile
     assert "nltk_data/${nltk_data_commit}/packages/tokenizers/${nltk_resource}.zip" in dockerfile
     assert (
         'echo "${nltk_resource_sha256}  ${nltk_archive}" | sha256sum --check --strict' in dockerfile
     )
-    assert "VLLM_USE_PRECOMPILED" not in dockerfile
-    assert "ENV TORCH_CUDA_ARCH_LIST=" not in dockerfile
-    assert "ENV FORCE_CUDA=" not in dockerfile
 
-    revision_arg = dockerfile.index("ARG MODELOPT_REVISION")
-    assert revision_arg > dockerfile.index(grouped_gemm_ref)
-    assert revision_arg < dockerfile.index("COPY modelopt /opt/puzzletron/src/modelopt/modelopt")
-    assert "COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py" in (
-        dockerfile
-    )
+
+def test_mamba_compatibility_patch_matches_the_manifest(project_root_path):
+    puzzletron_root = project_root_path / "examples/puzzletron"
+    environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
 
     mamba_source = environment["runtime_image"]["mamba_ssm"]
     patch_bytes = (puzzletron_root / "patches" / mamba_source["compatibility_patch"]).read_bytes()

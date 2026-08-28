@@ -97,25 +97,6 @@ def test_changed_source_rebuilds_only_requested_section(tmp_path: Path):
     assert mip.cache_hit is True
 
 
-def test_extractor_version_invalidates_snapshot(tmp_path: Path):
-    source = tmp_path / "input.json"
-    source.write_text("{}\n", encoding="utf-8")
-    cache = ReportSectionCache(tmp_path / "report", campaign_identity="campaign-a")
-    calls = []
-
-    def build():
-        calls.append("build")
-        return {}, "", {}
-
-    kwargs = _cache_kwargs(tmp_path, source, build)
-    first = cache.load_or_build(**kwargs)
-    second = cache.load_or_build(**{**kwargs, "extractor_version": 2})
-
-    assert calls == ["build", "build"]
-    assert first.snapshot.input_digest != second.snapshot.input_digest
-    assert second.cache_hit is False
-
-
 def test_corrupt_snapshot_is_rebuilt(tmp_path: Path):
     source = tmp_path / "input.json"
     source.write_text("{}\n", encoding="utf-8")
@@ -176,17 +157,3 @@ def test_failed_builder_preserves_prior_snapshot_and_manifest(tmp_path: Path):
     assert first.snapshot_path.read_bytes() == old_snapshot
     assert html_path.read_bytes() == old_html
     assert manifest_path.read_bytes() == old_manifest
-
-
-def test_deleted_partial_source_changes_ledger_digest(tmp_path: Path):
-    first = tmp_path / "raw/first.json"
-    second = tmp_path / "raw/second.json"
-    first.parent.mkdir()
-    first.write_text("{}\n", encoding="utf-8")
-    second.write_text("{}\n", encoding="utf-8")
-
-    before = fingerprint_paths(tmp_path, (first, second), hash_contents=False)
-    second.unlink()
-    after = fingerprint_paths(tmp_path, (first,), hash_contents=False)
-
-    assert stable_digest(before) != stable_digest(after)

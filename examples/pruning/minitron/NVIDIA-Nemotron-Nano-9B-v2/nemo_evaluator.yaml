@@ -6,19 +6,13 @@
 # - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 #
 # Usage:
-#   pip install "nemo-evaluator-launcher[all]==0.1.82"
+#   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>
 #   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 #   export HF_HOME=<path_to_huggingface_cache>
 #   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
-#
-#   # Set additional unused but required environment variables:
-#   export API_KEY=xxxxxx
-#   export INFERENCE_API_KEY=xxxxxx
-#   export OPENAI_CLIENT_ID=xxxxxx
-#   export OPENAI_CLIENT_SECRET=xxxxxx
 #
 #   nemo-evaluator-launcher run --config nemo_evaluator.yaml
 #
@@ -63,7 +57,7 @@ deployment:
   extra_args: "--trust-remote-code --no-enable-prefix-caching --mamba_ssm_cache_dtype float32 --model-loader-extra-config '{\"enable_multithread_load\"\
     : true, \"num_threads\": 96}' --kv-cache-dtype fp8 "
   env_vars:
-    VLLM_ATTENTION_BACKEND: FLASH_ATTN
+    VLLM_ATTENTION_BACKEND: lit:FLASH_ATTN
   endpoints:
     chat: /v1/chat/completions
     completions: /v1/completions
@@ -101,19 +95,15 @@ evaluation:
           # Auto-derived from deployment.checkpoint_path below
           tokenizer: ${deployment.checkpoint_path}
   env_vars:
-    HF_TOKEN: HF_TOKEN
-    HF_HOME: HF_HOME
-    VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
-    API_KEY: API_KEY
-    INFERENCE_API_KEY: INFERENCE_API_KEY
-    OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
-    OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: host:HF_HOME
+    VLLM_CACHE_ROOT: host:VLLM_CACHE_ROOT
 
   tasks:
     # 1. MMLU Pro
     - name: ns_mmlu_pro
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -124,7 +114,7 @@ evaluation:
     # 2. GPQA Diamond
     - name: ns_gpqa
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -135,7 +125,7 @@ evaluation:
     # 3. LiveCodeBench
     - name: ns_livecodebench
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -146,7 +136,7 @@ evaluation:
     # 4. AIME 2025
     - name: ns_aime2025
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -156,8 +146,8 @@ evaluation:
     # 5. MATH500 (Requires JUDGE_API_KEY)
     # - name: AA_math_test_500
     #   env_vars:
-    #     HF_TOKEN: HF_TOKEN
-    #     JUDGE_API_KEY: JUDGE_API_KEY
+    #     HF_TOKEN: host:HF_TOKEN
+    #     JUDGE_API_KEY: host:JUDGE_API_KEY
     #   nemo_evaluator_config:
     #     config:
     #       params:
@@ -167,7 +157,7 @@ evaluation:
     # 6. IFEval
     - name: ns_ifeval
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       # nemo_evaluator_config:
       #   config:
       #     params:
@@ -176,7 +166,7 @@ evaluation:
     # 7. SciCode
     - name: ns_scicode
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:

@@ -1,13 +1,11 @@
 # Example: AA-aligned eval template (single-task starting point)
 #
-# Minimal config to validate a quantized model end-to-end against one AA-style
-# benchmark. The agent extends this template by copying additional task
-# fragments from recipes/tasks/aa/*.md into the `evaluation.tasks` list — task
-# references define benchmark requirements and YAML fragments, this file
-# defines the deployment + operational conventions.
+# Deployment base for validating a quantized model with maintained NEL task
+# contracts. Add tasks with examples/llm_eval/nel_config.py; this file owns only
+# deployment and operational settings.
 #
-# Includes (default): gpqa_diamond_aa_v3 (simple-evals harness, n_samples=16).
-# Add more AA tasks per recipes/tasks/aa/ and the AA suite rule in SKILL.md.
+# The base contains no tasks. The compiler defaults to benchmarks missing from
+# Puzzletron's pinned lmms-eval revision; use repeated --task options otherwise.
 #
 # Usage:
 #   nel run --config recipes/examples/example_eval.yaml \
@@ -34,8 +32,10 @@
 # To eval an un-staged HF model, first download it to the cluster (e.g.
 # `huggingface_hub.snapshot_download`) and point `checkpoint_path` at it.
 #
-# Run a single task:
-#   nel run --config ... -t gpqa_diamond_aa_v3
+# Compile and run a single task:
+#   python examples/llm_eval/nel_config.py --base-config .agents/skills/evaluation/recipes/examples/example_eval.yaml \
+#     --task gpqa_diamond_aa_v3 --output /path/to/gpqa.yaml
+#   nel run --config /path/to/gpqa.yaml -t gpqa_diamond_aa_v3
 #
 # Canary (2 samples): use this before a full run to validate logs and tune
 # parallelism.
@@ -152,15 +152,7 @@ evaluation:
               # DeepSeek V4 only: reasoning-effort axis (high|max). "max" needs
               # --max-model-len >= 393216. Uncomment for DeepSeek V4.
               # reasoning_effort: max
-  tasks:
-  # Reasoning (chat endpoint, 8 repeats, short)
-    - name: gpqa_diamond_aa_v3
-      container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
-      nemo_evaluator_config:
-        config:
-          params:
-            extra:
-              n_samples: 16
+  tasks: []  # Populated only by examples/llm_eval/nel_config.py.
 
 export:
   # Use LITERAL values below — NOT ${deployment.*} / ${evaluation.*} cross-refs.

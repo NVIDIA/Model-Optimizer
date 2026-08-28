@@ -141,7 +141,10 @@ def unit(session, torch_ver, tf_ver):
     )
 
 
-@nox.session(python=PUZZLETRON_V2_CI_ENVIRONMENT["python"])
+@nox.session(
+    python=PUZZLETRON_V2_CI_ENVIRONMENT["python"],
+    venv_backend="virtualenv",
+)
 def puzzletron_v2(session):
     """Run Puzzletron v2 CPU-eligible tests in its pinned Python runtime."""
     session.install(
@@ -158,7 +161,10 @@ def puzzletron_v2(session):
         ".[hf,puzzletron,dev-test]",
         PUZZLETRON_V2_AUTOMODEL,
     )
-    session.run("uv", "pip", "check")
+    # This environment is resolved and installed by pip.  Use pip's dependency
+    # check so older, pip-compatible platform tags (notably decord's manylinux
+    # wheel) are not rejected by uv's stricter wheel-tag validation.
+    session.run("python", "-m", "pip", "check")
     _verify_puzzletron_v2_environment(session)
     session.run(
         "python",

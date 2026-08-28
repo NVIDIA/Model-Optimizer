@@ -26,7 +26,7 @@ COPY examples/puzzletron/patches /opt/puzzletron/patches
 COPY pyproject.toml LICENSE_HEADER /opt/modelopt-dependencies/
 
 RUN test "${TARGETPLATFORM}" = "linux/amd64" || \
-        (echo "Puzzletron requires linux/amd64 because decord 0.6.0 has no Linux ARM wheel" >&2; exit 1) && \
+        (echo "Puzzletron requires linux/amd64 because its CUDA stack and video decoder are not validated for Linux ARM" >&2; exit 1) && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake curl git ninja-build \
@@ -56,10 +56,6 @@ RUN automodel_repository="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["nemo_automodel"]["commit"])')" && \
     aiperf_version="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["aiperf"])')" && \
-    decord_wheel_sha256="$(python -c \
-        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["decord_wheel_sha256"])')" && \
-    decord_wheel_url="$(python -c \
-        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["decord_wheel_url"])')" && \
     langdetect_version="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["langdetect"])')" && \
     nltk_version="$(python -c \
@@ -74,7 +70,6 @@ RUN automodel_repository="$(python -c \
         -r "${PUZZLETRON_REQUIREMENTS}" \
         "nemo-automodel @ git+${automodel_repository}@${automodel_revision}" \
         "aiperf==${aiperf_version}" \
-        "decord @ ${decord_wheel_url}#sha256=${decord_wheel_sha256}" \
         "langdetect==${langdetect_version}" \
         "nltk==${nltk_version}" \
         "nox==${nox_version}" && \

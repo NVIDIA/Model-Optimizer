@@ -20,7 +20,8 @@ docker run --rm modelopt-puzzletron-worker:amd64-local \
     --environment /opt/puzzletron/ci_environment.json
 ```
 
-The image is Linux amd64-only because `decord 0.6.0` has no Linux ARM wheel.
+The image is Linux amd64-only because the current CUDA extension set and Linux
+`eva-decord 0.6.1` dependency do not have a validated ARM build path.
 The verifier checks package versions and sources, CUDA compatibility, worker
 imports, LMMS-Eval task configs, and the NLTK resources used by teacher
 evaluation. The image build therefore fails when the recorded worker contract

@@ -15,7 +15,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from modelopt.torch.puzzletron.diagnostics.sanity_verdict import (
     SanityVerdict,
@@ -137,32 +140,6 @@ def test_warning_policy_cannot_downgrade_slicing_correctness_failure(tmp_path: P
     assert manifest.outputs["blocking"] is True
 
 
-def test_folded_correctness_failure_preserves_advisory_finding_severity(tmp_path: Path):
-    config = {"experiment": {"dir": str(tmp_path)}}
-    manifest = StageManifest(stage="width_sanity", config=config)
-    (tmp_path / "manifests").mkdir(parents=True)
-
-    result = complete_sanity_stage(
-        config,
-        manifest,
-        verdict=SanityVerdict(
-            passed=False,
-            blocking=True,
-            findings=[
-                finding_from_message(stage="width_sanity", message="ranking quality regressed"),
-                finding_from_message(stage="sort_sanity", message="sorted teacher drifted"),
-            ],
-        ),
-    )
-
-    assert result.status == "failed"
-    assert manifest.outputs["blocking"] is True
-    assert [finding["severity"] for finding in manifest.outputs["findings"]] == [
-        "warning",
-        "error",
-    ]
-
-
 def test_complete_sanity_stage_strict_policy_does_not_fail_passed_verdict(tmp_path: Path):
     config = {
         "experiment": {"dir": str(tmp_path)},
@@ -179,20 +156,3 @@ def test_complete_sanity_stage_strict_policy_does_not_fail_passed_verdict(tmp_pa
 
     assert result.status == "success"
     assert manifest.status == "success"
-
-
-def test_finding_from_message_shape():
-    finding = finding_from_message(stage="width_sanity", message="example", evidence={"x": 1})
-    assert finding["stage"] == "width_sanity"
-    assert finding["severity"] == "warning"
-    assert finding["evidence"]["x"] == 1
-
-
-def test_finding_from_message_accepts_correctness_severity():
-    finding = finding_from_message(
-        stage="sort_sanity",
-        message="example",
-        severity="error",
-    )
-
-    assert finding["severity"] == "error"

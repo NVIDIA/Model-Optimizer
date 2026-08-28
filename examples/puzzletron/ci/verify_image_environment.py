@@ -97,16 +97,11 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
     for key in ("grouped_gemm_cuda_arch_list", "torch_cuda_arch_list"):
         if not re.fullmatch(r"[0-9.]+(?:;[0-9.]+)*", runtime_image.get(key, "")):
             raise ValueError(f"Puzzletron runtime image must declare explicit {key}")
-    decord_version = gpu_image.get("decord", "")
-    decord_wheel_url = gpu_image.get("decord_wheel_url", "")
-    if not re.fullmatch(
-        rf"https://files\.pythonhosted\.org/.*/decord-{re.escape(decord_version)}-"
-        r"py3-none-manylinux2010_x86_64\.whl",
-        decord_wheel_url,
-    ):
-        raise ValueError("Puzzletron worker image must pin the Linux x86_64 decord wheel")
-    if not re.fullmatch(r"[0-9a-f]{64}", gpu_image.get("decord_wheel_sha256", "")):
-        raise ValueError("Puzzletron worker image must pin the decord wheel checksum")
+    video_decoder = gpu_image.get("video_decoder") or {}
+    if video_decoder.get("distribution") != "eva-decord":
+        raise ValueError("Puzzletron worker image must use the Linux eva-decord distribution")
+    if video_decoder.get("version") != "0.6.1":
+        raise ValueError("Puzzletron worker image must pin eva-decord 0.6.1")
     if gpu_image.get("nltk_resources") != ["punkt", "punkt_tab"]:
         raise ValueError("Puzzletron worker image must declare the required NLTK resources")
     if not _REVISION_PATTERN.fullmatch(str(gpu_image.get("nltk_data_commit", ""))):
@@ -137,7 +132,9 @@ def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
         "lmms-eval": environment["lmms_eval"]["base_version"],
         "nemo-automodel": environment["nemo_automodel"]["base_version"],
         "aiperf": environment["gpu_image"]["aiperf"],
-        "decord": environment["gpu_image"]["decord"],
+        environment["gpu_image"]["video_decoder"]["distribution"]: environment["gpu_image"][
+            "video_decoder"
+        ]["version"],
         "langdetect": environment["gpu_image"]["langdetect"],
         "nltk": environment["gpu_image"]["nltk"],
         "nox": environment["gpu_image"]["nox"],
