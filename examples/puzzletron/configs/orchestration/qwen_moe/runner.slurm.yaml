@@ -11,18 +11,14 @@ runner:
     max_nodes: 20
     time_limit: "4:00:00"
   execution_contract:
-    # Replace with the ModelOpt checkout path visible on every worker and in the container.
-    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
-    # Replace with the virtual environment path to source on every worker.
-    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
-    # Replace with an image or path accepted by the site's srun container plugin.
-    container: REPLACE_WITH_SLURM_CONTAINER_IMAGE
+    # These paths are provided by the canonical Puzzletron worker image.
+    repository: /opt/puzzletron/src/modelopt
+    venv: /venv
+    # Replace with a registry reference or materialized copy of that image.
+    container: REPLACE_WITH_REVIEWED_PUZZLETRON_IMAGE
     # Replace with the host and container paths required by the campaign.
     container_mounts: "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
-    # Replace these values with the site's setup script and source checkout paths.
-    prerun_commands:
-      - source REPLACE_WITH_SITE_SETUP_SCRIPT
-      - export VLLM_ROOT=REPLACE_WITH_WORKER_VISIBLE_VLLM_CHECKOUT
-      - export AUTOMODEL_ROOT=REPLACE_WITH_WORKER_VISIBLE_AUTOMODEL_CHECKOUT
+    # Optional site setup, for example cache or authentication variables.
+    prerun_commands: []
     # Optional shell commands run when the stage payload exits.
     postrun_commands: []

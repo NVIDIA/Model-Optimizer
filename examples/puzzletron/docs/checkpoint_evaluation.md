@@ -5,13 +5,9 @@ checkpoint without creating or running a Puzzletron campaign.
 
 ## Quick start
 
-Install the Puzzletron worker requirements:
-
-```bash
-python -m pip install -r examples/puzzletron/requirements.txt
-```
-
-Then run the default smoke:
+Run the command in the canonical Puzzletron worker image described in the
+[environment setup guide](environment_setup.md#worker-environment). Mount the
+checkpoint and output paths into the container, then run the default smoke:
 
 ```bash
 python examples/puzzletron/evaluate_lmms_checkpoint.py \

@@ -52,7 +52,7 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
 
     if environment.get("schema_version") != 1:
         raise ValueError("Puzzletron image environment schema_version must be 1")
-    if environment.get("scope") != "puzzletron_v2_ci":
+    if environment.get("scope") != "puzzletron_v2_worker_ci":
         raise ValueError("Puzzletron image environment has an unexpected scope")
 
     base_image = environment.get("gpu_image", {}).get("base_image", "")
@@ -94,6 +94,36 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
     for key in ("grouped_gemm_cuda_arch_list", "torch_cuda_arch_list"):
         if not re.fullmatch(r"[0-9.]+(?:;[0-9.]+)*", runtime_image.get(key, "")):
             raise ValueError(f"Puzzletron runtime image must declare explicit {key}")
+    gpu_image = environment.get("gpu_image") or {}
+    decord_version = gpu_image.get("decord", "")
+    decord_wheel_url = gpu_image.get("decord_wheel_url", "")
+    if not re.fullmatch(
+        rf"https://files\.pythonhosted\.org/.*/decord-{re.escape(decord_version)}-"
+        r"py3-none-manylinux2010_x86_64\.whl",
+        decord_wheel_url,
+    ):
+        raise ValueError("Puzzletron worker image must pin the Linux x86_64 decord wheel")
+    if not re.fullmatch(r"[0-9a-f]{64}", gpu_image.get("decord_wheel_sha256", "")):
+        raise ValueError("Puzzletron worker image must pin the decord wheel checksum")
+    if gpu_image.get("nltk_resources") != ["punkt", "punkt_tab"]:
+        raise ValueError("Puzzletron worker image must declare the required NLTK resources")
+    if not _REVISION_PATTERN.fullmatch(str(gpu_image.get("nltk_data_commit", ""))):
+        raise ValueError("Puzzletron worker image must pin the NLTK data revision")
+    nltk_resource_sha256 = gpu_image.get("nltk_resource_sha256")
+    if not isinstance(nltk_resource_sha256, dict) or set(nltk_resource_sha256) != set(
+        gpu_image["nltk_resources"]
+    ):
+        raise ValueError("Puzzletron worker image must checksum every NLTK resource")
+    if not all(_SHA256_PATTERN.fullmatch(str(value)) for value in nltk_resource_sha256.values()):
+        raise ValueError("Puzzletron NLTK resource checksums must be SHA-256 values")
+    task_configs = environment.get("lmms_eval", {}).get("task_configs")
+    if not isinstance(task_configs, list) or not task_configs:
+        raise ValueError("Puzzletron worker image must declare LMMS-Eval task configs")
+    for task_config in task_configs:
+        if not re.fullmatch(r"tasks/[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.yaml", str(task_config)):
+            raise ValueError(
+                "Puzzletron LMMS-Eval task configs must use safe package-relative paths"
+            )
 
 
 def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
@@ -105,6 +135,9 @@ def _expected_versions(environment: dict[str, Any]) -> dict[str, str]:
         "lmms-eval": environment["lmms_eval"]["base_version"],
         "nemo-automodel": environment["nemo_automodel"]["base_version"],
         "aiperf": environment["gpu_image"]["aiperf"],
+        "decord": environment["gpu_image"]["decord"],
+        "langdetect": environment["gpu_image"]["langdetect"],
+        "nltk": environment["gpu_image"]["nltk"],
         "nox": environment["gpu_image"]["nox"],
         "causal-conv1d": environment["runtime_image"]["causal_conv1d"],
         "flash-linear-attention": environment["runtime_image"]["flash_linear_attention"],
@@ -165,8 +198,34 @@ def verify_installed_environment(
             f"Pinned Puzzletron CUDA mismatch: actual={torch_cuda!r}, expected={expected_cuda!r}"
         )
 
-    for module in ("causal_conv1d", "fla", "grouped_gemm", "mamba_ssm", "tilelang", "vllm"):
-        module_importer(module)
+    imported = {
+        module: module_importer(module)
+        for module in (
+            "aiperf",
+            "causal_conv1d",
+            "decord",
+            "fla",
+            "grouped_gemm",
+            "langdetect",
+            "lmms_eval",
+            "mamba_ssm",
+            "modelopt",
+            "nemo_automodel",
+            "nltk",
+            "puzzletron_orchestrator",
+            "puzzletron_setup",
+            "tilelang",
+            "torch",
+            "transformers",
+            "vllm",
+        )
+    }
+    lmms_roots = tuple(Path(path) for path in imported["lmms_eval"].__path__)
+    for task_config in environment["lmms_eval"]["task_configs"]:
+        if not any((root / task_config).is_file() for root in lmms_roots):
+            raise RuntimeError(f"Pinned LMMS-Eval task config is missing: {task_config}")
+    for resource in environment["gpu_image"]["nltk_resources"]:
+        imported["nltk"].data.find(f"tokenizers/{resource}")
 
 
 def _parse_args() -> argparse.Namespace:

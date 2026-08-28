@@ -3,10 +3,12 @@ FROM nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG TARGETARCH
 
 ENV VIRTUAL_ENV=/venv
 ENV PATH=/venv/bin/:$PATH
 ENV PIP_NO_CACHE_DIR=1
+ENV NLTK_DATA=/opt/puzzletron/nltk_data
 ENV PUZZLETRON_CI_ENVIRONMENT=/opt/puzzletron/ci_environment.json
 ENV PUZZLETRON_REQUIREMENTS=/opt/puzzletron/requirements.txt
 ENV PUZZLETRON_VERIFY_SCRIPT=/opt/puzzletron/verify_image_environment.py
@@ -23,10 +25,12 @@ COPY examples/puzzletron/ci/verify_image_environment.py /opt/puzzletron/verify_i
 COPY examples/puzzletron/patches /opt/puzzletron/patches
 COPY pyproject.toml LICENSE_HEADER /opt/modelopt-dependencies/
 
-RUN apt-get update && \
+RUN test "${TARGETARCH}" = "amd64" || \
+        (echo "Puzzletron requires linux/amd64 because decord 0.6.0 has no Linux ARM wheel" >&2; exit 1) && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential ca-certificates cmake git ninja-build \
-        python3 python3-dev python3-pip python3-venv && \
+        build-essential ca-certificates cmake curl git ninja-build \
+        python3 python3-dev python3-pip python3-venv unzip && \
     rm -rf /var/lib/apt/lists/* && \
     python3 -m venv "${VIRTUAL_ENV}" && \
     python -m pip install --upgrade \
@@ -52,6 +56,16 @@ RUN automodel_repository="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["nemo_automodel"]["commit"])')" && \
     aiperf_version="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["aiperf"])')" && \
+    decord_wheel_sha256="$(python -c \
+        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["decord_wheel_sha256"])')" && \
+    decord_wheel_url="$(python -c \
+        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["decord_wheel_url"])')" && \
+    langdetect_version="$(python -c \
+        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["langdetect"])')" && \
+    nltk_version="$(python -c \
+        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["nltk"])')" && \
+    nltk_data_commit="$(python -c \
+        'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["nltk_data_commit"])')" && \
     nox_version="$(python -c \
         'import json, os; print(json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]["nox"])')" && \
     transformers_version="$(python -c \
@@ -60,7 +74,21 @@ RUN automodel_repository="$(python -c \
         -r "${PUZZLETRON_REQUIREMENTS}" \
         "nemo-automodel @ git+${automodel_repository}@${automodel_revision}" \
         "aiperf==${aiperf_version}" \
+        "decord @ ${decord_wheel_url}#sha256=${decord_wheel_sha256}" \
+        "langdetect==${langdetect_version}" \
+        "nltk==${nltk_version}" \
         "nox==${nox_version}" && \
+    mkdir -p "${NLTK_DATA}/tokenizers" && \
+    while read -r nltk_resource nltk_resource_sha256; do \
+        nltk_archive="/tmp/${nltk_resource}.zip" && \
+        curl --fail --location --silent --show-error \
+            --output "${nltk_archive}" \
+            "https://raw.githubusercontent.com/nltk/nltk_data/${nltk_data_commit}/packages/tokenizers/${nltk_resource}.zip" && \
+        echo "${nltk_resource_sha256}  ${nltk_archive}" | sha256sum --check --strict && \
+        unzip -q "${nltk_archive}" -d "${NLTK_DATA}/tokenizers" && \
+        rm "${nltk_archive}"; \
+    done < <(python -c \
+        'import json, os; data=json.load(open(os.environ["PUZZLETRON_CI_ENVIRONMENT"]))["gpu_image"]; print("\n".join("{} {}".format(name, data["nltk_resource_sha256"][name]) for name in data["nltk_resources"]))') && \
     python -m pip install "transformers==${transformers_version}" && \
     python -m pip check
 
@@ -142,8 +170,7 @@ RUN python -m pip install --no-build-isolation --no-deps -e \
         "/opt/puzzletron/src/modelopt[hf,puzzletron,dev-test]" && \
     python -m pip check && \
     python "${PUZZLETRON_VERIFY_SCRIPT}" \
-        --environment "${PUZZLETRON_CI_ENVIRONMENT}" && \
-    python -c "import aiperf, causal_conv1d, fla, grouped_gemm, lmms_eval, mamba_ssm, modelopt, nemo_automodel, puzzletron_orchestrator, puzzletron_setup, tilelang, torch, transformers, vllm"
+        --environment "${PUZZLETRON_CI_ENVIRONMENT}"
 
 LABEL org.opencontainers.image.source="https://github.com/NVIDIA/Model-Optimizer" \
     org.opencontainers.image.revision="${MODELOPT_REVISION}" \

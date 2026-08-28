@@ -45,9 +45,9 @@ QWEN3P6_35B_A3B_MODEL_CONFIG = (
 def test_slurm_runner_example_is_portable() -> None:
     path = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/runner.slurm.example.yaml"
     slurm = load_runner_config(path)
-    assert slurm.contract.repository == WORKER_REPOSITORY_PLACEHOLDER
-    assert slurm.contract.venv == WORKER_VENV_PLACEHOLDER
-    assert slurm.contract.container is None
+    assert slurm.contract.repository == "/opt/puzzletron/src/modelopt"
+    assert slurm.contract.venv == "/venv"
+    assert slurm.contract.container.startswith("REPLACE_WITH_")
     assert slurm.contract.container_mounts is None
     assert not slurm.contract.prerun_commands
     assert slurm.slurm is not None
@@ -82,13 +82,9 @@ def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
         runner.contract.container,
         runner.contract.container_mounts,
     )
-    assert contract_values[:2] == (
-        WORKER_REPOSITORY_PLACEHOLDER,
-        WORKER_VENV_PLACEHOLDER,
-    )
+    assert contract_values[:2] == ("/opt/puzzletron/src/modelopt", "/venv")
     assert all(value and value.startswith("REPLACE_WITH_") for value in contract_values[2:])
-    assert runner.contract.prerun_commands
-    assert all("REPLACE_WITH_" in command for command in runner.contract.prerun_commands)
+    assert not runner.contract.prerun_commands
     assert runner.slurm is not None
     assert runner.slurm.account.startswith("REPLACE_WITH_")
     assert runner.slurm.partition.startswith("REPLACE_WITH_")
@@ -105,7 +101,9 @@ def test_checked_in_slurm_runners_only_emit_generic_partition(
 
 
 @pytest.mark.parametrize("relative_path", NAMED_SLURM_RUNNER_CONFIGS)
-def test_named_slurm_runners_keep_logs_below_the_campaign_root(relative_path: str) -> None:
+def test_named_slurm_runners_keep_logs_below_the_campaign_root(
+    relative_path: str,
+) -> None:
     payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
 
     assert "log_dir" not in payload["runner"]["slurm"]

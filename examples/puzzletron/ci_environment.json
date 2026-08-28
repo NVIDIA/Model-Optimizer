@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "puzzletron_v2_ci",
+  "scope": "puzzletron_v2_worker_ci",
   "python": "3.12",
   "torch": "2.11.0",
   "torchvision": "0.26.0",
@@ -9,12 +9,24 @@
     "base_image": "nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909bdad891fab300ec5700fb4f4656463b2f51980f",
     "torch_cuda": "12.9",
     "aiperf": "0.12.0",
+    "decord": "0.6.0",
+    "decord_wheel_sha256": "51997f20be8958e23b7c4061ba45d0efcd86bffd5fe81c695d0befee0d442976",
+    "decord_wheel_url": "https://files.pythonhosted.org/packages/11/79/936af42edf90a7bd4e41a6cac89c913d4b47fa48a26b042d5129a9242ee3/decord-0.6.0-py3-none-manylinux2010_x86_64.whl",
+    "langdetect": "1.0.9",
+    "nltk": "3.10.3",
+    "nltk_data_commit": "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a",
+    "nltk_resource_sha256": {
+      "punkt": "51c3078994aeaf650bfc8e028be4fb42b4a0d177d41c012b6a983979653660ec",
+      "punkt_tab": "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106"
+    },
+    "nltk_resources": ["punkt", "punkt_tab"],
     "nox": "2026.8.17"
   },
   "lmms_eval": {
     "base_version": "0.7.0",
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
-    "commit": "15c32bfec165df13c269ddd3cda03b2ed9137825"
+    "commit": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "task_configs": ["tasks/gsm8k/gsm8k.yaml", "tasks/ifeval/ifeval.yaml"]
   },
   "nemo_automodel": {
     "base_version": "0.5.0",

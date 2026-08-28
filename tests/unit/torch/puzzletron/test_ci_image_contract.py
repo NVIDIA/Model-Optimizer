@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the initial repository-owned Puzzletron image recipe."""
+"""Tests for the canonical repository-owned Puzzletron worker image."""
 
 import hashlib
 import json
@@ -47,6 +47,15 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert '"flash-linear-attention[cuda]==${linear_attention_version}"' in dockerfile
     assert 'export TORCH_CUDA_ARCH_LIST="${recorded_cuda_architectures}"' in dockerfile
     assert 'export TORCH_CUDA_ARCH_LIST="${grouped_gemm_cuda_architectures}"' in dockerfile
+    assert "ARG TARGETARCH" in dockerfile
+    assert 'test "${TARGETARCH}" = "amd64"' in dockerfile
+    assert '"decord @ ${decord_wheel_url}#sha256=${decord_wheel_sha256}"' in dockerfile
+    assert '"langdetect==${langdetect_version}"' in dockerfile
+    assert '"nltk==${nltk_version}"' in dockerfile
+    assert "nltk_data/${nltk_data_commit}/packages/tokenizers/${nltk_resource}.zip" in dockerfile
+    assert (
+        'echo "${nltk_resource_sha256}  ${nltk_archive}" | sha256sum --check --strict' in dockerfile
+    )
     assert "VLLM_USE_PRECOMPILED" not in dockerfile
     assert "ENV TORCH_CUDA_ARCH_LIST=" not in dockerfile
     assert "ENV FORCE_CUDA=" not in dockerfile
@@ -111,6 +120,24 @@ def test_image_excludes_checked_in_reports(project_root_path):
     dockerignore = (project_root_path / ".dockerignore").read_text().splitlines()
 
     assert "examples/puzzletron/reports" in dockerignore
+
+
+def test_worker_documentation_has_one_install_recipe(project_root_path):
+    puzzletron_root = project_root_path / "examples/puzzletron"
+    environment_guide = (puzzletron_root / "docs/environment_setup.md").read_text()
+    worker_section = environment_guide.split("## Worker environment", maxsplit=1)[1]
+
+    assert "../Dockerfile" in worker_section
+    assert "../ci/README.md" in worker_section
+    for manual_install_command in (
+        "apt-get install",
+        "git clone",
+        "python -m pip install",
+    ):
+        assert manual_install_command not in worker_section
+
+    checkpoint_guide = (puzzletron_root / "docs/checkpoint_evaluation.md").read_text()
+    assert "pip install -r examples/puzzletron/requirements.txt" not in checkpoint_guide
 
 
 def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):

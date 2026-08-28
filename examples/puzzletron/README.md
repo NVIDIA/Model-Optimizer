@@ -36,13 +36,11 @@ conversion, training, evaluation, and benchmarking run in the worker
 environment or container selected during setup. Prepare the
 [worker environment](docs/environment_setup.md) before launching a campaign.
 
-### Initial runtime image recipe
+### Worker image
 
-The repository includes an initial pinned Puzzletron CUDA image recipe. It
-validates the recorded environment contract but is not yet a complete worker
-environment or CI publication pipeline. See the
-[image build and validation guide](ci/README.md) for commands, pinned inputs,
-and current limitations.
+The repository includes the pinned Dockerfile used for Puzzletron workers and
+CI jobs that need the worker stack. Build and validation commands are in the
+[image guide](ci/README.md).
 
 ### 2. Generate a campaign
 
