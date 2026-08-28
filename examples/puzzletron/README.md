@@ -168,8 +168,8 @@ python -m examples.puzzletron.evaluation.text --backend nemo \
 ```
 
 The NeMo route prepares configuration but does not launch an evaluation. See
-the [text evaluation guide](evaluation/text/README.md) for benchmark routing,
-available alternatives, and result-labeling requirements.
+[checkpoint evaluation](docs/checkpoint_evaluation.md) for benchmark routing,
+available alternatives, full-run guidance, results, and troubleshooting.
 
 ## Configure a campaign
 
