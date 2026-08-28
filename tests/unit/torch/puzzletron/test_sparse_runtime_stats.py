@@ -248,23 +248,23 @@ def test_block_runtime_deduplicates_base_scaffold_measurement_pair(monkeypatch):
                 return "attention_scaffold_per_pp_stage"
             return "none"
 
-    benchmarked_layouts = []
+    captured = {}
 
-    def _benchmark_spec(_runtime_config, block_layout, *, gpu_id, cache_dir):
-        assert gpu_id == "0"
-        assert cache_dir is None
-        benchmarked_layouts.append(block_layout)
-        base_count = sum(block == base_block for block in block_layout)
-        scaffolded_count = sum(block == scaffolded_block for block in block_layout)
-        return RuntimeMeasurement(
-            total_ms=10.0 + 5.0 * base_count + 2.0 * scaffolded_count,
-            prefill_ms=3.0 + 1.0 * base_count + 0.5 * scaffolded_count,
-        )
+    def run_benchmarks(specs, _gpu_ids, _cache_dir, measurement_pairs):
+        captured["specs"] = specs
+        captured["measurement_pairs"] = measurement_pairs
+        results = {}
+        for key, (_runtime, block_layout) in specs.items():
+            base_count = sum(block == base_block for block in block_layout)
+            scaffolded_count = sum(block == scaffolded_block for block in block_layout)
+            results[key] = RuntimeMeasurement(
+                total_ms=10.0 + 5.0 * base_count + 2.0 * scaffolded_count,
+                prefill_ms=3.0 + 1.0 * base_count + 0.5 * scaffolded_count,
+            )
+        return results
 
-    monkeypatch.setattr(runtime_stats_module, "_benchmark_spec", _benchmark_spec)
+    monkeypatch.setattr(runtime_stats_module, "_run_benchmarks", run_benchmarks)
     monkeypatch.setattr(runtime_stats_module, "_resolve_gpu_ids", lambda _size: ["0"])
-    monkeypatch.setenv("PUZZLETRON_RUNTIME_SHARD_COUNT", "1")
-    monkeypatch.setenv("PUZZLETRON_RUNTIME_SHARD_INDEX", "0")
 
     runtime, non_block = calc_runtime_for_blocks(
         {base_block, scaffolded_block},
@@ -281,7 +281,10 @@ def test_block_runtime_deduplicates_base_scaffold_measurement_pair(monkeypatch):
         batch_size=1,
     )
 
-    assert len(benchmarked_layouts) == 4
+    assert len(captured["specs"]) == 4
+    assert len(captured["measurement_pairs"]) == 3
+    assert len(set(captured["measurement_pairs"])) == 2
+    assert {key for pair in captured["measurement_pairs"] for key in pair} == set(captured["specs"])
     assert runtime[base_block] == RuntimeMeasurement(total_ms=5.0, prefill_ms=1.0)
     assert runtime[scaffolded_block] == RuntimeMeasurement(total_ms=2.0, prefill_ms=0.5)
     assert non_block == RuntimeMeasurement(total_ms=10.0, prefill_ms=3.0)

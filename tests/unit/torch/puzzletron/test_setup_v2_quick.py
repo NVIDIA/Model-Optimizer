@@ -135,6 +135,80 @@ def test_cli_rejects_invalid_automation_argument_combinations(argv):
     assert error.value.code == 2
 
 
+def test_cli_incomplete_noninteractive_defaults_fail_fast(tmp_path, capsys):
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text("schema_version: 1\n")
+
+    assert (
+        cli_module.main(
+            [
+                "--non-interactive",
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(tmp_path / "campaign"),
+            ]
+        )
+        == 2
+    )
+    assert "Setup stopped: Enter a model path or Hugging Face URL." in capsys.readouterr().out
+
+
+def test_cli_invalid_noninteractive_vllm_topology_fails_fast(tmp_path, monkeypatch, capsys):
+    campaign = tmp_path / "campaign"
+    model_path = tmp_path / "model"
+    dataset = tmp_path / "dataset"
+    model_path.mkdir()
+    dataset.mkdir()
+    inspected = _qwen_inspected_model(model_path)
+    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
+    monkeypatch.setattr(
+        wizard_module,
+        "infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="text", evidence="local fixture"),
+    )
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model": {"source": str(model_path)},
+                "data": {"source": str(dataset), "modality": "text"},
+                "infrastructure": {
+                    "execution_contract": {
+                        "repository": "/worker/modelopt",
+                        "venv": "/worker/venv",
+                    }
+                },
+                "vllm": {
+                    "enabled": True,
+                    "topology": {"tensor_parallel_size": 3},
+                },
+            },
+            sort_keys=False,
+        )
+    )
+
+    assert (
+        cli_module.main(
+            [
+                "--non-interactive",
+                "--defaults",
+                str(defaults),
+                "--campaign-dir",
+                str(campaign),
+                "--profile",
+                "smoke",
+            ]
+        )
+        == 2
+    )
+    output = capsys.readouterr().out
+    assert "Setup stopped: Non-interactive vLLM topology is incompatible" in output
+    assert "TP=3 is incompatible" in output
+    assert "valid choices [1, 2, 4, 8]" in output
+
+
 # Resume and navigation behavior
 
 

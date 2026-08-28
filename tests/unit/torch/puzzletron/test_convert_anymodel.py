@@ -51,6 +51,17 @@ def _patch_single_rank_convert(monkeypatch):
     monkeypatch.setattr(convert_stage_module, "_distributed_if_needed", nullcontext)
 
 
+def test_nonmaster_raises_broadcast_conversion_failure(monkeypatch):
+    monkeypatch.setattr(
+        convert_stage_module.dist,
+        "broadcast",
+        lambda value, src: "ConversionError: failed conversion",
+    )
+
+    with pytest.raises(RuntimeError, match="rank 0 failed during teacher conversion"):
+        convert_stage_module._raise_on_master_failure(None, action="teacher conversion")
+
+
 def test_master_broadcasts_failure_before_reraising(monkeypatch):
     events = []
 

@@ -76,6 +76,16 @@ def test_auto_detect_block_configs_present(tmp_path):
     assert auto_detect_block_configs(tmp_path) == expected
 
 
+def test_native_converted_teacher_does_not_require_heterogeneous_adapter(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"architectures": ["LlamaForCausalLM"], "block_configs": [{}]})
+    )
+
+    assert not _native_checkpoint_requires_heterogeneous_adapter(
+        tmp_path, block_configs_override=None
+    )
+
+
 def test_native_realized_or_explicit_override_requires_heterogeneous_adapter(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps({"architectures": ["AnyModel"], "base_architecture": "NativeModel"})
