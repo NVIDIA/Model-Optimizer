@@ -6,7 +6,7 @@
 #
 # Unlike the other streaming examples, the drafter architecture is NOT overridden here: it
 # all lives in the recipe this points at,
-#   modelopt_recipes/huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/
+#   modelopt_recipes/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/
 #     speculative_decoding/dspark_warmstart.yaml
 # because every one of those fields is transcribed from the released checkpoint's own
 # config.json and must match it exactly. Keep drafter shape/behaviour changes in the recipe
@@ -78,7 +78,7 @@ pipeline:
     args:
       # Drafter architecture, warm-start source, block size, mask token, SWA window,
       # causal attention and attention sink all come from this recipe — see header.
-      - --config modules/Model-Optimizer/modelopt_recipes/huggingface/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/speculative_decoding/dspark_warmstart.yaml
+      - --config modules/Model-Optimizer/modelopt_recipes/models/nvidia/Nemotron-3.5-Lightning-30B-A3B-BF16/speculative_decoding/dspark_warmstart.yaml
       - model.model_name_or_path=<<global_vars.hf_model>>
       - dflash.dflash_init_checkpoint=<<global_vars.draft_model>>
       - data.data_path=/scratchspace/data/train.jsonl
