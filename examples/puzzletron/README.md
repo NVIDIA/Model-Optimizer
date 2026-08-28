@@ -38,8 +38,8 @@ environment or container selected during setup. Prepare the
 
 ### Worker image
 
-The repository includes the pinned Dockerfile used for Puzzletron workers and
-CI jobs that need the worker stack. Build and validation commands are in the
+The repository includes the versioned Dockerfile used for Puzzletron workers
+and CI jobs that need the worker stack. Build and validation commands are in the
 [image guide](ci/README.md).
 
 ### 2. Generate a campaign

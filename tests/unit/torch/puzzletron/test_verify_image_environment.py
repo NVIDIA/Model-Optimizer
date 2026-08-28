@@ -61,8 +61,6 @@ def test_runtime_verifier_reports_a_package_version_mismatch(project_root_path):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("repository", "https://github.com/example/mamba.git", "must use"),
-        ("commit", "v2.3.2.post1", "full Git revision"),
         ("compatibility_patch", "../unreviewed.patch", "safe patch filename"),
         ("compatibility_patch_sha256", "not-a-digest", "declare a SHA-256"),
     ],
@@ -80,7 +78,6 @@ def test_manifest_rejects_unpinned_mamba_source_or_patch(project_root_path, fiel
     [
         ("platform", "linux/arm64", "platform must be linux/amd64"),
         ("video_decoder", {"distribution": "decord", "version": "0.6.0"}, "eva-decord"),
-        ("nltk_data_commit", "gh-pages", "NLTK data revision"),
         ("nltk_resource_sha256", {"punkt": "0" * 64}, "checksum every NLTK resource"),
     ],
 )

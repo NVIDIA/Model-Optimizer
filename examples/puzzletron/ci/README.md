@@ -2,8 +2,8 @@
 
 The root [`Dockerfile`](../Dockerfile) is the canonical Puzzletron worker and
 GPU CI environment. [`ci_environment.json`](../ci_environment.json) records
-its immutable VCS inputs, package versions, CUDA architecture targets, binary
-and NLTK resource checksums, and the reviewed Mamba compatibility patch.
+its immutable VCS inputs, selected direct package versions, CUDA architecture
+targets, NLTK resource checksums, and the reviewed Mamba compatibility patch.
 
 Build and verify the image from the repository root:
 
@@ -30,6 +30,10 @@ repository inputs. When an image is published, retain the commit tag and record
 the registry digest; consumers should prefer the digest when they need an
 immutable reference.
 
+The tag identifies the recipe revision, not a bit-for-bit reproducible rebuild:
+transitive Python dependencies are still resolved when the image is built. Use
+the recorded registry digest to reuse one exact built image.
+
 The image is Linux amd64-only because the current CUDA extension set and Linux
 `eva-decord 0.6.1` dependency do not have a validated ARM build path.
 The verifier checks package versions and sources, CUDA compatibility, worker
@@ -45,6 +49,7 @@ separate steps; they do not require another package installation recipe.
 
 The `Puzzletron worker image` GitHub workflow builds and smoke-tests the image
 for relevant pull-request updates, changes merged into `feature/puzzletron_v2`,
-and manual dispatches. It records the runner-local image ID and source revision
-but does not publish the image to a registry. The smoke test verifies CUDA
-access; teacher evaluation remains a separate integration test.
+and later changes to the worker recipe. It records the runner-local image ID
+and source revision but does not publish the image to a registry. The smoke
+test verifies CUDA access; teacher evaluation remains a separate integration
+test.

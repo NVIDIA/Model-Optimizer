@@ -38,24 +38,15 @@ installs ModelOpt, the pinned vLLM and AutoModel sources, AIPerf, LMMS-Eval,
 the required CUDA extensions, and the teacher-evaluation resources. Do not
 maintain a second set of worker installation commands outside the Dockerfile.
 
-Build the Linux amd64 image from the repository root:
-
-```bash
-test -z "$(git status --porcelain)"
-revision="$(git rev-parse HEAD)"
-image="modelopt-puzzletron:amd64-sha-$(git rev-parse --short=12 HEAD)"
-docker build \
-  --platform linux/amd64 \
-  --file examples/puzzletron/Dockerfile \
-  --build-arg MODELOPT_REVISION="${revision}" \
-  --tag "${image}" \
-  .
-```
+Build the Linux amd64 image from the repository root by following the
+[image build and validation guide](../ci/README.md). That guide provides the
+canonical command and the revision-specific image tag.
 
 The amd64 platform is required because the current CUDA extension set and
 Linux `eva-decord 0.6.1` dependency do not have a validated ARM build path.
 
-Run the image locally with GPU access:
+Using the `image` variable from that guide, run the image locally with GPU
+access:
 
 ```bash
 docker run --gpus all --ipc=host --rm -it \
@@ -73,6 +64,5 @@ Add site-specific data, model, cache, and result mounts through
 format changes how the image is delivered, not how its Python environment is
 created.
 
-See the [image build and validation guide](../ci/README.md) for the standalone
-verification command. CI jobs that need the Puzzletron worker stack should use
-this image and its `/venv`; they should not reinstall a separate environment.
+CI jobs that need the Puzzletron worker stack should use this image and its
+`/venv`; they should not reinstall a separate environment.

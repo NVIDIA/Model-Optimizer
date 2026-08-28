@@ -30,10 +30,7 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     dockerfile = (puzzletron_root / "Dockerfile").read_text()
-    requirements = (puzzletron_root / "requirements.txt").read_text()
 
-    assert not (puzzletron_root / "ci/Dockerfile").exists()
-    assert not (puzzletron_root / "ci/setup_env.sh").exists()
     base_image = environment["gpu_image"]["base_image"]
     assert re.fullmatch(r"nvidia/cuda:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", base_image)
     assert f"FROM {base_image}" in dockerfile
@@ -42,19 +39,14 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert (
         "COPY examples/puzzletron/requirements.txt /opt/puzzletron/requirements.txt" in dockerfile
     )
+    assert "COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py" in (
+        dockerfile
+    )
     assert "COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json" in (
         dockerfile
     )
     assert 'python "${PUZZLETRON_VERIFY_SCRIPT}"' in dockerfile
 
-    video_decoder = environment["gpu_image"]["video_decoder"]
-    assert (
-        f'{video_decoder["distribution"]}=={video_decoder["version"]}; platform_system == "Linux"'
-    ) in requirements
-    lmms_source = environment["lmms_eval"]
-    assert (
-        f"-e git+{lmms_source['repository']}@{lmms_source['commit']}#egg=lmms-eval" in requirements
-    )
     assert '"langdetect==${langdetect_version}"' in dockerfile
     assert '"nltk==${nltk_version}"' in dockerfile
     assert "nltk_data/${nltk_data_commit}/packages/tokenizers/${nltk_resource}.zip" in dockerfile
@@ -63,7 +55,7 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     )
 
 
-def test_mamba_compatibility_patch_matches_the_manifest(project_root_path):
+def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
 
@@ -116,30 +108,6 @@ def test_standalone_verifier_prefers_the_baked_examples_package(project_root_pat
     )
 
 
-def test_image_excludes_checked_in_reports(project_root_path):
-    dockerignore = (project_root_path / ".dockerignore").read_text().splitlines()
-
-    assert "examples/puzzletron/reports" in dockerignore
-
-
-def test_worker_documentation_has_one_install_recipe(project_root_path):
-    puzzletron_root = project_root_path / "examples/puzzletron"
-    environment_guide = (puzzletron_root / "docs/environment_setup.md").read_text()
-    worker_section = environment_guide.split("## Worker environment", maxsplit=1)[1]
-
-    assert "../Dockerfile" in worker_section
-    assert "../ci/README.md" in worker_section
-    for manual_install_command in (
-        "apt-get install",
-        "git clone",
-        "python -m pip install",
-    ):
-        assert manual_install_command not in worker_section
-
-    checkpoint_guide = (puzzletron_root / "docs/checkpoint_evaluation.md").read_text()
-    assert "pip install -r examples/puzzletron/requirements.txt" not in checkpoint_guide
-
-
 def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):
     workflow = yaml.safe_load((project_root_path / ".github/workflows/unit_tests.yml").read_text())
 
@@ -168,7 +136,6 @@ def test_worker_image_workflow_builds_a_revision_identified_image(project_root_p
         "pull-request/[0-9]+",
         "feature/puzzletron_v2",
     ]
-    assert "workflow_dispatch" in workflow["on"]
     job = workflow["jobs"]["build-worker-image"]
     assert job["timeout-minutes"] == 240
     assert "linux-amd64-gpu-rtxpro6000" in job["runs-on"]

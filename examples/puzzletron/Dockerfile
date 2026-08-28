@@ -20,6 +20,7 @@ ENV PYTHONUNBUFFERED=1
 
 COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json
 COPY examples/puzzletron/requirements.txt /opt/puzzletron/requirements.txt
+COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py
 COPY examples/puzzletron/ci_environment.py /opt/puzzletron/src/modelopt/examples/puzzletron/ci_environment.py
 COPY examples/puzzletron/ci/verify_image_environment.py /opt/puzzletron/verify_image_environment.py
 COPY examples/puzzletron/patches /opt/puzzletron/patches
@@ -158,7 +159,6 @@ COPY modelopt /opt/puzzletron/src/modelopt/modelopt
 COPY modelopt_recipes /opt/puzzletron/src/modelopt/modelopt_recipes
 COPY puzzletron_orchestrator /opt/puzzletron/src/modelopt/puzzletron_orchestrator
 COPY puzzletron_setup /opt/puzzletron/src/modelopt/puzzletron_setup
-COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py
 COPY examples/puzzletron /opt/puzzletron/src/modelopt/examples/puzzletron
 
 RUN python -m pip install --no-build-isolation --no-deps -e \
