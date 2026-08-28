@@ -215,39 +215,71 @@ def install_pp_checkpoint_state_dict_support() -> None:
 
 
 def install_unsharded_checkpoint_state_dict_support() -> None:
-    """Fall back to the ordinary state dict for a one-rank dynamic model.
+    """Fall back to named tensors for a one-rank dynamic model checkpoint.
 
     PyTorch DCP can reject an otherwise valid unsharded DynamicModule after its
-    model-state verification removes every entry.  A one-rank checkpoint needs
-    no distributed state-dict transformation, so use the module's regular
-    state dict for this specific failure while preserving every other error.
+    model-state verification removes every entry. The module's regular state
+    dict is empty for the same reason, so collect registered parameters and
+    persistent buffers directly. A one-rank checkpoint needs no distributed
+    state-dict transformation.
     """
     from nemo_automodel.components.checkpoint import stateful_wrappers
 
-    original = stateful_wrappers.get_model_state_dict
-    if getattr(original, "_puzzletron_unsharded_fallback", False):
-        return
+    def is_empty_dcp_state(error: RuntimeError) -> bool:
+        return "model state_dict is required to save or load, but model state_dict is empty" in str(
+            error
+        )
 
-    def get_model_state_dict(model, *args, **kwargs):
-        try:
-            return original(model, *args, **kwargs)
-        except RuntimeError as error:
-            if (
-                "model state_dict is required to save or load, but model state_dict is empty"
-                not in str(error)
-            ):
-                raise
-            with ExitStack() as stack:
-                for module in model.modules():
-                    if isinstance(module, DynamicModule):
-                        stack.enter_context(module.reset_dynamic_attributes())
-                state_dict = model.state_dict()
-            if not state_dict:
-                raise
-            return state_dict
+    def dynamic_attributes_reset(model):
+        stack = ExitStack()
+        for module in model.modules():
+            if isinstance(module, DynamicModule):
+                stack.enter_context(module.reset_dynamic_attributes())
+        return stack
 
-    setattr(get_model_state_dict, "_puzzletron_unsharded_fallback", True)
-    stateful_wrappers.get_model_state_dict = get_model_state_dict
+    original_get = stateful_wrappers.get_model_state_dict
+    if not getattr(original_get, "_puzzletron_unsharded_fallback", False):
+
+        def get_model_state_dict(model, *args, **kwargs):
+            try:
+                return original_get(model, *args, **kwargs)
+            except RuntimeError as error:
+                if not is_empty_dcp_state(error):
+                    raise
+                with dynamic_attributes_reset(model):
+                    state_dict = {
+                        name: parameter.detach()
+                        for name, parameter in model.named_parameters(remove_duplicate=False)
+                    }
+                    for name, buffer in model.named_buffers(remove_duplicate=False):
+                        module_name, _, buffer_name = name.rpartition(".")
+                        owner = model.get_submodule(module_name)
+                        if buffer_name not in owner._non_persistent_buffers_set:
+                            state_dict[name] = buffer.detach()
+                if not state_dict:
+                    raise
+                return state_dict
+
+        setattr(get_model_state_dict, "_puzzletron_unsharded_fallback", True)
+        stateful_wrappers.get_model_state_dict = get_model_state_dict
+
+    original_set = stateful_wrappers.set_model_state_dict
+    if not getattr(original_set, "_puzzletron_unsharded_fallback", False):
+
+        def set_model_state_dict(model, state_dict, *args, options=None, **kwargs):
+            try:
+                return original_set(model, state_dict, *args, options=options, **kwargs)
+            except RuntimeError as error:
+                if not is_empty_dcp_state(error):
+                    raise
+                with dynamic_attributes_reset(model):
+                    return model.load_state_dict(
+                        state_dict,
+                        strict=True if options is None else bool(options.strict),
+                    )
+
+        setattr(set_model_state_dict, "_puzzletron_unsharded_fallback", True)
+        stateful_wrappers.set_model_state_dict = set_model_state_dict
 
 
 def _trace_global_kd_phase(phase: str) -> None:

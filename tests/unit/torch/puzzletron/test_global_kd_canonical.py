@@ -96,13 +96,11 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
         raise RuntimeError(failure[0])
 
     monkeypatch.setattr(stateful_wrappers, "get_model_state_dict", failed_dcp_state)
+    monkeypatch.setattr(stateful_wrappers, "set_model_state_dict", failed_dcp_state)
     global_kd_recipe.install_unsharded_checkpoint_state_dict_support()
 
-    class DynamicModel:
+    class DynamicModel(torch.nn.Linear):
         reset = False
-
-        def modules(self):
-            return [self]
 
         @contextmanager
         def reset_dynamic_attributes(self):
@@ -113,13 +111,16 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
                 self.reset = False
 
         def state_dict(self):
-            return {"weight": torch.ones(1)} if self.reset else {}
+            return {}
 
     monkeypatch.setattr(global_kd_recipe, "DynamicModule", DynamicModel)
-    model = DynamicModel()
+    model = DynamicModel(2, 3)
     state_dict = stateful_wrappers.get_model_state_dict(model)
 
-    assert set(state_dict) == {"weight"}
+    assert set(state_dict) == {"bias", "weight"}
+    replacement = {name: torch.ones_like(value) for name, value in state_dict.items()}
+    stateful_wrappers.set_model_state_dict(model, replacement)
+    assert all(torch.equal(value, replacement[name]) for name, value in model.named_parameters())
     failure[0] = "unrelated checkpoint failure"
     with pytest.raises(RuntimeError, match="unrelated checkpoint failure"):
         stateful_wrappers.get_model_state_dict(model)
