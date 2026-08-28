@@ -7,23 +7,17 @@
 #
 # This config is set up for a BF16 checkpoint. For an FP8 checkpoint, also apply the deployment changes below:
 # - FP8: add `--kv-cache-dtype fp8` to `deployment.extra_args`, and set in `deployment.env_vars`:
-#          VLLM_USE_FLASHINFER_MOE_FP8: "1"
-#          VLLM_FLASHINFER_MOE_BACKEND: throughput
+#          VLLM_USE_FLASHINFER_MOE_FP8: lit:1
+#          VLLM_FLASHINFER_MOE_BACKEND: lit:throughput
 #
 # Usage:
-#   pip install "nemo-evaluator-launcher[all]==0.1.82"
+#   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>
 #   export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 #   export HF_HOME=<path_to_huggingface_cache>
 #   export VLLM_CACHE_ROOT=<path_to_vllm_cache>
-#
-#   # Set additional unused but required environment variables:
-#   export API_KEY=xxxxxx
-#   export INFERENCE_API_KEY=xxxxxx
-#   export OPENAI_CLIENT_ID=xxxxxx
-#   export OPENAI_CLIENT_SECRET=xxxxxx
 #
 #   nemo-evaluator-launcher run --config nemo_evaluator.yaml
 #
@@ -71,8 +65,8 @@ deployment:
   # env_vars is for the BF16 checkpoint (no MoE backend flags needed). For an FP8
   # checkpoint, replace `{}` with the block below (see notes at top of file):
   #   FP8:
-  #     VLLM_USE_FLASHINFER_MOE_FP8: "1"
-  #     VLLM_FLASHINFER_MOE_BACKEND: throughput
+  #     VLLM_USE_FLASHINFER_MOE_FP8: lit:1
+  #     VLLM_FLASHINFER_MOE_BACKEND: lit:throughput
   env_vars: {}
   endpoints:
     chat: /v1/chat/completions
@@ -111,19 +105,15 @@ evaluation:
           # Auto-derived from deployment.checkpoint_path below
           tokenizer: ${deployment.checkpoint_path}
   env_vars:
-    HF_TOKEN: HF_TOKEN
-    HF_HOME: HF_HOME
-    VLLM_CACHE_ROOT: VLLM_CACHE_ROOT
-    API_KEY: API_KEY
-    INFERENCE_API_KEY: INFERENCE_API_KEY
-    OPENAI_CLIENT_ID: OPENAI_CLIENT_ID
-    OPENAI_CLIENT_SECRET: OPENAI_CLIENT_SECRET
+    HF_TOKEN: host:HF_TOKEN
+    HF_HOME: host:HF_HOME
+    VLLM_CACHE_ROOT: host:VLLM_CACHE_ROOT
 
   tasks:
     # 1. MMLU Pro
     - name: ns_mmlu_pro
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -134,7 +124,7 @@ evaluation:
     # 2. GPQA Diamond
     - name: ns_gpqa
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -145,7 +135,7 @@ evaluation:
     # 3. LiveCodeBench
     - name: ns_livecodebench
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -156,7 +146,7 @@ evaluation:
     # 4. AIME 2025
     - name: ns_aime2025
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -166,7 +156,7 @@ evaluation:
     # 5. IFBench
     - name: ns_ifbench
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:
@@ -176,7 +166,7 @@ evaluation:
     # 6. SciCode
     - name: ns_scicode
       env_vars:
-        HF_TOKEN: HF_TOKEN
+        HF_TOKEN: host:HF_TOKEN
       nemo_evaluator_config:
         config:
           params:

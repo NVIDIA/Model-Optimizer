@@ -5,12 +5,12 @@
 
 End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) demonstrating how ModelOpt techniques stack: Minitron structured pruning to 7B → Megatron-Bridge knowledge distillation to recover accuracy → FP8 quantization → vLLM deployment and throughput benchmarking. This document covers:
 
-1. **[Data Preparation](#1-data-preparation)** — tokenizing the training blend for distillation
-2. **[Pruning](#2-pruning)** — Minitron structured pruning from 9B to 7B
-3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation (up to 80B tokens)
-4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
-5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
-6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
+1. **[Data Preparation](#1-data-preparation)**: tokenizing the training blend for distillation
+2. **[Pruning](#2-pruning)**: Minitron structured pruning from 9B to 7B
+3. **[Distillation](#3-distillation)**: recovering accuracy via Megatron-Bridge knowledge distillation (up to 80B tokens)
+4. **[Evaluation](#4-evaluation)**: benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
+5. **[Quantization](#5-quantization)**: FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/llm_ptq/hf_ptq.py` script
+6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)**: throughput comparison of BF16 vs FP8 on a single H100
 
 ## Results
 
@@ -30,9 +30,9 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 **Key observations:**
 
 - **All benchmarks recover dramatically within the first checkpoint (2.5B tokens).** The pruned-only model is essentially non-functional, but a single distillation run recovers most capabilities.
-- **Math 500, IFEval, MMLU, and SciCode plateau quickly** — essentially saturated after 2.5B–20B tokens, with minimal gains over the remaining training.
+- **Math 500, IFEval, MMLU, and SciCode plateau quickly**: essentially saturated after 2.5B–20B tokens, with minimal gains over the remaining training.
 - **AIME, MMLU Pro, and GPQA continue improving** throughout the full run and benefit meaningfully from longer training.
-- **The 7B model at 80B tokens closes most of the gap to the official 9B**, and actually exceeds it on GPQA and IFEval. The table below compares the 7B→9B gap against the 9B→12B gap — both are ~25% compression — showing that the second pruning round recovers more efficiently:
+- **The 7B model at 80B tokens closes most of the gap to the official 9B**, and actually exceeds it on GPQA and IFEval. The table below compares the 7B→9B gap against the 9B→12B gap. Both are ~25% compression, showing that the second pruning round recovers more efficiently:
 
 | Benchmark | 7B (80B tokens) vs 9B | 9B (official) vs 12B |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ End-to-end optimization of [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/N
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 30, Coding 20, Science 15, IF 5)** blend (see [Data Blend](#data-blend) below). Blend ablations are in [ABLATIONS.md](ABLATIONS.md).
 
 > [!NOTE]
-> Exact numbers may vary depending on deployment and evaluation setup. All models above — including the official 9B and 12B — were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
+> Exact numbers may vary depending on deployment and evaluation setup. All models above (including the official 9B and 12B) were evaluated once with the same [evaluation setup](#4-evaluation) for fair comparison. These numbers may differ from those reported on the official [Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2) and [Nemotron-Nano-12B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-12B-v2) HuggingFace model cards.
 
 > [!NOTE]
 > The official Nemotron-Nano-9B-v2 model was itself produced by pruning Nemotron-Nano-12B-v2 using Minitron. See [arxiv:2508.14444](https://arxiv.org/abs/2508.14444) for details on the exact steps used there.
@@ -114,7 +114,7 @@ The optimal blend is 30% pretraining and 70% post-training data. Exact proportio
 - **30% pretraining data** closes the MMLU gap that arises from training exclusively on reasoning-heavy post-training data. The General split (20%) is upweighted specifically to recover general knowledge recall.
 - **Math (30%)** is the largest post-training category because AIME and MMLU Pro respond strongly to more math reasoning tokens. Two `Nemotron-Math-v2` splits are used to avoid repetition at longer token budgets.
 - **Science (15%)** uses `Nemotron-Post-Training-Dataset-v1 / stem` as the primary source for volume and GPQA stability, with small allocations to `Nemotron-Science-v1` MCQ/RQA subsets for format alignment with GPQA's multiple-choice structure.
-- **Instruction following (5%)** saturates quickly — IFEval reaches 60+% within 2.5B tokens — so a small allocation is sufficient.
+- **Instruction following (5%)** saturates quickly; IFEval reaches 60+% within 2.5B tokens, so a small allocation is sufficient.
 
 This blend intentionally omits capabilities not targeted in this experiment (e.g. long context and multilingual benchmarks). Depending on what benchmarks matter for your use case, you can substitute or add datasets from the [Nemotron Post-Training v3 collection](https://huggingface.co/collections/nvidia/nemotron-post-training-v3), for example:
 
@@ -151,8 +151,8 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_
 
 Non-default arguments:
 
-- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
-- `--seq_length 8192` (default: 4096) — dataset has longer sequences
+- `--hparams_to_skip num_attention_heads` (default: none): attention heads pruning is harder to recover, hence skipped
+- `--seq_length 8192` (default: 4096): dataset has longer sequences
 
 </details>
 
@@ -234,9 +234,9 @@ Non-default arguments:
 
 - `--seq_length 8192` (default: 4096)
 - `--mbs 4` (default: 1) - use as large as possible to maximize throughput
-- `--train_iters 16000` (train upto ~100B tokens — can stop earlier and take intermediate checkpoints for smaller runs)
+- `--train_iters 16000` (train upto ~100B tokens, can stop earlier and take intermediate checkpoints for smaller runs)
 - `--lr_warmup_iters 100` (default: 50)
-- `--eval_interval 400` (default: 100) — less frequent eval to save compute
+- `--eval_interval 400` (default: 100): less frequent eval to save compute
 - All other arguments use defaults.
 
 </details>
@@ -258,37 +258,31 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
 </details>
 
 > [!NOTE]
-> This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
+> This is pure SFT-style distillation; no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
 
 ---
 
 ### 4. Evaluation
 
-The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
+The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation; it submits a vLLM serving job and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
 <details>
 <summary>Evaluation launch steps (click to expand)</summary>
 
 Before running, update the following fields in the `nemo_evaluator.yaml` file or overwrite them in the command line with `-o <option>=<value>`:
 
-- `execution.hostname` — your Slurm login node hostname
-- `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
+- `execution.hostname`: your Slurm login node hostname
+- `execution.account`: your Slurm account
+- `deployment.checkpoint_path`: Hugging Face checkpoint path (original, pruned, or quantized)
 
 ```bash
-pip install "nemo-evaluator-launcher[all]==0.1.82"
+pip install "nemo-evaluator-launcher[all]==0.2.6"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 export HF_HOME=<path_to_huggingface_cache>
 export VLLM_CACHE_ROOT=<path_to_vllm_cache>
-
-# Set additional unused but required environment variables:
-export API_KEY=xxxxxx
-export INFERENCE_API_KEY=xxxxxx
-export OPENAI_CLIENT_ID=xxxxxx
-export OPENAI_CLIENT_SECRET=xxxxxx
 
 # Run the evaluation
 # To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)

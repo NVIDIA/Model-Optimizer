@@ -144,33 +144,16 @@ selection, materialization, and report lineage remain connected. Configure
 that route with the
 [post-MIP pipeline guide](docs/post_mip_pipeline.md#downstream-evaluation).
 
-To evaluate a compatible local text checkpoint without creating a campaign,
-run the default one-GPU smoke in the Puzzletron worker environment:
+For standalone evaluation in the Puzzletron worker environment, choose the
+route that matches the checkpoint and task:
 
-```bash
-python examples/puzzletron/evaluate_lmms_checkpoint.py \
-  --checkpoint /path/to/checkpoint \
-  --output-dir /path/to/results/checkpoint-smoke
-```
+| Route | Default smoke | Guide |
+| --- | --- | --- |
+| Text | `python -m examples.puzzletron.evaluation.text` runs eight IFEval and GSM8K samples with `lmms-eval`; the same command can prepare selected NeMo Evaluator task contracts. | [Text checkpoint evaluation](docs/checkpoint_evaluation.md) |
+| Qwen 3.5 0.8B VLM | `python -m examples.puzzletron.evaluation.vlm.run` runs the pinned RealWorldQA and MMMU short suite. | [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) |
 
-The smoke evaluates eight samples each from IFEval and GSM8K. See
-[text checkpoint evaluation](docs/checkpoint_evaluation.md) for task selection,
-full evaluation, model detection, runtime options, results, and troubleshooting.
-
-For a Qwen 3.5 0.8B vision-language checkpoint, use the separate pinned image
-and video benchmark workflow:
-
-```bash
-python -m examples.puzzletron.evaluation.vlm.run \
-  --checkpoint /path/to/checkpoint \
-  --output-dir /path/to/results/vlm-smoke \
-  --hf-home /path/to/huggingface-cache \
-  --suite short
-```
-
-See [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) for the
-available smoke, quick, and full suites, pinned data preparation, evaluator
-compatibility, video requirements, and result interpretation.
+The guides own installation, complete commands, suite or task selection,
+runtime constraints, results, and troubleshooting for their respective routes.
 
 ## Configure a campaign
 

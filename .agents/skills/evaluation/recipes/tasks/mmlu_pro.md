@@ -6,14 +6,11 @@
 
 ## Params
 
-## YAML Fragment
+## Contract Source
 
-Use this inside the top-level `evaluation.tasks` list:
-
-```yaml
-- name: mmlu_pro_aa_v3
-  container: nvcr.io/nvidia/eval-factory/simple-evals:26.03
-```
+Select `mmlu_pro_aa_v3` through `examples/llm_eval/nel_config.py`. Its container
+lives only in
+`examples/llm_eval/task_contracts.yaml`.
 
 ## Score Extraction
 

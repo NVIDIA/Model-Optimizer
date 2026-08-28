@@ -2,12 +2,12 @@
 
 End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) demonstrating how ModelOpt techniques stack: Minitron structured pruning → Megatron-Bridge knowledge distillation to recover accuracy → evaluation benchmarking → FP8 quantization → vLLM deployment and throughput benchmarking. This document covers:
 
-1. **[Data Preparation](#1-data-preparation)** — tokenizing the training blend for distillation
-2. **[Pruning](#2-pruning)** — Minitron structured pruning
-3. **[Distillation](#3-distillation)** — recovering accuracy via Megatron-Bridge knowledge distillation
-4. **[Evaluation](#4-evaluation)** — benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
-5. **[Quantization](#5-quantization)** — FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
-6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)** — throughput comparison of BF16 vs FP8 on a single H100
+1. **[Data Preparation](#1-data-preparation)**: tokenizing the training blend for distillation
+2. **[Pruning](#2-pruning)**: Minitron structured pruning
+3. **[Distillation](#3-distillation)**: recovering accuracy via Megatron-Bridge knowledge distillation
+4. **[Evaluation](#4-evaluation)**: benchmarking with NeMo Evaluator across MMLU Pro, GPQA Diamond, AIME, and more
+5. **[Quantization](#5-quantization)**: FP8 PTQ on the distilled checkpoint using ModelOpt's `examples/megatron_bridge/quantize.py` script
+6. **[vLLM Inference Benchmarking](#6-vllm-inference-benchmarking)**: throughput comparison of BF16 vs FP8 on a single H100
 
 ## Results
 
@@ -35,7 +35,7 @@ End-to-end optimization of [NVIDIA-Nemotron-3-Nano-30B-A3B-BF16](https://hugging
 | Nemotron-3-Nano-Pruned-22B-A3.0B-BF16 | 41.5 GiB | 1,190 | 2.0× |
 | Nemotron-3-Nano-Pruned-22B-A3.0B-FP8 | 22.8 GiB | 1,576 | 2.6× |
 
-Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **2.0×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **2.2×** speedup with a 47% memory reduction. Stacking both — pruning + FP8 — compounds to a **2.6×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy. See [Section 6](#6-vllm-inference-benchmarking) for the benchmark command.
+Pruning alone (BF16 → Pruned-A3.0B BF16) gives a **2.0×** throughput speedup with a 30% memory reduction (58.9 → 41.5 GiB), and FP8 quantization alone (BF16 → FP8) gives a **2.2×** speedup with a 47% memory reduction. Stacking both, pruning + FP8, compounds to a **2.6×** throughput speedup and a **2.6× memory reduction** (58.9 → 22.8 GiB) relative to the original 30B BF16 model, while preserving most of the benchmark accuracy. See [Section 6](#6-vllm-inference-benchmarking) for the benchmark command.
 
 Distillation uses the **30% Pretraining (Code 5, General 20, MATH 5) + 70% Post-training v1/v3 (Math 27, Coding 20, Science 13, IF 5, Tool calling 5)** blend (see [Data Blend](#data-blend) below) with an **80B @ 8K + 20B @ 32K = 100B token** schedule. Blend ablations and long-context phase ablations are in [ABLATIONS.md](ABLATIONS.md).
 
@@ -151,15 +151,15 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/prune_
 
 Non-default arguments:
 
-- `--hparams_to_skip num_attention_heads` (default: none) — attention heads pruning is harder to recover, hence skipped
-- `--seq_length 8192` (default: 4096) — dataset has longer sequences
-- `--prune_target_active_params 3e9` — MoE-specific; the **primary** pruning constraint — targets active params rather than total params, which is what matters for MoE inference cost
-- `--prune_target_params 28e9` — upper bound on total params only; the actual pruned model total can range anywhere from ~20B to 28B depending on which architecture wins — see pruning logs below for the top 20 candidates. You may also skip this argument all together for simplicity.
-- `--top_k 20` (default: 10) — larger candidate pool for better architecture search
-- `--max_depth_pruning 0.15` (default: 0.20) — tighter constraint since candidates with 42–46 layers universally fail for this model
-- `--max_width_pruning 0.30` (default: 0.40) — tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
-- `--prune_score_func mmlu_10pct_bs32` (default: `mmlu_10pct_bs1`) — batch_size=32 for ~3–4× faster candidate scoring
-- `--num_layers_in_first_pipeline_stage 5 --num_layers_in_last_pipeline_stage 5` — Uneven pipeline parallelism since 52 layers is not divisible by 8 GPUs
+- `--hparams_to_skip num_attention_heads` (default: none): attention heads pruning is harder to recover, hence skipped
+- `--seq_length 8192` (default: 4096): dataset has longer sequences
+- `--prune_target_active_params 3e9`: MoE-specific; the **primary** pruning constraint targets active params rather than total params, which is what matters for MoE inference cost
+- `--prune_target_params 28e9`: upper bound on total params only; the actual pruned model total can range anywhere from ~20B to 28B depending on which architecture wins. See pruning logs below for the top 20 candidates. You may also skip this argument all together for simplicity.
+- `--top_k 20` (default: 10): larger candidate pool for better architecture search
+- `--max_depth_pruning 0.15` (default: 0.20): tighter constraint since candidates with 42–46 layers universally fail for this model
+- `--max_width_pruning 0.30` (default: 0.40): tighter constraint to prevent head_dim≤48 and hidden=2048 dead zones
+- `--prune_score_func mmlu_10pct_bs32` (default: `mmlu_10pct_bs1`): batch_size=32 for ~3–4× faster candidate scoring
+- `--num_layers_in_first_pipeline_stage 5 --num_layers_in_last_pipeline_stage 5`: uneven pipeline parallelism since 52 layers is not divisible by 8 GPUs
 
 **NOTE**: The tighter search space constraints here (`--max_depth_pruning`, `--max_width_pruning`) are specific to Nemotron hybrid models (Mamba + Attention + MoE). Unlike standard transformers which expose only layers/hidden/attention/FFN dimensions, these models add Mamba-specific dimensions (`mamba_num_heads`, `mamba_head_dim`) and MoE dimensions (`num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`), making the combined search space much larger. The default 40%/20% bounds cast too wide a net and waste compute on dead-zone architectures.
 
@@ -259,17 +259,17 @@ Pruned hybrid_layer_pattern:   MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEM
 </details>
 
 > [!TIP]
-> Candidate selection above relies on the pruning score alone — it does not run a short KD trial per candidate to pick the winner. The main post-pruning distillation in [Section 3](#3-distillation) is still performed on the selected candidate. If you want a stronger pick, take a few top candidates' `export_config` from the logs above (where the score is similar to the best subnet), export them separately, run KD for ~2B tokens on each, and pick the best on your target metrics. See [ABLATIONS.md — 1st vs 2nd best candidate](ABLATIONS.md#distillation-results-1st-best-vs-2nd-best-pruning-candidate) for a concrete comparison.
+> Candidate selection above relies on the pruning score alone; it does not run a short KD trial per candidate to pick the winner. The main post-pruning distillation in [Section 3](#3-distillation) is still performed on the selected candidate. If you want a stronger pick, take a few top candidates' `export_config` from the logs above (where the score is similar to the best subnet), export them separately, run KD for ~2B tokens on each, and pick the best on your target metrics. See [ABLATIONS.md: 1st vs 2nd best candidate](ABLATIONS.md#distillation-results-1st-best-vs-2nd-best-pruning-candidate) for a concrete comparison.
 
 ---
 
 ### 3. Distillation
 
-Distillation is run in two phases: an 80B-token phase at 8K sequence length, followed by a 20B-token long-context phase at 32K sequence length. The two phases are launched as separate runs with an intermediate Megatron→HF checkpoint conversion, because the long-context phase changes `seq_length`, `gbs`, and `cp_size` — Megatron's checkpoint resume bookkeeping (sample counter is in absolute samples, iteration counter is in iter-units tied to `gbs`) does not handle a mid-run `gbs` change cleanly.
+Distillation is run in two phases: an 80B-token phase at 8K sequence length, followed by a 20B-token long-context phase at 32K sequence length. The two phases are launched as separate runs with an intermediate Megatron→HF checkpoint conversion because the long-context phase changes `seq_length`, `gbs`, and `cp_size`. Megatron's checkpoint resume bookkeeping (sample counter is in absolute samples, iteration counter is in iter-units tied to `gbs`) does not handle a mid-run `gbs` change cleanly.
 
-Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase — required by `TP=4 × EP=8`. The 32K phase additionally requires context parallel to fit the longer sequence, doubling the minimum to **8 nodes × 8x H100 (64 GPUs)**. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full schedule (80B @ 8K + 20B @ 32K = 100B tokens, 4k total steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
+Minimum hardware: **4 nodes × 8x H100 (32 GPUs)** for the 8K phase, required by `TP=4 × EP=8`. The 32K phase additionally requires context parallel to fit the longer sequence, doubling the minimum to **8 nodes × 8x H100 (64 GPUs)**. On **96 nodes × 8x H100 (768 GPUs total)**, it takes ~900 H100 GPU-hours per 10B tokens (400 iters), i.e. ~70 min wall-clock per 10B tokens on 96 nodes. Full schedule (80B @ 8K + 20B @ 32K = 100B tokens, 4k total steps) takes ~9k H100 GPU-hours (~12 hours wall-clock).
 
-#### 3a. Phase 1 — 80B tokens @ 8K seq length
+#### 3a. Phase 1: 80B tokens @ 8K seq length
 
 <details>
 <summary>Phase 1 distillation command (click to expand)</summary>
@@ -306,11 +306,11 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 Non-default arguments:
 
 - `--seq_length 8192` (default: 4096)
-- `--gbs 3072` (default: 768) — matches the original Nemotron-3-Nano-30B training GBS from the paper, kept to preserve the training distribution
-- `--train_iters 3200` — 80B tokens at GBS 3072 × seq_length 8192
-- `--lr 1e-4 --min_lr 1e-5 --lr_warmup_iters 25` — cosine fully decays over 3200 iters; the model is approaching saturation at 8K by this point (see [ABLATIONS.md — 8K trajectory](ABLATIONS.md#effect-of-data-blend-tool_calling)).
-- `--eval_interval 200` (default: 100) — less frequent eval to save compute
-- `--eval_iters 8` (default: 32) — since GBS is 4× larger than default
+- `--gbs 3072` (default: 768): matches the original Nemotron-3-Nano-30B training GBS from the paper, kept to preserve the training distribution
+- `--train_iters 3200`: 80B tokens at GBS 3072 × seq_length 8192
+- `--lr 1e-4 --min_lr 1e-5 --lr_warmup_iters 25`: cosine fully decays over 3200 iters; the model is approaching saturation at 8K by this point (see [ABLATIONS.md: 8K trajectory](ABLATIONS.md#effect-of-data-blend-tool_calling)).
+- `--eval_interval 200` (default: 100): less frequent eval to save compute
+- `--eval_iters 8` (default: 32): since GBS is 4× larger than default
 
 All other arguments use defaults.
 </details>
@@ -333,9 +333,9 @@ python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
 
 </details>
 
-#### 3c. Phase 2 — 20B tokens @ 32K seq length
+#### 3c. Phase 2: 20B tokens @ 32K seq length
 
-Phase 2 is a **fresh run** with the Phase 1 final checkpoint as the new student. It uses a different `--seed` so the data blend reshuffles (otherwise the model would see overlapping prefix of the same samples it already saw at 8K). The LR is bumped back up modestly to capture the rapid long-context adaptation observed in [ABLATIONS.md — Effect of long context training](ABLATIONS.md#effect-of-long-context-training).
+Phase 2 is a **fresh run** with the Phase 1 final checkpoint as the new student. It uses a different `--seed` so the data blend reshuffles (otherwise the model would see overlapping prefix of the same samples it already saw at 8K). The LR is bumped back up modestly to capture the rapid long-context adaptation observed in [ABLATIONS.md, Effect of long context training](ABLATIONS.md#effect-of-long-context-training).
 
 <details>
 <summary>Phase 2 distillation command (click to expand)</summary>
@@ -368,56 +368,50 @@ python -u /opt/Model-Optimizer/examples/megatron_bridge/distill.py \
 
 Changed arguments from Phase 1:
 
-- `--student_hf_path` — points at the HF export of the Phase 1 final checkpoint
-- `--seq_length 32768` — long-context phase
-- `--gbs 768` — `seq_length × gbs` product unchanged, so each iter still processes the same number of tokens
-- `--cp_size 2` — context parallel is needed to fit the longer sequence; doubles the minimum-hardware footprint to 8 nodes
-- `--train_iters 800` — 20B tokens at GBS 768 × seq_length 32768
-- `--lr 2e-5 --min_lr 1e-5 --lr_warmup_iters 10` — modest LR bump for the long-context adaptation (Phase 1 ended at fully-decayed LR 1e-5); the 10-iter warmup re-populates Adam moment estimates which restart from zero in a fresh run
-- `--recompute_granularity selective --recompute_modules moe` — selective MoE recompute further reduces activation memory at 32K. You may skip this if you have more memory.
-- `--seed 5678` — different from the Phase 1 seed (default 1234) so the data blend reshuffles
-- `--output_dir /path/to/distill_output_phase2_32k` — must be a **fresh directory** different from Phase 1's, so distill.py's resume mechanism (which auto-loads from `<output_dir>/checkpoints` if it exists) does not pull in stale state
+- `--student_hf_path`: points at the HF export of the Phase 1 final checkpoint
+- `--seq_length 32768`: long-context phase
+- `--gbs 768`: `seq_length × gbs` product unchanged, so each iter still processes the same number of tokens
+- `--cp_size 2`: context parallel is needed to fit the longer sequence; doubles the minimum-hardware footprint to 8 nodes
+- `--train_iters 800`: 20B tokens at GBS 768 × seq_length 32768
+- `--lr 2e-5 --min_lr 1e-5 --lr_warmup_iters 10`: modest LR bump for the long-context adaptation (Phase 1 ended at fully-decayed LR 1e-5); the 10-iter warmup re-populates Adam moment estimates which restart from zero in a fresh run
+- `--recompute_granularity selective --recompute_modules moe`: selective MoE recompute further reduces activation memory at 32K. You may skip this if you have more memory.
+- `--seed 5678`: different from the Phase 1 seed (default 1234) so the data blend reshuffles
+- `--output_dir /path/to/distill_output_phase2_32k`: must be a **fresh directory** different from Phase 1's, so distill.py's resume mechanism (which auto-loads from `<output_dir>/checkpoints` if it exists) does not pull in stale state
 
 </details>
 
 For multi-node Slurm runs, see the [Megatron-Bridge README](../../README.md#slurm-usage) for details.
 
 > [!NOTE]
-> This is pure SFT-style distillation — no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
+> This is pure SFT-style distillation; no RL or online reward signal is used. Adding an RL-based post-training step after distillation is a natural next step that could further improve some of these benchmarks.
 
 ---
 
 ### 4. Evaluation
 
-The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation — it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
+The eval config in [nemo_evaluator.yaml](nemo_evaluator.yaml) is for Slurm-based evaluation; it submits a vLLM serving job (with tool calling enabled via `--enable-auto-tool-choice --tool-call-parser qwen3_coder`) and runs evals against it. For local model execution and evaluation, refer to the [NeMo Evaluator documentation](https://docs.nvidia.com/nemo/evaluator/latest/) or this [blog](https://huggingface.co/blog/nvidia/nemotron-3-nano-evaluation-recipe).
 
 <details>
 <summary>Evaluation launch steps (click to expand)</summary>
 
 Before running, update the following fields in the `nemo_evaluator.yaml` file or overwrite them in the command line with `-o <option>=<value>`:
 
-- `execution.hostname` — your Slurm login node hostname
-- `execution.account` — your Slurm account
-- `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
+- `execution.hostname`: your Slurm login node hostname
+- `execution.account`: your Slurm account
+- `deployment.checkpoint_path`: Hugging Face checkpoint path (original, pruned, or quantized)
 
 The yaml is set up for a **BF16** checkpoint. For **FP8** checkpoints, also apply the quantization-specific vLLM deployment settings documented at the top of `nemo_evaluator.yaml`:
 - append `--kv-cache-dtype fp8` to `deployment.extra_args`
-- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8` plus `VLLM_FLASHINFER_MOE_BACKEND: throughput`)
+- set the matching FlashInfer MoE env vars in `deployment.env_vars` (`VLLM_USE_FLASHINFER_MOE_FP8: lit:1` plus `VLLM_FLASHINFER_MOE_BACKEND: lit:throughput`)
 
 ```bash
-pip install "nemo-evaluator-launcher[all]==0.1.82"
+pip install "nemo-evaluator-launcher[all]==0.2.6"
 
 # Set required environment variables:
 export HF_TOKEN=<your_huggingface_token>
 export SLURM_JOB_DIR=<path_to_slurm_job_output_dir>
 export HF_HOME=<path_to_huggingface_cache>
 export VLLM_CACHE_ROOT=<path_to_vllm_cache>
-
-# Set additional unused but required environment variables:
-export API_KEY=xxxxxx
-export INFERENCE_API_KEY=xxxxxx
-export OPENAI_CLIENT_ID=xxxxxx
-export OPENAI_CLIENT_SECRET=xxxxxx
 
 # Run the evaluation
 # To run a small subset and verify the end-to-end eval pipeline before launching full evals, add `-o ++evaluation.nemo_evaluator_config.config.params.limit_samples=8` (applies to all tasks)
@@ -455,7 +449,7 @@ This is done with the `MAMBA_MOE_FP8_CONSERVATIVE_CFG` config defined in [`model
 
 Quantization is a two-step flow: `quantize.py` calibrates and saves a Megatron checkpoint, then `export.py` converts it to a deployable HuggingFace checkpoint (the unified HF exporter loads at TP=1, so pipeline parallelism is used to shard across GPUs). Both steps take a few minutes on 8x H100.
 
-**Step 1 — calibrate and save the quantized Megatron checkpoint:**
+**Step 1: calibrate and save the quantized Megatron checkpoint**
 
 <details>
 <summary>FP8 PTQ command (click to expand)</summary>
@@ -474,7 +468,7 @@ torchrun --nproc_per_node 8 /opt/Model-Optimizer/examples/megatron_bridge/quanti
 
 </details>
 
-**Step 2 — export the Megatron checkpoint to a deployable HuggingFace checkpoint:**
+**Step 2: export the Megatron checkpoint to a deployable HuggingFace checkpoint**
 
 <details>
 <summary>Export command (click to expand)</summary>
@@ -502,7 +496,7 @@ The exported HuggingFace checkpoint is directly deployable with [vLLM](https://g
 > ```
 
 > [!TIP]
-> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also — just apply the FP8 deployment tweaks documented at the top of the yaml.
+> You can run the evaluation using the same `nemo_evaluator.yaml` file for the quantized checkpoint also; just apply the FP8 deployment tweaks documented at the top of the yaml.
 
 See FP8 vs BF16 results in the [Results](#results) section above.
 

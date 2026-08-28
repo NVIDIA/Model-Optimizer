@@ -8,6 +8,40 @@ The following instructions show how to evaluate the Model Optimizer quantized LL
 
 [NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
 
+### Maintained NeMo Evaluator task definitions
+
+Use `nel_config.py` to add maintained text benchmark definitions to an existing
+NeMo Evaluator Launcher config. `task_contracts.yaml` is their machine-readable
+source:
+
+```sh
+python nel_config.py \
+    --base-config path/to/base_nel_config.yaml \
+    --output path/to/text_benchmarks.yaml
+```
+
+Puzzletron uses this same compiler rather than maintaining a second copy of the
+task contracts:
+
+```sh
+python -m examples.puzzletron.evaluation.text --backend nemo \
+    --base-config path/to/base_nel_config.yaml \
+    --output path/to/text_benchmarks.yaml
+```
+
+LiveCodeBench, SciCode, and IFBench are the defaults because they are missing
+from Puzzletron's pinned `lmms-eval` revision. Other tasks are selected
+explicitly. Run `python nel_config.py --help` for the full list and required
+external-model options. See the [NeMo text benchmark guide](NEMO_EVALUATOR.md)
+for config generation, credentials, validation, task-specific checks, and
+result recording.
+
+Puzzletron defaults to `lmms-eval` and uses these NeMo contracts for missing
+benchmarks or an explicitly requested alternate contract. See its
+[text evaluation guide](../puzzletron/evaluation/text/README.md) for the routing
+table. When both routes exist, keep their results separate and label each result
+with the evaluator, exact task contract, and pinned revision or container tag.
+
 ## LM-Eval-Harness
 
 [LM-Eval-Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides a unified framework to test generative language models on a large number of different evaluation tasks.
