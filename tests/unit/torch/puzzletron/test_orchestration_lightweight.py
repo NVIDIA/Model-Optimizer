@@ -360,6 +360,43 @@ def test_orchestrator_cli_reports_config_errors_without_traceback(tmp_path: Path
     assert "Traceback" not in result.stderr
 
 
+def test_orchestrator_cli_rejects_unresolved_runner_template(tmp_path: Path) -> None:
+    runner = tmp_path / "runner.yaml"
+    runner.write_text(
+        yaml.safe_dump(
+            {
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {"account": "REPLACE_WITH_SLURM_ACCOUNT", "partition": "gpu"},
+                }
+            }
+        )
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "examples/puzzletron/orchestrate.py",
+            "--experiment",
+            str(tmp_path / "experiment.yaml"),
+            "--runner",
+            str(runner),
+            "--execution",
+            str(tmp_path / "execution.yaml"),
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 2
+    assert "unresolved REPLACE_WITH_ placeholders" in result.stderr
+    assert "runner.slurm.account" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_orchestrator_cli_reports_dry_run_adapter_errors_without_traceback(
     tmp_path: Path,
 ) -> None:

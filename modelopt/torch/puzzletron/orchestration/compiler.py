@@ -65,6 +65,7 @@ __all__ = [
     "load_runner_config",
     "plan_to_dict",
     "resolve_stage_execution_specs",
+    "validate_runner_ready",
 ]
 
 _CONTROLLER_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -588,6 +589,38 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
         slurm=environment.slurm,
         baremetal=environment.baremetal,
     )
+
+
+def _placeholder_paths(value: Any, *, path: str) -> list[str]:
+    if isinstance(value, str):
+        return [path] if "REPLACE_WITH_" in value else []
+    if isinstance(value, Mapping):
+        placeholders = []
+        for key, item in value.items():
+            display_key = (
+                {"contract": "execution_contract", "baremetal": "inventory"}.get(key, key)
+                if path == "runner"
+                else key
+            )
+            placeholders.extend(_placeholder_paths(item, path=f"{path}.{display_key}"))
+        return placeholders
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [
+            placeholder
+            for index, item in enumerate(value)
+            for placeholder in _placeholder_paths(item, path=f"{path}[{index}]")
+        ]
+    return []
+
+
+def validate_runner_ready(runner: RunnerEnvironment) -> None:
+    """Reject portable runner templates that still contain site placeholders."""
+
+    placeholders = _placeholder_paths(asdict(runner), path="runner")
+    if placeholders:
+        raise ValueError(
+            "runner contains unresolved REPLACE_WITH_ placeholders: " + ", ".join(placeholders)
+        )
 
 
 def load_execution_config(path: str | Path) -> dict[str, Any]:

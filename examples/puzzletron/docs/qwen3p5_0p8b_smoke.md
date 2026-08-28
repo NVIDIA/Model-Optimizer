@@ -10,30 +10,17 @@ evaluation, and final selection.
 
 Use the checked-in `full_smoke.yaml` experiment and
 `execution.full_smoke.yaml` execution config as the canonical inputs. The
-checked-in `runner.slurm.yaml` is a portable placeholder template. Copy it once
-to a campaign-local path, fill in the site contract there, and use that same
-materialized runner for the dry-run, launch, and resume.
+checked-in `runner.slurm.yaml` is a portable template, not a runnable site
+configuration. Copy it to a site-specific location once and replace its
+`REPLACE_WITH_` values before launching. Dry-run accepts the portable template
+for plan inspection, but the orchestrator rejects unresolved placeholders
+before submitting work.
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml
 EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_smoke.yaml
-RUNNER_TEMPLATE=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml
-CAMPAIGN_DIR=/path/to/qwen3p5_0p8b_full_smoke
-export PUZZLETRON_RUN_ROOT="$CAMPAIGN_DIR"
-RUNNER="$CAMPAIGN_DIR/runner.slurm.yaml"
-
-mkdir -p "$CAMPAIGN_DIR"
-if test -e "$RUNNER"; then
-  echo "runner already exists: $RUNNER" >&2
-  exit 1
-fi
-cp "$RUNNER_TEMPLATE" "$RUNNER"
-${EDITOR:-vi} "$RUNNER"
-
-if rg -n 'REPLACE_WITH_' "$RUNNER"; then
-  echo "replace every runner placeholder before continuing" >&2
-  exit 1
-fi
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_full_smoke
 ```
 
 Inspect the complete one-GPU plan without submitting work:
