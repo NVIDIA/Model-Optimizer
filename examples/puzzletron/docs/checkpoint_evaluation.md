@@ -1,7 +1,10 @@
-# Checkpoint evaluation
+# Text checkpoint evaluation
 
 Use the standalone command to evaluate a compatible local Hugging Face
 checkpoint without creating or running a Puzzletron campaign.
+
+For pinned image and video benchmarks on a Qwen 3.5 0.8B checkpoint, use the
+separate [VLM checkpoint evaluator](vlm_checkpoint_evaluation.md).
 
 ## Quick start
 
