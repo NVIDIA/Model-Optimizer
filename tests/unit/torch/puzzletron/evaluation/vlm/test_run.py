@@ -451,7 +451,7 @@ def test_requirements_pin_matches_runtime_lmms_eval_revision():
         "-e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
         f"{checkpoint.LMMS_EVAL_REVISION}#egg=lmms-eval"
     ) in requirements.splitlines()
-    assert 'decord; platform_system != "Darwin"' in requirements.splitlines()
+    assert 'eva-decord==0.6.1; platform_system == "Linux"' in requirements.splitlines()
     environment = json.loads(
         (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
     )
