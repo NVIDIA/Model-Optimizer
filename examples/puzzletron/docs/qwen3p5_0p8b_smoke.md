@@ -1,15 +1,18 @@
-# Qwen 3.5 0.8B full-lifecycle smoke
+# Qwen 3.5 0.8B text pruning smoke
 
-The checked-in Qwen 3.5 0.8B `full_smoke` recipe pins the public checkpoint revision and
-searches only the FFN intermediate sizes `[3072, 2048]`. The checked-in
-`full_smoke.yaml` experiment extends the bounded MIP smoke through evaluation,
-physical materialization, comparative AIPerf measurement, two
-global-distillation steps, final evaluation, and final selection. It keeps the
-two strongest candidates by language-model loss through materialization and
-AIPerf, then sends the candidate with higher measured output-token throughput
-to distillation.
+The checked-in `full_smoke` recipe runs a small end-to-end test of text-only
+pruning for Qwen 3.5 0.8B. It searches the FFN intermediate sizes
+`[3072, 2048]`, evaluates the candidates, saves the two strongest candidates as
+physical checkpoints, and measures their serving performance with AIPerf. It
+then distills the candidate with higher measured output-token throughput for
+two steps, evaluates it again, and selects the final checkpoint. The recipe
+pins the public checkpoint revision so repeated runs use the same starting
+model.
 
-## Run and resume the full lifecycle
+These small budgets check that the complete workflow runs and resumes
+correctly. They do not establish model quality or production throughput.
+
+## Run and resume the text workflow
 
 Use the checked-in `full_smoke.yaml` experiment and
 `execution.full_smoke.yaml` execution config as the canonical inputs. The

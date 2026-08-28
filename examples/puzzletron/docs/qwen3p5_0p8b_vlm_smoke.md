@@ -1,17 +1,17 @@
-# Qwen 3.5 0.8B VLM full-lifecycle smoke
+# Qwen 3.5 0.8B vision-language pruning smoke
 
-The checked-in `full_vlm_smoke` recipe runs a bounded image-text lifecycle for
-the public `Qwen/Qwen3.5-0.8B` checkpoint at the immutable revision declared in
-`model.yaml`. It inherits the conservative VLM MIP smoke, which searches only
-FFN intermediate sizes `[3072, 2048]`, and adds image-backed evaluation,
-physical materialization, comparative image-backed AIPerf measurement, two VLM
-distillation steps, and final image-backed evaluation. It keeps the two
-strongest candidates by image-text language-model loss through materialization
-and AIPerf, then sends the candidate with the highest measured 12-image
-throughput to distillation.
+The checked-in `full_vlm_smoke` recipe runs a small end-to-end test of
+vision-language pruning for the public `Qwen/Qwen3.5-0.8B` checkpoint. It uses
+real image-conversation examples to search the FFN intermediate sizes
+`[3072, 2048]`, evaluate the candidates, and save the two strongest candidates
+as physical checkpoints. It measures both checkpoints with 1-, 6-, and
+12-image AIPerf requests, distills the candidate with the highest measured
+12-image throughput for two steps, and runs a final image-and-text evaluation.
+The immutable revision in `model.yaml` ensures that repeated runs use the same
+starting model.
 
-These small budgets check lifecycle wiring and resumability. They do not
-establish model quality or production throughput.
+These small budgets check that the complete workflow runs and resumes
+correctly. They do not establish model quality or production throughput.
 
 ## Prepare the worker environment
 
