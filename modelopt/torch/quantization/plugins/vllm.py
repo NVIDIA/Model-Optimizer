@@ -604,17 +604,27 @@ class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
 
 class _QuantFusedMoEBase(QuantModule):
     def _setup(self):
-        self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
-        self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
-        self.w13_weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
-        self.w2_weight_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_weight)
-        self.w13_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
-        self.w2_output_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_output)
-        self.w13_output_quantizer.disable()
-        self.w2_output_quantizer.disable()
-        assert type(self.quant_method) is UnquantizedFusedMoEMethod, (
-            f"quant_method is {type(self.quant_method)}"
-        )
+        already_quantized = type(self.quant_method) is not UnquantizedFusedMoEMethod
+        if not already_quantized:
+            # Skip for already-quantized layers: fold_weight() folds any "*_weight_quantizer"
+            # attribute into its weight regardless of enabled state, which would corrupt an
+            # already real-quantized (e.g. packed NVFP4) expert weight.
+            self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+            self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
+            self.w13_weight_quantizer = TensorQuantizer(
+                QuantLinearConvBase.default_quant_desc_weight
+            )
+            self.w2_weight_quantizer = TensorQuantizer(
+                QuantLinearConvBase.default_quant_desc_weight
+            )
+            self.w13_output_quantizer = TensorQuantizer(
+                QuantLinearConvBase.default_quant_desc_output
+            )
+            self.w2_output_quantizer = TensorQuantizer(
+                QuantLinearConvBase.default_quant_desc_output
+            )
+            self.w13_output_quantizer.disable()
+            self.w2_output_quantizer.disable()
         self.parallel_state = create_parallel_state()
 
     def invoke_fused_moe_quantized(
@@ -647,13 +657,19 @@ class _QuantFusedMoEBase(QuantModule):
         **kwargs,
     ):
         if B is self.w13_weight:
-            # First layer of expert
-            A = self.w13_input_quantizer(A)  # noqa: N806
-            if self.w13_weight_quantizer.is_enabled:  # pragma: no cover
+            # First layer of expert. Quantizers may not exist for already-quantized
+            # experts (see _setup).
+            w13_input_quantizer = getattr(self, "w13_input_quantizer", None)
+            if w13_input_quantizer is not None:
+                A = w13_input_quantizer(A)  # noqa: N806
+            w13_weight_quantizer = getattr(self, "w13_weight_quantizer", None)
+            if (
+                w13_weight_quantizer is not None and w13_weight_quantizer.is_enabled
+            ):  # pragma: no cover
                 # Same pattern as FakeQuantMethod.apply: wrap as nn.Parameter if needed, swap
                 # w13_weight, call kernel, restore (tensor cannot stay assigned to nn.Parameter slot).
                 original_weight = self.w13_weight
-                quantized_tensor = self.w13_weight_quantizer(original_weight)
+                quantized_tensor = w13_weight_quantizer(original_weight)
                 try:
                     if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
                         quantized_tensor, torch.nn.Parameter
@@ -668,13 +684,19 @@ class _QuantFusedMoEBase(QuantModule):
                     self.w13_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
-            if self.w13_output_quantizer.is_enabled:
-                C[:] = self.w13_output_quantizer(C)
+            w13_output_quantizer = getattr(self, "w13_output_quantizer", None)
+            if w13_output_quantizer is not None and w13_output_quantizer.is_enabled:
+                C[:] = w13_output_quantizer(C)
         elif B is self.w2_weight:
-            A = self.w2_input_quantizer(A)  # noqa: N806
-            if self.w2_weight_quantizer.is_enabled:  # pragma: no cover
+            w2_input_quantizer = getattr(self, "w2_input_quantizer", None)
+            if w2_input_quantizer is not None:
+                A = w2_input_quantizer(A)  # noqa: N806
+            w2_weight_quantizer = getattr(self, "w2_weight_quantizer", None)
+            if (
+                w2_weight_quantizer is not None and w2_weight_quantizer.is_enabled
+            ):  # pragma: no cover
                 original_weight = self.w2_weight
-                quantized_tensor = self.w2_weight_quantizer(original_weight)
+                quantized_tensor = w2_weight_quantizer(original_weight)
                 try:
                     if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
                         quantized_tensor, torch.nn.Parameter
@@ -689,8 +711,9 @@ class _QuantFusedMoEBase(QuantModule):
                     self.w2_weight = original_weight
             else:
                 original_kernel(A, B, C, *args, **kwargs)
-            if self.w2_output_quantizer.is_enabled:
-                C[:] = self.w2_output_quantizer(C)
+            w2_output_quantizer = getattr(self, "w2_output_quantizer", None)
+            if w2_output_quantizer is not None and w2_output_quantizer.is_enabled:
+                C[:] = w2_output_quantizer(C)
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
@@ -726,11 +749,14 @@ class _QuantFusedMoEBase(QuantModule):
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
-        # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
+        # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one.
+        # Quantizers may not exist for already-quantized experts (see _setup) -- nothing to fold then.
         for weight, quantizer in (
-            (self.w13_weight, self.w13_weight_quantizer),
-            (self.w2_weight, self.w2_weight_quantizer),
+            (self.w13_weight, getattr(self, "w13_weight_quantizer", None)),
+            (self.w2_weight, getattr(self, "w2_weight_quantizer", None)),
         ):
+            if quantizer is None:
+                continue
             self._fold_weight_quantizer(
                 quantizer, (weight[i] for i in range(weight.shape[0])), keep_attrs
             )

@@ -173,12 +173,33 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
     import copy
 
-    if quant_config["recipe_path"]:
-        recipe = load_recipe(quant_config["recipe_path"])
-        assert isinstance(recipe, ModelOptPTQRecipe), (
-            f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
+    import yaml
+
+    if quant_config["recipe_path"] and (quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]):
+        raise ValueError(
+            "recipe_path and quant_cfg/kv_quant_cfg are mutually exclusive -- the recipe file "
+            "already carries the quant_cfg. Set only one."
         )
-        quant_cfg = recipe.quantize
+
+    if quant_config["recipe_path"]:
+        # Two shapes share this path: a standard ModelOptPTQRecipe YAML (metadata + quantize
+        # sections), or a Megatron export's per-quantizer resolved config (a flat
+        # quantizer_name -> state dict, saved by vllm_fakequant_megatron.py), which needs the
+        # HF->vLLM name translation load_quantizer_state_as_quant_cfg applies.
+        with open(quant_config["recipe_path"]) as f:
+            raw_recipe = yaml.safe_load(f) or {}
+        print("raw_recipe: ", raw_recipe)
+        if "quantize" in raw_recipe:
+            print("quantize in raw_recipe")
+            recipe = load_recipe(quant_config["recipe_path"])
+            assert isinstance(recipe, ModelOptPTQRecipe), (
+                f"Expected PTQ recipe, but got {type(recipe).__name__} from {quant_config['recipe_path']}"
+            )
+            quant_cfg = recipe.quantize
+        else:
+            from vllm_reload_utils import load_quantizer_state_as_quant_cfg
+            print("load_quantizer_state_as_quant_cfg")
+            quant_cfg = load_quantizer_state_as_quant_cfg(raw_recipe, model)
     else:
         quant_cfg = (
             copy.deepcopy(getattr(mtq, quant_config["quant_cfg"]))

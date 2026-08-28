@@ -21,13 +21,66 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 
 from modelopt.torch.export.model_config import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
+from modelopt.torch.utils import get_unwrapped_name
 from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
+
+
+def _quantizer_configs(module: torch.nn.Module) -> dict[str, dict]:
+    """Every ``TensorQuantizer``'s resolved num_bits/axis/block_sizes/enabled state, keyed by
+    name relative to *module*, in the private-attribute-named shape ``get_modelopt_state``
+    uses elsewhere (e.g. ``_disabled``) -- only the fields ``load_quantizer_state_as_quant_cfg``
+    (examples/vllm_serve/vllm_reload_utils.py) actually reads back, since the rest of
+    ``get_modelopt_state``'s output includes fields that aren't YAML-safe (e.g. dtypes).
+    Reload translates this HF-shaped dict to vLLM naming the same way it already does for
+    ``quantizer_state.pth`` and ``vllm_fq_modelopt_state.pth`` (``convert_dict_to_vllm``).
+    """
+    return {
+        get_unwrapped_name(name, module): {
+            "_num_bits": m.num_bits,
+            "_axis": m.axis,
+            "_block_sizes": m.block_sizes,
+            "_disabled": not m.is_enabled,
+        }
+        for name, m in module.named_modules()
+        if isinstance(m, TensorQuantizer)
+    }
+
+
+def gather_mcore_vllm_fq_quantizer_state(
+    quantizer_state_by_name: dict[str, dict],
+    save_directory: str | os.PathLike,
+) -> None:
+    """Sync each rank's captured quantizer configs and save as ``vllm_fq_quantizer_state.yaml``.
+
+    Args:
+        quantizer_state_by_name: HF-prefixed quantizer name -> resolved config, collected in
+            ``VllmFqGPTModelExporter._get_quantized_state``.
+        save_directory: Directory for ``vllm_fq_quantizer_state.yaml``.
+    """
+
+    def _merge_quantizer_states(objs: list) -> dict:
+        merged: dict = {}
+        for d in objs:
+            if d is not None:
+                merged.update(d)
+        return merged
+
+    merged = DistributedProcessGroup.get_dist_syncd_obj(
+        quantizer_state_by_name,
+        DistributedProcessGroup(None),
+        _merge_quantizer_states,
+    )
+    if is_master():
+        with open(Path(save_directory) / "vllm_fq_quantizer_state.yaml", "w") as f:
+            yaml.safe_dump(merged, f, sort_keys=False)
 
 
 def gather_mcore_vllm_fq_quantized_state_dict(
@@ -82,7 +135,8 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         save_directory: str | os.PathLike,
         pretrained_model_name_or_path: str | os.PathLike,
     ):
-        """Save HF shards + sidecar ``quantizer_state.pth``; then delegate to base export.
+        """Save HF shards + sidecar ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml``;
+        then delegate to base export.
 
         Pipeline-parallel placement of ``config.json``, tokenizer, and multimodal tensors
         remains handled by ``GPTModelExporter.save_pretrained`` (via ``super()``).
@@ -98,7 +152,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
             "Exporting extra modules is not supported for vLLM fakequant"
         )
 
+        # Populated by _get_quantized_state as a side effect of the layer_state_dicts build below.
+        self._quantizer_state_for_recipe: dict[str, dict] = {}
         gather_mcore_vllm_fq_quantized_state_dict(self.model, self.layer_state_dicts, save_dir)
+        gather_mcore_vllm_fq_quantizer_state(self._quantizer_state_for_recipe, save_dir)
 
         self._pop_quantizer_keys(self.state_dict)
         for _layer_sd in self.layer_state_dicts.values():
@@ -128,6 +185,9 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         Returns:
             Tuple: state_dict, quantization format, and block_size of the module.
         """
+        for qname, qstate in _quantizer_configs(module).items():
+            self._quantizer_state_for_recipe[prefix + qname] = qstate
+
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
         if qformat is None and "norm" not in prefix:
@@ -193,6 +253,9 @@ def export_mcore_gpt_to_hf_vllm_fq(
     trust_remote_code: bool = False,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
+
+    Also saves ``quantizer_state.pth`` and ``vllm_fq_quantizer_state.yaml`` sidecars,
+    auto-detected by the vLLM fakequant reload path.
 
     Args:
         model: The Megatron Core GPTModel instance.
