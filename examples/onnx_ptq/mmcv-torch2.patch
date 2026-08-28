@@ -1,0 +1,18 @@
+diff --git a/setup.py b/setup.py
+index 69157be..5d11838 100644
+--- a/setup.py
++++ b/setup.py
+@@ -268 +268 @@ def get_extensions():
+-            extra_compile_args['cxx'] = ['-std=c++14']
++            extra_compile_args['cxx'] = ['-std=c++17']
+@@ -363 +363 @@ def get_extensions():
+-            extra_compile_args['nvcc'] += ['-std=c++14']
++            extra_compile_args['nvcc'] += ['-std=c++17']
+diff --git a/mmcv/parallel/_functions.py b/mmcv/parallel/_functions.py
+index 4359a19..8c8ab09 100644
+--- a/mmcv/parallel/_functions.py
++++ b/mmcv/parallel/_functions.py
+@@ -75 +75,2 @@ class Scatter:
+-            streams = [_get_stream(device) for device in target_gpus]
++            streams = [
++                _get_stream(torch.device('cuda', device)) for device in target_gpus]

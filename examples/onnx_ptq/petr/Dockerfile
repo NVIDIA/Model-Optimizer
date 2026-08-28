@@ -13,52 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM nvcr.io/nvidia/pytorch:26.07-py3
+FROM nvcr.io/nvidia/pytorch:25.06-py3
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ARG TORCH_CUDA_ARCH_LIST=8.9+PTX
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git \
-        libgl1 \
-        libglib2.0-0 && \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
-ENV UV_PYTHON_INSTALL_DIR=/opt/python
-
 RUN python -m pip install --no-cache-dir uv==0.12.3 && \
-    uv python install 3.8.20 && \
-    uv venv --seed --python 3.8.20 /opt/petr
+    UV_PYTHON_INSTALL_DIR=/opt/python uv venv --seed --python 3.9.23 /opt/petr
 
-COPY examples/onnx_ptq/petr/requirements*.txt \
-    examples/onnx_ptq/petr/mmdet3d-nuscenes-only.patch \
-    /tmp/petr-requirements/
-# PETR uses nuScenes; remove mmdet3d's eager Lyft integration and unused PLY dependency.
-RUN unset PIP_CONSTRAINT && \
-    /opt/petr/bin/python -m pip install --no-cache-dir \
-        -r /tmp/petr-requirements/requirements-torch.txt && \
-    /opt/petr/bin/python -m pip install --no-cache-dir \
-        -r /tmp/petr-requirements/requirements.txt && \
-    git clone --branch v1.0.0rc6 --depth 1 \
-        https://github.com/open-mmlab/mmdetection3d.git /tmp/mmdetection3d && \
-    test "$(git -C /tmp/mmdetection3d rev-parse HEAD)" = \
-        47285b3f1e9dba358e98fcd12e523cfd0769c876 && \
-    git -C /tmp/mmdetection3d apply --check --index --unidiff-zero \
-        /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
-    git -C /tmp/mmdetection3d apply --index --unidiff-zero \
-        /tmp/petr-requirements/mmdet3d-nuscenes-only.patch && \
-    /opt/petr/bin/python -m pip install --no-cache-dir \
-        --no-build-isolation \
-        /tmp/mmdetection3d && \
-    /opt/petr/bin/python -m pip check && \
-    rm -rf /tmp/mmdetection3d && \
-    mkdir -p /opt/petr/lib/python3.8/site-packages/tensorrt && \
-    cp /opt/petr/lib/python3.8/site-packages/tensorrt_bindings/__init__.py \
-        /opt/petr/lib/python3.8/site-packages/tensorrt/__init__.py && \
-    cp /opt/petr/lib/python3.8/site-packages/tensorrt_bindings/tensorrt.so \
-        /opt/petr/lib/python3.8/site-packages/tensorrt/tensorrt.so
+COPY examples/onnx_ptq/install-evaluator-cu129.sh \
+    examples/onnx_ptq/mmcv-torch2.patch \
+    examples/onnx_ptq/mmdet3d-runtime.patch \
+    examples/onnx_ptq/requirements-evaluator-cu129.txt \
+    examples/onnx_ptq/requirements-modelopt-25.06.txt \
+    examples/onnx_ptq/requirements-torch-cu129.txt \
+    /tmp/evaluator/
+RUN bash /tmp/evaluator/install-evaluator-cu129.sh \
+        /opt/petr "${TORCH_CUDA_ARCH_LIST}" && \
+    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
+        -r /tmp/evaluator/requirements-modelopt-25.06.txt
 
 COPY . /opt/Model-Optimizer
-RUN cd /opt/Model-Optimizer && \
-    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
-        -e ".[onnx]" \
-        "onnxruntime-gpu[cuda,cudnn]~=1.24.2"
+RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps \
+    -e /opt/Model-Optimizer

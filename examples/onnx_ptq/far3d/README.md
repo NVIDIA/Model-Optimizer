@@ -2,7 +2,9 @@
 
 This example quantizes the FAR3D image encoder and decoder to INT8 or FP8 with Model Optimizer and evaluates the complete pipeline on the Argoverse 2 validation set. It follows the [NVIDIA DL4AGX FAR3D workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt).
 
-FAR3D uses a legacy PyTorch/MMCV environment that is incompatible with the current Model Optimizer Python dependencies. The provided image uses `nvcr.io/nvidia/pytorch:26.07-py3` with TensorRT 11.1 for engine build and evaluation, and isolates the legacy FAR3D packages in a Python 3.8 virtual environment. The TensorRT EP in ONNX Runtime 1.24 requires CUDA 12 and TensorRT 10.11 compatibility libraries during decoder quantization; these libraries are not used to build or run the TensorRT 11.1 engines.
+The provided image uses `nvcr.io/nvidia/pytorch:25.06-py3`, CUDA 12.9, and TensorRT 10.11. FAR3D runs in an isolated Python 3.9 environment with PyTorch 2.8 `cu129` and MMCV compiled against the container's CUDA toolkit; Model Optimizer uses the base Python 3.12 environment.
+
+The evaluator omits MMDetection3D's unused Lyft integration and its `plyfile`, TensorBoard, and KITTI-only scikit-image dependencies.
 
 ## 1. Prepare FAR3D and Argoverse 2
 
@@ -11,6 +13,7 @@ Clone DL4AGX, initialize its submodules, and apply its FAR3D patch:
 ```bash
 git clone https://github.com/NVIDIA/DL4AGX.git
 cd DL4AGX
+git checkout 9f7b29104c253d5bc68334e7b83b3eecb72d4572
 git submodule update --init --recursive
 cd AV-Solutions/far3d-trt/dependencies/Far3D
 git apply ../../patch/far3d.patch
@@ -18,7 +21,7 @@ git apply /path/to/Model-Optimizer/examples/onnx_ptq/far3d/far3d_optional_flash_
 cd ../..
 ```
 
-The second patch makes the unused CUDA 11-only FlashAttention implementation optional; the reference configuration uses MMCV `MultiheadAttention`.
+The second patch makes the unused legacy FlashAttention implementation optional and removes an unused IPython debug import; the reference configuration uses MMCV `MultiheadAttention`.
 
 Download the [Argoverse 2 sensor validation set](https://www.argoverse.org/av2.html), the [reference FAR3D checkpoint](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/far3d-trt#pytorch-model-to-onnx), and its configuration. The remaining commands assume:
 
@@ -38,16 +41,18 @@ docker build \
   /path/to/Model-Optimizer
 ```
 
+The default MMCV build targets SM 8.9 and includes PTX for newer GPUs. Set `--build-arg TORCH_CUDA_ARCH_LIST=...` when building for an older GPU.
+
 Start the image and mount the FAR3D checkout:
 
 ```bash
-docker run --rm -it --network=host --gpus=all --shm-size=80G --privileged \
+docker run --rm -it --gpus=all --shm-size=80G \
   -v /data/av2:/data/av2 \
   -v /path/to/far3d-trt:/workspace/far3d-trt \
   far3d-modelopt
 ```
 
-Use `/opt/far3d/bin/python` for data preparation, export, and evaluation. It selects the isolated legacy FAR3D environment:
+Use `/opt/far3d/bin/python` for data preparation, export, and evaluation. It selects the isolated FAR3D environment:
 
 ```bash
 export PYTHONPATH=/workspace/far3d-trt/dependencies/Far3D
@@ -67,16 +72,18 @@ This produces `far3d.encoder.onnx` and `far3d.decoder.onnx`.
 
 ## 3. Prepare calibration batches
 
-Build temporary engines from the exported models. They run the reference pipeline while collecting representative encoder and decoder inputs. TensorRT 11 builds strongly typed networks by default, so these engines preserve the types declared by the exported graphs; builder precision flags such as `--fp16` are no longer accepted:
+Build temporary engines from the exported models. The FP16 encoder matches the validated inference pipeline used to collect decoder inputs, while a strongly typed decoder preserves the graph's mixed FP16/FP32 tensor types:
 
 ```bash
 trtexec \
   --onnx=far3d.encoder.onnx \
   --saveEngine=far3d.encoder.calibration.engine \
+  --fp16 \
   --skipInference
 trtexec \
   --onnx=far3d.decoder.onnx \
   --saveEngine=far3d.decoder.calibration.engine \
+  --stronglyTyped \
   --skipInference
 ```
 
@@ -99,7 +106,6 @@ The calibration directory contains separate `encoder/` and `decoder/` batches. D
 Use the base Python environment for Model Optimizer:
 
 ```bash
-LD_LIBRARY_PATH="${ORT_TRT10_LIB_PATH}:${LD_LIBRARY_PATH}" \
 python /opt/Model-Optimizer/examples/onnx_ptq/far3d/quantize.py \
   --encoder-onnx far3d.encoder.onnx \
   --decoder-onnx far3d.decoder.onnx \
@@ -146,7 +152,7 @@ Use `--max-samples N` for an inference smoke test. Dataset metrics are skipped w
 
 ## Results on Argoverse 2 validation set
 
-The following historical results use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generation GPU. Model quantization uses PyTorch 2.8.0a0 from the 25.06 PyTorch container, while the FAR3D export and evaluation environment uses PyTorch 1.13.1. Accuracy is measured over all 23,522 validation frames after calibration with 512 batches sampled every 20 frames. These numbers are not directly reproducible with the current 26.07/TensorRT 11.1 image; rerun the workflow to measure the current toolchain.
+The historical results below use TensorRT 10.11.0.33 on an NVIDIA RTX 6000 Ada Generation GPU. Model quantization uses PyTorch 2.8.0a0 from the provided 25.06 PyTorch container, while export and evaluation used the previous PyTorch 1.13.1/CUDA 11.7 environment. Accuracy is measured over all 23,522 validation frames after calibration with 512 batches sampled every 20 frames. Rerun the workflow to measure the current CUDA 12.9 environment.
 
 | Encoder precision | Decoder precision | Framework | GPU compute time (ms) | Accuracy (mAP) |
 | --- | --- | --- | ---: | ---: |

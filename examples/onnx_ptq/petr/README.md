@@ -2,7 +2,7 @@
 
 This example quantizes the PETRv1 and PETRv2 image backbones and detection heads to INT8 or FP8 with Model Optimizer. It follows the [NVIDIA DL4AGX PETR TensorRT workflow](https://github.com/NVIDIA/DL4AGX/tree/master/AV-Solutions/petr-trt) and evaluates TensorRT engines on the nuScenes validation set.
 
-PETR uses a legacy PyTorch/MMCV environment that is incompatible with current Model Optimizer dependencies. The provided image uses `nvcr.io/nvidia/pytorch:26.07-py3` with TensorRT 11.1 and isolates PETR in a Python 3.8 virtual environment.
+The provided image uses `nvcr.io/nvidia/pytorch:25.06-py3`, CUDA 12.9, and TensorRT 10.11. PETR runs in an isolated Python 3.9 environment with PyTorch 2.8 `cu129` and MMCV compiled against the container's CUDA toolkit; Model Optimizer uses the base Python 3.12 environment.
 
 ## 1. Prepare PETR and nuScenes
 
@@ -42,7 +42,11 @@ docker build \
   -f examples/onnx_ptq/petr/Dockerfile \
   -t petr-modelopt \
   .
+```
 
+The default MMCV build targets SM 8.9 and includes PTX for newer GPUs. Set `--build-arg TORCH_CUDA_ARCH_LIST=...` when building for an older GPU.
+
+```bash
 docker run --rm -it --gpus=all --shm-size=64G \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \
@@ -53,12 +57,12 @@ docker run --rm -it --gpus=all --shm-size=64G \
   petr-modelopt
 ```
 
-The image builds MMDetection3D v1.0.0rc6 from its verified upstream commit and applies the included nuScenes-only patch. The patch removes the unused Lyft integration and its runtime dependencies while preserving the nuScenes dataset and evaluation path used here.
+The image builds MMCV 1.7.0 and MMDetection3D v1.0.0rc6 from verified upstream commits. The included patches add PyTorch 2.8 compatibility, remove the unused Lyft integration and the `plyfile`, TensorBoard, and KITTI-only scikit-image dependencies, and update the Python 3.9 runtime pins while preserving the nuScenes path used here.
 
-Use the isolated Python 3.8 environment for PETR export, calibration preparation, and evaluation. Keep its site-packages first so the installed MMDetection3D 1.0.0rc6 package takes precedence over the v0.17.1 source tree used by the configs:
+Use the isolated Python 3.9 environment for PETR export, calibration preparation, and evaluation. Keep its site-packages first so the installed MMDetection3D 1.0.0rc6 package takes precedence over the v0.17.1 source tree used by the configs:
 
 ```bash
-export PYTHONPATH=/opt/petr/lib/python3.8/site-packages:/workspace/PETR:/workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
+export PYTHONPATH=/opt/petr/lib/python3.9/site-packages:/workspace/PETR:/workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
 ```
 
 Inside the container, generate `nuscenes_infos_val.pkl` from the local nuScenes tables with the converter included in the pinned PETR checkout:
@@ -156,7 +160,6 @@ Collect 512 representative backbone and head input batches. The default interval
 
 Repeat with `v2`, the PETRv2 config, checkpoint, graphs, engines, and `calibration/PETRv2` output directory.
 
-TensorRT 11 uses strongly typed networks and no longer accepts `--fp16`.
 Use the base Python environment for Model Optimizer AutoCast, preserving FP32
 model inputs and outputs, then build the reference engines. The example below
 uses one representative batch for AutoCast node classification:
@@ -181,10 +184,12 @@ for version in v1 v2; do
   trtexec \
     --onnx="onnx_files/sim_${model}.extract_feat.fp16.onnx" \
     --saveEngine="engines/${model}.backbone.fp16.engine" \
+    --stronglyTyped \
     --skipInference
   trtexec \
     --onnx="onnx_files/sim_${model}.pts_bbox_head.forward.fp16.onnx" \
     --saveEngine="engines/${model}.head.fp16.engine" \
+    --stronglyTyped \
     --skipInference
 done
 ```
@@ -245,7 +250,7 @@ trtexec --loadEngine=engines/PETRv1.head.fp16.engine \
 
 ## Results on the nuScenes validation set
 
-Results below use TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU. Accuracy is measured over all 6,019 validation samples after calibration with 512 batches. GPU compute time is the sum of the backbone and head median times reported by `trtexec`; it excludes data transfers and PETRv2's reusable previous-frame feature extraction.
+The historical results below use TensorRT 11.1.0.106 and the previous PyTorch 1.13.1/CUDA 11.7 environment on an NVIDIA RTX 6000 Ada Generation GPU. Accuracy is measured over all 6,019 validation samples after calibration with 512 batches. GPU compute time is the sum of the backbone and head median times reported by `trtexec`; it excludes data transfers and PETRv2's reusable previous-frame feature extraction. Rerun the workflow to measure the current TensorRT 10.11/CUDA 12.9 environment.
 
 | Model | Backbone precision | Head precision | Framework | GPU compute time (ms) | Accuracy (mAP) |
 | --- | --- | --- | --- | ---: | ---: |

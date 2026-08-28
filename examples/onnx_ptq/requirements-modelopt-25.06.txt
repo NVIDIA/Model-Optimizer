@@ -1,0 +1,16 @@
+# Dependencies missing or requiring newer versions in PyTorch 25.06. ModelOpt is installed
+# with --no-deps because
+# the container's PyTorch 2.8 prerelease does not satisfy the stable torch>=2.8 specifier.
+cppimport==26.4.17
+lief==1.0.0
+ml_dtypes==0.5.4
+numpy==1.26.4
+omegaconf==2.3.1
+onnx==1.21.0
+onnx-graphsurgeon==0.6.1
+onnxconverter-common==1.16.0
+onnxruntime-gpu==1.24.4
+onnxscript==0.7.1
+onnxslim==0.1.96
+polygraphy==0.53.4
+setuptools==84.0.0

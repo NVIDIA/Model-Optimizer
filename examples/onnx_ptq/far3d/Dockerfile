@@ -13,44 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TensorRT 11.1 from the base image builds and runs the FAR3D engines.
-FROM nvcr.io/nvidia/pytorch:26.07-py3
+# TensorRT 10.11 from the base image builds and runs the FAR3D engines.
+FROM nvcr.io/nvidia/pytorch:25.06-py3
 
 ENV LD_LIBRARY_PATH=/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ARG TORCH_CUDA_ARCH_LIST=8.9+PTX
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libgl1 \
-        libglib2.0-0 && \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgl1 && \
     rm -rf /var/lib/apt/lists/*
 
-ENV UV_PYTHON_INSTALL_DIR=/opt/python
+RUN python -m pip install --no-cache-dir uv==0.12.3 && \
+    UV_PYTHON_INSTALL_DIR=/opt/python uv venv --seed --python 3.9.23 /opt/far3d
 
-# FAR3D requires the legacy PyTorch 1.13/MMCV stack in Python 3.8. ModelOpt is installed
-# separately below in the base image's Python 3.12 environment.
-RUN python -m pip install --no-cache-dir uv && \
-    uv python install 3.8 && \
-    uv venv --seed --python 3.8 /opt/far3d
-
-COPY examples/onnx_ptq/far3d/requirements*.txt /tmp/far3d-requirements/
-RUN env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
-        -r /tmp/far3d-requirements/requirements-torch.txt && \
-    env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
-        -r /tmp/far3d-requirements/requirements.txt && \
-    env -u PIP_CONSTRAINT /opt/far3d/bin/python -m pip install --no-cache-dir \
-        --no-build-isolation \
-        -r /tmp/far3d-requirements/requirements-mmdet3d.txt && \
-    mkdir -p /opt/far3d/lib/python3.8/site-packages/tensorrt && \
-    cp /opt/far3d/lib/python3.8/site-packages/tensorrt_bindings/__init__.py \
-        /opt/far3d/lib/python3.8/site-packages/tensorrt/__init__.py && \
-    cp /opt/far3d/lib/python3.8/site-packages/tensorrt_bindings/tensorrt.so \
-        /opt/far3d/lib/python3.8/site-packages/tensorrt/tensorrt.so
+COPY examples/onnx_ptq/install-evaluator-cu129.sh \
+    examples/onnx_ptq/mmcv-torch2.patch \
+    examples/onnx_ptq/mmdet3d-runtime.patch \
+    examples/onnx_ptq/requirements-evaluator-cu129.txt \
+    examples/onnx_ptq/requirements-modelopt-25.06.txt \
+    examples/onnx_ptq/requirements-torch-cu129.txt \
+    examples/onnx_ptq/far3d/requirements.txt \
+    /tmp/evaluator/
+RUN bash /tmp/evaluator/install-evaluator-cu129.sh \
+        /opt/far3d "${TORCH_CUDA_ARCH_LIST}" \
+        -r /tmp/evaluator/requirements.txt && \
+    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
+        -r /tmp/evaluator/requirements-modelopt-25.06.txt
 
 COPY . /opt/Model-Optimizer
-RUN cd /opt/Model-Optimizer && \
-    env -u PIP_CONSTRAINT python -m pip install --no-cache-dir \
-        -e ".[onnx]" \
-        "onnxruntime-gpu[cuda,cudnn]~=1.24.2" \
-        "tensorrt-cu12-libs==10.11.0.33"
-
-# The TensorRT EP in ONNX Runtime 1.24 requires TensorRT 10 during decoder quantization.
-ENV ORT_TRT10_LIB_PATH=/usr/local/lib/python3.12/dist-packages/tensorrt_libs
+RUN env -u PIP_CONSTRAINT python -m pip install --no-cache-dir --no-deps \
+    -e /opt/Model-Optimizer
