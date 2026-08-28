@@ -462,19 +462,28 @@ def test_global_kd_checkpoint_copies_vlm_assets_before_completion(tmp_path, monk
     assert (checkpoint / "saving_completed").is_file()
 
 
-def test_hf_auxiliary_assets_reject_symlinks_before_copying(tmp_path):
+@pytest.mark.parametrize("symlink_location", ["source", "destination"])
+def test_hf_auxiliary_assets_reject_symlinks_before_copying(tmp_path, symlink_location):
     source = tmp_path / "source"
     consolidated = tmp_path / "consolidated"
     source.mkdir()
     consolidated.mkdir()
     (source / "preprocessor_config.json").write_text("{}")
-    (source / "target.json").write_text("{}")
-    (source / "tokenizer_config.json").symlink_to(source / "target.json")
+    if symlink_location == "source":
+        (source / "target.json").write_text("{}")
+        (source / "tokenizer_config.json").symlink_to(source / "target.json")
+    else:
+        templates = source / "chat_templates"
+        templates.mkdir()
+        (templates / "vision.jinja").write_text("template")
+        destination = tmp_path / "destination"
+        destination.mkdir()
+        (consolidated / "chat_templates").symlink_to(destination)
 
-    with pytest.raises(ValueError, match="regular file"):
+    with pytest.raises(ValueError, match="symbolic link|regular file"):
         local_kd_recipe._copy_hf_auxiliary_assets(source, consolidated)
 
-    assert list(consolidated.iterdir()) == []
+    assert not (consolidated / "preprocessor_config.json").exists()
 
 
 @pytest.mark.parametrize(

@@ -466,6 +466,10 @@ def _copy_hf_auxiliary_assets(source_dir: Path, consolidated_dir: Path) -> None:
         destination = consolidated_dir / relative
         if destination.is_symlink():
             raise ValueError(f"checkpoint destination must not be a symbolic link: {relative}")
+        if destination.parent.is_symlink():
+            raise ValueError(
+                f"checkpoint destination directory must not be a symbolic link: {destination.parent.name}"
+            )
         if destination.exists():
             continue
         size = source.stat().st_size
@@ -477,10 +481,6 @@ def _copy_hf_auxiliary_assets(source_dir: Path, consolidated_dir: Path) -> None:
         validated.append((source, destination))
 
     for source, destination in validated:
-        if destination.parent.is_symlink():
-            raise ValueError(
-                f"checkpoint destination directory must not be a symbolic link: {destination.parent.name}"
-            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
 
