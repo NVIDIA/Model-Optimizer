@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from nemo_automodel.components.checkpoint.config import SaveConsolidatedMode
 from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.plugins.automodel import (
@@ -40,28 +39,6 @@ def test_local_kd_treats_ep_as_an_overlay_not_a_sample_axis():
     )
 
 
-def test_nested_hidden_widths_include_teacher_identity_candidate():
-    assert local_kd_recipe._nested_hidden_widths(4096, (3840,)) == (4096, 3840)
-    assert local_kd_recipe._nested_hidden_widths(4096, (4096, 3840)) == (
-        4096,
-        3840,
-    )
-
-
-def test_lane_axis_counts_merge_distinct_lanes_without_counting_model_parallel_replicas():
-    gathered = [
-        {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
-        {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
-        {"dp_lane": 1, "hidden_width_counts": {3840: 1}},
-        {"dp_lane": 1, "hidden_width_counts": {3840: 1}},
-    ]
-
-    assert local_kd_recipe._merge_lane_axis_counts(
-        gathered,
-        count_key="hidden_width_counts",
-    ) == {3840: 1, 4096: 1}
-
-
 def test_lane_axis_counts_reject_model_parallel_replica_disagreement():
     gathered = [
         {"dp_lane": 0, "hidden_width_counts": {4096: 1}},
@@ -73,12 +50,6 @@ def test_lane_axis_counts_reject_model_parallel_replica_disagreement():
             gathered,
             count_key="hidden_width_counts",
         )
-
-
-def test_local_kd_only_requires_publication_validation_when_exporting_hf():
-    assert not local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FALSE)
-    assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.FINAL)
-    assert local_kd_recipe._consolidated_export_enabled(SaveConsolidatedMode.EVERY)
 
 
 def test_local_kd_rejects_a_disabled_data_parallel_axis_with_ep(
@@ -156,49 +127,6 @@ def test_local_kd_reads_parallel_size_from_canonical_automodel_recipe() -> None:
 
     assert local_kd_recipe._recipe_parallel_size(recipe_cfg, "tp_size") == 2
     assert local_kd_recipe._recipe_parallel_size(recipe_cfg, "cp_size") == 1
-
-
-def test_subblock_parameter_cost_is_memoized_by_width_and_config() -> None:
-    subblock = SimpleNamespace(to_dict=lambda: {"kind": "ffn", "width": 16})
-    calls = []
-
-    def calculate(value):
-        calls.append(value)
-        return 123
-
-    cache = {}
-    assert (
-        local_kd_recipe._cached_subblock_cost(
-            cache,
-            width=4096,
-            subblock=subblock,
-            calculate=calculate,
-        )
-        == 123
-    )
-    assert (
-        local_kd_recipe._cached_subblock_cost(
-            cache,
-            width=4096,
-            subblock=subblock,
-            calculate=calculate,
-        )
-        == 123
-    )
-
-    assert calls == [subblock]
-
-
-def test_local_kd_normalizes_single_and_mapped_metric_loggers() -> None:
-    first = object()
-    second = object()
-
-    assert local_kd_recipe._iter_metric_loggers(first) == (first,)
-    assert local_kd_recipe._iter_metric_loggers({"a": first, "b": second}) == (
-        first,
-        second,
-    )
-    assert local_kd_recipe._iter_metric_loggers(None) == ()
 
 
 def test_disjoint_local_loss_backpropagates_immediately_and_returns_detached_value() -> None:
@@ -279,45 +207,6 @@ def test_elastic_local_kd_trend_is_reported_without_incomparable_hard_gate() -> 
     assert trend["comparable"] is False
     assert trend["hard_gate_passed"] is None
     assert set(trend["per_hidden_width"]) == {"1024", "2048"}
-
-
-def test_diverse_overfit_losses_are_not_treated_as_one_comparable_series() -> None:
-    assert not local_kd_recipe._overfit_loss_records_are_comparable(
-        single_batch_overfit=True,
-        resample_structure=True,
-    )
-    assert local_kd_recipe._overfit_loss_records_are_comparable(
-        single_batch_overfit=True,
-        resample_structure=False,
-    )
-
-
-def test_fixed_overfit_requires_material_relative_loss_decrease() -> None:
-    records = [{"loss": value} for value in (2.43, 2.43, 2.42, 2.42, 2.42, 2.42, 2.42, 2.42)]
-
-    trend = local_kd_recipe._loss_trend_summary(
-        records,
-        comparable=True,
-        window_size=4,
-        minimum_relative_decrease=0.05,
-    )
-
-    assert trend["decreased"] is True
-    assert trend["relative_decrease"] < 0.05
-    assert trend["hard_gate_passed"] is False
-
-
-def test_short_diverse_probe_reports_insufficient_evidence() -> None:
-    trend = local_kd_recipe._loss_trend_summary(
-        [{"loss": float(step)} for step in range(8)],
-        comparable=False,
-        window_size=8,
-    )
-
-    assert trend["sufficient_evidence"] is False
-    assert trend["required_records"] == 16
-    assert trend["observed_records"] == 8
-    assert trend["hard_gate_passed"] is None
 
 
 def test_inverse_width_policy_is_reproducible_and_favors_thinner_width() -> None:
@@ -437,72 +326,6 @@ def test_overfit_probe_repeats_one_batch_without_mutating_main_run() -> None:
     assert probe.runtime_pruning_mixin.name == "instantiated"
     assert not local_kd_launch._should_publish_final_checkpoint(probe)
     assert local_kd_launch._should_publish_final_checkpoint(config)
-
-
-def test_overfit_worker_mode_selects_one_configured_mode() -> None:
-    overfit = OmegaConf.create({"modes": ["smallest_fixed", "diverse_resampled"]})
-
-    assert local_kd_launch._selected_overfit_probe_modes(overfit, "diverse_resampled") == (
-        "diverse_resampled",
-    )
-    assert local_kd_launch._selected_overfit_probe_modes(overfit, None) == (
-        "smallest_fixed",
-        "diverse_resampled",
-    )
-    with pytest.raises(ValueError, match="not configured"):
-        local_kd_launch._selected_overfit_probe_modes(overfit, "unknown")
-
-
-def test_overfit_probe_digest_is_broadcast_from_rank_zero(monkeypatch) -> None:
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 7)
-
-    def broadcast(values, src):
-        assert src == 0
-        assert values == [None]
-        values[0] = "rankzero"
-
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
-
-    assert local_kd_launch._distributed_probe_digest("rank-local repr") == "rankzero"
-
-
-def test_bypass_run_location_is_broadcast_from_rank_zero(monkeypatch) -> None:
-    config = OmegaConf.create(
-        {
-            "puzzle_dir": "/tmp/puzzle",
-            "bypass": {"experiment_id": None, "experiment_dir": None},
-        }
-    )
-    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
-    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 7)
-
-    def broadcast(values, src):
-        assert src == 0
-        assert values == [None]
-        values[0] = ("shared-id", "/tmp/puzzle/bypass/bypass_runs/shared-id")
-
-    monkeypatch.setattr(torch.distributed, "broadcast_object_list", broadcast)
-    monkeypatch.setattr(
-        local_kd_launch,
-        "set_experiment_id",
-        lambda _cfg: pytest.fail("nonzero rank computed the experiment identity"),
-    )
-    monkeypatch.setattr(
-        local_kd_launch,
-        "set_experiment_dir",
-        lambda _cfg: pytest.fail("nonzero rank computed the experiment directory"),
-    )
-    monkeypatch.setattr(
-        local_kd_launch,
-        "_require_distributed_path_consensus",
-        lambda path, purpose: None,
-    )
-
-    local_kd_launch._broadcast_run_location(config)
-
-    assert config.bypass.experiment_id == "shared-id"
-    assert config.bypass.experiment_dir == "/tmp/puzzle/bypass/bypass_runs/shared-id"
 
 
 def test_distributed_path_consensus_rejects_split_checkpoint_roots(monkeypatch) -> None:

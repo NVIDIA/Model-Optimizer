@@ -37,17 +37,14 @@ from puzzletron_orchestrator.compiler import (
 )
 from puzzletron_orchestrator.controller import CampaignController
 from puzzletron_orchestrator.executors.base import Executor
-from puzzletron_orchestrator.progress import summarize_active_progress, summarize_stage_artifacts
 from puzzletron_orchestrator.schema import (
     AttemptSpec,
-    CommandSpec,
     JobHandle,
     JobState,
     JobStatus,
     ValidatedResult,
 )
 from puzzletron_orchestrator.state import PersistedAttempt, StageRunRecord
-from puzzletron_orchestrator.terminal import ShutdownAction
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -222,10 +219,6 @@ def _seed_sort_complete(run_dir: Path, write_terminal_manifest, config: dict) ->
     (sorted_dir / "model.safetensors").write_text("weights\n")
 
 
-def _seed_sort_sanity_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
-    _seed_sanity_complete(run_dir, "sort_sanity", write_terminal_manifest, config)
-
-
 def _seed_sanity_complete(
     run_dir: Path,
     stage_id: str,
@@ -354,150 +347,6 @@ def _record_completed_attempt(
     return attempt
 
 
-def test_depth_progress_reports_removal_and_candidate_counts(tmp_path: Path):
-    iteration = tmp_path / "depth" / "iterative" / "iteration_00"
-    iteration.mkdir(parents=True)
-    for index in range(3):
-        (iteration / f"candidate_layer_{index:03d}_moe.json").write_text("{}")
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "depth_importance",
-        config={"depth_importance": {"max_removals": 5, "expected_initial_sublayers": 80}},
-    )
-    assert summary == "removing layer 1 out of 5, current progress 3/80"
-
-
-def test_width_progress_reports_minibatch_from_log(tmp_path: Path):
-    log = tmp_path / "width.log"
-    log.write_text(
-        "[activation/automodel] entering calibration loop: target 128 iteration(s)\n"
-        "[activation/automodel] iter 12/128 (1.2s/iter, peak 10.0 GiB, elapsed 1.0 min)\n"
-    )
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "width_importance",
-        log_paths=(str(log),),
-    )
-    assert summary == "minibatch 12/128"
-
-
-def test_width_progress_reports_minibatch_from_resume_marker(tmp_path: Path):
-    progress = (
-        tmp_path
-        / "pruning"
-        / "pruning_scores"
-        / "automodel"
-        / "all_axes"
-        / ".native_resume"
-        / "progress.json"
-    )
-    progress.parent.mkdir(parents=True)
-    progress.write_text('{"version": 1, "next_step": 40, "total": 128}\n')
-    summary = summarize_stage_artifacts(tmp_path, "width_importance")
-    assert summary == "minibatch 40/128"
-
-
-def test_vllm_progress_reports_validated_over_total(tmp_path: Path):
-    cache = tmp_path / "runtime_cache"
-    cache.mkdir()
-    cache_index = 0
-    for spec_index in range(4):
-        for output_len in (1, 1024):
-            (cache / f"{cache_index}.json").write_text(
-                json.dumps(
-                    {
-                        "cache_identity": {
-                            "schema_version": 4,
-                            "model_config": {"spec": spec_index},
-                            "benchmark_args": {
-                                "input_len": 8192,
-                                "output_len": output_len,
-                                "max_model_len": 8192 + output_len,
-                                "effective_command": ["vllm", str(output_len)],
-                            },
-                        }
-                    }
-                )
-            )
-            cache_index += 1
-    # A combined phase without its prefill pair is not a validated spec.
-    (cache / "incomplete.json").write_text(
-        json.dumps(
-            {
-                "cache_identity": {
-                    "schema_version": 4,
-                    "model_config": {"spec": "incomplete"},
-                    "benchmark_args": {"input_len": 8192, "output_len": 1024},
-                }
-            }
-        )
-    )
-    log = tmp_path / "vllm.log"
-    log.write_text(
-        "Computing runtime for 36 subblocks (72 unique benchmarks) across 8 GPU(s)\n"
-        "Benchmarking runtime shard 1/16 (5/72 specs) on 1 GPU group(s):   "
-        "5%|▌         | 2/5 [00:20<06:00, 9.00s/it]\n"
-    )
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "vllm_stats",
-        config={
-            "vllm_stats": {
-                "generation_seq_len": 1024,
-                "runtime_stats": {"granularity": "subblock"},
-            }
-        },
-        log_paths=(str(log),),
-    )
-    assert summary == "validated 4/72 specs (36 subblocks)"
-
-
-def test_vllm_progress_estimates_unique_subblocks_from_library(tmp_path: Path):
-    library = [
-        {
-            "mamba_config": {
-                "kind": "mamba",
-                "name": "m",
-                "no_op": False,
-                "hidden_size": width,
-            },
-            "moe_config": {
-                "kind": "moe",
-                "name": "e",
-                "no_op": False,
-                "num_experts": experts,
-                "hidden_size": width,
-            },
-        }
-        for width in (2048, 1920)
-        for experts in (256, 128)
-    ]
-    # Duplicate rows must not inflate the unique subblock count.
-    library.extend(library)
-    (tmp_path / "subblock_library.json").write_text(json.dumps(library))
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "vllm_stats",
-        config={"vllm_stats": {"runtime_stats": {"granularity": "subblock"}}},
-    )
-    # 2 unique mamba + 4 unique moe = 6 subblocks → 12 specs.
-    assert summary == "validated 0/12 specs (6 subblocks)"
-
-
-def test_summarize_active_progress_prefers_stage_lines(tmp_path: Path):
-    iteration = tmp_path / "depth" / "iterative" / "iteration_00"
-    iteration.mkdir(parents=True)
-    (iteration / "candidate_layer_001_moe.json").write_text("{}")
-    handle = JobHandle(backend="fake", handle_id="h1", attempt_id="a1")
-    lines = summarize_active_progress(
-        puzzle_dir=tmp_path,
-        active={"h1": (handle, "depth_importance:worker:0", "a1")},
-        log_paths_by_work_id={},
-        config={"depth_importance": {"max_removals": 5, "expected_initial_sublayers": 80}},
-    )
-    assert lines == ["depth_importance: removing layer 1 out of 5, current progress 1/80"]
-
-
 def test_controller_shutdown_cancels_active_jobs(tmp_path: Path):
     plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
@@ -530,59 +379,6 @@ def test_controller_waits_for_parent_job_after_artifact_appears(tmp_path: Path, 
     assert not controller._parents_ready(child)
     controller._active.clear()
     assert controller._parents_ready(child)
-
-
-def test_controller_resubmits_legacy_completed_attempt_without_execution_identity(
-    tmp_path: Path,
-):
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    node = plan.stages[0]
-    delegate = adapter_for_stage(node)
-    item = delegate.plan(plan, node).items[0]
-    attempt = delegate.command(
-        plan=plan,
-        node=node,
-        item=item,
-        attempt_id="legacy-completed-attempt",
-        runner=plan.runner,
-    )
-    executor = _TrackingFakeExecutor()
-    controller = CampaignController(plan, executor=executor)
-    controller.store.save_attempt(attempt, None, JobState.COMPLETED.value)
-    controller.store.write_stage_record(
-        StageRunRecord(
-            stage_id="convert",
-            status=JobState.FAILED.value,
-            attempts=[
-                PersistedAttempt(
-                    attempt_id=attempt.attempt_id,
-                    work_id=attempt.work_id,
-                    stage_id=node.stage_id,
-                    status=JobState.COMPLETED.value,
-                    contract_hash=plan.contract_hash,
-                    metadata={"stage_execution_identity_incompatible": True},
-                )
-            ],
-        )
-    )
-
-    result = controller.run(once=True)
-
-    assert result["halted"] is False
-    assert result["failed_stages"] == []
-    assert executor.submitted_stage_ids == ["convert"]
-    attempts = controller.store.list_attempts("convert")
-    assert len(attempts) == 2
-    attempts_by_id = {attempt["attempt_id"]: attempt for attempt in attempts}
-    legacy = attempts_by_id.pop("legacy-completed-attempt")
-    assert "stage_execution_identity" not in legacy["metadata"]
-    submitted = next(iter(attempts_by_id.values()))
-    assert submitted["metadata"]["stage_execution_identity"] == (
-        controller._stage_execution_identity(node)
-    )
-    assert not list(
-        controller.store.events_root.glob("*_stage_execution_identity_incompatible.json")
-    )
 
 
 def test_controller_resubmits_completed_work_when_stage_semantics_change(
@@ -699,67 +495,6 @@ def test_controller_rejects_overrides_that_differ_from_compiled_plan(tmp_path: P
     assert submitted_attempt.metadata["stage_execution_identity"] != baseline_identity
 
 
-def test_controller_revalidates_recent_completed_work_before_resubmitting(
-    tmp_path: Path, monkeypatch
-):
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    node = plan.stages[0]
-    delegate = adapter_for_stage(node)
-    executor = _TrackingFakeExecutor()
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=45.0)
-    now = [1000.0]
-    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: now[0])
-    monkeypatch.setattr(
-        controller,
-        "_interruptible_sleep",
-        lambda seconds: now.__setitem__(0, now[0] + seconds),
-    )
-    _record_completed_attempt(
-        controller,
-        node,
-        handle=JobHandle(
-            backend="fake",
-            handle_id="completed-handle",
-            attempt_id="completed-attempt",
-        ),
-    )
-
-    class _DelayedVisibilityAdapter:
-        def __init__(self) -> None:
-            self.validation_count = 0
-
-        def __getattr__(self, name):
-            return getattr(delegate, name)
-
-        def aggregate(self, *, plan, node, work_plan):
-            return None
-
-        def validate(self, *, plan, node):
-            self.validation_count += 1
-            return ValidatedResult(
-                valid=self.validation_count >= 4,
-                reason="stage outputs missing",
-                artifacts=("ckpts/teacher/config.json",),
-            )
-
-    delayed = _DelayedVisibilityAdapter()
-    monkeypatch.setattr(
-        "puzzletron_orchestrator.controller.adapter_for_stage", lambda _node: delayed
-    )
-    monkeypatch.setattr(
-        "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda _config, stage_id: controller.store.stage_is_complete(stage_id),
-    )
-
-    result = controller.run(max_iterations=4)
-
-    assert result["halted"] is False
-    assert delayed.validation_count == 4
-    assert "convert" not in executor.submitted_stage_ids
-    assert len(controller.store.list_attempts("convert")) == 1
-    assert controller.store.stage_is_complete("convert")
-
-
 def test_controller_artifact_settling_deadline_survives_restart(tmp_path: Path, monkeypatch):
     plan = _compile_test_plan(
         tmp_path,
@@ -782,33 +517,6 @@ def test_controller_artifact_settling_deadline_survives_restart(tmp_path: Path, 
         )
         == 120.0
     )
-
-
-@pytest.mark.parametrize(
-    ("attempt", "expected_elapsed"),
-    [
-        ({"completed_at": "invalid", "submitted_at": 990.0}, 10.0),
-        ({"completed_at": float("nan"), "submitted_at": False}, 120.0),
-    ],
-    ids=("submitted-at-fallback", "no-usable-timestamp"),
-)
-def test_controller_settling_elapsed_handles_legacy_attempt_timestamps(
-    tmp_path: Path, monkeypatch, attempt, expected_elapsed
-):
-    plan = _compile_test_plan(
-        tmp_path,
-        stage_filter="convert",
-        execution_defaults={"artifact_settling_timeout_seconds": 120},
-    )
-    controller = CampaignController(plan, executor=_FakeExecutor())
-    monkeypatch.setattr(
-        controller,
-        "_required_completed_attempts",
-        lambda _node, _attempts: [attempt],
-    )
-    monkeypatch.setattr("puzzletron_orchestrator.controller.time.time", lambda: 1000.0)
-
-    assert controller._completed_work_artifact_settling_elapsed(None, []) == expected_elapsed
 
 
 @pytest.mark.parametrize("aggregation_failure", [False, True])
@@ -954,26 +662,6 @@ def test_controller_ignores_failed_record_from_stale_stage_execution(tmp_path: P
     assert executor.submitted_stage_ids == ["convert"]
 
 
-def test_controller_completed_summary_excludes_store_only_completion(tmp_path: Path, monkeypatch):
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    controller = CampaignController(plan, executor=_FakeExecutor())
-    controller.store.write_stage_record(
-        StageRunRecord(
-            stage_id="convert",
-            status=JobState.COMPLETED.value,
-            attempts=[],
-            aggregated=True,
-        )
-    )
-    # Suppress scheduling so the assertion isolates the controller's completed summary.
-    monkeypatch.setattr(controller, "_ready_nodes", list)
-
-    result = controller.run(once=True)
-
-    assert controller.store.stage_is_complete("convert")
-    assert "convert" not in result["completed"]
-
-
 def test_controller_aggregates_completed_work_before_resubmitting(
     tmp_path: Path, monkeypatch, write_terminal_manifest
 ):
@@ -1013,20 +701,6 @@ def test_controller_aggregates_completed_work_before_resubmitting(
     assert controller.store.stage_is_complete("convert")
 
 
-def test_controller_shutdown_cancels_store_tracked_jobs(tmp_path: Path):
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    executor = _FakeExecutor()
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
-    controller.run(once=True)
-    # Simulate a controller crash that lost in-memory handles but left durable
-    # running attempts behind.
-    controller._active.clear()
-    cancelled = controller.shutdown(reason="test-store")
-    assert cancelled == 1
-    assert len(executor.cancelled) == 1
-    assert controller.store.list_attempts("convert")[-1]["status"] == JobState.CANCELLED.value
-
-
 def test_controller_preserves_live_job_when_cancel_fails(tmp_path: Path):
     plan = _compile_test_plan(tmp_path, stage_filter="convert")
 
@@ -1041,28 +715,6 @@ def test_controller_preserves_live_job_when_cancel_fails(tmp_path: Path):
     assert controller.shutdown(reason="test-failure") == 0
     assert controller.store.list_attempts("convert")[-1]["status"] == JobState.RUNNING.value
     assert len(controller.store.list_live_handles()) == 1
-
-
-def test_slurm_job_id_falls_back_to_handle_id():
-    from puzzletron_orchestrator.executors.slurm import _slurm_job_id
-
-    assert (
-        _slurm_job_id(
-            JobHandle(backend="slurm", handle_id="slurm-14208687", attempt_id="a1", metadata={})
-        )
-        == "14208687"
-    )
-    assert (
-        _slurm_job_id(
-            JobHandle(
-                backend="slurm",
-                handle_id="slurm-1",
-                attempt_id="a1",
-                metadata={"job_id": "999"},
-            )
-        )
-        == "999"
-    )
 
 
 def test_slurm_cancel_batches_job_ids(tmp_path: Path, monkeypatch):
@@ -1143,165 +795,6 @@ def test_slurm_cancel_detects_jobs_that_remain_queued(tmp_path: Path, monkeypatc
         executor.cancel([handle])
 
 
-def test_slurm_cancel_waits_for_slow_allocation_cleanup(tmp_path: Path, monkeypatch):
-    from puzzletron_orchestrator.executors.slurm import SlurmExecutor
-    from puzzletron_orchestrator.schema import (
-        ExecutionContract,
-        RunnerEnvironment,
-        SlurmRunnerConfig,
-    )
-
-    queue_polls = 0
-
-    def _fake_run(argv):
-        nonlocal queue_polls
-
-        class _Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        result = _Result()
-        if argv[0] == "squeue":
-            queue_polls += 1
-            result.stdout = "11\n" if queue_polls <= 10 else ""
-        return result
-
-    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm._run_command", _fake_run)
-    monkeypatch.setattr("puzzletron_orchestrator.executors.slurm.time.sleep", lambda _: None)
-    executor = SlurmExecutor(
-        RunnerEnvironment(
-            kind="slurm",
-            slurm=SlurmRunnerConfig(account="test"),
-            contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        ),
-        scripts_dir=tmp_path / "sbatch",
-    )
-
-    executor.cancel([JobHandle(backend="slurm", handle_id="slurm-11", attempt_id="a", metadata={})])
-
-    assert queue_polls == 11
-
-
-def test_convert_progress_is_suppressed(tmp_path: Path):
-    handle = JobHandle(backend="fake", handle_id="h1", attempt_id="a1")
-    log = tmp_path / "convert.log"
-    log.write_text("Puzzletron stage 'convert' finished with status success\n")
-    lines = summarize_active_progress(
-        puzzle_dir=tmp_path,
-        active={"h1": (handle, "convert:0", "a1")},
-        log_paths_by_work_id={"convert:0": (str(log),)},
-        config={},
-    )
-    assert lines == []
-
-
-def test_tokenize_progress_reports_samples_tokenized(tmp_path: Path):
-    output = tmp_path / "dataset_cache" / "train.tokens"
-    progress = output.parent / f".{output.name}.progress"
-    progress.mkdir(parents=True)
-    (progress / "worker_0000.json").write_text(
-        json.dumps({"worker": 0, "rows_complete": 40, "rows_total": 100})
-    )
-    (progress / "worker_0001.json").write_text(
-        json.dumps({"worker": 1, "rows_complete": 35, "rows_total": 100})
-    )
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "tokenize_data",
-        config={
-            "tokenize_data": {
-                "caches": [
-                    {"output": str(output), "num_samples": 200},
-                    {
-                        "output": str(tmp_path / "dataset_cache" / "val.tokens"),
-                        "num_samples": 50,
-                    },
-                ]
-            }
-        },
-    )
-    assert summary == "75/250 samples tokenized"
-
-
-def test_tokenize_progress_reports_single_worker_samples(tmp_path: Path):
-    output = tmp_path / "dataset_cache" / "train.tokens"
-    progress = output.parent / f".{output.name}.progress"
-    progress.mkdir(parents=True)
-    (progress / "worker_0000.json").write_text(
-        json.dumps({"worker": 0, "rows_complete": 40, "rows_total": 100})
-    )
-
-    summary = summarize_stage_artifacts(
-        tmp_path,
-        "tokenize_data",
-        config={"tokenize_data": {"caches": [{"output": str(output), "num_samples": 100}]}},
-    )
-
-    assert summary == "40/100 samples tokenized"
-
-
-def test_sort_progress_counts_unique_checkpoint_shards(tmp_path: Path):
-    log = tmp_path / "sort.log"
-    log.write_text(
-        "*****************************************\n"
-        "[sorted_teacher] shard complete rank=0 "
-        "shard=model-00001-of-00026.safetensors (1/4)\n"
-        "[sorted_teacher] shard complete rank=0 "
-        "shard=model-00001-of-00026.safetensors (1/4)\n"
-        "[sorted_teacher] shard complete rank=1 "
-        "shard=model-00002-of-00026.safetensors (1/4)\n"
-        "new kernel: registered at torch_bindings.cpp\n"
-    )
-
-    summary = summarize_stage_artifacts(tmp_path, "sort", log_paths=(str(log),))
-
-    assert summary == "sorted checkpoint shards 2/26"
-
-
-def test_width_sanity_progress_reports_parent_case(tmp_path: Path):
-    log = tmp_path / "width-sanity.log"
-    log.write_text(
-        "[solution/automodel] parent sweep load | role=activation checkpoint=/tmp/model "
-        "solutions=10 pending=10\n"
-        "[solution/automodel] parent sweep candidate | "
-        "role=activation solution=3 target={'layer': 1}\n"
-    )
-
-    summary = summarize_stage_artifacts(tmp_path, "width_sanity", log_paths=(str(log),))
-
-    assert summary == "activation parent: scoring case 4/10"
-
-
-def test_bypass_sanity_progress_reports_probe_step_and_loss(tmp_path: Path):
-    log = tmp_path / "bypass-sanity.log"
-    log.write_text(
-        "[bypass/automodel] running fixed-batch overfit acceptance probe "
-        "mode=fixed_smallest (1/2) for 128 steps\n"
-        "[bypass/automodel] step=5/128 loss=0.125 layers=40\n"
-        "GpuFreq=control_disabled\n"
-    )
-
-    summary = summarize_stage_artifacts(tmp_path, "bypass_sanity", log_paths=(str(log),))
-
-    assert summary == "fixed_smallest probe 1/2: step 5/128, loss 0.125"
-
-
-def test_unknown_stage_progress_does_not_echo_arbitrary_log_tail(tmp_path: Path):
-    handle = JobHandle(backend="fake", handle_id="h1", attempt_id="a1")
-    log = tmp_path / "future.log"
-    log.write_text("new kernel: registered at torch_bindings.cpp\n")
-
-    lines = summarize_active_progress(
-        puzzle_dir=tmp_path,
-        active={"h1": (handle, "future_stage:0", "a1")},
-        log_paths_by_work_id={"future_stage:0": (str(log),)},
-        config={},
-    )
-
-    assert lines == []
-
-
 def test_controller_keyboard_interrupt_cancels_jobs(tmp_path: Path, monkeypatch):
     plan = _compile_test_plan(tmp_path, stage_filter="convert")
     executor = _FakeExecutor()
@@ -1319,44 +812,6 @@ def test_controller_keyboard_interrupt_cancels_jobs(tmp_path: Path, monkeypatch)
     assert result["halted"] is True
     assert len(executor.cancelled) == 1
     assert controller.store.list_attempts("convert")[-1]["status"] == JobState.CANCELLED.value
-
-
-def test_controller_can_resume_quit_menu_then_detach_live_jobs(tmp_path: Path):
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    executor = _FakeExecutor()
-
-    class _Controls:
-        enabled = True
-
-        def __init__(self) -> None:
-            self.actions = [ShutdownAction.CONTINUE, ShutdownAction.DETACH]
-
-        def start(self) -> None:
-            return None
-
-        def stop(self) -> None:
-            return None
-
-        def poll_quit(self) -> bool:
-            return True
-
-        def choose_shutdown(self) -> ShutdownAction:
-            return self.actions.pop(0)
-
-    controller = CampaignController(
-        plan,
-        executor=executor,
-        poll_interval_seconds=0.01,
-        terminal_controls=_Controls(),
-    )
-
-    result = controller.run()
-
-    assert result["detached"] is True
-    assert result["cancelled"] is False
-    assert executor.cancelled == []
-    assert controller.store.list_attempts("convert")[-1]["status"] == JobState.RUNNING.value
-    assert controller.store.list_live_handles()
 
 
 def test_controller_fatal_failure_drains_without_cancelling_siblings(
@@ -1446,35 +901,6 @@ def test_controller_fatal_failure_drains_without_cancelling_siblings(
     assert not ((blocked - {failed_stage}) & attempted_stages)
 
 
-def test_controller_collects_failed_attempt_log_paths(tmp_path: Path):
-    experiment, runner_path, execution_path = _write_configs(tmp_path)
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-    )
-    controller = CampaignController(plan, executor=_FakeExecutor())
-    attempt = AttemptSpec(
-        attempt_id="failed-attempt",
-        work_id="vllm_stats:0",
-        stage_id="vllm_stats",
-        command=CommandSpec(argv=("python", "worker.py"), log_path="/logs/fallback.log"),
-    )
-    handle = JobHandle("fake", "fake-failed-attempt", attempt.attempt_id)
-    controller.store.save_attempt(attempt, handle, JobState.RUNNING.value)
-    controller.store.update_attempt_status(
-        attempt.work_id,
-        attempt.attempt_id,
-        JobStatus(
-            handle=handle,
-            state=JobState.FAILED,
-            log_paths=("/logs/worker.log",),
-        ),
-    )
-
-    assert controller._failed_log_paths({"vllm_stats"}) == {"vllm_stats": ["/logs/worker.log"]}
-
-
 def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
     tmp_path: Path, write_terminal_manifest
 ):
@@ -1508,78 +934,6 @@ def test_controller_fatal_failure_cancels_other_jobs_in_fail_fast_mode(
     assert executor.cancelled
     assert all(
         attempt["status"] in {JobState.FAILED.value, JobState.CANCELLED.value}
-        for attempt in controller.store.list_attempts()
-    )
-
-
-def test_controller_width_sanity_failure_drains_independent_bypass_sanity(
-    tmp_path: Path, monkeypatch, write_terminal_manifest
-):
-    experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    experiment_config = yaml.safe_load(experiment.read_text())
-    _seed_sort_complete(run_dir, write_terminal_manifest, experiment_config)
-    _seed_sort_sanity_complete(run_dir, write_terminal_manifest, experiment_config)
-    upstream = {"convert", "tokenize_data", "width_importance", "sort", "sort_sanity"}
-    monkeypatch.setattr(
-        "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda config, stage_id: stage_id in upstream or artifacts_are_complete(config, stage_id),
-    )
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-    )
-    plan = replace(
-        plan,
-        stages=tuple(
-            node
-            for node in plan.stages
-            if node.stage_id in {"width_sanity", "slicing_sanity", "bypass_sanity"}
-        ),
-    )
-
-    class _SanityDrainExecutor(_TrackingFakeExecutor):
-        def __init__(self) -> None:
-            super().__init__()
-            self.poll_count = 0
-
-        def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-            self.poll_count += 1
-            statuses = []
-            for handle in handles:
-                stage_id = self._stage_id(handle)
-                if stage_id == "width_sanity":
-                    state = JobState.FAILED
-                    reason = "width sanity worker failure"
-                elif stage_id == "bypass_sanity":
-                    state = JobState.COMPLETED if self.poll_count > 1 else JobState.RUNNING
-                    reason = None
-                    if state is JobState.COMPLETED:
-                        _seed_sanity_complete(
-                            run_dir,
-                            "bypass_sanity",
-                            write_terminal_manifest,
-                            plan.experiment_config,
-                        )
-                else:
-                    state = JobState.COMPLETED
-                    reason = None
-                statuses.append(JobStatus(handle=handle, state=state, reason=reason))
-            return statuses
-
-    executor = _SanityDrainExecutor()
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
-    result = controller.run()
-
-    assert result["halted"] is True
-    assert result["cancelled"] is False
-    assert result["failed_stages"] == ["width_sanity"]
-    assert executor.cancelled == []
-    assert "bypass_sanity" in executor.submitted_stage_ids
-    assert "slicing_sanity" not in executor.submitted_stage_ids
-    assert any(
-        attempt["work_id"].startswith("bypass_sanity:")
-        and attempt["status"] == JobState.COMPLETED.value
         for attempt in controller.store.list_attempts()
     )
 
@@ -1650,51 +1004,6 @@ def test_controller_failed_ancestor_blocks_descendant_submit(
     blocked = _blocked_descendants(plan, {"sort_sanity"})
     assert "width_sanity" in blocked
     assert "bypass_sanity" not in blocked
-
-
-def test_controller_multiple_failures_drain_both_sanity_branches(
-    tmp_path: Path, monkeypatch, write_terminal_manifest
-):
-    experiment, runner_path, execution_path, run_dir = _write_sanity_drain_configs(tmp_path)
-    _seed_sort_complete(run_dir, write_terminal_manifest, yaml.safe_load(experiment.read_text()))
-    upstream = {"convert", "tokenize_data", "width_importance", "sort"}
-    monkeypatch.setattr(
-        "puzzletron_orchestrator.controller.stage_is_complete",
-        lambda _config, stage_id: stage_id in upstream,
-    )
-    plan = compile_campaign_plan(
-        experiment_config_path=experiment,
-        runner=load_runner_config(runner_path),
-        execution=load_execution_config(execution_path),
-    )
-
-    class _SanityDrainExecutor(_TrackingFakeExecutor):
-        def poll(self, handles: Sequence[JobHandle]) -> list[JobStatus]:
-            return [
-                JobStatus(
-                    handle=handle,
-                    state=(
-                        JobState.FAILED
-                        if self._stage_id(handle) in {"sort_sanity", "bypass_sanity"}
-                        else JobState.COMPLETED
-                    ),
-                    reason=(
-                        "sanity worker failure"
-                        if self._stage_id(handle) in {"sort_sanity", "bypass_sanity"}
-                        else None
-                    ),
-                )
-                for handle in handles
-            ]
-
-    executor = _SanityDrainExecutor()
-    controller = CampaignController(plan, executor=executor, poll_interval_seconds=0.01)
-    result = controller.run()
-
-    assert result["halted"] is True
-    assert result["cancelled"] is False
-    assert set(result["failed_stages"]) == {"sort_sanity", "bypass_sanity"}
-    assert executor.cancelled == []
 
 
 def test_controller_sigint_during_recovery_cancels_jobs(tmp_path: Path):

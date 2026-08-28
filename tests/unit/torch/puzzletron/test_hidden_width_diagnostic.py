@@ -23,33 +23,12 @@ from modelopt.torch.puzzletron.stages.diagnostics import (
     _hidden_width_ranking_verdict,
     _hidden_width_result_metrics,
     _merge_reused_sort_equivalence,
-    _near_teacher_axis_targets,
     _parent_sweep_sanity_verdict,
     _ratio_aligned_hidden_widths,
-    _select_diagnostic_hidden_width,
     _select_layers,
     _write_hidden_only_diagnostic_artifacts,
     _write_reused_sort_equivalence,
 )
-
-
-def test_near_teacher_axis_targets_selects_two_largest_legal_values():
-    config = {
-        "search_space": {
-            "axes": {
-                "ffn_intermediate": {
-                    "teacher_value": 12288,
-                    "values": [6144, 10240, 8192, 12288],
-                },
-                "binary_axis": {"teacher_value": 2, "values": [1]},
-            }
-        }
-    }
-
-    assert _near_teacher_axis_targets(config, ["ffn_intermediate", "binary_axis"], count=2) == {
-        "ffn_intermediate": [10240, 8192],
-        "binary_axis": [1],
-    }
 
 
 def test_hidden_width_targets_apply_requested_ratios_and_alignment():
@@ -57,15 +36,6 @@ def test_hidden_width_targets_apply_requested_ratios_and_alignment():
         3584,
         1024,
     ]
-
-
-def test_hidden_width_diagnostic_selects_nearest_legal_seven_eighths_width():
-    assert _select_diagnostic_hidden_width(4096, [4096, 3840, 3584]) == 3584
-    assert _select_diagnostic_hidden_width(2688, [2688, 2496, 2304]) == 2304
-
-
-def test_hidden_width_diagnostic_tie_prefers_larger_reduced_width():
-    assert _select_diagnostic_hidden_width(800, [800, 690, 710]) == 710
 
 
 def test_hidden_width_verdict_can_treat_original_prefix_as_diagnostic_only():

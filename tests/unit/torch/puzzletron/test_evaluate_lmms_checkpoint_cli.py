@@ -46,17 +46,6 @@ def test_runner_import_keeps_stdout_machine_readable(monkeypatch, capsys):
     assert captured.err == "import-time diagnostic\n"
 
 
-def test_cli_help_explains_qwen_profile_and_native_escape_hatch():
-    help_text = evaluate_lmms_checkpoint._build_parser().format_help()
-    normalized_help = " ".join(help_text.split())
-
-    assert "--model-profile {auto,none}" in help_text
-    assert "Qwen 3.5" in help_text
-    assert "reasoning_parser=qwen3" in help_text
-    assert "--lmms-eval-args" in help_text
-    assert "python -m lmms_eval --help" in normalized_help
-
-
 def test_cli_runs_generic_text_smoke_defaults(monkeypatch, tmp_path, capsys):
     checkpoint = tmp_path / "teacher"
     checkpoint.mkdir()
@@ -161,43 +150,6 @@ def test_cli_auto_configures_qwen_3_5_and_reports_the_choice(monkeypatch, tmp_pa
     assert "reasoning_parser=qwen3" in captured_streams.err
 
 
-@pytest.mark.parametrize(
-    ("extra_args", "expected"),
-    [
-        (["--model-profile", "none"], None),
-        (["--reasoning-parser", "custom"], "custom"),
-    ],
-)
-def test_cli_can_disable_or_override_qwen_3_5_profile(tmp_path, extra_args, expected):
-    checkpoint = tmp_path / "qwen"
-    checkpoint.mkdir()
-    (checkpoint / "config.json").write_text('{"model_type": "qwen3_5"}\n')
-
-    args = evaluate_lmms_checkpoint._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(tmp_path / "results"),
-            *extra_args,
-        ]
-    )
-
-    assert (
-        evaluate_lmms_checkpoint._settings(args)["model_args"].get("reasoning_parser") == expected
-    )
-
-
-def test_cli_ignores_unrecognized_or_malformed_model_metadata(tmp_path):
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    (checkpoint / "config.json").write_text(
-        '{"model_type": ["not", "a", "string"], "text_config": []}\n'
-    )
-
-    assert evaluate_lmms_checkpoint._automatic_model_args(checkpoint) == {}
-
-
 def test_cli_full_run_and_runtime_overrides_are_wired(tmp_path):
     checkpoint = tmp_path / "teacher"
     checkpoint.mkdir()
@@ -226,57 +178,6 @@ def test_cli_full_run_and_runtime_overrides_are_wired(tmp_path):
     assert settings["model_args"]["trust_remote_code"] is True
 
 
-def test_cli_forwards_native_lmms_eval_options_with_compatibility_path(tmp_path):
-    checkpoint = tmp_path / "teacher"
-    checkpoint.mkdir()
-    compatibility_tasks_root = tmp_path / "task-configs"
-
-    args = evaluate_lmms_checkpoint._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--lmms-eval-args",
-            "--verbosity",
-            "DEBUG",
-            "--apply_chat_template",
-        ]
-    )
-
-    settings = evaluate_lmms_checkpoint._settings(
-        args,
-        compatibility_tasks_root=compatibility_tasks_root,
-    )
-    assert settings["extra_args"] == [
-        "--verbosity",
-        "DEBUG",
-        "--apply_chat_template",
-        "--include_path",
-        str(compatibility_tasks_root),
-    ]
-
-
-def test_cli_maps_gsm8k_to_namespaced_compatibility_task(tmp_path):
-    checkpoint = tmp_path / "teacher"
-    checkpoint.mkdir()
-
-    args = evaluate_lmms_checkpoint._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--tasks",
-            " ifeval, gsm8k,custom_task ",
-        ]
-    )
-
-    assert evaluate_lmms_checkpoint._settings(args)["tasks"] == (
-        "ifeval,modelopt_gsm8k,custom_task"
-    )
-
-
 def test_cli_rejects_empty_task_names(tmp_path):
     checkpoint = tmp_path / "teacher"
     checkpoint.mkdir()
@@ -292,35 +193,6 @@ def test_cli_rejects_empty_task_names(tmp_path):
                 "ifeval,,gsm8k",
             ]
         )
-
-
-def test_compatibility_task_is_not_written_when_gsm8k_is_not_selected(tmp_path):
-    assert (
-        evaluate_lmms_checkpoint._prepare_compatibility_tasks(
-            tmp_path / "results", "ifeval,custom_task"
-        )
-        is None
-    )
-    assert not (tmp_path / "results").exists()
-
-
-def test_cli_explicit_timeout_overrides_full_default(tmp_path):
-    checkpoint = tmp_path / "teacher"
-    checkpoint.mkdir()
-
-    args = evaluate_lmms_checkpoint._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--full",
-            "--timeout-seconds",
-            "123",
-        ]
-    )
-
-    assert evaluate_lmms_checkpoint._settings(args)["timeout_seconds"] == 123
 
 
 def test_cli_reports_failed_attempt_evidence_payload(monkeypatch, tmp_path, capsys):

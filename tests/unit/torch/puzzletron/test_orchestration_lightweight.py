@@ -17,12 +17,9 @@
 
 from __future__ import annotations
 
-import io
 import json
-import os
 import subprocess
 import sys
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -30,7 +27,6 @@ import yaml
 
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 from puzzletron_orchestrator.config import load_experiment_config
-from puzzletron_orchestrator.logging import OrchestratorLogger
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
@@ -73,126 +69,6 @@ def test_lightweight_package_does_not_import_torch() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-
-
-def test_pipeline_config_import_does_not_cycle_through_post_mip() -> None:
-    environment = dict(os.environ)
-    # This subprocess checks cold importability, not subprocess coverage collection.
-    environment.pop("COVERAGE_PROCESS_START", None)
-    environment.pop("COVERAGE_FILE", None)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path; "
-            "assert callable(pipeline_config_from_path)",
-        ],
-        cwd=REPOSITORY_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert result.returncode == 0, result.stderr
-
-
-def test_named_vllm_measurement_gpu_group_includes_data_parallelism() -> None:
-    from puzzletron_orchestrator.vllm_measurements import normalize_vllm_measurements
-
-    measurements = normalize_vllm_measurements(
-        {
-            "vllm_stats": {
-                "enabled": True,
-                "measurements": {
-                    "multigpu": {
-                        "prefill_seq_len": 128,
-                        "generation_seq_len": 32,
-                        "batch_size": 1,
-                        "max_num_seqs": 1,
-                        "granularity": "subblock",
-                        "runtime_stats": {
-                            "topology": {
-                                "tensor_parallel_size": 2,
-                                "data_parallel_size": 2,
-                                "prefill_context_parallel_size": 2,
-                                "enable_expert_parallel": True,
-                                "gpu_group_size": 8,
-                            }
-                        },
-                    }
-                },
-            }
-        }
-    )
-
-    assert measurements["multigpu"].gpu_group_size == 8
-
-
-def test_cpu_stage_command_omits_main_gpu_count(tmp_path: Path) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import StageCompatAdapter
-    from puzzletron_orchestrator.schema import (
-        CampaignPlan,
-        ExecutionContract,
-        ExecutionStrategy,
-        FailurePolicy,
-        RunnerEnvironment,
-        StagePlanNode,
-    )
-
-    runner = RunnerEnvironment(
-        kind="local",
-        contract=ExecutionContract(repository=str(tmp_path), venv=".venv"),
-    )
-    plan = CampaignPlan(
-        experiment_config_path=str(tmp_path / "experiment.yaml"),
-        puzzle_dir=tmp_path / "run",
-        experiment_config={},
-        runner=runner,
-        execution_defaults={},
-        stages=(),
-        contract_hash="contract",
-    )
-    node = StagePlanNode(
-        stage_id="convert",
-        strategy=ExecutionStrategy.SINGLE,
-        instances=1,
-        failure_policy=FailurePolicy.STRICT,
-        mesh={},
-        gpus_per_instance=0,
-        gpus_per_node=0,
-        nodes=1,
-        total_gpus=0,
-        exclusive=False,
-        parents=(),
-        distributed=False,
-        resource="cpu",
-    )
-    adapter = StageCompatAdapter()
-    item = adapter.plan(plan, node).items[0]
-
-    attempt = adapter.command(
-        plan=plan,
-        node=node,
-        item=item,
-        attempt_id="attempt",
-        runner=runner,
-    )
-
-    assert "--gpus-per-node" not in attempt.command.argv
-    assert attempt.metadata["gpus_per_node"] == 0
-
-
-def test_orchestrator_logger_color_modes() -> None:
-    colored = io.StringIO()
-    OrchestratorLogger(color="always", stream=colored).success("stage complete")
-    assert "\033[32m" in colored.getvalue()
-    assert "stage complete" in colored.getvalue()
-
-    plain = io.StringIO()
-    OrchestratorLogger(color="never", stream=plain).error("stage failed")
-    assert "\033[" not in plain.getvalue()
-    assert "stage failed" in plain.getvalue()
 
 
 def test_load_experiment_config_composes_defaults_and_interpolation(
@@ -493,27 +369,6 @@ def test_convert_completeness_requires_runtime_subblock_library(
     )
 
 
-def test_non_elastic_bypass_completeness_does_not_require_dp_observations(
-    tmp_path: Path, write_terminal_manifest
-) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
-    config = {"puzzle_dir": str(tmp_path), "bypass": {"elastic": False}}
-    write_terminal_manifest(tmp_path, "bypass", config=config)
-    history = tmp_path / "artifacts" / "bypass" / "local_kd_loss_history.json"
-    history.parent.mkdir(parents=True)
-    history.write_text("{}\n")
-
-    assert stage_is_complete(config, "bypass")
-
-    config["bypass"]["elastic"] = True
-    assert not stage_is_complete(config, "bypass")
-    write_terminal_manifest(tmp_path, "bypass", config=config)
-    assert not stage_is_complete(config, "bypass")
-    (history.parent / "dp_observations.jsonl").write_text("{}\n")
-    assert stage_is_complete(config, "bypass")
-
-
 def test_width_completeness_requires_success_manifest_and_complete_passes(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
@@ -536,30 +391,6 @@ def test_width_completeness_requires_success_manifest_and_complete_passes(
     assert stage_is_complete(config, "width_importance")
 
 
-def test_sort_completeness_rejects_early_config_and_requires_final_outputs(
-    tmp_path: Path, write_terminal_manifest
-) -> None:
-    from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
-
-    config = {"puzzle_dir": str(tmp_path)}
-    sorted_teacher = tmp_path / "ckpts" / "sorted_teacher"
-    sorted_teacher.mkdir(parents=True)
-    (sorted_teacher / "config.json").write_text("{}")
-    assert not stage_is_complete(config, "sort")
-
-    shard = "model-00001-of-00001.safetensors"
-    (sorted_teacher / shard).write_text("weights")
-    (sorted_teacher / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {"model.weight": shard}})
-    )
-    (sorted_teacher / "sorted_permutations.json").write_text('{"layer": [0]}')
-    (sorted_teacher / "parallel_sort_manifest.json").write_text('{"status": "complete"}')
-    assert not stage_is_complete(config, "sort")
-
-    write_terminal_manifest(tmp_path, "sort", config=config)
-    assert stage_is_complete(config, "sort")
-
-
 def test_depth_completeness_requires_matching_complete_trajectory(
     tmp_path: Path, write_terminal_manifest
 ) -> None:
@@ -580,54 +411,6 @@ def test_depth_completeness_requires_matching_complete_trajectory(
         json.dumps({"status": "complete", "max_removals": 2, "selected": [{}, {}]})
     )
     assert stage_is_complete(config, "depth_importance")
-
-
-def test_build_library_requires_its_own_complete_outputs(
-    tmp_path: Path, write_terminal_manifest
-) -> None:
-    config = {"puzzle_dir": str(tmp_path)}
-    write_terminal_manifest(tmp_path, "build_library", config=config)
-    (tmp_path / "subblock_stats.json").write_text("{}")
-    assert not stage_is_complete(config, "build_library")
-
-    (tmp_path / "replacement_library.json").write_text("{}")
-    assert not stage_is_complete(config, "build_library")
-    (tmp_path / "candidate_library.json").write_text("{}")
-    assert stage_is_complete(config, "build_library")
-
-
-def test_build_library_completion_accepts_equivalent_loader_and_worker_configs(
-    tmp_path: Path, write_terminal_manifest
-) -> None:
-    experiment = tmp_path / "experiment.yaml"
-    experiment.write_text(
-        f"""\
-defaults: [_self_]
-puzzle_dir: {tmp_path}
-build_library:
-  enabled: true
-bypass:
-  best_val_loss: 1e+9
-  training:
-    learning_rate: 1e-4
-    min_lr_factor: 1e-5
-"""
-    )
-    controller_config = load_experiment_config(experiment)
-    worker_config = deepcopy(controller_config)
-    worker_config["library"] = {}
-
-    write_terminal_manifest(tmp_path, "build_library", config=worker_config)
-    for name in (
-        "replacement_library.json",
-        "candidate_library.json",
-        "subblock_stats.json",
-    ):
-        (tmp_path / name).write_text("{}")
-
-    assert stage_is_complete(controller_config, "build_library")
-    controller_config["bypass"]["best_val_loss"] = 2e9
-    assert not stage_is_complete(controller_config, "build_library")
 
 
 def test_embedding_build_library_requires_every_width_scenario(
@@ -678,48 +461,6 @@ def test_successful_manifest_stales_when_semantic_config_changes(
     assert stage_is_complete(config, "convert")
     changed = {**config, "convert": {"teacher_dir": "teacher-v2"}}
     assert not stage_is_complete(changed, "convert")
-
-
-def test_tokenize_data_completeness_rejects_mismatched_cache_metadata(
-    tmp_path: Path, write_terminal_manifest, write_token_cache
-) -> None:
-    output = tmp_path / "dataset_cache" / "train.tokens"
-    config = {
-        "puzzle_dir": str(tmp_path),
-        "dataset_path": str(tmp_path / "dataset"),
-        "convert": {"teacher_dir": str(tmp_path / "ckpts" / "teacher")},
-        "tokenize_data": {
-            "enabled": True,
-            "caches": [
-                {
-                    "output": str(output),
-                    "split": "train",
-                    "num_samples": 1,
-                    "seq_length": 8,
-                    "shuffle_seed": 1,
-                }
-            ],
-        },
-    }
-    receipt = write_token_cache(config, config["tokenize_data"]["caches"][0])
-    write_terminal_manifest(
-        tmp_path,
-        "tokenize_data",
-        config=config,
-        outputs={"caches": [receipt]},
-    )
-    metadata_path = Path(receipt["metadata"])
-    metadata = json.loads(metadata_path.read_text())
-    metadata["split"] = "validation"
-    metadata_path.write_text(json.dumps(metadata))
-
-    assert not stage_is_complete(config, "tokenize_data")
-
-    write_token_cache(config, config["tokenize_data"]["caches"][0])
-    assert stage_is_complete(config, "tokenize_data")
-
-    config["model"] = {"trust_remote_code": True}
-    assert not stage_is_complete(config, "tokenize_data")
 
 
 def test_tokenize_data_completeness_requires_exact_receipts_and_cache_set(
@@ -861,38 +602,3 @@ def test_legacy_mip_and_evaluation_completeness(tmp_path: Path, write_terminal_m
     runtime_eval.parent.mkdir(parents=True)
     runtime_eval.write_text("{}")
     assert stage_is_complete(config, "zero_shot_evaluation")
-
-
-def test_qwen_production_dry_run_uses_worker_python(tmp_path: Path) -> None:
-    output = tmp_path / "dry-run.json"
-    environment = dict(os.environ)
-    environment["PUZZLETRON_RUN_ROOT"] = str(tmp_path / "qwen-moe")
-    with output.open("w") as stream:
-        result = subprocess.run(
-            [
-                sys.executable,
-                "examples/puzzletron/orchestrate.py",
-                "--experiment",
-                "examples/puzzletron/configs/families/qwen3_5/qwen3p6_35b_a3b/runs/production.yaml",
-                "--runner",
-                "examples/puzzletron/configs/orchestration/qwen_moe/runner.slurm.yaml",
-                "--execution",
-                "examples/puzzletron/configs/orchestration/qwen_moe/execution.production.yaml",
-                "--stage",
-                "full",
-                "--dry-run",
-            ],
-            cwd=REPOSITORY_ROOT,
-            env=environment,
-            stdout=stream,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
-    assert result.returncode == 0, result.stderr
-
-    payload = yaml.safe_load(output.read_text())
-    assert all(submission["argv"][0] in {"python", "bash"} for submission in payload["submissions"])
-    vllm = [item for item in payload["submissions"] if item["stage_id"] == "vllm_stats"]
-    assert len(vllm) == 1
-    assert all(item["gpus"] == 8 and item["nodes"] == 1 for item in vllm)

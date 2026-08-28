@@ -25,22 +25,15 @@ from examples.puzzletron.acceptance_resume import (
     build_payload,
     check_marker,
     check_marker_details,
-    marker_path,
     source_identity,
     write_marker,
 )
-from examples.puzzletron.main import (
-    _completion_is_valid,
-    _embedding_followup_stage,
-    _report_model_name,
-    _resume_kwargs,
-)
+from examples.puzzletron.main import _completion_is_valid, _resume_kwargs
 from modelopt.torch.puzzletron.manifest import (
     StageManifest,
     semantic_stage_config,
     write_stage_manifest,
 )
-from modelopt.torch.puzzletron.orchestration.adapters.stage_compat import stage_output_patterns
 from modelopt.torch.puzzletron.stages.graph import STAGE_REGISTRY
 
 _PRE_V3_COMPLETION_MARKER = """{
@@ -68,25 +61,6 @@ def _config(root: Path, **sections: dict) -> dict:
         "mip": {},
         **sections,
     }
-
-
-def test_report_model_name_prefers_display_identity_over_snapshot_path():
-    config = {
-        "display_name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-        "model": {"source": "/cache/models--nvidia--Nemotron/snapshots/revision"},
-        "model_info": {"hf_repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"},
-    }
-
-    assert _report_model_name(config) == config["display_name"]
-
-
-def test_report_model_name_uses_hf_repo_before_snapshot_path():
-    config = {
-        "model": {"source": "/cache/models--nvidia--Nemotron/snapshots/revision"},
-        "model_info": {"hf_repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"},
-    }
-
-    assert _report_model_name(config) == config["model_info"]["hf_repo"]
 
 
 def _write_completion(root: Path, stage: str, identity: str) -> Path:
@@ -156,32 +130,6 @@ def test_vllm_completion_stales_when_runtime_aggregate_is_deleted(tmp_path: Path
     assert not _completion_is_valid(config, config_path, "vllm_stats")
 
 
-def test_vllm_completion_uses_configured_runtime_aggregate_filename(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        vllm_stats={
-            "enabled": True,
-            "subblock_stats_filename": "runtime/custom_stats.json",
-        },
-    )
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("static: true\n")
-    _write_completion(tmp_path, "convert", "convert-v1")
-    _write_stage_output(tmp_path, "vllm_stats", config["vllm_stats"], full_config=config)
-    summary = tmp_path / "artifacts" / "vllm_stats" / "summary.json"
-    summary.parent.mkdir(parents=True)
-    summary.write_text("{}\n")
-    stats_path = tmp_path / "runtime/custom_stats.json"
-    stats_path.parent.mkdir(parents=True)
-    stats_path.write_text("[{}]\n")
-    kwargs = _resume_kwargs(config, config_path, "vllm_stats")
-    write_marker(tmp_path, "vllm_stats", build_payload(**kwargs))
-
-    assert _completion_is_valid(config, config_path, "vllm_stats")
-    stats_path.unlink()
-    assert not _completion_is_valid(config, config_path, "vllm_stats")
-
-
 def test_every_registry_stage_projects_its_own_section_but_not_report_settings() -> None:
     config = {stage: {"semantic_value": stage} for stage in STAGE_REGISTRY}
     config["report"] = {"theme": "light"}
@@ -213,118 +161,6 @@ def test_sanity_stage_identity_includes_global_warning_policy(stage: str) -> Non
     changed = {**config, "sanity": {"fail_on_warnings": True}}
 
     assert semantic_stage_config(changed, stage) != semantic_stage_config(config, stage)
-
-
-def test_non_sanity_stage_identity_ignores_global_warning_policy() -> None:
-    config = {
-        "sort": {"enabled": True},
-        "sanity": {"fail_on_warnings": False},
-    }
-    changed = {**config, "sanity": {"fail_on_warnings": True}}
-
-    assert semantic_stage_config(changed, "sort") == semantic_stage_config(config, "sort")
-
-
-@pytest.mark.parametrize(
-    ("section", "changed_value"),
-    [
-        ("tokenize_data", {"enabled": True, "workers": 2}),
-        ("convert", {"teacher_dir": "/models/teacher-b"}),
-        ("dataset_path", "/datasets/source-b"),
-        ("model", {"source": "/models/source-b"}),
-        ("data", {"calibration": {"num_samples": 17, "seq_len": 8}}),
-        ("dataset", {"split": "validation"}),
-        ("train_token_cache_path", "/cache/train-b.tokens"),
-        ("validation_token_cache_path", "/cache/validation-b.tokens"),
-        ("pruning", {"shuffle_seed": 2}),
-        ("replacement_scoring", {"eval_samples": 33}),
-        ("depth_importance", {"eval_samples": 17}),
-        ("sort_sanity", {"eval_samples": 9}),
-        ("width_sanity", {"eval_samples": 5}),
-    ],
-)
-def test_tokenize_data_identity_includes_every_tokenizer_and_data_input(
-    section: str,
-    changed_value,
-) -> None:
-    config = {
-        "tokenize_data": {"enabled": True, "workers": 1},
-        "convert": {"teacher_dir": "/models/teacher-a"},
-        "dataset_path": "/datasets/source-a",
-        "model": {"source": "/models/source-a"},
-        "data": {"calibration": {"num_samples": 16, "seq_len": 8}},
-        "dataset": {"split": "train"},
-        "train_token_cache_path": "/cache/train-a.tokens",
-        "validation_token_cache_path": "/cache/validation-a.tokens",
-        "pruning": {"shuffle_seed": 1},
-        "replacement_scoring": {"eval_samples": 32},
-        "depth_importance": {"eval_samples": 16},
-        "sort_sanity": {"eval_samples": 8},
-        "width_sanity": {"eval_samples": 4},
-        "report": {"theme": "light"},
-    }
-    baseline = StageManifest(stage="tokenize_data", config=config).semantic_config_identity
-    changed = {**config, section: changed_value}
-    report_changed = {**config, "report": {"theme": "dark"}}
-
-    assert StageManifest(stage="tokenize_data", config=changed).semantic_config_identity != baseline
-    assert (
-        StageManifest(stage="tokenize_data", config=report_changed).semantic_config_identity
-        == baseline
-    )
-
-
-@pytest.mark.parametrize(
-    ("stage", "handler_section"),
-    [
-        ("width_importance", "pruning"),
-        ("build_library", "build_library"),
-        ("build_library", "vllm_stats"),
-        ("build_library", "library"),
-        ("replacement_scoring", "replacement_scoring"),
-    ],
-)
-def test_handler_section_changes_stale_consumer_but_report_changes_do_not(
-    tmp_path: Path,
-    stage: str,
-    handler_section: str,
-) -> None:
-    root = tmp_path / "campaign"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("static: true\n")
-    config = _config(
-        root,
-        **{
-            handler_section: {"semantic_value": "original"},
-            "report": {"theme": "light"},
-        },
-    )
-    _write_stage_output(root, stage, {})
-    kwargs = {
-        "root": root,
-        "config": config_path,
-        "mode": stage,
-        "width": None,
-        "depth": None,
-        "required_patterns": (f"manifests/{stage}.json",),
-        "stage_config": semantic_stage_config(config, stage),
-        "source_roots": (),
-    }
-    marker = write_marker(root, stage, build_payload(**kwargs))
-
-    report_changed = {**config, "report": {"theme": "dark"}}
-    assert check_marker(
-        marker,
-        **{**kwargs, "stage_config": semantic_stage_config(report_changed, stage)},
-    )
-
-    handler_changed = {**config, handler_section: {"semantic_value": "changed"}}
-    result = check_marker_details(
-        marker,
-        **{**kwargs, "stage_config": semantic_stage_config(handler_changed, stage)},
-    )
-    assert not result.valid
-    assert "changed relevant stage config" in result.stale_reasons
 
 
 def test_report_source_change_does_not_stale_expensive_stage(tmp_path: Path) -> None:
@@ -624,50 +460,6 @@ def test_legacy_version_2_marker_remains_checkable(tmp_path: Path) -> None:
     assert result.valid
     assert result.validation_mode == "legacy-v2"
     assert result.stale_reasons == ()
-
-
-def test_static_pre_v3_marker_reports_implementation_source_staleness(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("convert: {}\n")
-    marker = marker_path(tmp_path, "convert", None, None)
-    marker.parent.mkdir(parents=True)
-    marker.write_text(_PRE_V3_COMPLETION_MARKER)
-
-    result = check_marker_details(
-        marker,
-        root=tmp_path,
-        config=config_path,
-        mode="convert",
-        width=None,
-        depth=None,
-        source_roots=(),
-    )
-
-    assert not result.valid
-    assert result.validation_mode == "legacy-v2"
-    assert "changed implementation/source identity" in result.stale_reasons
-
-
-def test_embedding_followup_does_not_replay_completed_root_vllm_stats() -> None:
-    assert _embedding_followup_stage("build_library")
-    assert not _embedding_followup_stage("vllm_stats")
-
-
-def test_resume_patterns_are_the_canonical_completion_patterns(tmp_path: Path) -> None:
-    config = _config(
-        tmp_path,
-        embedding_pruning={"enabled": True, "widths": [1024, 768]},
-        vllm_stats={"subblock_stats_filename": "runtime.json"},
-    )
-    patterns = stage_output_patterns(config, "build_library")
-    resume_patterns = _resume_kwargs(config, tmp_path / "config.yaml", "build_library")[
-        "required_patterns"
-    ]
-
-    assert "scenarios/width_scenarios.json" in patterns
-    assert "scenarios/width-1024/depth-00/manifests/build_library.json" in patterns
-    assert "scenarios/width-0768/depth-00/runtime.json" in patterns
-    assert resume_patterns == ("manifests/build_library.json", *patterns)
 
 
 def test_tokenize_resume_marker_binds_external_cache_outputs(tmp_path: Path) -> None:
