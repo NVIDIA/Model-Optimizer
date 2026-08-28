@@ -124,7 +124,7 @@ def score(
     granularity: str = "op_type",
     metric: str = "kl_div",
     calibration_method: str = "entropy",
-    calibration_eps: Sequence[str] = ("cuda:0", "cpu"),
+    calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     op_types_scope: Sequence[str] | None = None,
     work_dir: str | None = None,
 ) -> dict:
@@ -176,6 +176,11 @@ def score(
 
         * ``scores``: mapping of ``op_type`` (op-type granularity) or ``node_name`` (node
           granularity) to the summed metric across graph outputs.
+        * ``failed``: list of targets whose probe was NOT recorded in ``scores``. Populated when
+          :func:`quantize` raised or when the probe ran successfully but inserted zero Q/DQ
+          nodes (i.e. the underlying quantize path silently declined to quantize this target).
+          Distinguishing this from ``scores == 0.0`` matters because ``0.0`` means "quantizing
+          this target is free" while ``failed`` means "we don't know."
         * ``calibration_source``: ``"real"`` if the caller supplied calibration data, ``"synthetic"``
           when the primitive fell back to random tensors.
         * ``num_calibration_samples``: number of samples used for the scoring pass.
@@ -218,6 +223,7 @@ def score(
     ref_outputs = _run_inference(onnx_path, calib_dict, calibration_eps_list)
 
     scores: dict[str, float] = {}
+    failed: list[str] = []
     use_tempdir = work_dir is None
     tmp_ctx = tempfile.TemporaryDirectory() if use_tempdir else None
     target_dir = tmp_ctx.name if tmp_ctx is not None else work_dir
@@ -248,7 +254,19 @@ def score(
                 logger.warning(
                     f"[{idx}/{len(targets)}] quantize() failed for target '{target_name}': {e}"
                 )
+                failed.append(target_name)
                 continue
+
+            # Distinguish "probe inserted no QDQ" (unprobed) from "probe inserted QDQ and drift
+            # was zero" (safe to quantize) -- otherwise both look identical as ``scores == 0.0``.
+            if _count_qdq_nodes(probe_path) == 0:
+                logger.warning(
+                    f"[{idx}/{len(targets)}] quantize() inserted no Q/DQ nodes for target "
+                    f"'{target_name}' -- recording as unprobed instead of a 0.0 drift score."
+                )
+                failed.append(target_name)
+                continue
+
             quant_outputs = _run_inference(probe_path, calib_dict, calibration_eps_list)
             scores[target_name] = _pair_metric(ref_outputs, quant_outputs, metric_fn)
             logger.info(
@@ -261,6 +279,7 @@ def score(
 
     return {
         "scores": scores,
+        "failed": failed,
         "calibration_source": calibration_source.value,
         "num_calibration_samples": num_samples,
         "metric": metric,
@@ -432,3 +451,16 @@ def _pair_metric(
 def _sanitize_filename(name: str) -> str:
     """Turn an arbitrary op/node name into a filesystem-safe token."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "unnamed"
+
+
+def _count_qdq_nodes(onnx_path: str) -> int:
+    """Return the number of QuantizeLinear + DequantizeLinear nodes in ``onnx_path``.
+
+    Used to distinguish a probe that ran successfully but inserted zero Q/DQ (silently no-op
+    because ORT's registry dropped the target op type) from one that inserted real Q/DQ and
+    happened to produce zero drift.
+    """
+    model = onnx.load(onnx_path, load_external_data=False)
+    return sum(
+        1 for node in model.graph.node if node.op_type in {"QuantizeLinear", "DequantizeLinear"}
+    )

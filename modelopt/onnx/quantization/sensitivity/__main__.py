@@ -26,39 +26,20 @@ import json
 import os
 import sys
 
-import numpy as np
-
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.__main__ import validate_file_size
 from modelopt.onnx.quantization.sensitivity.score import Granularity, Metric, score
+
+# 2 GiB matches the ``--onnx_path`` guard in ``modelopt.onnx.quantization.__main__``.
+_ONNX_MAX_SIZE_BYTES = 2 * (1024**3)
+# 4 GiB accommodates ImageNet-scale calibration NPZ files.
+_CALIB_MAX_SIZE_BYTES = 4 * (1024**3)
 
 
 def _default_output_json(onnx_path: str) -> str:
     """Derive the default ``--output_json`` path next to the input ONNX file."""
     stem, _ = os.path.splitext(os.path.basename(onnx_path))
     return os.path.join(os.path.dirname(os.path.abspath(onnx_path)), f"{stem}.sensitivity.json")
-
-
-def _load_calibration(path: str | None) -> str | dict | None:
-    """Return calibration input for :func:`score`.
-
-    If ``path`` is a ``.npz`` file, load it eagerly so the caller sees a proper ``dict``.
-    Directories and ``.npy`` files are passed through as strings so :func:`score` uses its
-    path-loader.
-
-    Args:
-        path: Filesystem location or ``None`` for the synthetic-random fallback.
-
-    Returns:
-        The value to hand to :func:`score` as ``calibration_data``.
-    """
-    if path is None:
-        return None
-    if os.path.isdir(path) or path.endswith(".npy"):
-        return path
-    if path.endswith(".npz"):
-        payload = np.load(path, allow_pickle=False)
-        return {key: payload[key] for key in payload.files}
-    raise ValueError(f"Unsupported calibration_data_path: {path}")
 
 
 def _render_ranked_table(result: dict, show_zero_scores: bool = False) -> str:
@@ -169,7 +150,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--calibration_eps",
         type=str,
         nargs="+",
-        default=["cuda:0", "cpu"],
+        default=["cpu", "cuda:0", "trt"],
         help="ORT execution providers, in priority order.",
     )
     parser.add_argument(
@@ -208,17 +189,20 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = get_parser().parse_args(argv)
 
+    # Boundary validation on user-supplied paths -- mirrors modelopt.onnx.quantization.__main__.
+    validate_file_size(args.onnx_path, _ONNX_MAX_SIZE_BYTES)
+    if args.calibration_data_path is not None and not os.path.isdir(args.calibration_data_path):
+        validate_file_size(args.calibration_data_path, _CALIB_MAX_SIZE_BYTES)
+
     if args.calibration_data_path is None:
         logger.warning(
             "Synthetic random calibration -- scores are directional-only; do not pair with "
             "absolute thresholds. See calibration_source in the output JSON."
         )
 
-    calibration_data = _load_calibration(args.calibration_data_path)
-
     result = score(
         onnx_path=args.onnx_path,
-        calibration_data=calibration_data,
+        calibration_data=args.calibration_data_path,  # path -> score() delegates to its loader
         num_synthetic_samples=args.num_calib_samples,
         target_precision=args.target_precision,
         granularity=args.granularity,
