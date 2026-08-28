@@ -78,7 +78,44 @@ logger = logging.getLogger(__name__)
 __all__ = ["HFDSparkModel"]
 
 
-def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
+def _tvd_chunk(a, b):
+    """Per-token TVD for one row chunk: ``(softmax(a) - softmax(b)).abs().sum(-1)``."""
+    return (
+        (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
+    )
+
+
+# torch.compile of _tvd_chunk, built once per process and reused. Eager, this chain is
+# six separate passes over [chunk, vocab] tensors (two bf16->fp32 casts, two softmaxes, a
+# subtract, an abs) that are 1 GB each at the Gemma-4 shape; Inductor fuses it into a
+# couple of kernels. Profiling put softmax + the surrounding elementwise ops at ~50% of
+# the training step once FlexAttention removed the attention bottleneck.
+_compiled_tvd_chunk = None
+_tvd_compile_failed = False
+
+
+def _get_tvd_chunk(use_compile: bool):
+    """Return the TVD chunk fn, compiled when asked for and when compilation succeeds.
+
+    Deliberately NOT wrapped in ``torch._dynamo.config.suppress_errors = True`` (which the
+    Eagle plugin sets globally): that turns a compile failure into a silent fallback to
+    eager, i.e. a performance feature that reports success while doing nothing. Here a
+    failure is warned about once and then remembered.
+    """
+    global _compiled_tvd_chunk, _tvd_compile_failed
+    if not use_compile or _tvd_compile_failed:
+        return _tvd_chunk
+    if _compiled_tvd_chunk is None:
+        try:
+            _compiled_tvd_chunk = torch.compile(_tvd_chunk, dynamic=False, fullgraph=True)
+        except Exception as exc:
+            _tvd_compile_failed = True
+            logger.warning("torch.compile of the DSpark TVD chunk failed (%s); using eager.", exc)
+            return _tvd_chunk
+    return _compiled_tvd_chunk
+
+
+def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024, chunk_fn=None):
     """Total-variation distance ||softmax(a)-softmax(b)||_1 / ... per token, memory-lean.
 
     Materializing both [N, vocab] float32 softmax tensors at once OOMs at large
@@ -86,13 +123,9 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
     gradient-checkpoint each chunk so the wide softmaxes are recomputed in backward
     rather than held — peak memory ~ chunk_size*vocab instead of N*vocab. The math
     is identical to ``(softmax(final)-softmax(teacher)).abs().sum(-1)``.
+
     """
-
-    def _chunk(a, b):
-        return (
-            (torch.softmax(a.float(), dim=-1) - torch.softmax(b.float(), dim=-1)).abs().sum(dim=-1)
-        )
-
+    _chunk = chunk_fn or _tvd_chunk
     outs = []
     for i in range(0, final_logits.size(0), chunk_size):
         a, b = final_logits[i : i + chunk_size], teacher_logits[i : i + chunk_size]
@@ -141,8 +174,16 @@ class HFDSparkModel(HFDFlashModel):
 
         return DSparkExporter(self)
 
-    def _apply_markov_head(self, hidden, backbone_logits, input_ids, anchor_positions, n_blocks):
+    def _apply_markov_head(
+        self, hidden, backbone_logits, input_ids, anchor_positions, n_blocks, inplace=False
+    ):
         """Add the Markov transition bias to the backbone base logits.
+
+        ``inplace`` folds the bias into ``backbone_logits`` instead of allocating a third
+        [B, N, bs, vocab] tensor (8.6 GB at the Gemma-4 shape). Safe for autograd -- neither
+        ``lm_head`` nor ``markov_w2`` saves its OUTPUT for backward -- but it leaves
+        ``backbone_logits`` holding the corrected logits, so the caller must not still need
+        the uncorrected ones (they are only used for the ``base_accuracy`` metric).
 
         Returns ``(final_logits [B, N, bs, V], confidence_logits [B, N, bs] | None)``.
         """
@@ -160,7 +201,7 @@ class HFDSparkModel(HFDFlashModel):
         prev_ids = torch.gather(input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, prev_idx)
 
         bias = self.dflash_module.compute_markov_bias(prev_ids, hidden4d)
-        final4d = base4d + bias
+        final4d = base4d.add_(bias) if inplace else base4d + bias
 
         confidence_logits = None
         if self.dflash_module.use_confidence_head:
@@ -176,13 +217,24 @@ class HFDSparkModel(HFDFlashModel):
         anchor_positions,
         block_keep_mask,
         loss_mask,
-        target_model_logits,
+        target_model_logits=None,
+        teacher_hidden=None,
     ):
         """Compute the three-term DSpark loss (CE + TVD + confidence BCE) and metrics.
 
         Uses next-token (shift_label) alignment: block position k predicts the token
         at anchor+k+1; the aligned target distribution is the base model's own
         next-token distribution at position anchor+k (= label index - 1).
+
+        The teacher distribution can arrive two ways. ``teacher_hidden`` ([B, seq, H], the
+        base model's post-final-norm hidden) is preferred: only the N*block_size rows the
+        loss actually reads are gathered and projected, so the full-sequence
+        [B, seq, vocab] tensor is never built and never gathered out of -- at the Gemma-4
+        shape that is ~17 GB/step of memory traffic. ``target_model_logits`` is the
+        fallback for producers that hand over logits directly.
+
+        ``backbone_logits`` may be None, which skips the ``base_accuracy`` diagnostic (and
+        with it a second full-vocab argmax); see ``dflash_report_acc``.
         """
         bsz, seq_len = input_ids.shape
         bs = self.dflash_block_size
@@ -217,7 +269,7 @@ class HFDSparkModel(HFDFlashModel):
             weight_mask = weight_mask * decay
 
         flat_final = final_logits.reshape(-1, vocab)
-        flat_base = backbone_logits.reshape(-1, vocab)
+        flat_base = None if backbone_logits is None else backbone_logits.reshape(-1, vocab)
         flat_targets = target_ids.reshape(-1)
         flat_weights = weight_mask.reshape(-1)
         valid_count = flat_weights.sum() + 1e-6
@@ -225,12 +277,27 @@ class HFDSparkModel(HFDFlashModel):
         # Aligned target distribution: base-model logits that predict token anchor+k+1
         # sit at position anchor+k (= label index - 1).
         teacher_indices = (safe_label_indices - 1).clamp(min=0)
-        teacher_logits = torch.gather(
-            target_model_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
-            2,
-            teacher_indices.unsqueeze(-1).expand(-1, -1, -1, vocab),
-        )
-        flat_teacher = teacher_logits.reshape(-1, vocab).detach()
+        with torch.no_grad():
+            if teacher_hidden is not None:
+                hdim = teacher_hidden.size(-1)
+                gathered_hidden = torch.gather(
+                    teacher_hidden.unsqueeze(1).expand(-1, n_blocks, -1, -1),
+                    2,
+                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, hdim),
+                )
+                flat_teacher = self._base_model_lm_head(gathered_hidden.reshape(-1, hdim))
+            else:
+                if target_model_logits is None:
+                    raise ValueError(
+                        "DSpark loss needs the base distribution: pass teacher_hidden "
+                        "(preferred) or target_model_logits."
+                    )
+                flat_teacher = torch.gather(
+                    target_model_logits.unsqueeze(1).expand(-1, n_blocks, -1, -1),
+                    2,
+                    teacher_indices.unsqueeze(-1).expand(-1, -1, -1, vocab),
+                ).reshape(-1, vocab)
+        flat_teacher = flat_teacher.detach()
 
         if valid_count <= 1.0:
             loss = flat_final.sum() * 0.0
@@ -243,7 +310,11 @@ class HFDSparkModel(HFDFlashModel):
 
         # Term 2: total-variation distance between the corrected draft and target.
         # Chunked + checkpointed to avoid materializing two [N, vocab] softmaxes at once.
-        l1_per_token = _tvd_per_token(flat_final, flat_teacher)
+        l1_per_token = _tvd_per_token(
+            flat_final,
+            flat_teacher,
+            chunk_fn=_get_tvd_chunk(getattr(self, "dflash_use_torch_compile", False)),
+        )
         l1_loss = (l1_per_token * flat_weights).sum() / valid_count
 
         # Term 3: confidence head BCE against the analytical accept rate c* = 1 - 0.5*TVD.
@@ -264,19 +335,25 @@ class HFDSparkModel(HFDFlashModel):
         with torch.no_grad():
             eval_count = binary_eval_mask.sum() + 1e-6
             keep = binary_eval_mask > 0.5
-            accuracy = (
-                ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            ).item()
-            base_accuracy = (
-                ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            ).item()
+            acc = ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
+            base_acc = (
+                acc.new_zeros(())
+                if flat_base is None
+                else ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
+            )
+            # ONE device sync for all five scalars. Each .item() is a full synchronize, and
+            # five of them per step chop up the window in which DDP's all-reduce can hide
+            # behind backward -- measured comm exposure is 18% of the step post-FlexAttention.
+            acc_v, base_acc_v, ce_v, l1_v, conf_v = torch.stack(
+                [acc, base_acc, ce_loss.detach(), l1_loss.detach(), confidence_loss.detach()]
+            ).tolist()
             metrics = {
-                "ce_loss": ce_loss.detach().item(),
-                "l1_loss": l1_loss.detach().item(),
-                "confidence_loss": float(confidence_loss.detach().item()),
-                "base_accuracy": base_accuracy,
+                "ce_loss": ce_v,
+                "l1_loss": l1_v,
+                "confidence_loss": conf_v,
+                "base_accuracy": base_acc_v,
             }
-        return loss, accuracy, metrics
+        return loss, acc_v, metrics
 
     def forward(
         self,
@@ -336,9 +413,14 @@ class HFDSparkModel(HFDFlashModel):
                 self._base_model_norm,
                 self._base_model_lm_head,
                 need_logits=True,
+                # Hand back the normed hidden instead of full-sequence logits; the loss
+                # projects only the rows it reads. Producers that supply base_model_logits
+                # directly still come back with logits and take the fallback path.
+                defer_lm_head=True,
             )
             target_hidden = base_outputs.target_hidden
             target_model_logits = base_outputs.logits
+            teacher_hidden = base_outputs.base_hidden
         else:
             # Call the inner base model directly (NOT super().forward(), which during
             # training runs the full DFlash pipeline). Compute target-model logits via
@@ -349,7 +431,9 @@ class HFDSparkModel(HFDFlashModel):
                     attention_mask=attention_mask,
                     output_hidden_states=True,
                 )
-                target_model_logits = self._base_model_lm_head(base_out.last_hidden_state)
+                # lm_head is applied per-row inside the loss, not over the whole sequence.
+                teacher_hidden = base_out.last_hidden_state
+                target_model_logits = None
             offset = 1
             selected = [base_out.hidden_states[lid + offset] for lid in self.target_layer_ids]
             target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
@@ -399,19 +483,30 @@ class HFDSparkModel(HFDFlashModel):
         )
 
         # 6. Backbone logits → Markov correction → three-term loss.
+        # dflash_report_acc gates the base_accuracy diagnostic (the draft's accuracy BEFORE
+        # the Markov correction). With it off, the uncorrected logits are dead after the
+        # bias is added, so the bias folds in place and a second full-vocab argmax is
+        # skipped -- two [N, vocab] tensors' worth of traffic per step.
+        report_base_acc = getattr(self, "dflash_report_acc", True)
         backbone_logits = self._base_model_lm_head(hidden).reshape(bsz, n_blocks, block_size, -1)
         final_logits, confidence_logits = self._apply_markov_head(
-            hidden, backbone_logits, input_ids, anchor_positions, n_blocks
+            hidden,
+            backbone_logits,
+            input_ids,
+            anchor_positions,
+            n_blocks,
+            inplace=not report_base_acc,
         )
         loss, accuracy, metrics = self._compute_dspark_loss(
-            backbone_logits,
+            backbone_logits if report_base_acc else None,
             final_logits,
             confidence_logits,
             input_ids,
             anchor_positions,
             block_keep_mask,
             loss_mask,
-            target_model_logits,
+            target_model_logits=target_model_logits,
+            teacher_hidden=teacher_hidden,
         )
 
         return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)

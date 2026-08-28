@@ -65,10 +65,19 @@ class DFlashBaseModelOutput:
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
     logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
+    # Post-final-norm base hidden [B, seq, H], i.e. lm_head's input. Consumers that only
+    # need the base distribution at a handful of positions project THIS at those rows
+    # instead of materialising (and then gathering out of) full-sequence logits.
+    base_hidden: torch.Tensor | None = None
 
     @classmethod
     def from_offline_dict(
-        cls, d: dict, base_model_norm=None, base_model_lm_head=None, need_logits=False
+        cls,
+        d: dict,
+        base_model_norm=None,
+        base_model_lm_head=None,
+        need_logits=False,
+        defer_lm_head=False,
     ):
         """Construct from a dict of pre-computed base model outputs (offline training).
 
@@ -85,19 +94,25 @@ class DFlashBaseModelOutput:
         to lm_head would be a corrupt distillation target).
         """
         logits = d.get("base_model_logits")
+        base_hidden = None
         if need_logits and logits is None:
+            out_hiddens = d.get("base_model_hidden_states")
+            if out_hiddens is None:
+                raise KeyError("base_model_hidden_states")
+            base_hidden = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
+            if defer_lm_head:
+                # Caller will project only the rows it needs; skip the full-sequence
+                # [B, seq, vocab] materialisation entirely.
+                return cls(target_hidden=d["aux_hidden_states"], base_hidden=base_hidden)
             if base_model_lm_head is None:
                 raise ValueError(
                     "need_logits=True but base_model_lm_head is None; cannot reconstruct logits."
                 )
-            out_hiddens = d.get("base_model_hidden_states")
-            if out_hiddens is None:
-                raise KeyError("base_model_hidden_states")
-            out_hiddens = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
-            logits = base_model_lm_head(out_hiddens)
+            logits = base_model_lm_head(base_hidden)
         return cls(
             target_hidden=d["aux_hidden_states"],
             logits=logits,
+            base_hidden=base_hidden,
         )
 
 
