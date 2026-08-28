@@ -232,23 +232,26 @@ def install_unsharded_checkpoint_state_dict_support() -> None:
     if not getattr(original_get, "_puzzletron_unsharded_fallback", False):
 
         def get_model_state_dict(model, *args, **kwargs):
+            # Snapshot references before DCP enters ModelOpt's dynamic-attribute
+            # reset contexts. Some nested dynamic VLMs expose no registered
+            # tensors after that failed traversal has unwound.
+            fallback_state_dict = {
+                name: parameter.detach()
+                for name, parameter in model.named_parameters(remove_duplicate=False)
+            }
+            for name, buffer in model.named_buffers(remove_duplicate=False):
+                module_name, _, buffer_name = name.rpartition(".")
+                owner = model.get_submodule(module_name)
+                if buffer_name not in owner._non_persistent_buffers_set:
+                    fallback_state_dict[name] = buffer.detach()
             try:
                 return original_get(model, *args, **kwargs)
             except RuntimeError as error:
                 if not is_empty_dcp_state(error):
                     raise
-                state_dict = {
-                    name: parameter.detach()
-                    for name, parameter in model.named_parameters(remove_duplicate=False)
-                }
-                for name, buffer in model.named_buffers(remove_duplicate=False):
-                    module_name, _, buffer_name = name.rpartition(".")
-                    owner = model.get_submodule(module_name)
-                    if buffer_name not in owner._non_persistent_buffers_set:
-                        state_dict[name] = buffer.detach()
-                if not state_dict:
+                if not fallback_state_dict:
                     raise
-                return state_dict
+                return fallback_state_dict
 
         setattr(get_model_state_dict, "_puzzletron_unsharded_fallback", True)
         stateful_wrappers.get_model_state_dict = get_model_state_dict

@@ -92,7 +92,12 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
         "but model state_dict is empty.rank = dist.get_rank()=0."
     ]
 
-    def failed_dcp_state(*args, **kwargs):
+    original_parameters = []
+
+    def failed_dcp_state(model, *args, **kwargs):
+        if not original_parameters:
+            original_parameters.extend(model._parameters.values())
+            model._parameters.clear()
         raise RuntimeError(failure[0])
 
     monkeypatch.setattr(stateful_wrappers, "get_model_state_dict", failed_dcp_state)
@@ -107,6 +112,7 @@ def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
     state_dict = stateful_wrappers.get_model_state_dict(model)
 
     assert set(state_dict) == {"bias", "weight"}
+    model._parameters.update(zip(("weight", "bias"), original_parameters))
     replacement = {name: torch.ones_like(value) for name, value in state_dict.items()}
     stateful_wrappers.set_model_state_dict(model, replacement)
     assert all(torch.equal(value, replacement[name]) for name, value in model.named_parameters())
