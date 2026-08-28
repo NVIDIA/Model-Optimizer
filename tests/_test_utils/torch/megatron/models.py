@@ -25,18 +25,19 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec,
     get_gpt_mtp_block_spec,
 )
-from megatron.core.models.mamba import MambaModel
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_rank,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
 )
+from megatron.core.post_training.modelopt.hybrid.model_specs import get_hybrid_stack_modelopt_spec
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import MLATransformerConfig, TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
-from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec, get_te_mamba_stack_spec
+from modelopt.torch.nas.plugins.megatron import get_te_hybrid_stack_spec
 
 try:
     from megatron.core.extensions.transformer_engine import TENorm
@@ -49,23 +50,12 @@ except ImportError as e:
 
 try:
     import mamba_ssm  # noqa: F401
-    from megatron.core.post_training.modelopt.mamba.model_specs import get_mamba_stack_modelopt_spec
     from megatron.core.ssm.mamba_layer import MambaLayer  # noqa: F401
 
     HAS_MAMBA = True
 except ImportError as e:
     warn(f"Mamba not installed: {e}")
     HAS_MAMBA = False
-
-try:  # nemo:26.08+ (MambaModel is now a deprecated HybridModel subclass)
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
-    from megatron.core.post_training.modelopt.hybrid.model_specs import (
-        get_hybrid_stack_modelopt_spec,
-    )
-
-    HAS_HYBRID = True
-except ImportError:
-    HAS_HYBRID = False
 
 try:
     import apex  # noqa: F401
@@ -362,7 +352,7 @@ def get_mcore_qwen3_600m(
     return model
 
 
-def get_mcore_mamba_hybrid_model(
+def get_mcore_hybrid_model(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     initialize_megatron: bool = False,
@@ -392,8 +382,8 @@ def get_mcore_mamba_hybrid_model(
     moe_shared_expert_intermediate_size: int | None = 32,
     num_moe_experts: int | None = 8,
     **config_kwargs: dict,
-) -> MambaModel:
-    """Builds a Mamba model with hybrid layer allocation (Mamba, MoE, Attention, MLP blocks).
+) -> HybridModel:
+    """Builds a hybrid model with the given layer allocation (Mamba, MoE, Attention, MLP blocks).
 
     Notable Args:
         hybrid_layer_pattern: The hybrid layer pattern to use.
@@ -445,7 +435,6 @@ def get_mcore_mamba_hybrid_model(
     assert "|" not in hybrid_layer_pattern, "Pipeline separators (`|`) are not supported"
     assert len(hybrid_layer_pattern) == num_layers
 
-    # nemo:26.08+ uses HybridModel + hybrid_layer_pattern; older uses deprecated MambaModel.
     common_kwargs = {
         "config": config,
         "vocab_size": vocab_size,
@@ -455,22 +444,12 @@ def get_mcore_mamba_hybrid_model(
         "share_embeddings_and_output_weights": False,
         "position_embedding_type": "none",
     }
-    if HAS_HYBRID:
-        spec = (
-            get_te_hybrid_stack_spec(moe_grouped_gemm)
-            if transformer_impl == "transformer_engine"
-            else get_hybrid_stack_modelopt_spec(remap_te_layernorm=True)
-        )
-        model = HybridModel(
-            hybrid_stack_spec=spec, hybrid_layer_pattern=hybrid_layer_pattern, **common_kwargs
-        )
-    else:
-        spec = (
-            get_te_mamba_stack_spec(moe_grouped_gemm)
-            if transformer_impl == "transformer_engine"
-            else get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
-        )
-        model = MambaModel(
-            mamba_stack_spec=spec, hybrid_override_pattern=hybrid_layer_pattern, **common_kwargs
-        )
+    spec = (
+        get_te_hybrid_stack_spec(moe_grouped_gemm)
+        if transformer_impl == "transformer_engine"
+        else get_hybrid_stack_modelopt_spec(remap_te_layernorm=True)
+    )
+    model = HybridModel(
+        hybrid_stack_spec=spec, hybrid_layer_pattern=hybrid_layer_pattern, **common_kwargs
+    )
     return model.to(torch.bfloat16) if bf16 else model
