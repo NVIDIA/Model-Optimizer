@@ -667,6 +667,24 @@ class HFDFlashModel(DFlashModel):
         q_len = n_blocks * block_size
         kv_len = seq_len + q_len
 
+        # FlexAttention consumes the same predicate as a BlockMask and skips the ~67% of
+        # tiles that are entirely masked; DFlashAttention routes a BlockMask to
+        # flex_attention_forward. See dflash_flex_attention.py for why this matters so
+        # much here (dense mask -> sm80 memory-efficient kernel -> 59% of the step).
+        if getattr(self, "dflash_use_flex_attention", False):
+            from .dflash_flex_attention import build_draft_block_mask
+
+            return build_draft_block_mask(
+                seq_len,
+                anchor_positions,
+                block_keep_mask,
+                n_blocks,
+                block_size,
+                window,
+                device,
+                head_dim=self.dflash_module.layers[0].self_attn.head_dim,
+            )
+
         q_indices = torch.arange(q_len, device=device).view(1, 1, -1, 1)
         kv_indices = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
         q_block_ids = q_indices // block_size

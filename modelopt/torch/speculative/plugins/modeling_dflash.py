@@ -185,6 +185,36 @@ class DFlashAttention(nn.Module):
         self._attn_fn = ALL_ATTENTION_FUNCTIONS.get(impl, ALL_ATTENTION_FUNCTIONS["sdpa"])
         return self._attn_fn
 
+    def _attend(self, q, k, v, attention_mask, bsz, q_len):
+        """Run attention and project, routing a FlexAttention BlockMask to the flex kernel.
+
+        ``attention_mask`` is either the dense additive [B, 1, Q, KV] tensor (HF attention
+        dispatch) or a BlockMask carrying the same predicate block-sparsely.
+        """
+        from .dflash_flex_attention import flex_attention_forward, is_block_mask
+
+        if is_block_mask(attention_mask):
+            dropout = 0.0 if not self.training else self.attention_dropout
+            if dropout:
+                raise ValueError(
+                    "FlexAttention path does not support attention_dropout > 0 "
+                    f"(got {dropout}); unset dflash_use_flex_attention."
+                )
+            attn_output = flex_attention_forward(q, k, v, attention_mask, self.scaling)
+        else:
+            attn_fn = self._get_attn_fn()
+            attn_output, _ = attn_fn(
+                self,
+                q,
+                k,
+                v,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+            )
+        return self.o_proj(attn_output.reshape(bsz, q_len, -1))
+
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
         """Forward with KV injection.
 
@@ -218,20 +248,7 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Use HF's attention dispatch (handles GQA internally)
-        attn_fn = self._get_attn_fn()
-        attn_output, _ = attn_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-        )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
 
 class DFlashGemma4Attention(DFlashAttention):
@@ -353,19 +370,7 @@ class DFlashGemma4Attention(DFlashAttention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        attn_fn = self._get_attn_fn()
-        attn_output, _ = attn_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-        )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
 
 class DFlashDecoderLayer(nn.Module):
