@@ -38,40 +38,11 @@ environment or container selected during setup. Prepare the
 
 ### Initial runtime image recipe
 
-The repository-owned [`Dockerfile`](Dockerfile) is an initial pinned recipe for
-the Puzzletron CUDA environment. The [environment manifest](ci_environment.json)
-records its immutable CUDA base, package versions, VCS revisions, compatibility
-patch, and CUDA architecture targets.
-
-Build the image from the repository root and record the ModelOpt revision in its
-OCI metadata:
-
-```bash
-docker build \
-  --platform linux/amd64 \
-  --file examples/puzzletron/Dockerfile \
-  --build-arg MODELOPT_REVISION="$(git rev-parse HEAD)" \
-  --tag modelopt-puzzletron-runtime:local \
-  .
-```
-
-The build checks package consistency, recorded versions and sources, CUDA
-compatibility, and core imports. Run those checks again with the standalone
-verifier:
-
-```bash
-docker run --rm modelopt-puzzletron-runtime:local \
-  python /opt/puzzletron/verify_image_environment.py \
-    --environment /opt/puzzletron/ci_environment.json
-```
-
-This initial recipe is not yet a complete replacement for the worker
-environment. In particular, checkpoint teacher evaluation still needs a
-compatible LMMS-Eval revision, task templates, optional runtime packages, and
-NLTK data to be installed and tested without manual repair. Known manual
-additions include `decord`, `langdetect`, and NLTK's `punkt_tab` data. GitHub
-image building, image publication, and digest-based GPU consumption are
-follow-up work.
+The repository includes an initial pinned Puzzletron CUDA image recipe. It
+validates the recorded environment contract but is not yet a complete worker
+environment or CI publication pipeline. See the
+[image build and validation guide](ci/README.md) for commands, pinned inputs,
+and current limitations.
 
 ### 2. Generate a campaign
 
