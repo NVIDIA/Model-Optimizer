@@ -125,10 +125,11 @@ def pack_float32_to_4bit_cpp_based(array: np.ndarray | Sequence, signed: bool) -
 
 def get_weights_scaling_factor_2(input: np.ndarray):
     """Returns per tensor weight scaling factor."""
-    per_block_scale_amax = np.max(np.abs(input)) / 6.0
-    per_block_quant_scale = per_block_scale_amax / 448.0
+    per_block_quant_scale = np.float32(np.max(np.abs(input))) / np.float32(6.0 * 448.0)
     if per_block_quant_scale == 0:
         per_block_quant_scale = 1.0
+    if not np.isfinite(per_block_quant_scale):
+        raise ValueError("NVFP4 per-tensor scales must be finite.")
     return np.float32(per_block_quant_scale)
 
 
@@ -146,13 +147,11 @@ def get_weights_scaling_factor(
 
     input = input.reshape(n, k // block_size, block_size)
     # Get per block amax
-    per_block_amax = np.max(np.abs(input), axis=-1)
-    # Get per-block-scale
-    per_block_scale = per_block_amax / 6.0
-    # Quantize per_block_scale to FP8
-    q_per_block_scale = per_block_scale / weights_scaling_factor_2
+    per_block_amax = np.max(np.abs(input), axis=-1).astype(np.float32)
+    # Quantize per-block scale to FP8
+    q_per_block_scale = per_block_amax / (np.float32(6.0) * weights_scaling_factor_2)
     # Set all zero values in scale to 1.0
-    zero_mask = per_block_scale == 0
+    zero_mask = q_per_block_scale == 0
     q_per_block_scale[zero_mask] = 1.0
     return q_per_block_scale.astype(np.float32)
 
