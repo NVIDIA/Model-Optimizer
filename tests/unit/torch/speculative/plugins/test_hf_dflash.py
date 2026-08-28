@@ -912,3 +912,175 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def _legacy_sample_anchor_positions(model, seq_len, loss_mask, device):
+    """Verbatim copy of the pre-static implementation, kept as the semantic reference."""
+    bs = model.dflash_block_size
+    bsz = loss_mask.shape[0]
+    max_anchor = max(seq_len - bs, 0)
+    num_anchors = getattr(model, "_num_anchors", 512)
+
+    valid = loss_mask[:, : max_anchor + 1] > 0.5
+    valid_counts = valid.sum(dim=1)
+    max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
+
+    if max_n <= 0:
+        return (
+            torch.zeros(bsz, 1, dtype=torch.long, device=device),
+            torch.zeros(bsz, 1, dtype=torch.bool, device=device),
+        )
+
+    indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
+    masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+    random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+    random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
+    _, sorted_idx = random_vals.sort(dim=1)
+    gathered = torch.gather(masked_indices, 1, sorted_idx)
+    anchors = gathered[:, :max_n].sort(dim=1).values
+    keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
+        max=max_n
+    )
+    anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
+    return anchors, keep
+
+
+class TestAnchorSamplingStaticShape:
+    """n_blocks is fixed by the config, and the anchors it picks are still the legacy ones.
+
+    A data-dependent n_blocks made the draft's q_len/kv_len data-dependent, and both the
+    block-mask builder and the attention are compiled with ``dynamic=False`` -- so every
+    new batch shape cost a multi-minute recompile, indefinitely. These tests pin both
+    halves of the fix: the shape no longer moves with the data, and what the model trains
+    on did not change.
+    """
+
+    DEVICE = torch.device("cpu")
+
+    @staticmethod
+    def _model(num_anchors):
+        model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config(block_size=BLOCK_SIZE)
+        config["dflash_num_anchors"] = num_anchors
+        mtsp.convert(model, [("dflash", config)])
+        return model
+
+    @staticmethod
+    def _loss_mask(lengths, seq_len=SEQ_LEN):
+        mask = torch.zeros(len(lengths), seq_len)
+        for row, n in enumerate(lengths):
+            mask[row, :n] = 1.0
+        return mask
+
+    # Each case puts the legacy bound somewhere different: under the cap, ragged across
+    # rows, at 1, and in the two degenerate cases the old code special-cased.
+    @pytest.mark.parametrize(
+        "lengths",
+        [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0), (13, 0)],
+    )
+    def test_matches_legacy_sampling(self, lengths):
+        """Same seed in, same anchors and same keep mask out -- bitwise."""
+        model = self._model(num_anchors=8)
+        loss_mask = self._loss_mask(lengths)
+
+        torch.manual_seed(1234)
+        legacy_anchors, legacy_keep = _legacy_sample_anchor_positions(
+            model, SEQ_LEN, loss_mask, self.DEVICE
+        )
+        torch.manual_seed(1234)
+        anchors, keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
+
+        n_old = legacy_keep.shape[1]
+        assert keep.shape[1] >= n_old
+        assert torch.equal(keep[:, :n_old], legacy_keep)
+        assert torch.equal(anchors[:, :n_old], legacy_anchors)
+        # Everything past the legacy bound is inert padding.
+        assert not keep[:, n_old:].any()
+        assert not anchors[:, n_old:].any()
+
+    def test_sort_is_truncated_before_it_widens(self):
+        """The surplus columns must not pull unsampled anchors to the front of the row.
+
+        Slicing to the static width *after* sorting would do exactly that: anchors past
+        the legacy bound would sort in among the kept ones and silently move which
+        positions are trained on, while every shape assertion still passed.
+        """
+        model = self._model(num_anchors=8)
+        # One long row, so the legacy bound (valid_counts.max() - 1) sits below the static
+        # width and there really are surplus columns to get wrong.
+        loss_mask = self._loss_mask((6, 6))
+        torch.manual_seed(7)
+        legacy_anchors, legacy_keep = _legacy_sample_anchor_positions(
+            model, SEQ_LEN, loss_mask, self.DEVICE
+        )
+        torch.manual_seed(7)
+        anchors, keep = model._sample_anchor_positions(SEQ_LEN, loss_mask, self.DEVICE)
+        assert legacy_keep.shape[1] < keep.shape[1], "fixture no longer exercises truncation"
+        kept = anchors[keep]
+        assert torch.equal(kept, legacy_anchors[legacy_keep])
+
+    def test_shape_is_independent_of_batch_contents(self):
+        """The whole point: one shape, therefore one compile."""
+        model = self._model(num_anchors=8)
+        shapes = {
+            model._sample_anchor_positions(SEQ_LEN, self._loss_mask(lengths), self.DEVICE)[0].shape
+            for lengths in [(13, 13), (13, 5), (9, 9), (5, 3), (2, 1), (1, 1), (0, 0)]
+        }
+        assert len(shapes) == 1, f"n_blocks still varies with the batch: {shapes}"
+
+    def test_shape_is_min_of_num_anchors_and_sequence(self):
+        anchors, _ = self._model(num_anchors=4)._sample_anchor_positions(
+            SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
+        )
+        assert anchors.shape[1] == 4, "num_anchors should bind here"
+        anchors, _ = self._model(num_anchors=512)._sample_anchor_positions(
+            SEQ_LEN, self._loss_mask((13, 13)), self.DEVICE
+        )
+        assert anchors.shape[1] == SEQ_LEN - BLOCK_SIZE + 1, "the sequence should bind here"
+
+    def test_sampling_does_not_sync_on_the_batch(self):
+        """The old bound read valid_counts back to the host, stalling the pipeline.
+
+        Parsed rather than grepped: the prose explaining the removal names the call it
+        removed, so a substring search over the source matches its own docstring.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(
+            textwrap.dedent(inspect.getsource(hf_dflash.HFDFlashModel._sample_anchor_positions))
+        )
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        assert not called & {"item", "tolist"}, f"host sync in anchor sampling: {called}"
+
+    def test_trailing_padding_blocks_do_not_change_the_loss(self):
+        """The padding the static shape introduces is weightless in the loss and accuracy.
+
+        Mathematically exact -- block_keep_mask zeroes those rows in both the numerator
+        and the normalizer -- but the reduction is over more elements, so compare at
+        float tolerance rather than bitwise.
+        """
+        model = self._model(num_anchors=8)
+        vocab, bsz, n_blocks, pad = 32, 1, 2, 3
+        torch.manual_seed(0)
+        input_ids = torch.randint(0, vocab, (bsz, SEQ_LEN))
+        loss_mask = torch.ones(bsz, SEQ_LEN)
+        logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab)
+        anchors = torch.tensor([[0, BLOCK_SIZE]])[:, :n_blocks]
+        keep = torch.ones(bsz, n_blocks)
+
+        base_loss, base_acc = model._compute_loss(logits, input_ids, anchors, keep, loss_mask)
+        padded_loss, padded_acc = model._compute_loss(
+            torch.cat([logits, torch.randn(bsz, pad * BLOCK_SIZE, vocab)], dim=1),
+            input_ids,
+            torch.cat([anchors, torch.zeros(bsz, pad, dtype=anchors.dtype)], dim=1),
+            torch.cat([keep, torch.zeros(bsz, pad)], dim=1),
+            loss_mask,
+        )
+        torch.testing.assert_close(padded_loss, base_loss)
+        assert padded_acc == pytest.approx(base_acc)
