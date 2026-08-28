@@ -354,7 +354,7 @@ nel run --config <path> --dry-run
 
 Fix unresolved `???`, bad Hydra overrides, missing env vars, invalid mounts, image issues, sbatch errors, obvious deployment errors before proceeding.
 
-> **Non-fatal noise:** "Failed to get manifest"/`401`/`404`, "Could not extract frame definition file", "proceeding with minimal task definition", "Found N unlisted task(s)", expected for `ns_*`/recipe tasks and private (gitlab) containers; the task still runs in-container. Set `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1`. Real blockers: unresolved `???`, interpolation errors, bad mounts, sbatch rejections.
+> **Task-discovery fallback:** During `load_tasks_from_container`, "Failed to get manifest", "Could not extract frame definition file", "proceeding with minimal task definition", or "Found N unlisted task(s)" can indicate unavailable task metadata. For a known recipe task, set `NEMO_EVALUATOR_TRUST_UNLISTED_TASKS=1` and confirm the job continues. A `401`, `404`, or manifest-not-found error from the pyxis/enroot image pull is a real blocker; the trust setting cannot make a missing or inaccessible image pullable. Other blockers include unresolved `???`, interpolation errors, bad mounts, and sbatch rejections.
 
 **Step 8.2, Canary** (limited-samples, validates everything dry-run can't):
 

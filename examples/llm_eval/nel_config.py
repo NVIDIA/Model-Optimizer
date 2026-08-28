@@ -327,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    """Compile and write selected task contracts, reporting input errors through argparse."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

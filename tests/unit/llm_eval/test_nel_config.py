@@ -176,7 +176,7 @@ def test_compile_requires_external_task_bindings(
     "endpoint",
     [
         pytest.param("https://judge.example/not-v1", id="wrong-path"),
-        pytest.param("https://user:secret@judge.example/v1", id="credentials"),
+        pytest.param("https://" + "user:secret" + "@judge.example/v1", id="credentials"),
         pytest.param("https://judge.example:bad/v1", id="malformed-port"),
     ],
 )

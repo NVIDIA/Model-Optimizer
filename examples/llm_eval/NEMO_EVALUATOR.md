@@ -113,7 +113,7 @@ runtime path; it is not an accuracy result.
 After the smoke passes, run the same config without `limit_samples`:
 
 ```bash
-nel run --config path/to/text_benchmarks.yaml -t <task-name>
+nel run --config path/to/text_benchmarks.yaml
 ```
 
 ## Task-specific checks

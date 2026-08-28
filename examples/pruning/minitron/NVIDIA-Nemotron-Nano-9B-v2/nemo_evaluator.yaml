@@ -6,7 +6,7 @@
 # - `deployment.checkpoint_path` — Hugging Face checkpoint path (original, pruned, or quantized)
 #
 # Usage:
-#   pip install "nemo-evaluator-launcher[all]==0.1.82"
+#   pip install "nemo-evaluator-launcher[all]==0.2.6"
 #
 #   # Set required environment variables:
 #   export HF_TOKEN=<your_huggingface_token>

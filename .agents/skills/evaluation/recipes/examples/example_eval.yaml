@@ -33,7 +33,7 @@
 # `huggingface_hub.snapshot_download`) and point `checkpoint_path` at it.
 #
 # Compile and run a single task:
-#   python examples/llm_eval/nel_config.py --base-config recipes/examples/example_eval.yaml \
+#   python examples/llm_eval/nel_config.py --base-config .agents/skills/evaluation/recipes/examples/example_eval.yaml \
 #     --task gpqa_diamond_aa_v3 --output /path/to/gpqa.yaml
 #   nel run --config /path/to/gpqa.yaml -t gpqa_diamond_aa_v3
 #
