@@ -430,19 +430,49 @@ class HFDFlashModel(DFlashModel):
         # DFlashModule._build_gemma4_rope_kinds() build one rotary module per kind. Only the
         # kinds the DRAFT actually uses are kept, so an all-full_attention draft never sees the
         # sliding entry.
+        # dflash_architecture_config may name the kind to inherit from explicitly via
+        # `rope_attention_kind`. Needed because the draft's own layer_types are the wrong
+        # signal on Gemma 4: an all-`full_attention` draft would inherit theta 1e6 +
+        # proportional rope, which measured 1.2-3.4% WORSE on acceptance length than the
+        # `sliding_attention` entry's plain theta 1e4 (see the RoPE A/B). The draft is an
+        # independent small model consuming base hidden states, not a reproduction of the
+        # base's full-attention layers, so its attention kind should not dictate its RoPE.
+        _rope_kind_override = getattr(self.dflash_config, "rope_attention_kind", None)
         base_rope_params = getattr(base_config, "rope_parameters", None)
         _nested_rope = None
         if isinstance(base_rope_params, dict) and any(
             isinstance(v, dict) for v in base_rope_params.values()
         ):
-            draft_layer_types = getattr(self.dflash_config, "layer_types", None) or list(
-                base_rope_params
+            draft_layer_types = (
+                [_rope_kind_override]
+                if _rope_kind_override
+                else getattr(self.dflash_config, "layer_types", None) or list(base_rope_params)
             )
             _nested_rope = {
                 kind: dict(base_rope_params[kind])
                 for kind in dict.fromkeys(draft_layer_types)
                 if isinstance(base_rope_params.get(kind), dict)
             } or None
+
+            # `rope_attention_kind` can only select a WHOLE base entry, and Gemma 4 ships
+            # theta and rope_type welded together (full_attention = 1e6 + proportional,
+            # sliding_attention = 1e4 + default). To sweep one of them independently -- e.g.
+            # theta 1e6 with plain default rope, which matches no base entry -- let the
+            # recipe override the resolved fields directly. Applied AFTER the entry is
+            # chosen, so it layers on top of whichever kind was inherited.
+            _rope_overrides = {
+                k: getattr(self.dflash_config, f"rope_override_{k}", None)
+                for k in ("rope_theta", "rope_type", "partial_rotary_factor")
+            }
+            _rope_overrides = {k: v for k, v in _rope_overrides.items() if v is not None}
+            if _rope_overrides and _nested_rope:
+                for _kind_cfg in _nested_rope.values():
+                    _kind_cfg.update(_rope_overrides)
+                    # A default-rope entry must not keep a stale partial_rotary_factor:
+                    # the rotary class would ignore it, but the exporter would emit it.
+                    if _kind_cfg.get("rope_type") == "default":
+                        _kind_cfg.pop("partial_rotary_factor", None)
+                logger.info("DFlash: RoPE overrides applied: %s", _rope_overrides)
 
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
             if not hasattr(base_config, attr):

@@ -417,13 +417,19 @@ class DFlashExporter(SpeculativeDecodingExporter):
             if any(isinstance(v, dict) for v in _draft_rope.values()):
                 # Nested per-attention-kind form; a draft is single-kind by construction.
                 _draft_rope = next(v for v in _draft_rope.values() if isinstance(v, dict))
+            # The DRAFT's theta always wins. `rope_theta` above is resolved from the BASE
+            # config, which is only right when the draft inherited the base's value
+            # verbatim. A recipe can now sweep theta independently of the base (see
+            # hf_dflash's rope_override_* fields), and exporting the base's theta then
+            # silently ships a drafter whose served RoPE disagrees with how it trained --
+            # the served AL collapses with no error anywhere.
+            if _draft_rope.get("rope_theta") is not None:
+                config["rope_theta"] = _draft_rope["rope_theta"]
             _rope_type = _draft_rope.get("rope_type")
             if _rope_type and _rope_type != "default":
                 config["rope_type"] = _rope_type
                 if "partial_rotary_factor" in _draft_rope:
                     config["partial_rotary_factor"] = _draft_rope["partial_rotary_factor"]
-                if _draft_rope.get("rope_theta") is not None:
-                    config["rope_theta"] = _draft_rope["rope_theta"]
 
         # Add layer_types if present (Qwen3-style)
         if hasattr(draft_config, "layer_types"):

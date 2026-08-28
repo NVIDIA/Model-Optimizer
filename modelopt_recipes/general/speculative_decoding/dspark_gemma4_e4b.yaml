@@ -153,6 +153,13 @@ dflash:
     # draft therefore loads without error and produces garbage.
     model_type: gemma4_text
     attention_k_eq_v: true
+    # Inherit RoPE from the base's sliding_attention entry (theta 1e4, plain default
+    # rope) rather than from the draft's own layer_types. Those are all
+    # full_attention, which would pull theta 1e6 + proportional rope -- measured
+    # 1.2-3.4% WORSE on acceptance length at every comparable step. The draft is an
+    # independent small model consuming base hidden states, not a reproduction of the
+    # base's full-attention layers.
+    rope_attention_kind: sliding_attention
     layer_types:
       - full_attention
       - full_attention

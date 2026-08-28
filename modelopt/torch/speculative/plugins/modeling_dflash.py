@@ -526,8 +526,18 @@ class DFlashModule(nn.Module):
             cfg = copy.copy(config)
             if kind == "full_attention":
                 cfg.head_dim = getattr(config, "global_head_dim", None) or config.head_dim
-            if isinstance(rope_params, dict) and isinstance(rope_params.get(kind), dict):
-                cfg.rope_parameters = dict(rope_params[kind])
+            entry = rope_params.get(kind) if isinstance(rope_params, dict) else None
+            if entry is None and isinstance(rope_params, dict):
+                # The RoPE kind need not equal the LAYER kind. `rope_attention_kind` lets a
+                # recipe inherit e.g. the sliding entry for an all-full_attention draft, so
+                # rope_params can hold exactly one entry keyed by a name absent from
+                # layer_types. Fall back to that sole entry -- leaving rope_parameters
+                # nested here makes the rotary class raise KeyError('rope_type'), since it
+                # indexes rope_parameters as a FLAT dict.
+                sole = [v for v in rope_params.values() if isinstance(v, dict)]
+                entry = sole[0] if len(sole) == 1 else None
+            if isinstance(entry, dict):
+                cfg.rope_parameters = dict(entry)
                 cfg.rope_theta = cfg.rope_parameters.get("rope_theta", config.rope_theta)
             kinds[kind] = cfg
         return kinds
