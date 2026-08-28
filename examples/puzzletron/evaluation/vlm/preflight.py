@@ -248,6 +248,6 @@ def _verify_video_reader(suite: str) -> None:
     )
     if video_selected and importlib.util.find_spec("decord") is None:
         raise RuntimeError(
-            "video evaluation requires a decord-compatible reader; use Python below 3.12 "
-            "on macOS or run in the supported Linux Puzzletron environment"
+            "video evaluation requires an installed decord-compatible reader; install one "
+            "supported by this Python and platform, or use the supported Puzzletron environment"
         )
