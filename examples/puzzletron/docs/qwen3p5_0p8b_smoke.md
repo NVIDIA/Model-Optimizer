@@ -67,7 +67,7 @@ python examples/puzzletron/orchestrate.py \
 
 The checked-in flow deliberately uses two candidate-evaluation samples, two
 IFEval samples, four AIPerf requests per serving candidate, and two
-distillation steps. These budgets validate lifecycle correctness, comparative
+distillation steps. These budgets validate workflow correctness, comparative
 serving selection, and resumability; they are not quality or throughput claims.
 The worker environment must provide the [pinned evaluator
 installation](checkpoint_evaluation.md#quick-start). IFEval task data must be

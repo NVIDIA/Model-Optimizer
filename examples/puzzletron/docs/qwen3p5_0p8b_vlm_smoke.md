@@ -1,68 +1,53 @@
-# Qwen 3.5 0.8B vision-language pruning smoke
+# Qwen 3.5 0.8B VLM pruning smoke
 
-The checked-in `full_vlm_smoke` recipe runs a small end-to-end test of
-vision-language pruning for the public `Qwen/Qwen3.5-0.8B` checkpoint. It uses
-real image-conversation examples to search the FFN intermediate sizes
-`[3072, 2048]`, evaluate the candidates, and save the two strongest candidates
-as physical checkpoints. It reloads each saved directory through vLLM for two
-RealWorldQA image samples using the pinned Qwen 3.5 VLM evaluation profile. The
-profile verifies the evaluator revision and immutable offline dataset snapshot,
-strips inherited Hub credentials, and records preflight provenance before
-delegating execution to the shared checkpoint evaluator. The workflow then
-measures both checkpoints with 1-, 6-, and 12-image AIPerf requests, distills
-the candidate with the highest measured 12-image throughput for two steps, and
-runs the pinned RealWorldQA benchmark and internal image-and-text evaluation on
-the resulting checkpoint. The immutable revision in `model.yaml` ensures that
-repeated runs use the same starting model. See
-[evaluate saved checkpoints](post_mip_pipeline.md#evaluate-saved-checkpoints)
-for the direct pre-KD and post-KD reload paths; no AnyModel-to-AutoModel
-conversion occurs.
+Use this guide to run the checked-in Qwen 3.5 0.8B vision-language pruning
+example on one GPU. The example uses eight image-conversation samples and keeps
+the work small enough to check the complete workflow:
 
-These small budgets check that the complete workflow runs and resumes
-correctly. They do not establish model quality or production throughput.
+1. Search two FFN intermediate sizes, `3072` and `2048`.
+2. Save the two candidates with the lowest image-text loss.
+3. Reload each saved checkpoint and evaluate two RealWorldQA samples.
+4. Measure both checkpoints with 1-, 6-, and 12-image AIPerf requests.
+5. Distill the faster candidate for two steps, then reload and evaluate the
+   resulting checkpoint.
 
-## Prepare the worker environment
+The model, dataset, evaluation task, and small work limits are pinned in the
+checked-in configuration. This smoke test checks that pruning, evaluation,
+serving, distillation, and resume all work. Its scores and throughput are not
+model-quality or production performance results.
+
+## Before you start
 
 Prepare the setup and worker environments described in
-[environment setup](environment_setup.md). The worker environment must provide
+[environment setup](environment_setup.md). The worker environment needs
 ModelOpt, NeMo AutoModel's Qwen 3.5 VLM support, the Puzzletron requirements,
-the pinned `lmms-eval` dependency, and the reviewed AIPerf/vLLM runtime selected
-by your runner contract. The worker-visible Hugging Face cache must already
-contain the pinned RealWorldQA snapshot. Populate it as described in
-[cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data); the
-profile verifies the local snapshot and evaluates it offline.
+and the AIPerf/vLLM runtime selected by your runner.
 
-The worker-visible Hugging Face cache must contain, or be allowed to fetch,
-`Qwen/Qwen3.5-0.8B` at the pinned revision in
-`configs/families/qwen3_5/qwen3p5_0p8b/model.yaml`. If workers are offline,
-populate that cache before launch and mount it through the runner; do not
-replace the checked-in model identity with a machine-specific path.
+Workers also need access to:
 
-## Materialize the image-text smoke dataset
+- `Qwen/Qwen3.5-0.8B` at the revision in
+  `configs/families/qwen3_5/qwen3p5_0p8b/model.yaml`;
+- the pinned RealWorldQA snapshot described in
+  [cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data);
+- a shared location for the prepared dataset and campaign output.
 
-Choose worker-visible dataset and output paths. The dataset revision must be an
-immutable Hugging Face commit SHA, not `main` or `latest`.
+If workers cannot access the network, populate the model and benchmark caches
+before launch and mount them through the runner. Keep the checked-in model
+identity instead of replacing it with a machine-specific path.
+
+## Prepare the dataset
+
+Choose paths visible to every worker. The dataset revision must be an immutable
+Hugging Face commit SHA.
 
 ```bash
 export PUZZLETRON_DATASET_PATH=/path/to/qwen3p5-vlm-smoke-data
 export PUZZLETRON_DATASET_REVISION=51f4f4d219315c3283950994d4eb3d7fc30aa87b
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_full_vlm_smoke
-
-test -n "$PUZZLETRON_DATASET_PATH"
-test -n "$PUZZLETRON_DATASET_REVISION"
-test -n "$PUZZLETRON_RUN_ROOT"
-case "$PUZZLETRON_DATASET_REVISION" in
-  *[!0-9a-f]*|'')
-    echo "PUZZLETRON_DATASET_REVISION must be a lowercase commit SHA" >&2
-    exit 1
-    ;;
-esac
-test "${#PUZZLETRON_DATASET_REVISION}" -eq 40
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_smoke
 ```
 
-Materialize eight normalized image-conversation samples. Run this networked
-preparation step once; campaign workers consume the resulting local files and
-manifest without fetching the dataset.
+Download and normalize eight image-conversation samples. This is the only step
+that needs dataset network access.
 
 ```bash
 python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
@@ -73,8 +58,7 @@ python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
   --max-shards-per-subset 1
 ```
 
-Before GPU work, confirm that the immutable acquisition identity, eight
-samples, and real image inventory were published:
+Check that the manifest has the expected revision, samples, and local images:
 
 ```bash
 python - "$PUZZLETRON_DATASET_PATH" "$PUZZLETRON_DATASET_REVISION" <<'PY'
@@ -83,24 +67,19 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-expected_revision = sys.argv[2]
 manifest = json.loads((root / "manifest.json").read_text())
-acquisition = manifest["acquisition"]
-assert acquisition["revision"] == expected_revision
+assert manifest["acquisition"]["revision"] == sys.argv[2]
 assert manifest["sample_count"] == 8
 assert manifest["image_count"] >= 8
-assert len(manifest["images"]) == manifest["image_count"]
-assert all((root / item["path"]).is_file() for item in manifest["images"])
-print(json.dumps(manifest, indent=2, sort_keys=True))
+assert all((root / image["path"]).is_file() for image in manifest["images"])
+print(f"prepared {manifest['sample_count']} samples with {manifest['image_count']} images")
 PY
 ```
 
-## Materialize the site runner
+## Configure the runner
 
-The experiment and execution files are canonical inputs. The checked-in Slurm
-runner is a portable placeholder: copy it into the campaign directory, fill in
-the site contract once, and reuse that same file for dry-run, launch, and
-resume.
+The example provides the experiment and execution settings. Copy the runner
+template into the output directory and replace its site-specific placeholders:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
@@ -122,13 +101,13 @@ if rg -n 'REPLACE_WITH_' "$RUNNER"; then
 fi
 ```
 
-The runner's repository, environment, container, mounts, Slurm account, and
-partition must all resolve from every worker. Include the Hugging Face model
-cache and the materialized dataset path in the worker/container mount contract.
+Set the repository, environment, container, mounts, Slurm account, and
+partition for your site. The model cache, benchmark cache, prepared dataset,
+and output directory must be visible inside the worker environment.
 
-## Inspect, launch, and resume
+## Inspect and run the smoke test
 
-Compile and inspect the full plan without submitting work:
+Compile the plan without submitting work:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
@@ -138,13 +117,16 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Confirm that all enabled model stages use one GPU, image-backed stages resolve
-`data.modality=multimodal`, and no text tokenization stage is present. Confirm
-that two quality candidates reach `post.params-90.checkpoint_eval` for the
-bounded RealWorldQA run and then `post.params-90.vlm_serving`, which declares a
-`chat` workload with 1, 6, and 12 1280x720 images per request rather than a
-text-only serving proxy. The `fastest_vlm` filter selects one candidate from the
-12-image throughput metric before KD. Then launch by omitting only `--dry-run`:
+Before launch, check that model stages use one GPU and that the plan contains
+these VLM-specific steps:
+
+- image-text evaluation and no text tokenization stage;
+- `checkpoint_eval` before serving;
+- chat serving with 1, 6, and 12 images per request;
+- `post_kd_checkpoint_eval` after VLM distillation;
+- final image-text evaluation and candidate selection.
+
+Run the same plan without `--dry-run`:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
@@ -154,38 +136,31 @@ python examples/puzzletron/orchestrate.py \
   --stage full
 ```
 
-After an interruption, rerun that exact launch command with the same
-environment variables and the same three input files. Puzzletron reuses
-compatible completed stages and reruns failed or incomplete stages; do not
-copy partial artifacts into a new output root.
+To resume after an interruption, rerun this exact command with the same
+environment variables and configuration files. Puzzletron reuses compatible
+completed stages and reruns failed or incomplete work.
 
-## Acceptance evidence and limits
+## Check the result
 
-A successful command exit is necessary but not sufficient. Before treating the
-smoke as accepted, verify the cumulative report at
-`$PUZZLETRON_RUN_ROOT/artifacts/campaign_report/campaign_report.html` and its
-canonical stage summaries:
+Open the campaign report at
+`$PUZZLETRON_RUN_ROOT/artifacts/campaign_report/campaign_report.html`. Confirm
+the following before accepting the smoke test:
 
-- width scoring and VLM KD processed real image tensors and report a nonzero
-  vision-forward count;
-- sorting and physical slicing equivalence passed at the configured tolerance;
-- each materialized pre-KD checkpoint has a successful `checkpoint_eval`
-  summary whose `checkpoint` field names that saved artifact, whose
-  RealWorldQA sample count equals two, and whose metrics are finite; the
-  evaluation root's `profile.json` records the pinned dataset revision and
-  offline preflight;
-- the selected post-KD checkpoint has a successful `post_kd_checkpoint_eval`
-  summary for two RealWorldQA samples with finite metrics, and the internal
-  final image evaluation reloads the same checkpoint;
-- the two-step KD summary contains finite main CE/KD and MTP CE/KD metrics plus
-  nonzero trainable-group gradient evidence;
-- AIPerf completes every 1-, 6-, and 12-image chat workload for both retained
-  candidates without request failures, and `fastest_vlm` selects one candidate
-  using `images_12.concurrency_1.image_throughput`;
-- rerunning the launch command submits no work for completed compatible stages.
+- width scoring, image-text evaluation, and VLM distillation processed real
+  image tensors;
+- sorting and physical slicing checks passed;
+- both saved pre-distillation checkpoints completed `checkpoint_eval` on two
+  RealWorldQA samples with finite metrics;
+- AIPerf completed its 1-, 6-, and 12-image requests for both candidates, and
+  `fastest_vlm` selected one candidate from the 12-image throughput result;
+- the selected post-distillation checkpoint completed
+  `post_kd_checkpoint_eval` on two RealWorldQA samples with finite metrics;
+- the two distillation steps produced finite CE and KD metrics;
+- rerunning the launch command submitted no work for already completed stages.
 
-Post-MIP evaluation summaries contain aggregate metrics. Verify their raw
-image-evaluation records separately:
+The evaluation summaries contain aggregate metrics. The raw `image_eval` and
+`final_image_eval` records should also report a nonzero vision-forward count
+and image-output checksums:
 
 ```bash
 python - "$PUZZLETRON_RUN_ROOT" <<'PY'
@@ -202,26 +177,67 @@ for node in ("image_eval", "final_image_eval"):
     )
     assert records, f"missing raw evaluation record for {node}"
     for path in records:
-        observability = json.loads(path.read_text())["observability"]
-        assert observability["vision_forward_count"] > 0
-        assert observability["vision_output_checksums"]
+        details = json.loads(path.read_text())["observability"]
+        assert details["vision_forward_count"] > 0
+        assert details["vision_output_checksums"]
 PY
 ```
 
-The serving stage uses one synthetic request per candidate and workload, with
-1280x720 images in batches of 1, 6, and 12. This exercises the multimodal API,
-vision path, and comparative selection while keeping the example bounded; it
-does not isolate vision-encoder latency or establish production performance.
-Increase request count and concurrency in a separate reviewed performance run
-before making throughput claims.
+The serving step uses one synthetic request for each image count. It checks the
+multimodal API and provides a value for candidate selection, but it is not a
+performance benchmark. Use more requests, realistic concurrency, and your
+deployment image sizes before drawing throughput conclusions.
 
-The real-checkpoint lifecycle test is opt-in and is not part of default pytest
-or routine CI smoke execution. Point it at the populated cache:
+## Evaluate a saved checkpoint separately
+
+The campaign evaluates saved checkpoints automatically and records the results
+with each candidate. To check a checkpoint outside the campaign, validate the
+environment and cached benchmark data first:
 
 ```bash
-PUZZLETRON_VLM_BENCHMARK_HF_HOME=/path/to/hf-home \
-  pytest --run-manual tests/gpu/torch/puzzletron/test_qwen3p5_0p8b_vlm_smoke.py
+python -m examples.puzzletron.evaluation.vlm.run \
+  --checkpoint /path/to/pruned-checkpoint \
+  --output-dir /path/to/results/vlm-smoke \
+  --hf-home /path/to/huggingface-cache \
+  --suite short \
+  --preflight-only
 ```
 
-The checkpoint contract is documented in
-[evaluate saved checkpoints](post_mip_pipeline.md#evaluate-saved-checkpoints).
+If preflight succeeds, run the same command without `--preflight-only`. The
+`short` suite runs the pinned RealWorldQA and MMMU tasks. See
+[VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
+result files, and cache preparation.
+
+## Plan a larger run
+
+Start from `full_vlm_smoke.yaml` and `execution.full_vlm_smoke.yaml`. Copy both
+files, keep the VLM-specific order of evaluation, materialization, image
+serving, selection, and distillation, then change each small smoke limit for
+your use case.
+
+Use guided setup when you need help resolving the model, dataset, and site
+settings:
+
+```bash
+python examples/puzzletron/puzzletron_setup_v2.py \
+  --defaults examples/puzzletron/configs/setup/defaults.example.yaml
+```
+
+Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. The wizard's
+pruning profile and post-MIP graph are generic, so do not treat the generated
+graph as the maintained VLM example. Apply its site settings to your copied VLM
+configuration instead.
+
+Choose larger-run settings deliberately:
+
+- representative dataset subsets and sample counts;
+- supported FFN widths, search constraints, and number of solutions;
+- evaluation tasks and sample counts for the intended use case;
+- serving image sizes, images per request, concurrency, and request count;
+- distillation steps, batch sizes, validation, and checkpoint frequency;
+- worker resources for every changed or added stage.
+
+Keep this route FFN-only unless another pruning axis has its own correctness
+evidence. Inspect the complete plan with `--dry-run` before launch. See
+[configuration and overrides](configuration_overrides.md) for persistent and
+temporary changes.

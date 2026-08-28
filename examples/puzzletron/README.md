@@ -20,6 +20,10 @@ The usual path is to prepare Puzzletron, generate a campaign, inspect and run a
 small smoke campaign, and then repeat the run with production settings. The
 same command resumes compatible work after an interruption.
 
+For an image-text walkthrough using Qwen 3.5 0.8B and the recommended
+Nemotron-VLM dataset, follow the
+[Qwen VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md).
+
 ### 1. Prepare the environments
 
 Create one lightweight Python environment for the setup wizard and the command
@@ -45,10 +49,14 @@ python examples/puzzletron/puzzletron_setup_v2.py \
   --defaults examples/puzzletron/configs/setup/defaults.example.yaml
 ```
 
-Choose **Balanced pruning** for a first campaign. For the maintained Qwen text
-route, select `Qwen/Qwen3.5-0.8B` and the recommended Puzzle-KD v2 text dataset
-or an existing worker-visible dataset. Review the detected model, worker and
-scheduler settings, and output directory.
+Choose **Balanced pruning** for a first-generated text campaign. For the
+maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the recommended
+Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM, use
+the checked-in VLM pruning smoke linked below. Guided setup can resolve the
+same model, the recommended Nemotron-VLM v2 image-text dataset, and site
+settings, but its generic pruning profile is not the VLM example used here.
+Review the detected model, data modality, worker and scheduler settings, and
+output directory.
 
 The wizard reads model configuration, not model weights, and does not submit
 jobs. It writes validated `smoke/` and `production/` bundles plus a generated
@@ -78,8 +86,9 @@ campaign. Two checked-in Qwen 3.5 0.8B examples exercise the complete pruning
 workflow on one GPU. Use the
 [text pruning smoke](docs/qwen3p5_0p8b_smoke.md) for text-only evaluation,
 serving measurements, distillation, and final model selection. Use the
-[vision-language pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md) for the same
-workflow with real image-conversation inputs and image-aware measurements.
+[VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md) for the same workflow with
+real image-conversation inputs, image-aware measurements, and guidance for
+sizing a larger campaign.
 
 ### 4. Launch production
 
