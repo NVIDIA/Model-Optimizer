@@ -1516,13 +1516,10 @@ class GPTModelExporter:
                 self._state_dict[v_proj_key] = val.detach().clone()
 
     def _gated_delta_net_slicing(self, module, prefix, is_mtp=False):
-        """Split GatedDeltaNet's fused ``in_proj`` into the four HF projections.
+        """Split GatedDeltaNet's fused ``in_proj`` into HF's qkv / z / b / a projections.
 
-        Megatron-Core packs ``[query, key, value, z, beta, alpha]`` along dim 0 of a single
-        ``in_proj``; HF stores ``in_proj_qkv`` (query+key+value), ``in_proj_z``, ``in_proj_b``
-        (beta) and ``in_proj_a`` (alpha).  The sections are contiguous and in that order, so
-        the split is a plain ``torch.split`` -- sizes come from the module itself so TP
-        sharding is handled without re-deriving them here.
+        Megatron packs ``[query, key, value, z, beta, alpha]``; sizes come from the module so TP
+        sharding needs no re-derivation.
         """
         if is_mtp:
             prefix = self._mtp_prefix(prefix)

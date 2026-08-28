@@ -18,6 +18,7 @@ from pathlib import Path
 
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
@@ -52,9 +53,7 @@ def test_quantize_and_export(tmp_path: Path, num_gpus):
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (megatron_path / "latest_checkpointed_iteration.txt").exists()
-    assert list(megatron_path.rglob("modelopt_state")), (
-        "Expected modelopt_state in the Megatron checkpoint"
-    )
+    assert_has_modelopt_state(megatron_path)
 
     # Step 2: export to HF
     export_cmd = extend_cmd_parts(

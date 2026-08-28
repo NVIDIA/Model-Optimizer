@@ -244,10 +244,7 @@ LLAVA_VISION_PREFIXES = ("multi_modal_projector", "vision_model")
 def with_language_model_prefix(
     mapping: dict[str, CustomModuleMapping],
 ) -> dict[str, CustomModuleMapping]:
-    """Derive a VLM mapping from a text-model mapping by nesting it under ``model.language_model.``.
-
-    Prefixes that do not start with ``model.`` (e.g. ``lm_head.``) are left unchanged.
-    """
+    """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
     result = {}
     for key, m in mapping.items():
         prefix = m.target_name_or_prefix

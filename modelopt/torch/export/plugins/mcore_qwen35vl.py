@@ -15,13 +15,10 @@
 
 """Custom mapping from Qwen3.5-VL Hugging Face models to Megatron Core models.
 
-Qwen3.5 interleaves GatedDeltaNet linear-attention layers -- Megatron keeps them under
-``self_attention`` with a fused ``in_proj`` that HF splits into ``in_proj_qkv`` / ``_z`` / ``_b`` /
-``_a`` -- with gated full-attention layers, and adds shared experts to the Qwen3 MoE rules. As for
-Qwen3-VL, only the language model is exported; the vision tower is copied from the HF checkpoint.
-
-Requires ``--no_moe_grouped_gemm`` (SequentialMLP experts); fused ``TEGroupedMLP`` experts have no
-gated split in the exporter. Gated full-attention layers are untested.
+Qwen3.5 interleaves GatedDeltaNet linear-attention layers (fused ``in_proj``, split here into
+HF's ``in_proj_qkv`` / ``_z`` / ``_b`` / ``_a``) with gated full-attention layers, and adds MoE
+shared experts. Only the language model is exported; the vision tower is copied from HF.
+Requires ``--no_moe_grouped_gemm``: fused ``TEGroupedMLP`` experts have no gated split.
 """
 
 from .mcore_custom import (

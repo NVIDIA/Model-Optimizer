@@ -15,21 +15,10 @@
 
 """Custom mapping from Qwen3-VL Hugging Face models to Megatron Core models.
 
-Qwen3-VL differs from Qwen3 in one structural way: language-model weights live
-under ``model.language_model.`` instead of ``model.``, while ``lm_head.weight``
-remains at the root level, so the mappings below are derived from the Qwen3 ones
-with :func:`with_language_model_prefix`.
-
-The visual encoder (``model.visual.*``) is not mapped: only the language model is
-quantized, and the vision tower is copied verbatim from the Hugging Face checkpoint
-via ``QWEN3VL_VISION_PREFIXES``.
-
-Note: ``Qwen3VLMoeForConditionalGeneration`` is **not** supported here.  The MoE
-variant stores expert weights as 3-D tensors (``mlp.experts.gate_up_proj``,
-``mlp.experts.down_proj``) that require a dedicated fused-expert mapping and
-cannot reuse the dense Qwen3 rules.
-
-Reference: https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct/blob/main/model.safetensors.index.json
+Qwen3-VL nests the language model under ``model.language_model.`` while ``lm_head`` stays at the
+root, so the mappings are derived from Qwen3's. The visual encoder is copied verbatim from HF via
+``QWEN3VL_VISION_PREFIXES`` rather than mapped. ``Qwen3VLMoeForConditionalGeneration`` is not
+supported: its 3-D fused expert weights cannot reuse the dense Qwen3 rules.
 """
 
 from .mcore_custom import with_language_model_prefix

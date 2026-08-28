@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_moe_vl_dir,
@@ -73,6 +74,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     distilled Megatron checkpoint and only verifies the ModelOpt (quantize) state survived.
     """
     hf_model_path = create_student(tmp_path)
+    is_vlm = "vision_config" in (hf_model_path / "config.json").read_text()
     moe_flag = ["--no_moe_grouped_gemm"] if no_moe_grouped_gemm else []
     quantized_megatron_path = tmp_path / "quantized_megatron"
     distill_output_dir = tmp_path / "qad_output"
@@ -93,9 +95,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
         export_megatron_path=quantized_megatron_path,
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
-    assert list(quantized_megatron_path.rglob("modelopt_state")), (
-        "Expected modelopt_state in the quantized Megatron checkpoint"
-    )
+    assert_has_modelopt_state(quantized_megatron_path)
 
     # Step 2: QAD -- load the quantized student from the Megatron checkpoint (restoring the ModelOpt
     # quantizers) and distill from the (unquantized) HF teacher. The distilled checkpoint must keep the
@@ -125,9 +125,7 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     tracker = distilled_megatron_path / "latest_checkpointed_iteration.txt"
     assert tracker.read_text(encoding="utf-8").strip() == str(early_exit_iter)
     assert (distilled_megatron_path / "iter_0000001").is_dir()
-    assert list(distilled_megatron_path.rglob("modelopt_state")), (
-        "Expected modelopt_state to be preserved in the distilled (QAD) checkpoint"
-    )
+    assert_has_modelopt_state(distilled_megatron_path)
 
     if not exports_hf:
         return  # architecture missing from the export mapping; stop at the distilled checkpoint
@@ -150,5 +148,11 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
-    # QAD trains the student, so weights drift from the reference: names/shapes only.
-    assert_exported_checkpoint_matches(hf_export_path, hf_model_path, check_values=False)
+    # QAD trains the student, so language-model weights drift from the reference; the vision
+    # tower is never trained and must still come through byte for byte.
+    assert_exported_checkpoint_matches(
+        hf_export_path,
+        hf_model_path,
+        check_values=False,
+        bit_exact_prefixes=("model.visual.",) if is_vlm else (),
+    )
