@@ -47,8 +47,8 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert '"flash-linear-attention[cuda]==${linear_attention_version}"' in dockerfile
     assert 'export TORCH_CUDA_ARCH_LIST="${recorded_cuda_architectures}"' in dockerfile
     assert 'export TORCH_CUDA_ARCH_LIST="${grouped_gemm_cuda_architectures}"' in dockerfile
-    assert "ARG TARGETARCH" in dockerfile
-    assert 'test "${TARGETARCH}" = "amd64"' in dockerfile
+    assert "ARG TARGETPLATFORM" in dockerfile
+    assert 'test "${TARGETPLATFORM}" = "linux/amd64"' in dockerfile
     assert '"decord @ ${decord_wheel_url}#sha256=${decord_wheel_sha256}"' in dockerfile
     assert '"langdetect==${langdetect_version}"' in dockerfile
     assert '"nltk==${nltk_version}"' in dockerfile

@@ -94,6 +94,7 @@ def test_runtime_verifier_reports_a_mamba_version_mismatch(project_root_path):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("platform", "linux/arm64", "platform must be linux/amd64"),
         ("decord_wheel_url", "https://example.com/decord.whl", "x86_64 decord wheel"),
         ("decord_wheel_sha256", "not-a-digest", "decord wheel checksum"),
         ("nltk_data_commit", "gh-pages", "NLTK data revision"),

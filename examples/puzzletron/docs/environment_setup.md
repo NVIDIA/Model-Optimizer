@@ -45,7 +45,7 @@ docker build \
   --platform linux/amd64 \
   --file examples/puzzletron/Dockerfile \
   --build-arg MODELOPT_REVISION="$(git rev-parse HEAD)" \
-  --tag modelopt-puzzletron-worker:local \
+  --tag modelopt-puzzletron-worker:amd64-local \
   .
 ```
 
@@ -57,7 +57,7 @@ Run the image locally with GPU access:
 
 ```bash
 docker run --gpus all --ipc=host --rm -it \
-  modelopt-puzzletron-worker:local
+  modelopt-puzzletron-worker:amd64-local
 ```
 
 Inside the image, the runner contract is:

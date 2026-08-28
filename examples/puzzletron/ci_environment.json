@@ -7,6 +7,7 @@
   "transformers": "5.8.1",
   "gpu_image": {
     "base_image": "nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909bdad891fab300ec5700fb4f4656463b2f51980f",
+    "platform": "linux/amd64",
     "torch_cuda": "12.9",
     "aiperf": "0.12.0",
     "decord": "0.6.0",

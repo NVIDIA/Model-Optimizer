@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG TARGETARCH
+ARG TARGETPLATFORM
 
 ENV VIRTUAL_ENV=/venv
 ENV PATH=/venv/bin/:$PATH
@@ -25,7 +25,7 @@ COPY examples/puzzletron/ci/verify_image_environment.py /opt/puzzletron/verify_i
 COPY examples/puzzletron/patches /opt/puzzletron/patches
 COPY pyproject.toml LICENSE_HEADER /opt/modelopt-dependencies/
 
-RUN test "${TARGETARCH}" = "amd64" || \
+RUN test "${TARGETPLATFORM}" = "linux/amd64" || \
         (echo "Puzzletron requires linux/amd64 because decord 0.6.0 has no Linux ARM wheel" >&2; exit 1) && \
     apt-get update && \
     apt-get install -y --no-install-recommends \

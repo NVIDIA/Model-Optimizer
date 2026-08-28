@@ -55,9 +55,12 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
     if environment.get("scope") != "puzzletron_v2_worker_ci":
         raise ValueError("Puzzletron image environment has an unexpected scope")
 
-    base_image = environment.get("gpu_image", {}).get("base_image", "")
+    gpu_image = environment.get("gpu_image") or {}
+    base_image = gpu_image.get("base_image", "")
     if not _BASE_IMAGE_PATTERN.fullmatch(base_image):
         raise ValueError("Puzzletron image base must be an immutable NVIDIA CUDA digest")
+    if gpu_image.get("platform") != "linux/amd64":
+        raise ValueError("Puzzletron worker image platform must be linux/amd64")
 
     sources = {
         "grouped_gemm": (environment.get("runtime_image") or {}).get("grouped_gemm") or {},
@@ -94,7 +97,6 @@ def validate_environment_contract(environment: dict[str, Any]) -> None:
     for key in ("grouped_gemm_cuda_arch_list", "torch_cuda_arch_list"):
         if not re.fullmatch(r"[0-9.]+(?:;[0-9.]+)*", runtime_image.get(key, "")):
             raise ValueError(f"Puzzletron runtime image must declare explicit {key}")
-    gpu_image = environment.get("gpu_image") or {}
     decord_version = gpu_image.get("decord", "")
     decord_wheel_url = gpu_image.get("decord_wheel_url", "")
     if not re.fullmatch(

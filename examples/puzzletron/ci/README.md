@@ -12,10 +12,10 @@ docker build \
   --platform linux/amd64 \
   --file examples/puzzletron/Dockerfile \
   --build-arg MODELOPT_REVISION="$(git rev-parse HEAD)" \
-  --tag modelopt-puzzletron-worker:local \
+  --tag modelopt-puzzletron-worker:amd64-local \
   .
 
-docker run --rm modelopt-puzzletron-worker:local \
+docker run --rm modelopt-puzzletron-worker:amd64-local \
   python /opt/puzzletron/verify_image_environment.py \
     --environment /opt/puzzletron/ci_environment.json
 ```
