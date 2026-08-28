@@ -23,6 +23,8 @@
   - "*linear_attn.in_proj_a*"
   - "*linear_attn.in_proj_b*"
   - "*mixer.conv1d*"
+  # Megatron-Core names the GatedDeltaNet block ``self_attention``, HF ``linear_attn``.
+  - "*self_attention.conv1d*"
   - "*mlp.gate.*"
   - "*mlp.shared_expert_gate.*"
   - "*output_layer*"

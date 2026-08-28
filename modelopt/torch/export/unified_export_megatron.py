@@ -1535,12 +1535,19 @@ class GPTModelExporter:
             sections["beta"],
             sections["alpha"],
         ]
-        proj_prefixes = [
-            prefix + name + "." for name in ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
-        ]
+        proj_names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+        proj_prefixes = [prefix + name + "." for name in proj_names]
+        # The recipes keep the alpha / beta gates in BF16, but Megatron fuses all six sections
+        # behind one quantizer, so they can only be dropped here rather than by a quantizer_name.
+        keep_bf16 = {
+            p for p, n in zip(proj_prefixes, proj_names) if n in ("in_proj_a", "in_proj_b")
+        }
 
         for proj_prefix in proj_prefixes:
-            self._record_layer_quant_config(proj_prefix, qformat, block_size)
+            if proj_prefix in keep_bf16:
+                self._record_excluded_module(proj_prefix)
+            else:
+                self._record_layer_quant_config(proj_prefix, qformat, block_size)
         if qformat in (None, QUANTIZATION_NONE):
             # Split the fused in_proj exclude entry into the per-HF-name projections.
             self.exclude_modules = [
@@ -1563,7 +1570,12 @@ class GPTModelExporter:
                 proj_scales = list(torch.split(weight_scale, split_sizes, dim=0))
             else:
                 proj_scales = [weight_scale.detach().clone() for _ in proj_keys]
-            for proj_weight, scale, key in zip(proj_weights, proj_scales, proj_keys):
+            for proj_prefix, proj_weight, scale, key in zip(
+                proj_prefixes, proj_weights, proj_scales, proj_keys
+            ):
+                if proj_prefix in keep_bf16:
+                    self._state_dict[key] = proj_weight
+                    continue
                 self._state_dict[key] = to_quantized_weight(
                     proj_weight, scale, qformat, weight_scale_2, block_size
                 )
@@ -1572,8 +1584,9 @@ class GPTModelExporter:
         if weight_scale_2 is not None:
             if len(weight_scale_2.shape) > 0:
                 raise ValueError("weight_scale_2 must be a scalar!")
-            for key in proj_keys:
-                self._state_dict[key + "_scale_2"] = weight_scale_2.detach().clone()
+            for proj_prefix, key in zip(proj_prefixes, proj_keys):
+                if proj_prefix not in keep_bf16:
+                    self._state_dict[key + "_scale_2"] = weight_scale_2.detach().clone()
 
         # weight and weight_scale have been popped; the rest (bias, input_scale, ...) is
         # either split like the weight or replicated onto every projection.
@@ -1585,6 +1598,8 @@ class GPTModelExporter:
                     self._state_dict[proj_prefix + key] = proj_bias
             else:
                 for proj_prefix in proj_prefixes:
+                    if proj_prefix in keep_bf16:
+                        continue
                     self._state_dict[proj_prefix + key] = val.detach().clone()
 
     def _self_attention_scaling(

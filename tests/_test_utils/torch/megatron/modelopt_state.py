@@ -17,8 +17,9 @@
 from pathlib import Path
 
 from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+from torch.distributed.checkpoint import FileSystemReader
 
-__all__ = ["assert_has_modelopt_state"]
+__all__ = ["assert_has_modelopt_state", "assert_no_quantizers_matching"]
 
 
 def assert_has_modelopt_state(megatron_path: Path | str) -> None:
@@ -33,3 +34,19 @@ def assert_has_modelopt_state(megatron_path: Path | str) -> None:
         f"modelopt_state under {megatron_path} holds no restorable mode (only 'kd_loss' or "
         "empty), so the quantizers would not survive a reload"
     )
+
+
+def assert_no_quantizers_matching(megatron_path: Path | str, *substrings: str) -> None:
+    """Assert no calibrated quantizer under ``megatron_path`` matches ``substrings``.
+
+    Disabled-quantizer patterns are written against HuggingFace names, so they silently
+    no-op wherever Megatron names the module differently.
+    """
+    iter_dirs = sorted(Path(megatron_path).glob("iter_*"))
+    assert iter_dirs, f"No iter_* checkpoint under {megatron_path}"
+    keys = FileSystemReader(str(iter_dirs[-1])).read_metadata().state_dict_metadata
+    quantizers = [k for k in keys if "_quantizer." in k]
+    assert quantizers, f"No quantizers at all under {megatron_path}; was the model quantized?"
+    for substring in substrings:
+        hits = sorted(k for k in quantizers if substring in k)
+        assert not hits, f"Expected no quantizer matching {substring!r}, found: {hits[:4]}"

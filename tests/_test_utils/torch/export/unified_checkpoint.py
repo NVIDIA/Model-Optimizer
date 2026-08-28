@@ -24,6 +24,8 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
+
 __all__ = [
     "assert_exported_checkpoint_matches",
     "assert_safetensors_index_consistent",
@@ -82,8 +84,6 @@ def _expected_shape(exported: torch.Tensor, reference: torch.Tensor) -> tuple[in
 
 def _unpack_nvfp4(packed: torch.Tensor) -> torch.Tensor:
     """Expand two E2M1 values per ``uint8`` back into a float tensor (low nibble first)."""
-    from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
-
     codes = torch.empty(
         (*packed.shape[:-1], packed.shape[-1] * 2), dtype=torch.long, device=packed.device
     )

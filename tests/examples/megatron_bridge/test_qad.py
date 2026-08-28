@@ -19,7 +19,10 @@ from pathlib import Path
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
-from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
+from _test_utils.torch.megatron.modelopt_state import (
+    assert_has_modelopt_state,
+    assert_no_quantizers_matching,
+)
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
     create_tiny_qwen3_5_moe_vl_dir,
@@ -96,6 +99,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, exports_hf, no_moe_groupe
     )
     run_example_command(quantize_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert_has_modelopt_state(quantized_megatron_path)
+    # Megatron names these differently from HF, so the recipe's patterns must have aliases.
+    assert_no_quantizers_matching(quantized_megatron_path, "conv1d", "mlp.router", "output_layer")
 
     # Step 2: QAD -- load the quantized student from the Megatron checkpoint (restoring the ModelOpt
     # quantizers) and distill from the (unquantized) HF teacher. The distilled checkpoint must keep the
