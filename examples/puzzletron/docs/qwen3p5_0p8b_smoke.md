@@ -3,8 +3,11 @@
 The checked-in Qwen 3.5 0.8B `full_smoke` recipe pins the public checkpoint revision and
 searches only the FFN intermediate sizes `[3072, 2048]`. The checked-in
 `full_smoke.yaml` experiment extends the bounded MIP smoke through evaluation,
-physical materialization, AIPerf, two global-distillation steps, final
-evaluation, and final selection.
+physical materialization, comparative AIPerf measurement, two
+global-distillation steps, final evaluation, and final selection. It keeps the
+two strongest candidates by language-model loss through materialization and
+AIPerf, then sends the candidate with higher measured output-token throughput
+to distillation.
 
 ## Run and resume the full lifecycle
 
@@ -55,8 +58,9 @@ python examples/puzzletron/orchestrate.py \
   --stage full
 ```
 
-The checked-in flow deliberately uses two evaluation samples, four AIPerf
-requests, and two distillation steps. These budgets validate lifecycle
-correctness and resumability; they are not quality or throughput claims. Final
-acceptance must reload the selected checkpoint, verify the cumulative report,
-and confirm that the resume submits no work for completed stages.
+The checked-in flow deliberately uses two evaluation samples per candidate,
+four AIPerf requests per serving candidate, and two distillation steps. These
+budgets validate lifecycle correctness, comparative serving selection, and
+resumability; they are not quality or throughput claims. Final acceptance must
+reload the selected checkpoint, verify the cumulative report, and confirm that
+the resume submits no work for completed stages.

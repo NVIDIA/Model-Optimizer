@@ -121,7 +121,9 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
 
     assert nodes["online_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
-    assert nodes["best_lm"]["top_k"] == 1
+    assert config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 1
+    assert config["mip"]["runs"]["params-90"]["homogeneous"]["keep"] == 5
+    assert nodes["best_lm"]["top_k"] == 2
     assert nodes["serving"]["config"]["request_count"] == 4
     assert nodes["serving"]["config"]["concurrency"] == [1]
     assert nodes["fastest"]["top_k"] == 1
