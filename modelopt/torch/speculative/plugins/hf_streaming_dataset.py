@@ -213,7 +213,7 @@ class StreamingDataset(Dataset):
         (seeded by ``training_args.seed``), so no shuffle is needed here.
 
         Args:
-            entries: Untokenized per-sample dicts from the input jsonl. Schema is
+            entries: Per-sample dicts from the input jsonl. Schema is
                 subclass-defined (see :meth:`_tokenize_entry`); passed to :meth:`_fetch`.
             tokenizer: HF tokenizer; used for client-side tokenization and the
                 server/client loss-mask alignment in :meth:`_fetch`.
@@ -283,11 +283,28 @@ class StreamingDataset(Dataset):
     def _tokenize_entry(self, entry: dict) -> dict | None:
         """Tokenize a single entry.
 
-        Returns ``None`` for entries missing ``cid`` / ``conversations``-or-``messages``, or when
-        right-truncation to ``max_seq_len`` drops the entire supervised span
-        (``answer_only_loss`` mode with the assistant turn at the tail).
+        Pretokenized entries may provide aligned ``token_ids`` / ``loss_mask`` lists.
+        Otherwise, tokenize ``conversations`` or ``messages``. Returns ``None`` when
+        required data is absent or right-truncation drops the supervised span.
         """
         cid = entry.get("conversation_id") or entry.get("uuid")
+        token_ids = entry.get("token_ids")
+        loss_mask = entry.get("loss_mask")
+        if token_ids is not None or loss_mask is not None:
+            if not self.config.answer_only_loss:
+                raise ValueError("pretokenized loss_mask requires answer_only_loss=True")
+            if not isinstance(token_ids, list) or not isinstance(loss_mask, list):
+                raise ValueError("pretokenized entries require token_ids and loss_mask lists")
+            if len(token_ids) != len(loss_mask):
+                raise ValueError("pretokenized token_ids and loss_mask lengths must match")
+            if self.config.max_seq_len is not None:
+                token_ids = token_ids[: self.config.max_seq_len]
+                loss_mask = loss_mask[: self.config.max_seq_len]
+            loss_mask = torch.tensor(loss_mask, dtype=torch.long)
+            if cid is None or not token_ids or int(loss_mask.sum()) == 0:
+                return None
+            return {"cid": str(cid), "token_ids": token_ids, "loss_mask": loss_mask}
+
         # Prefer ``conversations``, fall back to ``messages`` (the documented default format;
         # see examples README). The order matters: some corpora (e.g. Spec-Decoding-Dataset-v2)
         # carry a degenerate user-only ``messages`` stub (no assistant turn) alongside the real

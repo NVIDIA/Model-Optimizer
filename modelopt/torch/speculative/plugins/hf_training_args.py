@@ -102,6 +102,7 @@ class TrainingArguments(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    resume_model_only: bool = False
     training_seq_len: int = 2048
     estimate_ar: bool = False
     ar_validate_steps: int = 1000
