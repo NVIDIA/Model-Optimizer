@@ -66,7 +66,7 @@ Other general recipe families are documented inside their own folders:
 
 ---
 
-## `huggingface/` — model-specific recipes
+## `huggingface/` — architecture-specific recipes
 
 Each lives under its HF `model_type`. The point of a model folder is to capture
 **what differs from the generic preset** — usually an algorithm tweak or a

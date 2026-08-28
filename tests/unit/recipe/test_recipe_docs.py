@@ -85,25 +85,55 @@ def test_general_ptq_recipe_count_in_ptq_md():
 
 
 def test_every_model_specific_ptq_dir_is_mentioned():
-    """Every model dir under huggingface/ or models/ with PTQ recipes must appear in ptq.md.
+    """Every model-specific PTQ recipe must be identifiable in ptq.md.
 
-    The identifier checked is the directory containing the ptq/ folder — the
-    HF ``model_type`` (e.g. ``gemma4``) or a models/<org>/<model_id> leaf
-    (e.g. ``Step-3.5-Flash``, ``Nemotron-3-Nano-4B-BF16``).
+    ``huggingface/<model_type>/ptq/`` recipes are checked by their ``model_type``
+    (e.g. ``gemma4``); ``models/<org>/<model_id>/ptq/`` recipes are checked by their
+    full ``<org>/<model_id>`` hub path (e.g. ``nvidia/Nemotron-3-Nano-4B-BF16``), so
+    the org — the whole point of the top-level tier — is verified too and an org
+    re-key (e.g. ``step3p5`` → ``stepfun-ai``) can't silently drift from the doc.
     """
     doc = _ptq_md_text()
-    search_dirs = (RECIPES_DIR / "huggingface", RECIPES_DIR / "models")
-    model_dirs = sorted(
-        {
-            yaml_path.parent.parent.name
-            for base in search_dirs
-            for yaml_path in base.glob("**/ptq/*.yaml")
-        }
-    )
-    assert model_dirs, "No model-specific PTQ recipes found under huggingface/ or models/"
-    missing = [name for name in model_dirs if name not in doc]
+    # model_type recipes: huggingface/<model_type>/ptq/<recipe>.yaml -> <model_type>
+    hf_ids = {p.parent.parent.name for p in (RECIPES_DIR / "huggingface").glob("**/ptq/*.yaml")}
+    # checkpoint recipes: models/<org>/<model_id>/ptq/<recipe>.yaml -> <org>/<model_id>
+    model_ids = {
+        f"{p.parent.parent.parent.name}/{p.parent.parent.name}"
+        for p in (RECIPES_DIR / "models").glob("**/ptq/*.yaml")
+    }
+    identifiers = sorted(hf_ids | model_ids)
+    assert identifiers, "No model-specific PTQ recipes found under huggingface/ or models/"
+    missing = [name for name in identifiers if name not in doc]
     assert not missing, (
         f"Model-specific PTQ recipe folders are missing from "
         f"modelopt_recipes/ptq.md: {missing}. Add them to the model-specific "
         "recipes section (kinds table and/or the matching subsection)."
+    )
+
+
+def test_checkpoint_recipes_live_in_the_top_level_models_tier():
+    """Lock in the model_type-vs-checkpoint split.
+
+    Checkpoint-mirror recipes belong at ``models/<org>/<model_id>/``; ``huggingface/``
+    holds only per-``model_type`` recipes. A checkpoint recipe dropped back under
+    ``huggingface/`` (a re-created ``huggingface/models/``, or a nested
+    ``huggingface/<model_type>/<checkpoint>/<task>/``) fails loudly here instead of
+    silently shipping both tiers — e.g. on a bad merge that re-adds the old layout.
+    """
+    hf = RECIPES_DIR / "huggingface"
+    assert not (hf / "models").exists(), (
+        "huggingface/models/ must not exist — checkpoint-mirror recipes live in the "
+        "top-level modelopt_recipes/models/ tier."
+    )
+    # Every recipe under huggingface/ must be <model_type>/<task>/<file> (3 parts);
+    # anything deeper is a checkpoint nested under a model_type and belongs in models/.
+    nested = sorted(
+        str(p.relative_to(RECIPES_DIR))
+        for ext in ("*.yaml", "*.yml")
+        for p in hf.glob(f"**/{ext}")
+        if len(p.relative_to(hf).parts) != 3
+    )
+    assert not nested, (
+        f"Recipes under huggingface/ must be <model_type>/<task>/<file>; found nested "
+        f"paths (a checkpoint recipe belongs under models/<org>/<model_id>/): {nested}"
     )
