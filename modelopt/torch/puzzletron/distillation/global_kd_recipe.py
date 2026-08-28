@@ -212,6 +212,38 @@ def install_pp_checkpoint_state_dict_support() -> None:
         setattr(stateful_wrappers, name, non_strict)
 
 
+def install_unsharded_checkpoint_state_dict_support() -> None:
+    """Fall back to the ordinary state dict for a one-rank dynamic model.
+
+    PyTorch DCP can reject an otherwise valid unsharded DynamicModule after its
+    model-state verification removes every entry.  A one-rank checkpoint needs
+    no distributed state-dict transformation, so use the module's regular
+    state dict for this specific failure while preserving every other error.
+    """
+    from nemo_automodel.components.checkpoint import stateful_wrappers
+
+    original = stateful_wrappers.get_model_state_dict
+    if getattr(original, "_puzzletron_unsharded_fallback", False):
+        return
+
+    def get_model_state_dict(model, *args, **kwargs):
+        try:
+            return original(model, *args, **kwargs)
+        except RuntimeError as error:
+            if (
+                "model state_dict is required to save or load, but model state_dict is empty"
+                not in str(error)
+            ):
+                raise
+            state_dict = model.state_dict()
+            if not state_dict:
+                raise
+            return state_dict
+
+    setattr(get_model_state_dict, "_puzzletron_unsharded_fallback", True)
+    stateful_wrappers.get_model_state_dict = get_model_state_dict
+
+
 def _trace_global_kd_phase(phase: str) -> None:
     if os.environ.get("PUZZLETRON_TRACE_GLOBAL_KD") != "1":
         return
@@ -654,6 +686,8 @@ class _WeightedObjectiveMixin:
     ):
         """Publish a completion marker only after model and optimizer DCP succeed."""
 
+        if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
+            install_unsharded_checkpoint_state_dict_support()
         result = None
         publication_error: Exception | None = None
         publication_error_text: str | None = None

@@ -85,6 +85,31 @@ def test_global_kd_checkpoint_context_uses_active_anymodel_block_configs(
     assert observed[0][0].to_dict() == {"subblock_configs": []}
 
 
+def test_unsharded_checkpoint_falls_back_only_for_empty_dcp_state(monkeypatch):
+    from nemo_automodel.components.checkpoint import stateful_wrappers
+
+    from modelopt.torch.puzzletron.distillation import global_kd_recipe
+
+    failure = [
+        "The option indicates that model state_dict is required to save or load, "
+        "but model state_dict is empty.rank = dist.get_rank()=0."
+    ]
+
+    def failed_dcp_state(*args, **kwargs):
+        raise RuntimeError(failure[0])
+
+    monkeypatch.setattr(stateful_wrappers, "get_model_state_dict", failed_dcp_state)
+    global_kd_recipe.install_unsharded_checkpoint_state_dict_support()
+
+    model = torch.nn.Linear(2, 3)
+    state_dict = stateful_wrappers.get_model_state_dict(model)
+
+    assert set(state_dict) == {"bias", "weight"}
+    failure[0] = "unrelated checkpoint failure"
+    with pytest.raises(RuntimeError, match="unrelated checkpoint failure"):
+        stateful_wrappers.get_model_state_dict(model)
+
+
 def test_distillation_overfit_stage_disables_mtp_objectives_by_default(monkeypatch, tmp_path):
     """Nano-like checkpoints without MTP must not enable MTP loss implicitly."""
     from modelopt.torch.puzzletron.manifest import StageManifest
