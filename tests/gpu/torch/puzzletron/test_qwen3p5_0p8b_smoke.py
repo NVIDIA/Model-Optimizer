@@ -174,7 +174,7 @@ def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
     run_config = yaml.safe_load(
         (
             project_root_path
-            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml"
+            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml"
         ).read_text(encoding="utf-8")
     )
     width_sanity_config = run_config["width_sanity"]
