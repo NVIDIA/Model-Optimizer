@@ -25,9 +25,9 @@ import contextlib
 import os
 
 import torch
-from _distillation_provider import convert_to_distillation_provider
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )

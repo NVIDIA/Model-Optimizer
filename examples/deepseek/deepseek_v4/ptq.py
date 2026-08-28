@@ -53,6 +53,25 @@ Usage (single node, 4 GPUs, MP=4):
 
 For MP=8 across two nodes use torchrun's ``--nnodes=2 --node_rank=<i>
 --master_addr=<ip>`` flags.
+
+Calibration settings
+--------------------
+
+When the amax dumped here is later consumed by ``quantize_to_nvfp4.py
+--cast_mxfp4_to_nvfp4``, the expert weights are a lossless bit-cast, so the
+activation amax (``input_scale``) is the only calibrated quantity that survives:
+
+  * ``--calib_seq`` sets the tokenizer truncation cap, which decides how much of a
+    long document survives. Raising it is **not** free on this path: the whole
+    corpus is tokenized in one ``padding=True`` call, so every row is padded to
+    the longest surviving sample, and ``calibrate_loop`` passes only ``input_ids``
+    -- so those pad tokens participate in calibration. Choose it from the context
+    length the activations must cover, and re-validate rather than assuming
+    higher is better.
+
+  * ModelOpt's ``mse_calibrate`` has no effect on this path — it tunes weight
+    quantizers only, and the MXFP4->NVFP4 cast overwrites ``weight_scale``
+    afterwards.
 """
 
 from __future__ import annotations
@@ -296,7 +315,14 @@ def _build_nvfp4_experts_cfg() -> dict:
     }
 
 
-def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list[str]):
+def ptq(
+    model,
+    tokenizer,
+    batch_size: int,
+    calib_size: int,
+    calib_datasets: list[str],
+    calib_seq: int = 512,
+):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
@@ -311,6 +337,7 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_samples=[calib_size] * len(calib_datasets),
+        max_sample_length=calib_seq,
         device=device,
     )
     _trace("calib dataloader ready")
@@ -437,6 +464,16 @@ def main():
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--calib_size", type=int, default=64)
     p.add_argument(
+        "--calib_seq",
+        type=int,
+        default=512,
+        help=(
+            "calibration sequence truncation cap (max_sample_length). Longer documents are "
+            "truncated to this; because the corpus is tokenized in one padded call, shorter "
+            "ones are padded up to it. Re-validate when changing it."
+        ),
+    )
+    p.add_argument(
         "--calib_dataset",
         dest="calib_datasets",
         nargs="+",
@@ -471,7 +508,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
+    model = ptq(
+        model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets, args.calib_seq
+    )
     save_amax_and_quant_config(model, args.output_path)
 
     if args.run_generate is not None:
