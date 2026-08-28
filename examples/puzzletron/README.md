@@ -145,7 +145,7 @@ dependency-ordered campaign and whole-campaign resume.
 Candidate evaluation can be part of a post-MIP campaign flow, where metrics,
 selection, materialization, and report lineage remain connected. Configure
 that route with the
-[post-MIP pipeline guide](docs/post_mip_pipeline.md#downstream-evaluation).
+[post-MIP pipeline guide](docs/post_mip_pipeline.md#evaluate-saved-checkpoints).
 
 For standalone evaluation in the Puzzletron worker environment, choose the
 route that matches the checkpoint and task:

@@ -4,11 +4,19 @@ The checked-in `full_vlm_smoke` recipe runs a small end-to-end test of
 vision-language pruning for the public `Qwen/Qwen3.5-0.8B` checkpoint. It uses
 real image-conversation examples to search the FFN intermediate sizes
 `[3072, 2048]`, evaluate the candidates, and save the two strongest candidates
-as physical checkpoints. It measures both checkpoints with 1-, 6-, and
-12-image AIPerf requests, distills the candidate with the highest measured
-12-image throughput for two steps, and runs a final image-and-text evaluation.
-The immutable revision in `model.yaml` ensures that repeated runs use the same
-starting model.
+as physical checkpoints. It reloads each saved directory through vLLM for two
+RealWorldQA image samples using the pinned Qwen 3.5 VLM evaluation profile. The
+profile verifies the evaluator revision and immutable offline dataset snapshot,
+strips inherited Hub credentials, and records preflight provenance before
+delegating execution to the shared checkpoint evaluator. The workflow then
+measures both checkpoints with 1-, 6-, and 12-image AIPerf requests, distills
+the candidate with the highest measured 12-image throughput for two steps, and
+runs the pinned RealWorldQA benchmark and internal image-and-text evaluation on
+the resulting checkpoint. The immutable revision in `model.yaml` ensures that
+repeated runs use the same starting model. See
+[evaluate saved checkpoints](post_mip_pipeline.md#evaluate-saved-checkpoints)
+for the direct pre-KD and post-KD reload paths; no AnyModel-to-AutoModel
+conversion occurs.
 
 These small budgets check that the complete workflow runs and resumes
 correctly. They do not establish model quality or production throughput.
@@ -18,7 +26,11 @@ correctly. They do not establish model quality or production throughput.
 Prepare the setup and worker environments described in
 [environment setup](environment_setup.md). The worker environment must provide
 ModelOpt, NeMo AutoModel's Qwen 3.5 VLM support, the Puzzletron requirements,
-and the reviewed AIPerf/vLLM runtime selected by your runner contract.
+the pinned `lmms-eval` dependency, and the reviewed AIPerf/vLLM runtime selected
+by your runner contract. The worker-visible Hugging Face cache must already
+contain the pinned RealWorldQA snapshot. Populate it as described in
+[cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data); the
+profile verifies the local snapshot and evaluates it offline.
 
 The worker-visible Hugging Face cache must contain, or be allowed to fetch,
 `Qwen/Qwen3.5-0.8B` at the pinned revision in
@@ -128,11 +140,11 @@ python examples/puzzletron/orchestrate.py \
 
 Confirm that all enabled model stages use one GPU, image-backed stages resolve
 `data.modality=multimodal`, and no text tokenization stage is present. Confirm
-that two quality candidates reach `post.params-90.vlm_serving`, which declares
-a `chat` workload with 1, 6, and 12 1280x720 images per request rather than a
-text-only serving proxy. The `fastest_vlm` filter selects one candidate from
-the 12-image throughput metric before KD. Then launch by omitting only
-`--dry-run`:
+that two quality candidates reach `post.params-90.checkpoint_eval` for the
+bounded RealWorldQA run and then `post.params-90.vlm_serving`, which declares a
+`chat` workload with 1, 6, and 12 1280x720 images per request rather than a
+text-only serving proxy. The `fastest_vlm` filter selects one candidate from the
+12-image throughput metric before KD. Then launch by omitting only `--dry-run`:
 
 ```bash
 python examples/puzzletron/orchestrate.py \
@@ -157,7 +169,14 @@ canonical stage summaries:
 - width scoring and VLM KD processed real image tensors and report a nonzero
   vision-forward count;
 - sorting and physical slicing equivalence passed at the configured tolerance;
-- the selected checkpoint reloads after materialization and after VLM KD;
+- each materialized pre-KD checkpoint has a successful `checkpoint_eval`
+  summary whose `checkpoint` field names that saved artifact, whose
+  RealWorldQA sample count equals two, and whose metrics are finite; the
+  evaluation root's `profile.json` records the pinned dataset revision and
+  offline preflight;
+- the selected post-KD checkpoint has a successful `post_kd_checkpoint_eval`
+  summary for two RealWorldQA samples with finite metrics, and the internal
+  final image evaluation reloads the same checkpoint;
 - the two-step KD summary contains finite main CE/KD and MTP CE/KD metrics plus
   nonzero trainable-group gradient evidence;
 - AIPerf completes every 1-, 6-, and 12-image chat workload for both retained
@@ -195,3 +214,14 @@ vision path, and comparative selection while keeping the example bounded; it
 does not isolate vision-encoder latency or establish production performance.
 Increase request count and concurrency in a separate reviewed performance run
 before making throughput claims.
+
+The real-checkpoint lifecycle test is opt-in and is not part of default pytest
+or routine CI smoke execution. Point it at the populated cache:
+
+```bash
+PUZZLETRON_VLM_BENCHMARK_HF_HOME=/path/to/hf-home \
+  pytest --run-manual tests/gpu/torch/puzzletron/test_qwen3p5_0p8b_vlm_smoke.py
+```
+
+The checkpoint contract is documented in
+[evaluate saved checkpoints](post_mip_pipeline.md#evaluate-saved-checkpoints).

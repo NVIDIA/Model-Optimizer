@@ -3,11 +3,15 @@
 The checked-in `full_smoke` recipe runs a small end-to-end test of text-only
 pruning for Qwen 3.5 0.8B. It searches the FFN intermediate sizes
 `[3072, 2048]`, evaluates the candidates, saves the two strongest candidates as
-physical checkpoints, and measures their serving performance with AIPerf. It
-then distills the candidate with higher measured output-token throughput for
-two steps, evaluates it again, and selects the final checkpoint. The recipe
-pins the public checkpoint revision so repeated runs use the same starting
-model.
+physical checkpoints, and reloads each saved directory through vLLM for two
+IFEval samples. It then measures both checkpoints with AIPerf, distills the
+candidate with higher measured output-token throughput for two steps, evaluates
+the resulting checkpoint with another two IFEval samples and the internal
+two-sample LM-loss check, and selects the final checkpoint. The recipe pins the
+public checkpoint revision so repeated runs use the same starting model. See
+[evaluate saved checkpoints](post_mip_pipeline.md#evaluate-saved-checkpoints)
+for how both Hugging Face directories are loaded without an AnyModel-to-AutoModel
+conversion.
 
 These small budgets check that the complete workflow runs and resumes
 correctly. They do not establish model quality or production throughput.
@@ -61,9 +65,16 @@ python examples/puzzletron/orchestrate.py \
   --stage full
 ```
 
-The checked-in flow deliberately uses two evaluation samples per candidate,
-four AIPerf requests per serving candidate, and two distillation steps. These
-budgets validate lifecycle correctness, comparative serving selection, and
-resumability; they are not quality or throughput claims. Final acceptance must
-reload the selected checkpoint, verify the cumulative report, and confirm that
-the resume submits no work for completed stages.
+The checked-in flow deliberately uses two candidate-evaluation samples, two
+IFEval samples, four AIPerf requests per serving candidate, and two
+distillation steps. These budgets validate lifecycle correctness, comparative
+serving selection, and resumability; they are not quality or throughput claims.
+The worker environment must provide the [pinned evaluator
+installation](checkpoint_evaluation.md#quick-start). IFEval task data must be
+fetchable from each worker or already present in its Hugging Face cache.
+
+After completion, inspect the `checkpoint_eval` and `post_kd_checkpoint_eval`
+nodes under `artifacts/post_mip/nodes`. Their summaries must name the corresponding
+pre-KD and post-KD checkpoints, report two effective IFEval samples, and contain
+finite metrics. Also verify the cumulative report and confirm that resuming
+submits no work for completed stages.

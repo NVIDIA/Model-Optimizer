@@ -75,9 +75,11 @@ def test_qwen3p5_0p8b_full_vlm_smoke_compiles_the_one_gpu_lifecycle(
         "post.params-90.image_eval",
         "post.params-90.best_vlm_loss",
         "post.params-90.materialized",
+        "post.params-90.checkpoint_eval",
         "post.params-90.vlm_serving",
         "post.params-90.fastest_vlm",
         "post.params-90.short_vlm_kd",
+        "post.params-90.post_kd_checkpoint_eval",
         "post.params-90.final_image_eval",
         "post.params-90.best",
     )
@@ -100,7 +102,14 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 1
     assert config["mip"]["runs"]["params-90"]["homogeneous"]["keep"] == 5
     assert nodes["best_vlm_loss"]["top_k"] == 2
-    assert nodes["vlm_serving"]["input"] == "materialized"
+    assert nodes["checkpoint_eval"]["type"] == "downstream_evaluation"
+    assert nodes["checkpoint_eval"]["failure_policy"] == "strict"
+    assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_realworldqa"
+    assert nodes["checkpoint_eval"]["config"]["batch_size"] == 1
+    assert nodes["checkpoint_eval"]["config"]["timeout_seconds"] == 600
+    assert nodes["checkpoint_eval"]["config"]["limit_mm_per_prompt"] == {"image": 1}
+    assert nodes["vlm_serving"]["config"]["readiness_timeout"] == 300
+    assert nodes["vlm_serving"]["config"]["benchmark_timeout"] == 300
     assert nodes["fastest_vlm"] == {
         "type": "filter",
         "input": "vlm_serving",
@@ -116,6 +125,9 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
         "local_batch_size": 1,
         "checkpoint_every_steps": 2,
     }
+    assert nodes["post_kd_checkpoint_eval"]["type"] == "downstream_evaluation"
+    assert nodes["post_kd_checkpoint_eval"]["failure_policy"] == "strict"
+    assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_image_eval"]["config"] == {
         "eval_samples": 2,
         "block_size": 512,

@@ -117,4 +117,4 @@ identity when applicable. For `lmms-eval`, retain `command.json`,
 generated YAML and launcher result artifacts.
 
 To evaluate candidates as part of a pruning campaign, use
-[downstream evaluation](post_mip_pipeline.md#downstream-evaluation) instead.
+[saved-checkpoint evaluation](post_mip_pipeline.md#evaluate-saved-checkpoints) instead.

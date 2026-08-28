@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.future as future_stages
+from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
 from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
 from modelopt.torch.puzzletron.post_mip.runner import (
@@ -77,6 +78,33 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
 
     assert settings["save_consolidated"] is True
     assert settings["max_steps"] == 8
+
+
+def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch):
+    # Keep the examples-layer VLM dependencies out of core test collection.
+    from examples.puzzletron.evaluation.vlm import post_mip as vlm_post_mip
+
+    calls = []
+    monkeypatch.setattr(vlm_post_mip, "register_profiles", lambda: calls.append(True))
+
+    post_mip_entrypoint._register_evaluation_profiles(
+        {
+            "post_mip": {
+                "flows": {
+                    "params": {
+                        "nodes": {
+                            "checkpoint_eval": {
+                                "type": "downstream_evaluation",
+                                "config": {"profile": "qwen35_vlm_realworldqa"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    assert calls == [True]
 
 
 def test_online_eval_settings_deep_merge_automodel_overrides():
@@ -293,3 +321,45 @@ def test_downstream_evaluation_delegates_to_generic_checkpoint_evaluator(monkeyp
         ),
         "settings": {"tasks": ["ifeval"], "limit": 4},
     }
+
+
+def test_downstream_evaluation_routes_the_pinned_vlm_profile(monkeypatch, tmp_path):
+    # Keep the examples-layer VLM dependencies out of core test collection.
+    from examples.puzzletron.evaluation.vlm import post_mip
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    captured = {}
+
+    def fake_evaluate(checkpoint_path, *, output_root, settings):
+        captured.update(
+            checkpoint=checkpoint_path,
+            output_root=output_root,
+            settings=settings,
+        )
+        return {"metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}}
+
+    monkeypatch.setattr(runner, "_DOWNSTREAM_EVALUATION_PROFILES", {})
+    monkeypatch.setattr(post_mip, "evaluate_realworldqa_checkpoint", fake_evaluate)
+    post_mip.register_profiles()
+    node = SimpleNamespace(
+        node_id="checkpoint_eval",
+        config={
+            "config": {
+                "profile": "qwen35_vlm_realworldqa",
+                "batch_size": 1,
+                "timeout_seconds": 600,
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(checkpoint)},
+    )
+
+    result = runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
+
+    assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
+    assert captured["checkpoint"] == str(checkpoint)
+    assert captured["settings"] == {"batch_size": 1, "timeout_seconds": 600}

@@ -25,7 +25,8 @@ from types import ModuleType
 import pytest
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import preflight, profile, suites, tasks
+from examples.puzzletron.evaluation.vlm import model as vlm_model
+from examples.puzzletron.evaluation.vlm import post_mip, preflight, profile, suites, tasks
 from examples.puzzletron.evaluation.vlm import run as evaluation
 
 _QWEN_CONFIG = {
@@ -49,6 +50,32 @@ def _write_checkpoint(root: Path) -> Path:
     model.mkdir()
     (model / "config.json").write_text(json.dumps(_QWEN_CONFIG) + "\n")
     return model
+
+
+def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        architectures=["AnyModel"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config_path.write_text(json.dumps(config) + "\n")
+
+    vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+    config["base_architecture"] = "OtherForConditionalGeneration"
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="AnyModel base_architecture"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+    config.update(
+        architectures=["AnyModel", "Qwen3_5ForConditionalGeneration"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="AnyModel base_architecture"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
 def _write_lmms_tasks(root: Path, tasks: tuple[str, ...]) -> Path:
@@ -234,6 +261,60 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
         "max_frames": settings["model_args"]["max_frame_num"],
     }
     assert report["generation_policy"] == settings["gen_kwargs"]
+
+
+def test_realworldqa_smoke_policy_is_single_run_with_two_samples():
+    assert suites.source_tasks("realworldqa-smoke") == ("realworldqa",)
+    policy = suites.execution_policy("realworldqa-smoke", timeout_seconds=900)
+    assert policy["limit"] == 2
+    assert policy["repetitions"] == 1
+    assert policy["timeout_seconds"] == 900
+
+
+def test_post_mip_realworldqa_adapter_routes_runtime_overrides(monkeypatch, tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    output = tmp_path / "output"
+    captured = {}
+
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        captured.update(args=args, settings_overrides=settings_overrides)
+        preflight = {
+            "profile": suites.EVALUATION_PROFILE,
+            "dataset_revisions": {
+                "realworldqa": profile.VLM_BENCHMARK_DATASETS["realworldqa"].revision
+            },
+            "sample_limit": 2,
+        }
+        preflight_callback(preflight)
+        return {
+            "preflight": preflight,
+            "runs": [{"metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}}],
+        }
+
+    monkeypatch.setattr(post_mip.run, "evaluate", fake_evaluate)
+    result = post_mip.evaluate_realworldqa_checkpoint(
+        model,
+        output_root=output,
+        settings={
+            "batch_size": 1,
+            "timeout_seconds": 900,
+            "dtype": "bfloat16",
+            "topology": {"tensor_parallel_size": 1},
+        },
+    )
+
+    assert captured["args"].suite == "realworldqa-smoke"
+    assert captured["args"].checkpoint == model
+    assert captured["args"].output_dir == output
+    assert captured["args"].timeout_seconds == 900
+    assert captured["settings_overrides"] == {
+        "dtype": "bfloat16",
+        "topology": {"tensor_parallel_size": 1},
+    }
+    assert json.loads((output / "profile.json").read_text())["sample_limit"] == 2
+    assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
+    assert result["profile_path"] == str(output / "profile.json")
 
 
 def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):

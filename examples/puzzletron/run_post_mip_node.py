@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Run or aggregate one campaign-configured post-MIP node."""
 
@@ -15,7 +27,20 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from puzzletron_orchestrator.config import load_experiment_config
+from puzzletron_orchestrator.config import load_experiment_config  # noqa: E402
+
+
+def _register_evaluation_profiles(config: dict) -> None:
+    profiles = {
+        node.get("config", {}).get("profile")
+        for flow in (config.get("post_mip", {}).get("flows") or {}).values()
+        for node in (flow.get("nodes") or {}).values()
+        if node.get("type") == "downstream_evaluation"
+    }
+    if "qwen35_vlm_realworldqa" in profiles:
+        from examples.puzzletron.evaluation.vlm.post_mip import register_profiles
+
+        register_profiles()
 
 
 def main() -> None:
@@ -44,6 +69,7 @@ def main() -> None:
         from modelopt.torch.puzzletron.post_mip import run_post_mip_node_shard
 
         config = pipeline_config_from_path(args.config, overrides=args.override)
+        _register_evaluation_profiles(config)
         payload = {
             "result_path": str(
                 run_post_mip_node_shard(

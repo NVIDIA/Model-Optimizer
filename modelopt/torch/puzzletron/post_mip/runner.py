@@ -27,7 +27,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkpoint
 from ..identity import canonicalize, stable_hash
@@ -44,8 +44,25 @@ from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservatio
 __all__ = [
     "aggregate_post_mip_node",
     "expected_post_mip_execution_identity",
+    "register_downstream_evaluation_profile",
     "run_post_mip_node_shard",
 ]
+
+_DOWNSTREAM_EVALUATION_PROFILES: dict[str, Callable[..., dict[str, Any]]] = {}
+
+
+def register_downstream_evaluation_profile(
+    name: str,
+    evaluator: Callable[..., dict[str, Any]],
+) -> None:
+    """Register an examples-layer evaluator without coupling ModelOpt to that example."""
+
+    if not name:
+        raise ValueError("downstream evaluation profile name must not be empty")
+    existing = _DOWNSTREAM_EVALUATION_PROFILES.get(name)
+    if existing is not None and existing is not evaluator:
+        raise ValueError(f"downstream evaluation profile is already registered: {name}")
+    _DOWNSTREAM_EVALUATION_PROFILES[name] = evaluator
 
 
 def _puzzle_dir(config: Mapping[str, Any]) -> Path:
@@ -508,10 +525,21 @@ def _downstream_evaluation(
         / source.architecture_id
         / "lmms_eval"
     )
+    settings = dict(node.config.get("config") or {})
+    profile = settings.pop("profile", None)
+    if profile is not None:
+        evaluator = _DOWNSTREAM_EVALUATION_PROFILES.get(str(profile))
+        if evaluator is None:
+            raise ValueError(f"unsupported downstream evaluation profile: {profile}")
+        return evaluator(
+            source.artifact["checkpoint"],
+            output_root=output_root,
+            settings=settings,
+        )
     return run_lmms_eval_checkpoint(
         source.artifact["checkpoint"],
         output_root=output_root,
-        settings=node.config.get("config") or {},
+        settings=settings,
     )
 
 

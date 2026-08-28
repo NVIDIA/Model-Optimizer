@@ -21,6 +21,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 REPOSITORY_ROOT = Path(__file__).absolute().parents[4]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -117,57 +121,69 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def evaluate(
+    args: argparse.Namespace,
+    *,
+    settings_overrides: Mapping[str, object] | None = None,
+    preflight_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Prepare and run one pinned VLM profile invocation."""
+
+    prepared = preflight.prepare(args)
+    task_root, configured_tasks = tasks.prepare(
+        args.output_dir,
+        suite=prepared.suite,
+        dataset_snapshots=prepared.dataset_snapshots,
+        quick_manifest=prepared.quick_manifest,
+    )
+    offline_task_preflight = tasks.verify_offline(
+        task_root,
+        configured_tasks,
+        hf_home=prepared.hf_home,
+        timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+    )
+    report = dict(prepared.report)
+    report.update(
+        {
+            "configured_tasks": list(configured_tasks),
+            "offline_task_preflight": offline_task_preflight,
+            "task_config_root": str(task_root),
+        }
+    )
+    if preflight_callback is not None:
+        preflight_callback(report)
+    if args.preflight_only:
+        return {"preflight": report, "runs": []}
+    settings = preflight.settings(
+        args,
+        tasks_root=task_root,
+        configured_tasks=configured_tasks,
+        prepared=prepared,
+    )
+    settings.update(settings_overrides or {})
+    repetitions = prepared.execution_policy["repetitions"]
+    runs = []
+    with checkpoint.without_huggingface_credentials():
+        for repetition in range(1, repetitions + 1):
+            output_root = args.output_dir
+            if repetitions > 1:
+                output_root = output_root / f"short-repetition-{repetition}"
+            runs.append(
+                checkpoint.run_lmms_eval_checkpoint(
+                    args.checkpoint,
+                    output_root=output_root,
+                    settings=settings,
+                )
+            )
+    return {"preflight": report, "runs": runs}
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        prepared = preflight.prepare(args)
-        task_root, configured_tasks = tasks.prepare(
-            args.output_dir,
-            suite=prepared.suite,
-            dataset_snapshots=prepared.dataset_snapshots,
-            quick_manifest=prepared.quick_manifest,
-        )
-        offline_task_preflight = tasks.verify_offline(
-            task_root,
-            configured_tasks,
-            hf_home=prepared.hf_home,
-            timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
-        )
-        report = dict(prepared.report)
-        report.update(
-            {
-                "configured_tasks": list(configured_tasks),
-                "offline_task_preflight": offline_task_preflight,
-                "task_config_root": str(task_root),
-            }
-        )
+        result = evaluate(args)
         if args.preflight_only:
-            print(json.dumps({"preflight": report}, indent=2, sort_keys=True))
-            return 0
-        settings = preflight.settings(
-            args,
-            tasks_root=task_root,
-            configured_tasks=configured_tasks,
-            prepared=prepared,
-        )
-        repetitions = prepared.execution_policy["repetitions"]
-        runs = []
-        with checkpoint.without_huggingface_credentials():
-            for repetition in range(1, repetitions + 1):
-                output_root = args.output_dir
-                if repetitions > 1:
-                    output_root = output_root / f"short-repetition-{repetition}"
-                runs.append(
-                    checkpoint.run_lmms_eval_checkpoint(
-                        args.checkpoint,
-                        output_root=output_root,
-                        settings=settings,
-                    )
-                )
-        result = {
-            "preflight": report,
-            "runs": runs,
-        }
+            result = {"preflight": result["preflight"]}
     except Exception as error:
         payload = {
             "error": type(error).__name__,
