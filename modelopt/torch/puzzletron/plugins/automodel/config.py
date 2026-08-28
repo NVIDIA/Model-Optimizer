@@ -45,7 +45,9 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from ...anymodel.model_descriptor import ModelDescriptorFactory
-from ...dataset.config import DataLayout, Modality, PuzzletronDataSpec
+from ...dataset.batch import DataLayout, Modality
+from ...dataset.config import PuzzletronDataSpec
+from ...security_policy import require_boolean_policy
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +62,7 @@ __all__ = [
 ]
 
 _FROM_PRETRAINED_TARGET = "nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained"
-_FROM_PRETRAINED_VLM_TARGET = (
-    "nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained"
-)
+_FROM_PRETRAINED_VLM_TARGET = "nemo_automodel.NeMoAutoModelForImageTextToText.from_pretrained"
 _DEFAULT_TEACHER_SUBDIR = "ckpts/teacher"
 
 
@@ -88,6 +88,16 @@ def _teacher_path(hydra_cfg) -> str:
     return f"{hydra_cfg.puzzle_dir}/{_DEFAULT_TEACHER_SUBDIR}"
 
 
+def _trust_remote_code(hydra_cfg) -> bool:
+    """Resolve the shared model and processor remote-code policy."""
+    model = _as_dict(hydra_cfg.get("model", None))
+    return require_boolean_policy(
+        model.get("trust_remote_code"),
+        path="model.trust_remote_code",
+        default=False,
+    )
+
+
 def _inject_canonical_data(
     recipe: dict,
     hydra_cfg,
@@ -108,8 +118,7 @@ def _inject_canonical_data(
     if spec.modality is Modality.MULTIMODAL:
         if bool(model.get("force_hf", True)):
             raise ValueError(
-                "multimodal Puzzletron stages require native AutoModel; "
-                "set model.force_hf=False"
+                "multimodal Puzzletron stages require native AutoModel; set model.force_hf=False"
             )
         model["_target_"] = _FROM_PRETRAINED_VLM_TARGET
         recipe["model"] = model
@@ -117,8 +126,7 @@ def _inject_canonical_data(
         dataset.update(
             {
                 "_target_": (
-                    "modelopt.torch.puzzletron.dataset."
-                    "load_materialized_conversation_dataset"
+                    "modelopt.torch.puzzletron.dataset.load_materialized_conversation_dataset"
                 ),
                 "path_or_dataset": str(source_path),
                 "pretokenize": True,
@@ -131,21 +139,21 @@ def _inject_canonical_data(
             dataset["num_samples"] = int(num_samples)
         recipe["dataset"] = dataset
         processor = dict(recipe.get("processor") or {})
-        processor.setdefault("trust_remote_code", True)
+        processor["trust_remote_code"] = bool(model.get("trust_remote_code", False))
         recipe["processor"] = processor
+        # AutoModel's VLM recipe owns processor-aware padded and packed collation.
+        dataloader = dict(recipe.get("dataloader") or {})
+        dataloader.pop("collate_fn", None)
+        recipe["dataloader"] = dataloader
     elif spec.layout is not DataLayout.FIXED:
-        if (
-            spec.layout is DataLayout.PACKED_VARLEN
-            and bool(model.get("force_hf", True))
-        ):
+        if spec.layout is DataLayout.PACKED_VARLEN and bool(model.get("force_hf", True)):
             raise ValueError(
                 "packed variable-length text data require native AutoModel; "
                 "set model.force_hf=False"
             )
         dataset = {
             "_target_": (
-                "modelopt.torch.puzzletron.distillation.dataset."
-                "make_puzzletron_chat_dataset"
+                "modelopt.torch.puzzletron.distillation.dataset.make_puzzletron_chat_dataset"
             ),
             "dataset_path": str(source_path),
             "split": str(split),
@@ -162,6 +170,7 @@ def _inject_canonical_data(
         }
     if spec.layout is DataLayout.PACKED_VARLEN:
         packing = spec.packing
+        assert packing is not None
         if spec.modality is Modality.MULTIMODAL:
             recipe["packed_sequence"] = {
                 "pack_size": int(packing.pack_size),
@@ -253,7 +262,7 @@ def build_stage_recipe_config(automodel_cfg) -> dict:
     return {
         "step_scheduler": {"global_batch_size": 1, "local_batch_size": 1, "max_steps": 1},
         "dist_env": {"backend": "nccl"},
-        "model": {"torch_dtype": "bf16", "trust_remote_code": True},
+        "model": {"torch_dtype": "bf16", "trust_remote_code": False},
         "checkpoint": {"enabled": False},
         "distributed": distributed,
         "distributed_config": {
@@ -313,9 +322,7 @@ def _merge_required_mapping(target: dict, required: dict, *, path: str) -> None:
         elif isinstance(target[key], dict) and isinstance(value, dict):
             _merge_required_mapping(target[key], value, path=key_path)
         elif target[key] != value:
-            raise ValueError(
-                f"Descriptor requires {key_path}={value!r}, got {target[key]!r}"
-            )
+            raise ValueError(f"Descriptor requires {key_path}={value!r}, got {target[key]!r}")
 
 
 def inject_descriptor_model_kwargs(
@@ -375,7 +382,7 @@ def inject_descriptor_pipeline_config(
     *,
     model_path,
     descriptor_name,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
 ) -> dict:
     """Let the model descriptor customize AutoModel PP splitting for this recipe.
 
@@ -480,7 +487,9 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
     # slicing or the PP microbatch shape.
     scheduler_dp = max(
         _int_or_default(
-            explicit_dp if explicit_dp not in (None, "none", "None", "") else distributed.get("ep_size"),
+            explicit_dp
+            if explicit_dp not in (None, "none", "None", "")
+            else distributed.get("ep_size"),
             1,
         ),
         1,
@@ -498,9 +507,7 @@ def _align_pipeline_batch_size(recipe: dict, *, micro_batch_size) -> dict:
             )
         batch_dp = max(scheduler_dp // ep_size, 1)
     global_batch = int(micro_batch_size)
-    local_batch = (
-        global_batch // batch_dp if global_batch % batch_dp == 0 else global_batch
-    )
+    local_batch = global_batch // batch_dp if global_batch % batch_dp == 0 else global_batch
     scheduler = dict(recipe.get("step_scheduler") or {})
     if _int_or_default(distributed.get("pp_size"), 1) <= 1:
         scheduler["local_batch_size"] = local_batch
@@ -532,7 +539,7 @@ def build_recipe_config(hydra_cfg) -> dict:
     model["pretrained_model_name_or_path"] = _teacher_path(hydra_cfg)
     model.setdefault("anymodel_descriptor", hydra_cfg.get("descriptor", None))
     model.setdefault("force_hf", bool(_as_dict(automodel_cfg).get("force_hf", True)))
-    model.setdefault("trust_remote_code", True)
+    model["trust_remote_code"] = _trust_remote_code(hydra_cfg)
     recipe["model"] = model
 
     if model["anymodel_descriptor"] is None:
@@ -557,14 +564,14 @@ def build_recipe_config(hydra_cfg) -> dict:
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
 
     inject_descriptor_pipeline_config(
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     _align_pipeline_seq_len(recipe, block_size=hydra_cfg.pruning.get("block_size", None))
     _align_pipeline_batch_size(
@@ -581,14 +588,20 @@ def build_recipe_config(hydra_cfg) -> dict:
     return recipe
 
 
-def _inject_model(recipe: dict, model_path, descriptor, force_hf: bool) -> dict:
+def _inject_model(
+    recipe: dict,
+    model_path,
+    descriptor,
+    force_hf: bool,
+    trust_remote_code: bool,
+) -> dict:
     """Set the recipe's ``model`` block to load ``model_path`` via the patched from_pretrained."""
     model = dict(recipe.get("model", {}))
     model.setdefault("_target_", _FROM_PRETRAINED_TARGET)
     model["pretrained_model_name_or_path"] = str(model_path)
     model.setdefault("anymodel_descriptor", descriptor)
     model.setdefault("force_hf", bool(force_hf))
-    model.setdefault("trust_remote_code", True)
+    model["trust_remote_code"] = trust_remote_code
     recipe["model"] = model
     if model["anymodel_descriptor"] is None:
         raise ValueError(
@@ -598,13 +611,13 @@ def _inject_model(recipe: dict, model_path, descriptor, force_hf: bool) -> dict:
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     inject_descriptor_pipeline_config(
         recipe,
         model_path=model["pretrained_model_name_or_path"],
         descriptor_name=model["anymodel_descriptor"],
-        trust_remote_code=bool(model.get("trust_remote_code", True)),
+        trust_remote_code=bool(model.get("trust_remote_code", False)),
     )
     return recipe
 
@@ -621,7 +634,13 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     force_hf = bool(_as_dict(automodel_cfg).get("force_hf", False))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)
-    recipe = _inject_model(recipe, model_path, descriptor, force_hf)
+    recipe = _inject_model(
+        recipe,
+        model_path,
+        descriptor,
+        force_hf,
+        _trust_remote_code(hydra_cfg),
+    )
     _inject_canonical_data(
         recipe,
         hydra_cfg,
@@ -631,15 +650,11 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     _align_dummy_dataset(
         recipe,
         num_samples=hydra_cfg.scoring.get("eval_samples", None),
-        block_size=hydra_cfg.scoring.get(
-            "block_size", hydra_cfg.pruning.get("block_size", None)
-        ),
+        block_size=hydra_cfg.scoring.get("block_size", hydra_cfg.pruning.get("block_size", None)),
     )
     _align_pipeline_seq_len(
         recipe,
-        block_size=hydra_cfg.scoring.get(
-            "block_size", hydra_cfg.pruning.get("block_size", None)
-        ),
+        block_size=hydra_cfg.scoring.get("block_size", hydra_cfg.pruning.get("block_size", None)),
     )
     _align_pipeline_batch_size(
         recipe, micro_batch_size=hydra_cfg.scoring.get("micro_batch_size", None)
@@ -687,9 +702,7 @@ def solution_scoring_params(hydra_cfg) -> dict:
         "lm_head_backend": str(automodel_cfg.get("lm_head_backend", "flash_kld")),
         "teacher_cache_device": teacher_cache_device,
         "flash_kld_token_chunk_size": automodel_cfg.get("flash_kld_token_chunk_size", None),
-        "flash_kld_reduction_backend": str(
-            automodel_cfg.get("flash_kld_reduction_backend", "fla")
-        ),
+        "flash_kld_reduction_backend": str(automodel_cfg.get("flash_kld_reduction_backend", "fla")),
     }
 
 
