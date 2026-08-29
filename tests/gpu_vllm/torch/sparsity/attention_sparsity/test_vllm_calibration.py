@@ -21,7 +21,7 @@ import pytest
 import torch
 from torch import nn
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend, FlashAttentionImpl
 from vllm.v1.attention.backends.flashinfer import FlashInferImpl
 
 from modelopt.torch.kernels.common.attention import IS_AVAILABLE as TRITON_KERNEL_AVAILABLE
@@ -287,12 +287,15 @@ def _make_impl(num_heads, head_dim, num_kv_heads):
 
 
 def _paged_cache_for(seqs_kv, num_kv_heads, head_dim, page_size, device, dtype):
-    """Scatter per-request contiguous K/V lists into a stacked paged cache."""
+    """Scatter per-request K/V lists into the installed backend's paged layout."""
     blocks_per_seq = [(kv.shape[0] + page_size - 1) // page_size for kv, _ in seqs_kv]
     num_blocks = sum(blocks_per_seq)
     max_blocks = max(blocks_per_seq)
-    k_cache = torch.zeros(num_blocks, page_size, num_kv_heads, head_dim, device=device, dtype=dtype)
-    v_cache = torch.zeros_like(k_cache)
+    cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        num_blocks, page_size, num_kv_heads, head_dim
+    )
+    kv_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
+    k_cache, v_cache = attention_plugin._flash_attention_kv_cache_views(kv_cache, head_dim)
     block_table = torch.zeros(len(seqs_kv), max_blocks, device=device, dtype=torch.int32)
     g = 0
     for b, (k, v) in enumerate(seqs_kv):
@@ -302,7 +305,7 @@ def _paged_cache_for(seqs_kv, num_kv_heads, head_dim, page_size, device, dtype):
             k_cache[g, : te - ts] = k[ts:te]
             v_cache[g, : te - ts] = v[ts:te]
             g += 1
-    return torch.stack([k_cache, v_cache], dim=0), block_table
+    return kv_cache, block_table
 
 
 def _sdpa_reference(q, k, v, is_causal):
@@ -415,12 +418,17 @@ class TestCalibrationForward:
             {"sample_length": 128, "total_tiles": [8, 8, 8], "skipped_tiles": [1, 3, 5]}
         ]
 
-    def test_rejects_non_logical_cache_shape(self):
+    def test_rejects_non_logical_cache_shape(self, monkeypatch):
         num_heads, num_kv_heads, head_dim = 4, 2, 64
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
         enable_calibration([impl], TRIALS)
-        # A physical HND tensor must be exposed as a logical [blocks, page, heads, dim] view.
+        # Inject a malformed logical view to exercise the adapter's shape guard.
         kv_cache = torch.zeros(2, 1, num_kv_heads, 16, head_dim, dtype=torch.bfloat16)
+        monkeypatch.setattr(
+            attention_plugin,
+            "_flash_attention_kv_cache_views",
+            lambda cache, _head_size: cache.unbind(0),
+        )
         attn_metadata = SimpleNamespace(
             num_actual_tokens=1,
             max_query_len=1,
@@ -441,11 +449,16 @@ class TestCalibrationForward:
                 output=torch.empty_like(q),
             )
 
-    def test_rejects_non_16bit_cache(self):
+    def test_rejects_non_16bit_cache(self, monkeypatch):
         num_heads, num_kv_heads, head_dim = 4, 2, 64
         impl = _make_impl(num_heads, head_dim, num_kv_heads)
         enable_calibration([impl], TRIALS)
         kv_cache = torch.zeros(2, 1, 16, num_kv_heads, head_dim, dtype=torch.uint8)
+        monkeypatch.setattr(
+            attention_plugin,
+            "_flash_attention_kv_cache_views",
+            lambda cache, _head_size: cache.unbind(0),
+        )
         attn_metadata = SimpleNamespace(
             num_actual_tokens=1,
             max_query_len=1,
