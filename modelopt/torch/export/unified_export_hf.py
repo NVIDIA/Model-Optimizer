@@ -100,9 +100,6 @@ from .quant_aware_conversion import (
     revert_weight_conversion_quant_aware,
 )
 from .quant_utils import (
-    _UnsupportedQuantizedWeightExportFormatError,
-    capture_quantized_weight_export_state,
-    export_quantized_weight_tensors,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -609,30 +606,6 @@ def _export_quantized_weight(
     output_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.output_quantizer, None
     )
-
-    if not isinstance(weight, QTensorWrapper):
-        try:
-            state = capture_quantized_weight_export_state(sub_module, weight_name)
-        except _UnsupportedQuantizedWeightExportFormatError:
-            # AWQ and SmoothQuant remain on the legacy format-specific path below.
-            pass
-        else:
-            exported = export_quantized_weight_tensors(weight, state, dtype, weight_name)
-            setattr(
-                sub_module,
-                weight_name,
-                nn.Parameter(exported.pop(weight_name), requires_grad=False),
-            )
-            for name, value in exported.items():
-                sub_module.register_buffer(name, value)
-            if (
-                quantization_format == QUANTIZATION_MXFP8
-                and hasattr(weight_quantizer, "_scale")
-                and weight_quantizer._scale is not None
-            ):
-                del weight_quantizer._scale
-            torch.cuda.empty_cache()
-            return
 
     # Already real-quantized weights (``mtq.compress`` / ``hf_ptq --low_memory_mode``) hold packed
     # nibbles -- half the logical last dim -- so per-block scales cannot be recomputed from them.

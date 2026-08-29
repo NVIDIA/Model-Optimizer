@@ -963,6 +963,32 @@ class _QuantizedWeightExportState:
     four_over_six: bool = False
 
 
+@dataclass(frozen=True)
+class _QuantizedWeightExportSpec:
+    """Stable deployment metadata for one logical quantized weight."""
+
+    quantization_format: str
+    block_size: int
+
+
+@dataclass(frozen=True)
+class _ExportStateTensorMetadata:
+    name: str
+    axes: tuple[int, ...]
+    block_sizes: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _QuantizedWeightExportMetadata:
+    quantization_format: str
+    block_size: int
+    weight_shape: tuple[int, ...]
+    tensors: tuple[_ExportStateTensorMetadata, ...]
+    packing_permutation: tuple[int, ...]
+    static_nvfp4: bool
+    four_over_six: bool
+
+
 def _same_storage(left: object, right: object) -> bool:
     if left is right:
         return True
@@ -979,7 +1005,7 @@ def _same_storage(left: object, right: object) -> bool:
 
 def _resolve_weight_quantizer(
     module: nn.Module, weight_name: str
-) -> tuple[torch.Tensor, TensorQuantizer | SequentialQuantizer]:
+) -> tuple[torch.Tensor, TensorQuantizer | SequentialQuantizer] | None:
     weight = getattr(module, weight_name)
     iter_weights = getattr(module, "iter_weights_for_calibration", None)
     if iter_weights is not None:
@@ -991,7 +1017,7 @@ def _resolve_weight_quantizer(
     if quantizer is None and weight_name.startswith("weight"):
         quantizer = representative_weight_quantizer(module)
     if quantizer is None:
-        raise RuntimeError(f"Missing weight quantizer for {weight_name!r}")
+        return None
     return weight, quantizer
 
 
@@ -1025,7 +1051,7 @@ def _state_tensor(
     block_sizes: tuple[int, ...] = (),
     cpu: bool = True,
 ) -> _ExportStateTensor:
-    value = value.detach().cpu().clone() if cpu else value.detach()
+    value = value.detach().cpu().clone() if cpu else value.detach().clone()
     if value.numel() == 1 and not axes and not block_sizes:
         return _ExportStateTensor(name, value.reshape(()))
     if len(axes) != value.ndim or len(block_sizes) != value.ndim:
@@ -1041,6 +1067,8 @@ def _axis_scale_state(
     value: torch.Tensor,
     packed_shape: tuple[int, ...],
     axis: int | Sequence[int],
+    *,
+    cpu: bool = True,
 ) -> _ExportStateTensor:
     axes = (axis,) if isinstance(axis, int) else tuple(axis)
     axes = tuple(_normalize_weight_dim(dim, len(packed_shape)) for dim in axes)
@@ -1055,6 +1083,7 @@ def _axis_scale_state(
         value.reshape(expected_shape),
         axes=axes,
         block_sizes=(1,) * len(axes),
+        cpu=cpu,
     )
 
 
@@ -1115,19 +1144,30 @@ def _input_quantizer(module: nn.Module, weight_name: str):
     return quantizer
 
 
-def capture_quantized_weight_export_state(
+def _resolve_quantized_weight_export_inputs(
     module: nn.Module,
-    weight_name: str = "weight",
-) -> _QuantizedWeightExportState:
-    """Capture detached export state without mutating the quantized module."""
+    weight_name: str,
+) -> (
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        TensorQuantizer,
+        TensorQuantizer | None,
+        str,
+    ]
+    | None
+):
     weight = getattr(module, weight_name)
     if isinstance(weight, QTensorWrapper):
         raise NotImplementedError("Functional export requires an uncompressed source weight")
 
-    quantized_view, weight_quantizer = _resolve_weight_quantizer(module, weight_name)
+    resolved = _resolve_weight_quantizer(module, weight_name)
+    if resolved is None:
+        return None
+    quantized_view, weight_quantizer = resolved
     input_quantizer = _input_quantizer(module, weight_name)
     if not weight_quantizer.is_enabled:
-        raise RuntimeError(f"Weight quantizer for {weight_name!r} is disabled")
+        return None
     quantization_format = _get_quantization_from_quantizers(
         module, weight_quantizer, input_quantizer
     )
@@ -1137,6 +1177,20 @@ def capture_quantized_weight_export_state(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
+    return weight, quantized_view, weight_quantizer, input_quantizer, quantization_format
+
+
+def capture_quantized_weight_export_state(
+    module: nn.Module,
+    weight_name: str = "weight",
+    *,
+    cpu: bool = True,
+) -> _QuantizedWeightExportState | None:
+    """Capture detached state for one weight, or ``None`` when it is not quantized."""
+    resolved = _resolve_quantized_weight_export_inputs(module, weight_name)
+    if resolved is None:
+        return None
+    weight, quantized_view, weight_quantizer, input_quantizer, quantization_format = resolved
 
     permutation = _packing_permutation(weight, quantized_view)
     packed_shape = tuple(weight.shape[axis] for axis in permutation)
@@ -1162,21 +1216,22 @@ def capture_quantized_weight_export_state(
                 per_block_amax.reshape(block_shape),
                 axes=tuple(range(len(packed_shape))),
                 block_sizes=(1,) * (len(packed_shape) - 1) + (block_size,),
+                cpu=cpu,
             )
         )
-        tensors.append(_state_tensor("weight_global_amax", global_amax))
+        tensors.append(_state_tensor("weight_global_amax", global_amax, cpu=cpu))
     elif quantization_format in _NVFP4_EXPORT_FORMATS:
         weight_scale_2 = (
             weight_quantizer._amax.float() / 448.0
             if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8
             else NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
         )
-        tensors.append(_state_tensor("weight_scale_2", weight_scale_2))
+        tensors.append(_state_tensor("weight_scale_2", weight_scale_2, cpu=cpu))
     elif quantization_format == QUANTIZATION_FP8:
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None:
             raise RuntimeError(f"Missing calibrated weight scale for {weight_name!r}")
-        tensors.append(_state_tensor("weight_scale", weight_scale))
+        tensors.append(_state_tensor("weight_scale", weight_scale, cpu=cpu))
     elif quantization_format == QUANTIZATION_FP8_PC_PT:
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None or weight_quantizer.axis is None:
@@ -1187,18 +1242,23 @@ def capture_quantized_weight_export_state(
                 weight_scale,
                 packed_shape,
                 weight_quantizer.axis,
+                cpu=cpu,
             )
         )
     elif quantization_format == QUANTIZATION_FP8_PB_WO:
         weight_scale = get_scaling_factor(weight_quantizer)
         if weight_scale is None:
             raise RuntimeError(f"Missing calibrated block scale for {weight_name!r}")
-        tensors.append(_block_scale_state("weight_scale", weight_scale, packed_shape, block_config))
+        tensors.append(
+            _block_scale_state("weight_scale", weight_scale, packed_shape, block_config, cpu=cpu)
+        )
     elif quantization_format == QUANTIZATION_MXFP8:
         cached_scale = getattr(weight_quantizer, "_scale", None)
         if cached_scale is not None:
             tensors.append(
-                _block_scale_state("weight_scale", cached_scale, packed_shape, block_config)
+                _block_scale_state(
+                    "weight_scale", cached_scale, packed_shape, block_config, cpu=cpu
+                )
             )
     elif quantization_format not in _MXFP4_EXPORT_FORMATS:
         raise _UnsupportedQuantizedWeightExportFormatError(
@@ -1213,7 +1273,7 @@ def capture_quantized_weight_export_state(
                 if quantization_format == QUANTIZATION_NVFP4
                 else get_scaling_factor(input_quantizer)
             )
-            tensors.append(_state_tensor("input_scale", input_scale))
+            tensors.append(_state_tensor("input_scale", input_scale, cpu=cpu))
 
     return _QuantizedWeightExportState(
         quantization_format=quantization_format,
@@ -1223,6 +1283,62 @@ def capture_quantized_weight_export_state(
         packing_permutation=permutation,
         static_nvfp4=static_nvfp4,
         four_over_six=bool(block_config.get("four_over_six", False)),
+    )
+
+
+def get_quantized_weight_export_spec(
+    module: nn.Module,
+    weight_name: str = "weight",
+) -> _QuantizedWeightExportSpec | None:
+    """Return stable deployment metadata without retaining quantizer tensors."""
+    resolved = _resolve_quantized_weight_export_inputs(module, weight_name)
+    if resolved is None:
+        return None
+    _, _, weight_quantizer, _, quantization_format = resolved
+    block_config = getattr(weight_quantizer, "block_sizes", None) or {}
+    block_size = int(block_config.get(-1, 0)) if isinstance(block_config, dict) else 0
+    return _QuantizedWeightExportSpec(quantization_format, block_size)
+
+
+def split_quantized_weight_export_state(
+    state: _QuantizedWeightExportState,
+) -> tuple[object, tuple[torch.Tensor, ...]]:
+    """Separate opaque state metadata from tensor values for typed transport."""
+    metadata = _QuantizedWeightExportMetadata(
+        state.quantization_format,
+        state.block_size,
+        state.weight_shape,
+        tuple(
+            _ExportStateTensorMetadata(record.name, record.axes, record.block_sizes)
+            for record in state.tensors
+        ),
+        state.packing_permutation,
+        state.static_nvfp4,
+        state.four_over_six,
+    )
+    return metadata, tuple(record.value for record in state.tensors)
+
+
+def restore_quantized_weight_export_state(
+    metadata: object,
+    tensors: Sequence[torch.Tensor],
+) -> _QuantizedWeightExportState:
+    """Restore opaque export state after its tensor values have been transported."""
+    if not isinstance(metadata, _QuantizedWeightExportMetadata):
+        raise TypeError(f"Invalid quantized weight export metadata: {type(metadata).__name__}")
+    if len(tensors) != len(metadata.tensors):
+        raise ValueError(f"Expected {len(metadata.tensors)} export tensors, got {len(tensors)}")
+    return _QuantizedWeightExportState(
+        metadata.quantization_format,
+        metadata.block_size,
+        metadata.weight_shape,
+        tuple(
+            _ExportStateTensor(spec.name, tensor, spec.axes, spec.block_sizes)
+            for spec, tensor in zip(metadata.tensors, tensors, strict=True)
+        ),
+        metadata.packing_permutation,
+        metadata.static_nvfp4,
+        metadata.four_over_six,
     )
 
 
@@ -1524,10 +1640,10 @@ def _quantized_layer_name(weight_name: str) -> str:
 
 
 def build_hf_quantization_config(
-    named_states: Mapping[str, _QuantizedWeightExportState | None]
-    | Iterable[tuple[str, _QuantizedWeightExportState | None]],
+    named_states: Mapping[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]
+    | Iterable[tuple[str, _QuantizedWeightExportState | _QuantizedWeightExportSpec | None]],
 ) -> dict[str, Any]:
-    """Build canonical ModelOpt HF configuration from named opaque states."""
+    """Build canonical ModelOpt HF configuration from named states or specs."""
     layers: dict[str, tuple[str, int] | None] = {}
     for weight_name, state in dict(named_states).items():
         layer_name = _quantized_layer_name(weight_name)

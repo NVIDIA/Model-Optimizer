@@ -20,15 +20,19 @@ import pytest
 import torch
 import torch.nn as nn
 
+import modelopt.torch.export.quant_utils as quant_utils
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.quant_utils import (
     build_hf_quantization_config,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
+    get_quantized_weight_export_spec,
     merge_quantized_weight_export_states,
     permute_quantized_weight_export_state,
+    restore_quantized_weight_export_state,
     select_quantized_weight_export_state,
+    split_quantized_weight_export_state,
 )
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
@@ -88,6 +92,25 @@ class _SquareTransposedExperts(nn.Module):
             yield getattr(self, name).transpose(-1, -2), getattr(self, f"{name}_weight_quantizer")
 
 
+class _GroupedWeights(nn.Module):
+    """Minimal TEGroupedLinear-style numbered-weight layout."""
+
+    def __init__(self):
+        super().__init__()
+        self.weight0 = nn.Parameter(torch.arange(16, dtype=torch.float32).reshape(4, 4))
+        self.weight1 = nn.Parameter(torch.arange(16, 32, dtype=torch.float32).reshape(4, 4))
+        cfg = QuantizerAttributeConfig(num_bits=(4, 3))
+        self.quantizers = nn.ModuleList([TensorQuantizer(cfg), TensorQuantizer(cfg)])
+        for index, quantizer in enumerate(self.quantizers, start=1):
+            quantizer._amax = torch.tensor(float(index))
+        self.input_quantizer = TensorQuantizer()
+        self.input_quantizer.disable()
+
+    def iter_weights_for_calibration(self):
+        yield self.weight0, self.quantizers[0]
+        yield self.weight1, self.quantizers[1]
+
+
 def test_capture_does_not_modify_zero_amax():
     module = _fp8_linear()
     module.weight_quantizer._amax.zero_()
@@ -131,6 +154,64 @@ def test_export_state_round_trips_through_object_transport():
     exported = export_quantized_weight_tensors(module.weight, state, torch.float32)
 
     assert exported["weight"].shape == module.weight.shape
+
+
+def test_capture_resolves_numbered_grouped_weights_by_storage():
+    module = _GroupedWeights()
+
+    state0 = capture_quantized_weight_export_state(module, "weight0")
+    state1 = capture_quantized_weight_export_state(module, "weight1")
+
+    assert state0 is not None and state1 is not None
+    assert state0.quantization_format == state1.quantization_format == "fp8"
+    assert state0.tensors[0].value.item() != state1.tensors[0].value.item()
+
+
+def test_unquantized_weight_has_no_export_state_or_spec():
+    module = nn.Linear(4, 4, bias=False)
+
+    assert capture_quantized_weight_export_state(module) is None
+    assert get_quantized_weight_export_spec(module) is None
+
+
+def test_export_state_split_restore_preserves_output():
+    module = _fp8_linear()
+    state = capture_quantized_weight_export_state(module)
+    assert state is not None
+    metadata, tensors = split_quantized_weight_export_state(state)
+
+    restored = restore_quantized_weight_export_state(metadata, tensors)
+
+    expected = export_quantized_weight_tensors(module.weight, state, torch.float32)
+    actual = export_quantized_weight_tensors(module.weight, restored, torch.float32)
+    assert actual.keys() == expected.keys()
+    for name in actual:
+        torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+
+def test_export_spec_builds_config_without_tensor_state():
+    spec = get_quantized_weight_export_spec(_fp8_linear())
+    assert spec is not None
+
+    config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
+
+    assert config["quant_algo"] == "FP8"
+
+
+def test_export_spec_does_not_materialize_static_scale_state(monkeypatch):
+    weight = torch.arange(32, dtype=torch.float32).reshape(2, 16) / 32
+    module = _static_w4a16_linear(weight, weight.abs().amax(dim=1, keepdim=True), torch.tensor(1.0))
+    monkeypatch.setattr(
+        quant_utils,
+        "_state_tensor",
+        lambda *args, **kwargs: pytest.fail("export spec materialized tensor state"),
+    )
+
+    spec = get_quantized_weight_export_spec(module)
+
+    assert spec is not None
+    assert spec.quantization_format == "w4a16_nvfp4"
+    assert spec.block_size == 16
 
 
 def test_static_nvfp4_merge_recomputes_scales_from_merged_amax():
