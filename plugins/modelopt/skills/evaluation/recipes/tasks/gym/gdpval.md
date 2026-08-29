@@ -138,3 +138,12 @@ count means tasks were lost (e.g. across a walltime resume) and the ELO is compu
 fewer tasks than the references were. Per-task detail is in
 `evaluator_rollouts.jsonl` + `nemo_gym_logs/`; raw judge responses are under
 `PERSIST_DELIVERABLES_DIR`.
+
+## Feasibility pre-check
+
+The **per-task ceiling** binds, not the total budget. On a large reasoning model a
+12600 s (3.5 h) ceiling timed out ~88% of rollouts, leaving n=7 paired tasks —
+a full benchmark's GPU-h for no usable signal.
+
+Run a handful of tasks first and measure the timeout rate. If a material fraction
+hits the ceiling, either raise it or drop GDPval and record the infeasibility.

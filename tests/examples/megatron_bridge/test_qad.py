@@ -17,7 +17,6 @@
 from pathlib import Path
 
 import pytest
-from _test_utils.examples.megatron_bridge import qwen35_moe_bridge_supported
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import (
     create_tiny_gemma3vl_dir,
@@ -31,8 +30,8 @@ from _test_utils.torch.transformers_models import (
     ("create_student", "is_vlm", "is_moe"),
     [
         (lambda tmp_path: create_tiny_qwen3_dir(tmp_path, with_tokenizer=True), False, False),
-        (
-            # TODO: remove once qwen35_vl_moe is supported
+        # Dense-VLM QAD path; the MoE VLM below covers it in CI, so run this one on demand only.
+        pytest.param(
             lambda tmp_path: create_tiny_gemma3vl_dir(
                 tmp_path,
                 with_processor=True,
@@ -42,6 +41,7 @@ from _test_utils.torch.transformers_models import (
             ),
             True,
             False,
+            marks=pytest.mark.manual,
         ),
         pytest.param(
             lambda tmp_path: create_tiny_qwen3_5_moe_vl_dir(
@@ -49,10 +49,6 @@ from _test_utils.torch.transformers_models import (
             ),
             True,
             True,
-            marks=pytest.mark.skipif(
-                not qwen35_moe_bridge_supported(),
-                reason="Qwen3.5-MoE needs Megatron-Bridge native MoE support (nemo:26.08+)",
-            ),
         ),
     ],
     ids=["qwen3", "gemma3vl", "qwen3_5_moe_vl"],
@@ -71,18 +67,13 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
     train_iters = 3
     early_exit_iter = 2
 
-    # TODO: VLMs disable sequence parallelism, so tensor parallelism can't be used here.
-    #     Flip to tp_size=num_gpus in nemo:26.08 container
-    tp_size = 1
-    pp_size = num_gpus
-
     # Step 1: PTQ the (language) model to FP8 and save a Megatron checkpoint carrying the ModelOpt state.
     quantize_cmd = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "quantize.py", "--skip_generate"],
         hf_model_name_or_path=hf_model_path,
         recipe="general/ptq/fp8_default-kv_fp8",
-        tp_size=tp_size,
-        pp_size=pp_size,
+        tp_size=num_gpus,
+        pp_size=1,
         calib_dataset_name="cnn_dailymail",  # text dataset -> (for VLMs) text-only LM calibration
         calib_num_samples=8,
         calib_batch_size=2,
@@ -103,8 +94,8 @@ def test_qad(tmp_path: Path, num_gpus, create_student, is_vlm, is_moe):
         student_megatron_path=quantized_megatron_path,
         teacher_hf_path=hf_model_path,
         output_dir=distill_output_dir,
-        tp_size=tp_size,
-        pp_size=pp_size,
+        tp_size=num_gpus,
+        pp_size=1,
         seq_length=16,
         mbs=1,
         gbs=4,
