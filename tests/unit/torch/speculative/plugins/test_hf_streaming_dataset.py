@@ -430,6 +430,88 @@ def test_lapped_slot_is_treated_as_miss(monkeypatch):
         ds[0]
 
 
+def _done_raising_handler(seq, n_layers, hidden, *, fail_first_n, calls):
+    """Sidecar handler whose /done raises a transport error for its first ``fail_first_n``
+    calls, then behaves normally. ``calls`` accumulates the paths hit."""
+    inner = _rdma_sidecar_handler(seq, n_layers, hidden)
+    state = {"done": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/done":
+            state["done"] += 1
+            if state["done"] <= fail_first_n:
+                raise httpx.ConnectError("simulated sidecar failure")
+        return inner(request)
+
+    return handler
+
+
+def test_failed_done_is_treated_as_a_miss(monkeypatch):
+    """A /done that errors must not be read as "the slot is still ours".
+
+    The gen check /done performs is the only thing between a lapped ring slot and training
+    on another prompt's activations: the token_ids comparison that follows compares the
+    server's per-request record, not the bytes just read, so it passes on a mis-slotted
+    read. Trusting the read when /done is unreachable trades a visible resample for silent
+    corruption, so the failure must fail closed like an explicit lap does.
+    """
+    seq, n_layers, hidden = 8, 3, 16
+    calls: list[str] = []
+    _mock_rdma(
+        monkeypatch,
+        _done_raising_handler(seq, n_layers, hidden, fail_first_n=10**6, calls=calls),
+    )
+
+    ds = EagleVllmStreamingDataset(
+        entries=[{"conversation_id": "c-0", "messages": [{"role": "user", "content": "x"}]}],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+            fail_after_consecutive_skips=100,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="no fetchable sample"):
+        ds[0]
+    assert "/done" in calls, "fixture never reached /done"
+
+
+def test_failed_done_resamples_instead_of_returning_the_read(monkeypatch):
+    """The discard is a resample, not a hard failure: the next entry is fetched and returned.
+
+    Pins that failing closed costs one extra round trip rather than breaking the epoch --
+    the cheap half of the asymmetry that justifies discarding.
+    """
+    seq, n_layers, hidden = 8, 3, 16
+    calls: list[str] = []
+    _mock_rdma(
+        monkeypatch,
+        _done_raising_handler(seq, n_layers, hidden, fail_first_n=1, calls=calls),
+    )
+
+    ds = EagleVllmStreamingDataset(
+        entries=[
+            {"conversation_id": f"c-{i}", "messages": [{"role": "user", "content": "x"}]}
+            for i in range(2)
+        ],
+        tokenizer=_tokenizer_returning(seq),
+        config=EagleVllmStreamingConfig(
+            server_urls="http://mock:8000",
+            model="mock-model",
+            max_seq_len=seq,
+            fail_after_consecutive_skips=100,
+        ),
+    )
+
+    batch = ds[0]
+    assert batch["base_model_hidden_states"].shape == (seq, hidden)
+    # Two prompts posted: the first read was thrown away, the second is what came back.
+    assert calls.count("/v1/completions") == 2
+    assert calls.count("/done") == 2
+
+
 def test_oversize_server_response_raises(monkeypatch):
     """If the server captured more tokens than max_seq_len (its connector max_tokens >
     our recv buffer), reading would silently truncate the slice; fail loud instead so the
