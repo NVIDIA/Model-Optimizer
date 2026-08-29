@@ -1137,9 +1137,8 @@ class GPTModelExporter:
         if zero_centered_gamma:
             # Megatron centres this gamma on 0, HF on 1. Assert, don't derive: the config flag
             # is model-wide while this one is per-norm.
-            module_config = getattr(module, "config", None)
-            assert getattr(module_config, "layernorm_zero_centered_gamma", True), (
-                f"{prefix} is mapped as zero-centered gamma but its config disables it; "
+            assert getattr(module, "zero_centered_gamma", False), (
+                f"{prefix} is mapped as zero-centered gamma but the module reports otherwise; "
                 "exporting would shift the weights by 1.0"
             )
             weight = weight + 1.0
@@ -1246,7 +1245,12 @@ class GPTModelExporter:
         self._state_dict = OrderedDict()
         try:
             qformat, block_size = self._grouped_mlp_slicing(
-                module, marker + "{}", parallel_config=parallel_config, is_mtp=False, quantize=False
+                module,
+                marker + "{}",
+                parallel_config=parallel_config,
+                is_mtp=False,
+                quantize=False,
+                record_quant_config=False,
             )
             per_expert = self._state_dict
         finally:
@@ -1263,6 +1267,12 @@ class GPTModelExporter:
         weights = collect(".weight")
         if not weights:
             return
+        # Record against the packed prefix, as _pack_name_remapping does for the other packed path.
+        if qformat in (None, QUANTIZATION_NONE):
+            self._record_excluded_module(prefix)
+        else:
+            assert block_size is not None
+            self._record_layer_quant_config(prefix, qformat, block_size)
         scales, scales_2 = collect(".weight_scale"), collect(".weight_scale_2")
         input_scales = collect(".input_scale")
 
@@ -1290,7 +1300,13 @@ class GPTModelExporter:
             )[0]
 
     def _grouped_mlp_slicing(
-        self, module, prefix, parallel_config=None, is_mtp=False, quantize=True
+        self,
+        module,
+        prefix,
+        parallel_config=None,
+        is_mtp=False,
+        quantize=True,
+        record_quant_config=True,
     ):
         """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
 
@@ -1447,7 +1463,7 @@ class GPTModelExporter:
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
         # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
-        if seen_qformat is not None:
+        if seen_qformat is not None and record_quant_config:
             assert seen_block_size is not None
             num_total_experts = num_experts * ep_size
             for global_id in range(num_total_experts):
@@ -1651,6 +1667,17 @@ class GPTModelExporter:
             in_proj, self.dtype, prefix=prefix
         )
 
+        assert tuple(module.in_proj_split_names) == (
+            "query",
+            "key",
+            "value",
+            "z",
+            "beta",
+            "alpha",
+        ), (
+            f"Unexpected GatedDeltaNet in_proj layout {tuple(module.in_proj_split_names)}; the "
+            "split below assumes [query, key, value, z, beta, alpha]"
+        )
         sections = dict(zip(module.in_proj_split_names, module.in_proj_split_sections))
         split_sizes = [
             sections["query"] + sections["key"] + sections["value"],

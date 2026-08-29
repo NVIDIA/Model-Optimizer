@@ -218,12 +218,14 @@ def load_modelopt_megatron_checkpoint(
     # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
     checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
 
-    # ``distill.py`` distills a VLM's language model only, so its checkpoint holds no ``vision_model.*``
-    # weights and must be loaded into ``.language_model`` rather than the full VLM wrapper.
+    # ``distill.py`` distills a VLM's language model only, so its checkpoint holds the language
+    # model at the root and must be loaded into ``.language_model``, not the full VLM wrapper.
+    # Keyed off the same ``language_model.`` prefix ``get_language_model`` navigates, so a renamed
+    # vision tower cannot make a full-VLM checkpoint look language-model-only.
     checkpoint_keys = _checkpoint_keys(checkpoint_path)
     unwrapped_model = unwrap_model(model)
     if any(get_language_model(m)[1] for m in unwrapped_model) and not any(
-        key.startswith("vision_model.") for key in checkpoint_keys
+        key.startswith("language_model.") for key in checkpoint_keys
     ):
         print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
         model = [get_language_model(m)[0] for m in unwrapped_model]

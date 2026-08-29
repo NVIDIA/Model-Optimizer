@@ -360,7 +360,7 @@ def main(args: argparse.Namespace):
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
-    def _build_model_provider(hf_path, load_weights=True):
+    def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
 
@@ -373,7 +373,6 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
-        # Must match the expert layout of --student_megatron_path (see quantize.py).
         set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.sft:
             # A response-only loss mask needs per-token reduction to combine across CP ranks.
@@ -390,14 +389,21 @@ def main(args: argparse.Namespace):
     # The student structure is always built from --student_hf_path. When --student_megatron_path is
     # given, the HF weights are skipped (they are overwritten by the Megatron checkpoint, loaded into
     # the built student inside the patched provide() below).
+    # Only the student's layout is pinned -- it must match --student_megatron_path (see quantize.py).
     student_provider = _build_model_provider(
-        args.student_hf_path, load_weights=args.student_megatron_path is None
+        args.student_hf_path,
+        load_weights=args.student_megatron_path is None,
+        moe_grouped_gemm=moe_grouped_gemm,
     )
     if student_has_modelopt_state:
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
-    teacher_provider = _build_model_provider(args.teacher_hf_path)
+    # The teacher only runs forward, is loaded from HF, and is hidden from the checkpoint
+    # (``expose_minimal_state_dict``), so it keeps the faster grouped GEMM regardless.
+    teacher_provider = _build_model_provider(
+        args.teacher_hf_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
+    )
 
     # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
     # the same padded width. A shared tokenizer does not imply it: the HF configs can disagree.

@@ -222,7 +222,8 @@ def get_args() -> argparse.Namespace:
         help=(
             "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
             "By default grouped GEMM is used unless the architecture cannot export it to "
-            "HuggingFace, in which case SequentialMLP is selected automatically."
+            "HuggingFace, in which case SequentialMLP is selected automatically. VLMs only: the "
+            "LLM path reads the expert layout from the checkpoint and ignores this flag."
         ),
     )
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
