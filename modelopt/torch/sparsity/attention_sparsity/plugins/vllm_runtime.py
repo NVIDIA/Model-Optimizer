@@ -15,6 +15,7 @@
 
 """Install ModelOpt attention transforms into a loaded vLLM model."""
 
+import fnmatch
 import importlib
 from collections import Counter
 from collections.abc import Mapping
@@ -111,6 +112,31 @@ def _model_config(model_runner):
     if model_config is not None:
         return model_config
     return getattr(getattr(model_runner, "vllm_config", None), "model_config", None)
+
+
+def _calibration_ignore_patterns(model_runner) -> tuple[str, ...]:
+    """Return the existing skip-softmax layer exclusions, if any."""
+    hf_config = getattr(_model_config(model_runner), "hf_config", None)
+    sparse_meta = getattr(hf_config, "sparse_attention_config", None)
+    if not isinstance(sparse_meta, dict):
+        return ()
+    groups = sparse_meta.get("config_groups")
+    if not isinstance(groups, dict):
+        return ()
+
+    patterns = []
+    for group in groups.values():
+        if not isinstance(group, dict) or group.get("algorithm") != "skip_softmax":
+            continue
+        ignore = group.get("ignore", ())
+        if isinstance(ignore, list | tuple):
+            patterns.extend(name for name in ignore if isinstance(name, str))
+    return tuple(patterns)
+
+
+def _is_calibration_ignored(name: str, patterns: tuple[str, ...]) -> bool:
+    """Match exclusions exactly as the checkpoint serving loader does."""
+    return any(fnmatch.fnmatch(name, f"*{pattern}*") for pattern in patterns)
 
 
 def _resolve_sparse_config(model_runner, sparse_cfg) -> tuple[dict | None, str | None]:
@@ -554,8 +580,9 @@ def _attention_quant_error(module) -> str | None:
 def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallReport:
     """Install skip-softmax calibration adapters into a loaded vLLM model.
 
-    Swaps the backend-matched ModelOpt adapter onto every attention layer and
-    disables cascade attention, following validation-before-mutation: every
+    Swaps the backend-matched ModelOpt adapter onto each attention layer that
+    is not excluded by the checkpoint's existing skip-softmax ``ignore``
+    policy and disables cascade attention, following validation-before-mutation: every
     known compatibility error — across all layers — is collected and raised
     before any module is changed. Calibration itself starts separately via
     :func:`~.vllm.enable_calibration` (typically over a worker RPC), so engine
@@ -565,16 +592,18 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
 
     Requirements validated here: eager execution (``enforce_eager=True`` —
     the per-request calibration loop cannot be CUDA-graph captured), fp16/bf16
-    model and KV-cache dtypes, pipeline-parallel size 1, no active attention
+    model and KV-cache dtypes, pipeline- and data-parallel size 1, no active attention
     Q/K/P/V fakequant, and a FlashAttention or FlashInfer backend per layer.
     """
     from vllm.config.compilation import CUDAGraphMode
 
     model = _unwrapped_model(model_runner)
+    ignore_patterns = _calibration_ignore_patterns(model_runner)
     candidates = [
         (name, module)
         for name, module in model.named_modules()
         if isinstance(module, _VLLM_ATTENTION)
+        and not _is_calibration_ignored(name, ignore_patterns)
     ]
 
     _require_supported_vllm()
@@ -582,13 +611,18 @@ def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallR
     parallel = getattr(getattr(model_runner, "vllm_config", None), "parallel_config", None)
     if getattr(parallel, "pipeline_parallel_size", 1) != 1:
         errors.append("pipeline_parallel_size must be 1 for skip-softmax calibration")
+    if getattr(parallel, "data_parallel_size", 1) != 1:
+        errors.append(
+            "data_parallel_size must be 1 for skip-softmax calibration: data-parallel "
+            "replicas serve disjoint requests, so per-rank count records do not align"
+        )
     if _cudagraph_mode(model_runner) != CUDAGraphMode.NONE:
         errors.append(
             "skip-softmax calibration requires eager execution (enforce_eager=True); "
             "the per-request calibration loop cannot be CUDA-graph captured"
         )
     if not candidates:
-        errors.append("no attention layers were found")
+        errors.append("no attention layers were found after applying the checkpoint ignore policy")
 
     plans = []
     for name, module in candidates:

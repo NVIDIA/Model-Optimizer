@@ -263,6 +263,37 @@ def test_flashinfer_metadata_builder_patch_stashes_common_metadata(
             assert actual == expected
 
 
+def test_flashinfer_metadata_builder_uses_public_host_seq_lens(
+    monkeypatch, isolated_flashinfer_builder_patch
+):
+    """Mixed metadata must not copy device sequence lengths back to the host."""
+
+    class DeviceSeqLens:
+        def cpu(self):
+            raise AssertionError("unexpected device-to-host sequence-length copy")
+
+    def build(_self, common_attn_metadata):
+        return SimpleNamespace(num_decodes=1, num_prefills=1)
+
+    monkeypatch.setattr(FlashInferMetadataBuilder, "build", build)
+    assert patch_flashinfer_metadata_builder() is True
+    common = SimpleNamespace(
+        block_table_tensor=torch.zeros(2, 1, dtype=torch.int32),
+        seq_lens=DeviceSeqLens(),
+        seq_lens_cpu=torch.tensor([16, 64], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=64,
+        causal=True,
+    )
+
+    metadata = FlashInferMetadataBuilder.build(object(), common)
+
+    assert metadata._modelopt_max_seq_len_decode == 16
+    assert metadata._modelopt_max_seq_len_prefill == 64
+
+
 def test_select_and_clone_flashinfer_impl_preserves_runtime_state(
     isolated_flashinfer_builder_patch,
 ):

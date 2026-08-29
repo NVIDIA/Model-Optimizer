@@ -234,13 +234,13 @@ def build_sparse_attention_config(
     Non-skip groups from ``existing_config`` (e.g. exported N:M
     ``sparse_softmax`` metadata) are preserved after the skip group; an
     existing ``skip_softmax`` group is replaced by the new calibration,
-    carrying over its layer policy (``ignore`` — layers deliberately kept
-    dense — and ``initial_disabled_steps``): recalibration replaces the
-    fitted thresholds, not which layers the export sparsifies.
+    carrying over its layer policy (``targets``, ``ignore`` — layers
+    deliberately kept dense — and ``initial_disabled_steps``): recalibration
+    replaces the fitted thresholds, not which layers the export sparsifies.
     """
-    # target_sparsity covers only fitted phases: claiming a target for a phase
-    # without calibrated (a, b) would advertise sparsity the serving path
-    # silently serves dense (it needs the per-phase scale factors).
+    # Keep the emitted metadata scoped to the phases actually fitted. The
+    # serving loader may default an absent target, but a missing per-phase
+    # threshold_scale_factor still keeps that phase dense.
     target_sparsity_by_phase = {
         phase: value
         for phase, value in _normalize_target_sparsity(target_sparsity).items()
@@ -249,7 +249,6 @@ def build_sparse_attention_config(
 
     skip_group: dict[str, Any] = {
         "algorithm": "skip_softmax",
-        "targets": ["Attention"],
         "threshold_scale_factor": export_threshold_scale_factor(calibration_params),
         "target_sparsity": target_sparsity_by_phase,
     }
@@ -265,13 +264,15 @@ def build_sparse_attention_config(
                 # Keep the replaced group's layer policy: dropping ``ignore``
                 # would sparsify layers the original export deliberately kept
                 # dense (e.g. first/last blocks).
-                for key in ("ignore", "initial_disabled_steps"):
+                for key in ("targets", "ignore", "initial_disabled_steps"):
                     if key in group and key not in skip_group:
                         skip_group[key] = group[key]
             else:
                 preserved.append(group)
         for idx, group in enumerate(preserved, start=1):
             config_groups[f"group_{idx}"] = group
+
+    skip_group.setdefault("targets", ["Attention"])
 
     result: dict[str, Any] = {
         "config_groups": config_groups,

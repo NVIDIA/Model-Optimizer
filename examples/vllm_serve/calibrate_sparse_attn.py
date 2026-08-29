@@ -32,6 +32,7 @@ the checkpoint config are preserved.
 
 Usage:
     python calibrate_sparse_attn.py <ckpt> \
+        --calib_data_dir <ruler-data-dir> \
         --target_sparse_ratio 0.5 \
         --decode_tokens 32 \
         --update_checkpoint_config
@@ -89,6 +90,8 @@ def _engine_kwargs(value: str) -> dict:
         )
     if kwargs.get("pipeline_parallel_size", 1) != 1:
         raise argparse.ArgumentTypeError("pipeline_parallel_size must be 1 for calibration")
+    if kwargs.get("data_parallel_size", 1) != 1:
+        raise argparse.ArgumentTypeError("data_parallel_size must be 1 for calibration")
     return kwargs
 
 
@@ -126,6 +129,30 @@ def _load_prompts(llm, args) -> list[str]:
         f"(token lengths {lengths[0]}..{lengths[-1]})"
     )
     return prompts
+
+
+def _preflight_prompt_inputs(args, parser: argparse.ArgumentParser) -> list[str] | None:
+    """Validate prompt sources before the vLLM engine is initialized."""
+    if args.prompts_file is not None:
+        try:
+            return _load_prompts(None, args)
+        except (OSError, ValueError) as err:
+            parser.error(str(err))
+    if args.calib_data_dir is None:
+        parser.error(
+            "the default RULER tasks require --calib_data_dir; pass --prompts_file "
+            "to supply custom prompts instead"
+        )
+    data_dir = Path(args.calib_data_dir)
+    if not data_dir.is_dir():
+        parser.error(f"--calib_data_dir {args.calib_data_dir!r} is not a directory")
+    essays_dir = data_dir / "essays"
+    if not essays_dir.is_dir() or next(essays_dir.glob("*.txt"), None) is None:
+        parser.error(
+            f"--calib_data_dir {args.calib_data_dir!r} must contain essays/*.txt; "
+            "run examples/llm_sparsity/attention_sparsity/download_ruler_data.sh first"
+        )
+    return None
 
 
 def _existing_sparse_config(ckpt: str) -> dict | None:
@@ -265,6 +292,9 @@ def main():
             f"containing config.json; {args.model!r} has none"
         )
 
+    # Custom prompts do not need a tokenizer, so read them eagerly as well.
+    prompts = _preflight_prompt_inputs(args, parser)
+
     # Workers run in separate processes and must import the calibration worker.
     repo_root = str(Path(__file__).resolve().parent)
     if repo_root not in sys.path:
@@ -303,7 +333,8 @@ def main():
     llm = LLM(**llm_kwargs)
 
     # Built after engine init so the RULER builder reuses the engine's tokenizer.
-    prompts = _load_prompts(llm, args)
+    if prompts is None:
+        prompts = _load_prompts(llm, args)
 
     trials = list(DEFAULT_THRESHOLD_TRIALS)
     n_layers = llm.collective_rpc("sparse_calib_enable", args=(trials,))[0]
