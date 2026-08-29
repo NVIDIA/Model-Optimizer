@@ -15,21 +15,4 @@
 
 """Public interfaces for Puzzletron VLM evaluation."""
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from .run import evaluate as evaluate
-
-__all__ = ["evaluate"]
-
-
-def __getattr__(name: str) -> Any:
-    """Load the CLI-backed evaluator without preloading ``python -m ...run``."""
-
-    if name == "evaluate":
-        from .run import evaluate
-
-        return evaluate
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+from .evaluator import *

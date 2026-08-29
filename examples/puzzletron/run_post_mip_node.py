@@ -32,8 +32,8 @@ from puzzletron_orchestrator.config import load_experiment_config  # noqa: E402
 
 def _register_evaluation_profiles(config: dict) -> None:
     profiles = {
-        node.get("config", {}).get("profile")
-        for flow in (config.get("post_mip", {}).get("flows") or {}).values()
+        (node.get("config") or {}).get("profile")
+        for flow in ((config.get("post_mip") or {}).get("flows") or {}).values()
         for node in (flow.get("nodes") or {}).values()
         if node.get("type") == "downstream_evaluation"
     }

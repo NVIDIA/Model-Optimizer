@@ -87,16 +87,21 @@ def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypat
     calls = []
     monkeypatch.setattr(vlm_post_mip, "register_profiles", lambda: calls.append(True))
 
+    post_mip_entrypoint._register_evaluation_profiles({"post_mip": None})
     post_mip_entrypoint._register_evaluation_profiles(
         {
             "post_mip": {
                 "flows": {
                     "params": {
                         "nodes": {
+                            "generic_eval": {
+                                "type": "downstream_evaluation",
+                                "config": None,
+                            },
                             "checkpoint_eval": {
                                 "type": "downstream_evaluation",
                                 "config": {"profile": "qwen35_vlm_realworldqa"},
-                            }
+                            },
                         }
                     }
                 }

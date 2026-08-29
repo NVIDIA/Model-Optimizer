@@ -263,36 +263,30 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert report["generation_policy"] == settings["gen_kwargs"]
 
 
-def test_realworldqa_smoke_policy_is_single_run_with_two_samples():
-    assert suites.source_tasks("realworldqa-smoke") == ("realworldqa",)
-    policy = suites.execution_policy("realworldqa-smoke", timeout_seconds=900)
-    assert policy["limit"] == 2
-    assert policy["repetitions"] == 1
-    assert policy["timeout_seconds"] == 900
-
-
-def test_post_mip_realworldqa_adapter_routes_runtime_overrides(monkeypatch, tmp_path):
-    model = tmp_path / "model"
-    model.mkdir()
+def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):
+    model = _write_checkpoint(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
     output = tmp_path / "output"
     captured = {}
 
-    def fake_evaluate(args, *, settings_overrides, preflight_callback):
-        captured.update(args=args, settings_overrides=settings_overrides)
-        preflight = {
-            "profile": suites.EVALUATION_PROFILE,
-            "dataset_revisions": {
-                "realworldqa": profile.VLM_BENCHMARK_DATASETS["realworldqa"].revision
-            },
-            "sample_limit": 2,
-        }
-        preflight_callback(preflight)
+    def fake_runner(checkpoint_path, *, output_root, settings):
+        report = json.loads((output / "profile.json").read_text())
+        assert report["configured_tasks"] == ["modelopt_vlm_benchmark_realworldqa"]
+        assert report["sample_limit"] == 2
+        captured.update(
+            checkpoint=checkpoint_path,
+            output_root=output_root,
+            settings=settings,
+        )
         return {
-            "preflight": preflight,
-            "runs": [{"metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}}],
+            "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
         }
 
-    monkeypatch.setattr(post_mip.run, "evaluate", fake_evaluate)
+    monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
     result = post_mip.evaluate_realworldqa_checkpoint(
         model,
         output_root=output,
@@ -304,15 +298,13 @@ def test_post_mip_realworldqa_adapter_routes_runtime_overrides(monkeypatch, tmp_
         },
     )
 
-    assert captured["args"].suite == "realworldqa-smoke"
-    assert captured["args"].checkpoint == model
-    assert captured["args"].output_dir == output
-    assert captured["args"].timeout_seconds == 900
-    assert captured["settings_overrides"] == {
-        "dtype": "bfloat16",
-        "topology": {"tensor_parallel_size": 1},
-    }
-    assert json.loads((output / "profile.json").read_text())["sample_limit"] == 2
+    assert captured["checkpoint"] == model
+    assert captured["output_root"] == output
+    assert captured["settings"]["tasks"] == "modelopt_vlm_benchmark_realworldqa"
+    assert captured["settings"]["limit"] == 2
+    assert captured["settings"]["timeout_seconds"] == 900
+    assert captured["settings"]["dtype"] == "bfloat16"
+    assert captured["settings"]["topology"] == {"tensor_parallel_size": 1}
     assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
     assert result["profile_path"] == str(output / "profile.json")
 
