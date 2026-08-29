@@ -106,6 +106,14 @@ def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypat
                                 "type": "downstream_evaluation",
                                 "config": [],
                             },
+                            "invalid_list_profile": {
+                                "type": "downstream_evaluation",
+                                "config": {"profile": []},
+                            },
+                            "invalid_mapping_profile": {
+                                "type": "downstream_evaluation",
+                                "config": {"profile": {}},
+                            },
                             "checkpoint_eval": {
                                 "type": "downstream_evaluation",
                                 "config": {"profile": "qwen35_vlm_realworldqa"},
