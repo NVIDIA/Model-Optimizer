@@ -19,6 +19,8 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import need_calibration
+from modelopt.torch.quantization.model_calib import max_calibrate
+from modelopt.torch.quantization.nn import StaticBlockScaleQuantizer, TensorQuantizer
 from modelopt.torch.quantization.plugins import register_hf_attentions_on_the_fly
 from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
@@ -50,6 +52,99 @@ CUSTOM_CONFIG = {
         "algorithm": "max",
     },
 }
+
+
+def _nvfp4_ablation_config(method, with_activations):
+    weight_quant_type = "dynamic" if method == "awq_lite" else "static"
+    quant_cfg = [
+        *mtq.config._base_disable_all,
+        {
+            "quantizer_name": "*weight_quantizer",
+            "enable": True,
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": weight_quant_type, "scale_bits": (4, 3)},
+            },
+        },
+        # Layerwise calibration bootstraps the first decoder-layer inputs with a
+        # full-model forward before static weight quantizers have been calibrated
+        # and promoted. Keep embeddings quantized, but use the normal dynamic
+        # NVFP4 path so that bootstrap remains executable.
+        {
+            "parent_class": "nn.Embedding",
+            "quantizer_name": "*weight_quantizer",
+            "enable": True,
+            "cfg": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            },
+        },
+    ]
+    if with_activations:
+        quant_cfg.append(
+            {
+                "quantizer_name": "*input_quantizer",
+                "enable": True,
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                },
+            }
+        )
+    quant_cfg.extend(
+        {"quantizer_name": pattern, "enable": False}
+        for pattern in (
+            "*embed_vision*",
+            "*vision_tower*",
+            "*visual*",
+            "*vision_model*",
+            "*multi_modal_projector*",
+        )
+    )
+
+    algorithm = {"method": method, "layerwise": {"enable": True}}
+    if method in ("local_hessian", "mse", "wmse"):
+        algorithm["fp8_scale_sweep"] = True
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
+
+
+CUSTOM_CONFIG["ABLATE_W4A4_WMSE"] = _nvfp4_ablation_config("wmse", True)
+CUSTOM_CONFIG["ABLATE_W4A16_WMSE"] = _nvfp4_ablation_config("wmse", False)
+
+
+def _calibrate_layerwise_external_static_weights(model):
+    """Max-calibrate static weights outside decoder layers after layerwise PTQ.
+
+    Layerwise calibration intentionally operates on decoder layers only. Ablation
+    configs re-enable normally skipped modules such as ``lm_head``, so calibrate
+    and promote any static weight quantizers that the decoder pass did not touch.
+    Already promoted decoder weights are left unchanged.
+    """
+    calibrated = []
+    for name, module in model.named_modules():
+        if not name or not hasattr(module, "iter_weights_for_calibration"):
+            continue
+        has_unpromoted_static_weight = False
+        for _, quantizer in module.iter_weights_for_calibration():
+            if (
+                isinstance(quantizer, TensorQuantizer)
+                and not isinstance(quantizer, StaticBlockScaleQuantizer)
+                and quantizer.is_enabled
+                and quantizer.is_static_block_quant
+            ):
+                has_unpromoted_static_weight = True
+                break
+        if not has_unpromoted_static_weight:
+            continue
+        max_calibrate(
+            module,
+            forward_loop=None,
+            distributed_sync=False,
+            shared_states={"weight_global_amax": {"patterns": []}},
+        )
+        calibrated.append(name)
+    if calibrated:
+        print(f"Max-calibrated layerwise-external static weights: {calibrated}")
 
 
 def get_tokenizer(ckpt_path, max_seq_len=MAX_SEQ_LEN, trust_remote_code=False):
@@ -157,6 +252,8 @@ def _quantize_model_with_dataset(
             register_hf_attentions_on_the_fly(net)
 
         net = mtq.quantize(net, mtq_cfg, calibrate_loop)
+        if isinstance(quant_cfg, str) and quant_cfg.startswith("ABLATE_"):
+            _calibrate_layerwise_external_static_weights(net)
     mtq.print_quant_summary(net)
     # Compress or fold weights for faster evaluation.
     if compress:
@@ -172,6 +269,7 @@ def quantize_model(
     batch_size,
     calib_size,
     data="cnn_dailymail",
+    max_sample_length=512,
     test_generated=True,
     compress=False,
     auto_quantize_bits=None,
@@ -189,6 +287,7 @@ def quantize_model(
         batch_size: the calibration batch size for each calibration inference run.
         calib_size: the total calibration dataset size.
         data: the name of the calibration dataset.
+        max_sample_length: the maximum sequence length of each calibration sample.
         test_generated:  If ``True``, test the generated text before and after quantization.
         compress: If ``True``, compress the model after quantization.
         auto_quantize_bits: The effective bits constraint for auto_quantize.
@@ -224,6 +323,7 @@ def quantize_model(
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_samples=calib_size,
+        max_sample_length=max_sample_length,
         device=device,
         include_labels=is_gradient_based,
     )

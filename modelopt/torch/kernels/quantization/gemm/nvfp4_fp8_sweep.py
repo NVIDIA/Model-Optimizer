@@ -184,6 +184,7 @@ def _fp8_scale_sweep_hessian_kernel(
     NUM_CANDIDATES: tl.constexpr,
     ROWS_PER_PROGRAM: tl.constexpr,
     HAS_COUPLING: tl.constexpr,
+    DIAGONAL: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     cin_block = pid % N_CIN_BLOCKS
@@ -207,12 +208,16 @@ def _fp8_scale_sweep_hessian_kernel(
         ).to(tl.float32)
 
     idx = tl.arange(0, BLOCK_SIZE)
-    hessian = tl.load(
-        hessian_ptr
-        + cin_block * (BLOCK_SIZE * BLOCK_SIZE)
-        + idx[:, None] * BLOCK_SIZE
-        + idx[None, :]
-    ).to(tl.float32)  # [BS, BS]
+    if DIAGONAL:
+        # wmse: only the per-input-channel importance diag(H) is stored, [BS] per cin-block.
+        hessian = tl.load(hessian_ptr + cin_block * BLOCK_SIZE + idx).to(tl.float32)  # [BS]
+    else:
+        hessian = tl.load(
+            hessian_ptr
+            + cin_block * (BLOCK_SIZE * BLOCK_SIZE)
+            + idx[:, None] * BLOCK_SIZE
+            + idx[None, :]
+        ).to(tl.float32)  # [BS, BS]
 
     best_loss = tl.full([ROWS_PER_PROGRAM], float("inf"), dtype=tl.float32)
     best_idx = tl.zeros([ROWS_PER_PROGRAM], dtype=tl.int32)
@@ -223,9 +228,14 @@ def _fp8_scale_sweep_hessian_kernel(
         scale_safe = tl.where(scale == 0.0, 1.0, scale)  # scale == 0 only if global_amax == 0
         q_mag = fp4_round_magnitude(w_abs / scale_safe)
         dw = w_sign * (q_mag * scale_safe - w_abs)  # = quant(w) - w, [ROWS, BS]
-        # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
-        hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]
-        loss = tl.sum(hdw * dw, axis=1)  # [ROWS]
+        if DIAGONAL:
+            # Σ_b Imp_b Δw_b² — the quadratic form with H replaced by diag(Imp). Squaring
+            # before weighting matches the reference einsum's operand order bit-for-bit.
+            loss = tl.sum((dw * dw) * hessian[None, :], axis=1)  # [ROWS]
+        else:
+            # dwᵀ H dw per row (H symmetric); allow_tf32=False keeps it true fp32 vs the reference.
+            hdw = tl.dot(dw, hessian, allow_tf32=False)  # [ROWS, BS]
+            loss = tl.sum(hdw * dw, axis=1)  # [ROWS]
         if HAS_COUPLING:
             loss += 2.0 * tl.sum(dw * coupling_bias, axis=1)
         is_better = loss < best_loss
@@ -248,7 +258,9 @@ def nvfp4_fp8_scale_sweep_hessian(
     Hessian-weighted counterpart of :func:`nvfp4_fp8_scale_sweep`: for each NVFP4 block
     it minimizes ``Δwᵀ H Δw`` (``Δw = quant(w) - w``) over the 126 FP8 E4M3 candidates,
     where ``H`` is the per-cin-block local Hessian shared across all output rows. Used by
-    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration. When ``coupling_bias`` is
+    :class:`NVFP4MSECalibrator` for ``local_hessian`` calibration. A rank-2 ``hessian`` is
+    read as the diagonal ``diag(Imp)`` and minimizes ``Σ_b Imp_b Δw_b²`` instead (``wmse``).
+    When ``coupling_bias`` is
     supplied, it adds the activation error coupling ``2 Δwᵀ(PW0)``. The scale-independent
     activation-error constant is omitted, so candidate losses may be negative.
 
@@ -258,7 +270,8 @@ def nvfp4_fp8_scale_sweep_hessian(
             ``b % (cin // block_size)``.
         global_amax: Scalar FP32 global amax (``= reduce_amax(per_block_amax)``).
         hessian: Per-cin-block Hessian of shape ``[cin // block_size, block_size, block_size]``,
-            fp32 (typically normalized by sample count).
+            or its diagonal (per-input-channel importance) of shape
+            ``[cin // block_size, block_size]``, fp32 (typically normalized by sample count).
         block_size: NVFP4 block size (typically 16).
         coupling_bias: Optional fp32-compatible CUDA tensor with ``x.numel()`` values in the
             same flat layout as ``x``, containing ``P W0`` for each block.
@@ -267,10 +280,14 @@ def nvfp4_fp8_scale_sweep_hessian(
         ``best_amax`` of shape ``[N_BLOCKS]``, fp32, on the same device as ``x``.
     """
     n_blocks, x_flat, best_amax = _prepare_block_sweep(x, block_size)
-    if hessian.dim() != 3 or hessian.shape[1] != block_size or hessian.shape[2] != block_size:
+    diagonal = hessian.dim() == 2
+    if hessian.shape[1:] not in (
+        torch.Size([block_size]),
+        torch.Size([block_size, block_size]),
+    ):
         raise ValueError(
-            f"hessian must have shape [n_cin_blocks, {block_size}, {block_size}], "
-            f"got {tuple(hessian.shape)}."
+            f"hessian must have shape [n_cin_blocks, {block_size}] or "
+            f"[n_cin_blocks, {block_size}, {block_size}], got {tuple(hessian.shape)}."
         )
     n_cin_blocks = hessian.shape[0]
     if n_blocks % n_cin_blocks != 0:
@@ -314,6 +331,7 @@ def nvfp4_fp8_scale_sweep_hessian(
             NUM_CANDIDATES=int(candidate_amaxes.numel()),
             ROWS_PER_PROGRAM=_HESSIAN_ROWS_PER_PROGRAM,
             HAS_COUPLING=coupling_bias is not None,
+            DIAGONAL=diagonal,
             num_warps=_HESSIAN_NUM_WARPS,
         )
     return best_amax

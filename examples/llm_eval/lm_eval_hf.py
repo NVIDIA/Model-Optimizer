@@ -89,6 +89,8 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     auto_quantize_checkpoint = arg_dict.pop("auto_quantize_checkpoint", None)
     calib_batch_size = arg_dict.pop("calib_batch_size", None)
     calib_size = arg_dict.pop("calib_size", 512)
+    calib_dataset = arg_dict.pop("calib_dataset", "cnn_dailymail")
+    calib_seqlen = arg_dict.pop("calib_seqlen", 512)
     compress = arg_dict.pop("compress", False)
 
     # Sparse attention arguments
@@ -120,6 +122,8 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
             tokenizer=model_obj.tokenizer,
             batch_size=calib_batch_size,
             calib_size=calib_size,
+            data=calib_dataset,
+            max_sample_length=calib_seqlen,
             auto_quantize_bits=auto_quantize_bits,
             auto_quantize_method=auto_quantize_method,
             auto_quantize_score_size=auto_quantize_score_size,
@@ -167,6 +171,8 @@ _MODELOPT_ARG_KEYS = (
     "quant_cfg",
     "calib_batch_size",
     "calib_size",
+    "calib_dataset",
+    "calib_seqlen",
     "auto_quantize_bits",
     "auto_quantize_method",
     "auto_quantize_score_size",
@@ -191,6 +197,18 @@ def _add_modelopt_args(parser):
     )
     parser.add_argument(
         "--calib_size", type=int, help="Calibration size for quantization", default=512
+    )
+    parser.add_argument(
+        "--calib_dataset",
+        type=str,
+        default="cnn_dailymail",
+        help="Dataset used for quantization calibration",
+    )
+    parser.add_argument(
+        "--calib_seqlen",
+        type=int,
+        default=512,
+        help="Maximum sequence length for quantization calibration samples",
     )
     parser.add_argument(
         "--auto_quantize_bits",

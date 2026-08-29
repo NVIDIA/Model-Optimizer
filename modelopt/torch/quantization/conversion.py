@@ -113,8 +113,8 @@ def _restore_shared_quant_state_aliases(
     """Rebuild shared-state ties before checkpoint tensor values are loaded."""
     if not metadata.get("shared_quant_states"):
         return
-    # max / mse / local_hessian all carry ``shared_states`` (via _SharedStatesConfig) and use
-    # the same grouping; resolve the patterns that were in effect at save and rebuild the ties.
+    # max / mse / local_hessian / wmse all carry ``shared_states`` (via _SharedStatesConfig) and
+    # use the same grouping; resolve the patterns in effect at save and rebuild the ties.
     patterns = SharedWeightGlobalAmaxState.resolve_patterns(
         shared_states=getattr(config, "shared_states", None)
     )

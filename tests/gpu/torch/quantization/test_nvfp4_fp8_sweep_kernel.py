@@ -382,10 +382,10 @@ def test_mse_calibrate_end_to_end(monkeypatch, tmp_path, dtype):
 
 
 def _build_hessian_accumulator(
-    cout, cin, quantizer_output, block_size=BLOCK_SIZE, unquantized_input=None
+    cout, cin, quantizer_output, block_size=BLOCK_SIZE, unquantized_input=None, diagonal=False
 ):
     """Real ``_LocalHessianAccumulator`` so the test exercises the production metric."""
-    acc = _LocalHessianAccumulator(cout, cin, block_size)
+    acc = _LocalHessianAccumulator(cout, cin, block_size, diagonal=diagonal)
     acc.accumulate(quantizer_output, unquantized_input)
     return acc
 
@@ -420,14 +420,17 @@ def _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc):
 
 
 def _total_hessian_loss(x_blocks, per_block_amax, global_amax, hessian):
-    """Total Hessian-weighted quantization error ``Σ dwᵀ H dw`` under the production
-    (CUDA ``static_blockwise_fp4_fake_quant``) rounding used at deployment — the objective
-    the sweep minimizes, summed over all blocks."""
+    """Total weighted quantization error under the production (CUDA
+    ``static_blockwise_fp4_fake_quant``) rounding used at deployment — the objective the
+    sweep minimizes, summed over all blocks. ``Σ dwᵀ H dw`` for a full per-cin-block
+    Hessian, ``Σ Imp·dw²`` for the rank-2 diagonal (wmse)."""
     n_blocks = x_blocks.shape[0]
     n_cin = hessian.shape[0]
     h_per_block = hessian[torch.arange(n_blocks, device=x_blocks.device) % n_cin]
     xq = static_blockwise_fp4_fake_quant(x_blocks.float(), per_block_amax, global_amax)
     dw = x_blocks.float() - xq
+    if hessian.dim() == 2:
+        return ((dw * dw) * h_per_block).sum()
     return (torch.einsum("nij,nj->ni", h_per_block, dw) * dw).sum()
 
 
@@ -489,6 +492,49 @@ def test_hessian_parity_random_weights(seed, cout, cin, dtype):
 
 
 @requires_triton
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(("cout", "cin"), [(8, 64), (1, 256), (256, 2048)])
+def test_wmse_diagonal_parity_random_weights(cout, cin, dtype):
+    """The diagonal (``wmse``) Triton sweep must match its reference 126-step sweep.
+
+    Also pins the design invariant that a diagonal ``Imp`` selects exactly what a full
+    Hessian equal to ``diag(Imp)`` selects.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    weight = torch.randn(cout, cin, device=device, dtype=dtype)
+    activations = torch.randn(512, cin, device=device, dtype=torch.float32)
+    acc = _build_hessian_accumulator(cout, cin, activations, diagonal=True)
+    assert acc.normalized_hessian().shape == (cin // BLOCK_SIZE, BLOCK_SIZE)
+
+    x_blocks = weight.reshape(-1, BLOCK_SIZE)
+    per_block_amax = x_blocks.float().abs().amax(dim=-1)
+    global_amax = per_block_amax.max()
+
+    importance = acc.normalized_hessian()
+    ref = _run_hessian_reference(x_blocks, per_block_amax, global_amax, acc)
+    tri = _run_hessian_triton(x_blocks, per_block_amax, global_amax, acc)
+
+    assert ref.shape == tri.shape
+    n_blocks = ref.numel()
+    n_diff = int((ref != tri).sum())
+    # The kernel and the reference einsum reduce the same 16 fp32 products in a different
+    # order, so a block whose two best candidates are exactly tied may flip. Cap that as the
+    # full-Hessian test does and require the achieved objective to be unchanged.
+    assert n_diff / n_blocks < 1e-3, f"{n_diff}/{n_blocks} blocks differ (>0.1%)"
+    loss_ref = _total_hessian_loss(x_blocks, ref, global_amax, importance)
+    loss_tri = _total_hessian_loss(x_blocks, tri, global_amax, importance)
+    rel_gap = ((loss_tri - loss_ref) / loss_ref.abs().clamp_min(1e-12)).abs().item()
+    assert rel_gap < 1e-6, f"aggregate wmse-loss gap {rel_gap:.3e} too large (dtype={dtype})"
+
+    # diag(Imp) through the full-Hessian kernel must agree with the diagonal kernel.
+    embedded = _build_hessian_accumulator(cout, cin, activations)
+    embedded.hessian_per_block = torch.diag_embed(importance)
+    embedded.num_samples = 1
+    assert torch.equal(tri, _run_hessian_triton(x_blocks, per_block_amax, global_amax, embedded))
+
+
+@requires_triton
 def test_hessian_sweep_input_validation():
     """``nvfp4_fp8_scale_sweep_hessian`` should reject malformed inputs cleanly."""
     device = "cuda"
@@ -501,9 +547,11 @@ def test_hessian_sweep_input_validation():
         nvfp4_fp8_scale_sweep_hessian(x.cpu(), g.cpu(), h.cpu())
     with pytest.raises(ValueError, match="block_size"):
         nvfp4_fp8_scale_sweep_hessian(x, g, h, block_size=0)
-    # Wrong Hessian block dims.
+    # Wrong Hessian block dims (full and diagonal forms).
     with pytest.raises(ValueError, match="hessian must have shape"):
         nvfp4_fp8_scale_sweep_hessian(x, g, torch.randn(4, 8, 8, device=device))
+    with pytest.raises(ValueError, match="hessian must have shape"):
+        nvfp4_fp8_scale_sweep_hessian(x, g, torch.randn(4, 8, device=device))
     with pytest.raises(ValueError, match="coupling_bias must have"):
         nvfp4_fp8_scale_sweep_hessian(x, g, h, coupling_bias=torch.randn(3, device=device))
     with pytest.raises(ValueError, match="coupling_bias must be a CUDA"):

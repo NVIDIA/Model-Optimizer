@@ -864,7 +864,7 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
 
 class _SharedStatesConfig(ModeloptBaseConfig):
-    """The ``shared_states`` grouping knob, shared by max / mse / local_hessian calibration."""
+    """The ``shared_states`` grouping knob, shared by max / mse / local_hessian / wmse calib."""
 
     shared_states: dict[str, dict[str, list[str]]] | None = ModeloptField(
         default=None,
@@ -1007,20 +1007,13 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
-    """Configuration for local Hessian-weighted MSE calibration.
+class _ActivationWeightedCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
+    """Knobs shared by the activation-weighted weight-scale searches (local_hessian / wmse).
 
-    This algorithm uses activation information to optimize per-block scales for weight
-    quantization. It minimizes the output reconstruction error by weighting the loss
-    with the local Hessian matrix computed from input activations.
-
-    The default local Hessian loss is ``ΔWᵀ H ΔW``. The optional activation error coupling
-    extends it to ``ΔWᵀ H ΔW + 2 ΔWᵀ P W0``, where ``ΔW = Wq-W0``,
-    ``H = XqᵀXq / B``, and ``P = Xqᵀ(Xq-X) / B`` for each local cin-block.
-
+    Both build a per-cin-block weighting term from the input activations captured during a
+    calibration forward and hand it to the MSE weight search; they differ only in whether that
+    term is the full local Hessian or its diagonal.
     """
-
-    method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
     step_size: float | None = ModeloptField(
         default=0.1,
@@ -1061,6 +1054,34 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         "Default is 16 for NVFP4.",
     )
 
+    distributed_sync: bool | None = ModeloptField(
+        default=True,
+        title="Whether to sync the amax across the distributed processes.",
+        description="If True, the amax will be synced across the distributed processes.",
+    )
+
+    debug: bool | None = ModeloptField(
+        default=False,
+        title="Debug mode.",
+        description="If True, module's local Hessian metadata will be kept as a module attribute.",
+    )
+
+
+class LocalHessianCalibConfig(_ActivationWeightedCalibConfig):
+    """Configuration for local Hessian-weighted MSE calibration.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization. It minimizes the output reconstruction error by weighting the loss
+    with the local Hessian matrix computed from input activations.
+
+    The default local Hessian loss is ``ΔWᵀ H ΔW``. The optional activation error coupling
+    extends it to ``ΔWᵀ H ΔW + 2 ΔWᵀ P W0``, where ``ΔW = Wq-W0``,
+    ``H = XqᵀXq / B``, and ``P = Xqᵀ(Xq-X) / B`` for each local cin-block.
+
+    """
+
+    method: Literal["local_hessian"] = ModeloptField("local_hessian")
+
     activation_error_coupling: bool | None = ModeloptField(
         default=False,
         title="Include the activation error coupling term in block-wise output MSE.",
@@ -1074,17 +1095,18 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         ),
     )
 
-    distributed_sync: bool | None = ModeloptField(
-        default=True,
-        title="Whether to sync the amax across the distributed processes.",
-        description="If True, the amax will be synced across the distributed processes.",
-    )
 
-    debug: bool | None = ModeloptField(
-        default=False,
-        title="Debug mode.",
-        description="If True, module's local Hessian metadata will be kept as a module attribute.",
-    )
+class WmseCalibConfig(_ActivationWeightedCalibConfig):
+    """Configuration for weighted-MSE (WMSE) calibration.
+
+    WMSE (`ScaleSweep <https://arxiv.org/abs/2606.07618>`_, eqs. 12-13) is the local-Hessian
+    objective with the per-block Hessian ``H`` replaced by its diagonal — the per-input-channel
+    importance ``Imp_i = ‖X[:, i]‖²``. Each block therefore minimizes ``Σ_b Imp_b ΔW_b²``, which
+    keeps the activation weighting while dropping the cross-channel terms (and their ``B x B``
+    per-block storage).
+    """
+
+    method: Literal["wmse"] = ModeloptField("wmse")
 
 
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
@@ -1278,7 +1300,9 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         return self
 
 
-_ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+_ScaleCalibConfig: TypeAlias = (
+    MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig | WmseCalibConfig
+)
 
 
 class LSQConfig(QuantizeAlgorithmConfig):
@@ -1347,7 +1371,7 @@ class LSQConfig(QuantizeAlgorithmConfig):
         default=None,
         title="Scale calibration algorithm to run first.",
         description=(
-            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Dict with 'method' key: 'mse', 'local_hessian', 'wmse', or 'max'. "
             "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
             "Defaults to {'method': 'mse'} if None."
         ),
@@ -1684,6 +1708,9 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG: dict[str, Any] = _load_quantize_config_dict
 )
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_ACT_ERROR_COUPLING_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/nvfp4_w4a4_weight_local_hessian_act_error_coupling"
+)
+NVFP4_W4A4_WEIGHT_WMSE_CFG: dict[str, Any] = _load_quantize_config_dict(
+    "configs/ptq/presets/model/nvfp4_w4a4_weight_wmse"
 )
 MAMBA_MOE_NVFP4_AGGRESSIVE_CFG: dict[str, Any] = _load_quantize_config_dict(
     "configs/ptq/presets/model/mamba_moe_nvfp4_aggressive"

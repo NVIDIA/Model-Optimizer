@@ -179,9 +179,10 @@ class NVFP4MSECalibrator(MseCalibrator):
     Python sweep. Both fast paths require the input on CUDA in the blocked
     ``[n_blocks, block_size]`` layout with Triton + the kernel package importable:
 
-    - **Hessian-weighted** (local_hessian): taken when ``hessian is not None`` — minimizes
-      ``Δwᵀ H Δw`` plus the optional activation error coupling term. Wins over the plain path,
-      so it fires even when ``error_func`` is also set.
+    - **Hessian-weighted** (local_hessian / wmse): taken when ``hessian is not None`` — minimizes
+      ``Δwᵀ H Δw`` plus the optional activation error coupling term, or ``Σ_b Imp_b Δw_b²`` when
+      ``hessian`` is the rank-2 diagonal (wmse). Wins over the plain path, so it fires even when
+      ``error_func`` is also set.
     - **plain squared-error**: taken when ``hessian is None and error_func is None``.
 
     Otherwise (CPU, non-blocked layout, Triton unavailable, or an ``error_func`` with no
@@ -201,9 +202,10 @@ class NVFP4MSECalibrator(MseCalibrator):
     ):
         """Initialize NVFP4 MSE calibrator with per-block and global amax.
 
-        ``hessian`` (per-cin-block ``[cin // block_size, block_size, block_size]``) enables
-        the Hessian-weighted Triton fast path (local_hessian); ``error_func`` carries the
-        same metric for the reference fallback when the fast path is unavailable.
+        ``hessian`` (per-cin-block ``[cin // block_size, block_size, block_size]``, or its
+        diagonal ``[cin // block_size, block_size]`` for wmse) enables the Hessian-weighted
+        Triton fast path; ``error_func`` carries the same metric for the reference fallback
+        when the fast path is unavailable.
         """
         super().__init__(amax=amax, axis=axis, quant_func=quant_func, error_func=error_func)
         self._global_amax = global_amax.to(dtype=torch.float32)
@@ -253,7 +255,7 @@ class NVFP4MSECalibrator(MseCalibrator):
         return self._error_func is None and self._triton_sweep_eligible(x)
 
     def _can_use_hessian_fast_path(self, x: torch.Tensor) -> bool:
-        """Whether the Hessian-weighted Triton fast path is usable (local_hessian)."""
+        """Whether the Hessian-weighted Triton fast path is usable (local_hessian / wmse)."""
         return self._hessian is not None and self._triton_sweep_eligible(x)
 
     @torch.no_grad()
