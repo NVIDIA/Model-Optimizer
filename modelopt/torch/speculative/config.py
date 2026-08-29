@@ -167,7 +167,11 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_use_torch_compile: bool = ModeloptField(
         default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        description=(
+            "Whether to torch.compile the compute-heavy parts of DFlash training: the draft "
+            "decoder stack and the DSpark TVD chunk. Costs a one-time compile on the first "
+            "training step; the draft's shapes are static, so it does not recur."
+        ),
     )
 
     dflash_use_flex_attention: bool = ModeloptField(

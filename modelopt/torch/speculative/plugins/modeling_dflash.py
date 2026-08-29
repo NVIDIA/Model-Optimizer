@@ -573,9 +573,38 @@ class DFlashModule(nn.Module):
 
     def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
         """Forward with feature fusion, KV injection, and position embeddings."""
+        # Lazy rotary construction mutates the module, so it stays outside the compiled
+        # region below: Dynamo would either graph-break on it or bake in the first call's
+        # state.
+        self._maybe_init_rotary_emb(device=noise_embedding.device)
+        return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
+
+    def _body(self):
+        """Return the draft stack, Inductor-compiled on first use when asked for.
+
+        The layer loop is where the step's small-kernel tail lives: at the Gemma-4-E4B
+        shape a profiled step ran ~1500 pointwise launches, 403 ``aten::copy_`` and 205
+        device-to-device memcpys, individually microseconds and collectively about a third
+        of the step. Fusing them is a compiler's job.
+
+        ``dynamic=False`` is only affordable because ``_sample_anchor_positions`` pins the
+        block count; while n_blocks tracked the batch, every new width cost a fresh
+        multi-minute compile.
+
+        Training only. Generation (AR validation, drafting) runs the same module at a
+        different and varying shape, which under ``dynamic=False`` would mint a compile per
+        length -- exactly the trade the pinned block count was introduced to avoid.
+        """
+        if not self.training or not getattr(self, "_dflash_compile_stack", False):
+            return self._forward_body
+        if getattr(self, "_compiled_body", None) is None:
+            self._compiled_body = torch.compile(self._forward_body, dynamic=False)
+        return self._compiled_body
+
+    def _forward_body(self, noise_embedding, target_hidden, position_ids, attention_mask):
+        """Feature fusion, rotary selection, the decoder stack, and the final norm."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
-        self._maybe_init_rotary_emb(device=hidden_states.device)
         per_kind = {
             kind: emb(hidden_states, position_ids)
             for kind, emb in getattr(self, "rotary_emb_by_kind", {}).items()

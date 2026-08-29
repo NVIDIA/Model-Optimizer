@@ -568,6 +568,11 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+        # Opt-in Inductor fusion of the draft stack; see DFlashModule._body for why this is
+        # only affordable now that the block count is static.
+        self.dflash_module._dflash_compile_stack = bool(
+            getattr(self, "dflash_use_torch_compile", False)
+        )
 
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
