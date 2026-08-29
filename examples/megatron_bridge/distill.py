@@ -341,11 +341,20 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace):
-    # Same layout choice as quantize.py -- it must match --student_megatron_path.
-    moe_grouped_gemm = use_moe_grouped_gemm(
-        args.student_hf_path,
-        trust_remote_code=args.trust_remote_code,
-        force_sequential=args.no_moe_grouped_gemm,
+    student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
+        args.student_megatron_path
+    )
+    # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
+    # data-driven choice. An unquantized (e.g. pruned) student exports via Megatron-Bridge, which
+    # reads either layout, so it keeps the faster grouped GEMM.
+    moe_grouped_gemm = (
+        use_moe_grouped_gemm(
+            args.student_hf_path,
+            trust_remote_code=args.trust_remote_code,
+            force_sequential=args.no_moe_grouped_gemm,
+        )
+        if student_has_modelopt_state
+        else not args.no_moe_grouped_gemm
     )
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
@@ -381,9 +390,6 @@ def main(args: argparse.Namespace):
     # The student structure is always built from --student_hf_path. When --student_megatron_path is
     # given, the HF weights are skipped (they are overwritten by the Megatron checkpoint, loaded into
     # the built student inside the patched provide() below).
-    student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
-        args.student_megatron_path
-    )
     student_provider = _build_model_provider(
         args.student_hf_path, load_weights=args.student_megatron_path is None
     )

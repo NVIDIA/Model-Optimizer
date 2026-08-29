@@ -59,6 +59,7 @@ from pathlib import Path
 
 import torch
 from megatron.bridge import AutoBridge
+from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
 from transformers import AutoConfig
 
 import modelopt.torch.utils.distributed as dist
@@ -237,6 +238,14 @@ def get_args() -> argparse.Namespace:
 
 def main(args: argparse.Namespace):
     checkpoint_export_paths: list[tuple[Path, Path]] = _get_checkpoint_export_paths(args)
+    # This path drops quantization, so a QAD checkpoint would export silently unquantized.
+    # ``has_modelopt_state`` ignores ``kd_loss``, so plain distillation still passes.
+    quantized = [str(p) for p, _ in checkpoint_export_paths if has_modelopt_state(str(p))]
+    if quantized:
+        raise ValueError(
+            f"{quantized[0]} is quantized; this script exports full precision only and would drop "
+            "the quantizers. Use export_quantized_megatron_to_hf.py instead."
+        )
     is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
 
     if is_vlm:

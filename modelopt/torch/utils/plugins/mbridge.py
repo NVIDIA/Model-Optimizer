@@ -144,7 +144,6 @@ def load_mbridge_model_from_hf(
         provider_overrides: Overrides for the provider.
         init_model_parallel: Whether to initialize model parallel.
         moe_grouped_gemm: Whether to use grouped GEMM for MoE.
-            Pruning does not support grouped GEMM yet.
         load_weights: Whether to load the HF weights into the model. Set to ``False`` when the
             weights will be loaded from a Megatron checkpoint instead (e.g. for export), in which
             case only the model structure (with the correct layer spec) is built.
