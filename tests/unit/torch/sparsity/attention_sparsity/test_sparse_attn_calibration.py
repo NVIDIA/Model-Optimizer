@@ -185,11 +185,12 @@ class TestBuildSparseAttentionConfig:
         assert "decode" not in group["threshold_scale_factor"]
 
     def test_replaced_skip_group_keeps_layer_policy(self):
-        """Recalibration replaces thresholds but keeps ignore/initial_disabled_steps."""
+        """Recalibration replaces thresholds but keeps the existing layer policy."""
         existing = {
             "config_groups": {
                 "group_0": {
                     "algorithm": "skip_softmax",
+                    "targets": ["LlamaAttention"],
                     "ignore": ["model.layers.0.self_attn"],
                     "initial_disabled_steps": 4,
                     "threshold_scale_factor": {"prefill": {"a": 1.0, "b": 1.0}},
@@ -198,6 +199,7 @@ class TestBuildSparseAttentionConfig:
         }
         config = build_sparse_attention_config(self._PARAMS, 0.5, existing_config=existing)
         group = config["config_groups"]["group_0"]
+        assert group["targets"] == ["LlamaAttention"]
         assert group["ignore"] == ["model.layers.0.self_attn"]
         assert group["initial_disabled_steps"] == 4
         assert group["threshold_scale_factor"]["prefill"] == {"a": 7.9, "b": 8.6}

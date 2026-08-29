@@ -821,7 +821,7 @@ def patch_flashinfer_metadata_builder() -> bool:
         if num_decodes and num_prefills:
             # Prefer the host-resident copy the runner may already carry;
             # fall back to one device->host copy per mixed-batch build.
-            seq_lens_cpu = getattr(common, "_seq_lens_cpu", None)
+            seq_lens_cpu = getattr(common, "seq_lens_cpu", None)
             if seq_lens_cpu is None:
                 seq_lens_cpu = common.seq_lens.cpu()
             max_seq_len_decode = int(seq_lens_cpu[:num_decodes].max())

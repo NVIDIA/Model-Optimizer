@@ -45,6 +45,7 @@ def calibration_driver(monkeypatch):
         ["--engine_kwargs", '{"enforce_eager": false}'],
         ["--engine_kwargs", '{"enable_prefix_caching": true}'],
         ["--engine_kwargs", '{"pipeline_parallel_size": 2}'],
+        ["--engine_kwargs", '{"data_parallel_size": 2}'],
     ],
 )
 def test_parser_rejects_invalid_inputs_before_engine_start(calibration_driver, flags):
@@ -65,6 +66,40 @@ def test_load_prompts_reads_nonempty_lines(calibration_driver, tmp_path):
     args = SimpleNamespace(prompts_file=str(prompts_file))
 
     assert calibration_driver._load_prompts(None, args) == ["first prompt", "second prompt"]
+
+
+@pytest.mark.parametrize("prompts_contents", [None, "\n\n"])
+def test_preflight_rejects_invalid_prompts_before_engine_start(
+    calibration_driver, tmp_path, prompts_contents
+):
+    prompts_file = tmp_path / "prompts.txt"
+    if prompts_contents is not None:
+        prompts_file.write_text(prompts_contents)
+    parser = calibration_driver._build_parser()
+    args = parser.parse_args(["/checkpoint", "--prompts_file", str(prompts_file)])
+
+    with pytest.raises(SystemExit):
+        calibration_driver._preflight_prompt_inputs(args, parser)
+
+
+def test_preflight_requires_ruler_data_before_engine_start(calibration_driver):
+    parser = calibration_driver._build_parser()
+    args = parser.parse_args(["/checkpoint"])
+
+    with pytest.raises(SystemExit):
+        calibration_driver._preflight_prompt_inputs(args, parser)
+
+
+def test_preflight_validates_ruler_essay_files_before_engine_start(calibration_driver, tmp_path):
+    parser = calibration_driver._build_parser()
+    args = parser.parse_args(["/checkpoint", "--calib_data_dir", str(tmp_path)])
+    with pytest.raises(SystemExit):
+        calibration_driver._preflight_prompt_inputs(args, parser)
+
+    essays = tmp_path / "essays"
+    essays.mkdir()
+    (essays / "sample.txt").write_text("essay")
+    assert calibration_driver._preflight_prompt_inputs(args, parser) is None
 
 
 def test_existing_sparse_config_reads_only_dict(calibration_driver, tmp_path):

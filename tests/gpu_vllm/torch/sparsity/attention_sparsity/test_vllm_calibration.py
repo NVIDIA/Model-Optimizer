@@ -107,6 +107,34 @@ class TestCalibrationInstaller:
         with pytest.raises(NotImplementedError, match="pipeline_parallel_size must be 1"):
             vllm_runtime.install_vllm_skip_softmax_calibration(runner)
 
+    def test_rejects_data_parallelism(self):
+        runner = _model_runner(nn.ModuleDict({"attn": _bare_attention()}))
+        runner.vllm_config.parallel_config.data_parallel_size = 2
+        with pytest.raises(NotImplementedError, match="data_parallel_size must be 1"):
+            vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+
+    def test_excludes_checkpoint_ignored_layers_from_measurement(self):
+        ignored = _bare_attention()
+        included = _bare_attention()
+        ignored_impl = ignored.impl
+        metadata = {
+            "config_groups": {
+                "group_0": {
+                    "algorithm": "skip_softmax",
+                    "ignore": ["a_attn"],
+                }
+            }
+        }
+        runner = _model_runner(
+            nn.ModuleDict({"a_attn": ignored, "b_attn": included}), sparse_metadata=metadata
+        )
+
+        report = vllm_runtime.install_vllm_skip_softmax_calibration(runner)
+
+        assert report.installed_layers == ("b_attn",)
+        assert ignored.impl is ignored_impl
+        assert isinstance(included.impl, ModelOptSparseAttentionImpl)
+
     def test_rejects_active_attention_quantizers_atomically(self):
         quantized = _bare_attention()
         quantized.q_bmm_quantizer = SimpleNamespace(is_enabled=True)
