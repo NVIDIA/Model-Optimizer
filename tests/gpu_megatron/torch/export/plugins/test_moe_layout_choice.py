@@ -22,13 +22,13 @@ from modelopt.torch.export.plugins.mcore_common import all_mcore_hf_export_mappi
 @pytest.mark.parametrize(
     ("arch", "grouped_is_exportable"),
     [
-        # Only Nemotron-H maps fused grouped-GEMM experts, so it keeps the faster layout.
+        # These map fused grouped-GEMM experts, so they keep the faster layout.
         ("NemotronHForCausalLM", True),
+        ("Qwen3_5MoeForConditionalGeneration", True),
         ("Qwen3MoeForCausalLM", False),
         ("DeepseekV3ForCausalLM", False),
         ("GptOssForCausalLM", False),
         ("Llama4ForConditionalGeneration", False),
-        ("Qwen3_5MoeForConditionalGeneration", False),
     ],
 )
 def test_grouped_gemm_exportability(arch, grouped_is_exportable):

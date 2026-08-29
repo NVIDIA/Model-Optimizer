@@ -22,11 +22,13 @@ import pytest
 import torch
 import transformers
 from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
-from _test_utils.torch.megatron.models import get_mcore_gpt_model
+from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     create_tiny_nemotron_dir,
+    create_tiny_nemotron_h_dir,
+    create_tiny_qwen3_5_moe_vl_dir,
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
@@ -89,7 +91,34 @@ def _test_unified_export_megatron(
     size,
     model_dir=None,
 ):
-    if model_type == "qwen3vl":
+    if model_type == "nemotron_h":
+        config = transformers.AutoConfig.from_pretrained(model_dir)
+        model = get_mcore_hybrid_model(
+            tensor_model_parallel_size=size,
+            pipeline_model_parallel_size=1,
+            initialize_megatron=True,
+            num_layers=config.num_hidden_layers,
+            hybrid_layer_pattern=config.hybrid_override_pattern,
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_query_groups=config.num_key_value_heads,
+            ffn_hidden_size=config.intermediate_size,
+            max_sequence_length=config.max_position_embeddings,
+            vocab_size=config.vocab_size,
+            mamba_state_dim=config.ssm_state_size,
+            mamba_num_heads=config.mamba_num_heads,
+            mamba_head_dim=config.mamba_head_dim,
+            mamba_num_groups=config.n_groups,
+            num_moe_experts=config.n_routed_experts,
+            moe_ffn_hidden_size=config.moe_intermediate_size,
+            moe_shared_expert_intermediate_size=config.moe_shared_expert_intermediate_size,
+            # NemotronH is the only arch that exports fused grouped-GEMM experts.
+            moe_grouped_gemm=True,
+            # NemotronH norms are RMSNorm; the builder defaults to LayerNorm, whose biases have no
+            # counterpart in the HF checkpoint.
+            normalization="RMSNorm",
+        ).cuda()
+    elif model_type == "qwen3vl":
         config = transformers.AutoConfig.from_pretrained(model_dir)
         text_cfg = config.text_config
         num_layers = text_cfg.num_hidden_layers
@@ -100,6 +129,30 @@ def _test_unified_export_megatron(
         max_sequence_length = text_cfg.max_position_embeddings
         vocab_size = text_cfg.vocab_size
         extra_kwargs = {"kv_channels": text_cfg.head_dim, "qk_layernorm": True}
+    elif model_type in {"qwen3_5_moe_vl_grouped", "qwen3_5_moe_vl_sequential"}:
+        text_cfg = transformers.AutoConfig.from_pretrained(model_dir).text_config
+        num_layers = text_cfg.num_hidden_layers
+        hidden_size = text_cfg.hidden_size
+        num_attention_heads = text_cfg.num_attention_heads
+        num_query_groups = text_cfg.num_key_value_heads
+        ffn_hidden_size = text_cfg.intermediate_size
+        max_sequence_length = text_cfg.max_position_embeddings
+        vocab_size = text_cfg.vocab_size
+        # Hybrid GatedDeltaNet + gated attention, with routed experts stored packed.
+        extra_kwargs = {
+            "kv_channels": text_cfg.head_dim,
+            "qk_layernorm": True,
+            "experimental_attention_variant": "gated_delta_net",
+            "num_moe_experts": text_cfg.num_experts,
+            "moe_ffn_hidden_size": text_cfg.moe_intermediate_size,
+            "moe_shared_expert_intermediate_size": text_cfg.shared_expert_intermediate_size,
+            "moe_shared_expert_gate": True,
+            # Match the HF layer_types pattern (every Nth layer is full attention, rest GDN).
+            "linear_attention_freq": len(text_cfg.layer_types),
+            # Both layouts must reach the same packed HF tensors, via GroupedMLPPacking
+            # (TEGroupedMLP) and PackNameRemapping (SequentialMLP) respectively.
+            "moe_grouped_gemm": model_type.endswith("grouped"),
+        }
     elif model_type == "qwen3_moe":
         config = transformers.AutoConfig.from_pretrained(model_dir)
         num_layers = config.num_hidden_layers
@@ -133,22 +186,26 @@ def _test_unified_export_megatron(
     activation_func = "squared_relu" if model_type == "nemotron" else "swiglu"
     normalization = "LayerNorm" if model_type == "nemotron" else "RMSNorm"
 
-    model = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        pipeline_model_parallel_size=1,
-        initialize_megatron=True,
-        num_layers=num_layers,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-        num_query_groups=num_query_groups,
-        ffn_hidden_size=ffn_hidden_size,
-        max_sequence_length=max_sequence_length,
-        vocab_size=vocab_size,
-        activation_func=activation_func,
-        normalization=normalization,
-        transformer_impl="modelopt",
-        **extra_kwargs,
-    ).cuda()
+    model = (
+        model
+        if model_type == "nemotron_h"
+        else get_mcore_gpt_model(
+            tensor_model_parallel_size=size,
+            pipeline_model_parallel_size=1,
+            initialize_megatron=True,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_query_groups=num_query_groups,
+            ffn_hidden_size=ffn_hidden_size,
+            max_sequence_length=max_sequence_length,
+            vocab_size=vocab_size,
+            activation_func=activation_func,
+            normalization=normalization,
+            transformer_impl="modelopt",
+            **extra_kwargs,
+        ).cuda()
+    )
 
     if quant_config:
         quant_config_dict = getattr(mtq, quant_config)
@@ -210,8 +267,10 @@ def _test_unified_export_megatron(
     ("model_type", "extra_module", "quant_config", "kv_cache_quant_cfg"),
     [
         ("nemotron", None, None, None),
-        ("nemotron", None, "NVFP4_DEFAULT_CFG", None),
-        ("nemotron", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        # NemotronH (Mamba + attention + grouped-GEMM MoE) supersedes the older Nemotron for
+        # quantized coverage; the plain/eagle/medusa cases below still smoke-test the old arch.
+        ("nemotron_h", None, "NVFP4_DEFAULT_CFG", None),
+        ("nemotron_h", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
         ("nemotron", "eagle", None, None),
         ("nemotron", "medusa", None, None),
         ("llama", None, None, None),
@@ -224,6 +283,11 @@ def _test_unified_export_megatron(
         # Regression guard: routed experts used to be dropped silently from the export.
         ("qwen3_moe", None, None, None),
         ("qwen3_moe", None, "FP8_DEFAULT_CFG", None),
+        # Packed routed experts (Qwen3.5). NVFP4 keeps per-expert block scales while FP8 merges a
+        # single scale, so the packing rules only get full coverage across both formats.
+        ("qwen3_5_moe_vl_grouped", None, "NVFP4_DEFAULT_CFG", None),
+        ("qwen3_5_moe_vl_grouped", None, "FP8_DEFAULT_CFG", None),
+        ("qwen3_5_moe_vl_sequential", None, "NVFP4_DEFAULT_CFG", None),
     ],
 )
 def test_unified_export_megatron(
@@ -235,8 +299,12 @@ def test_unified_export_megatron(
         model_dir = create_tiny_qwen3vl_dir(tmp_path)
     elif model_type == "nemotron":
         model_dir = create_tiny_nemotron_dir(tmp_path)
+    elif model_type == "nemotron_h":
+        model_dir = create_tiny_nemotron_h_dir(tmp_path)
     elif model_type == "qwen3_moe":
         model_dir = create_tiny_qwen3_moe_dir(tmp_path)
+    elif model_type.startswith("qwen3_5_moe_vl"):
+        model_dir = create_tiny_qwen3_5_moe_vl_dir(tmp_path)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
     # TODO: Fix TP>1 failures

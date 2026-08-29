@@ -92,21 +92,26 @@ def _unpack_nvfp4(packed: torch.Tensor) -> torch.Tensor:
     return NVFP4QTensor.get_e2m1_values(packed.device).to(torch.float32)[codes]
 
 
+def _scale_key(key: str, suffix: str) -> str:
+    """Scale key for the dotted (``...proj.weight``) and packed (``...gate_up_proj``) layouts."""
+    return key.replace(".weight", f".{suffix}") if key.endswith(".weight") else f"{key}_{suffix}"
+
+
 def _dequantize(key: str, exported: dict[str, torch.Tensor]) -> torch.Tensor:
     """Undo the exporter's weight scaling so the value can be compared to the source."""
-    scale = exported.get(key.replace(".weight", ".weight_scale"))
+    scale = exported.get(_scale_key(key, "weight_scale"))
     if _is_packed(exported[key]):
         # NVFP4: E2M1 codes, an E4M3 scale per block along the last dim, and a global FP32 scale.
         weight = _unpack_nvfp4(exported[key])
         block_size = weight.shape[-1] // scale.shape[-1]
         weight = weight * scale.to(torch.float32).repeat_interleave(block_size, dim=-1)
-        scale_2 = exported.get(key.replace(".weight", ".weight_scale_2"))
+        scale_2 = exported.get(_scale_key(key, "weight_scale_2"))
         return weight if scale_2 is None else weight * scale_2.to(torch.float32)
     weight = exported[key].to(torch.float32)
     if scale is None:
         return weight
     scale = scale.to(torch.float32)
-    return weight * (scale if scale.ndim == 0 else scale.reshape(-1, *([1] * (weight.ndim - 1))))
+    return weight * scale.reshape(*scale.shape, *([1] * (weight.ndim - scale.ndim)))
 
 
 def assert_exported_checkpoint_matches(
@@ -175,7 +180,10 @@ def assert_exported_checkpoint_matches(
     wrong = []
     for key in shared:
         got, want = _dequantize(key, exported), reference[key].to(torch.float32)
-        if exported[key].dtype == reference[key].dtype and key + "_scale" not in exported:
+        if (
+            exported[key].dtype == reference[key].dtype
+            and _scale_key(key, "weight_scale") not in exported
+        ):
             # Copied through untouched (norms, router, vision tower): must be bit-exact.
             if not torch.equal(exported[key], reference[key]):
                 wrong.append((key, "not bit-exact"))
