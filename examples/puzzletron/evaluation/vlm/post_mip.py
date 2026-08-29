@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import run
+from examples.puzzletron.evaluation.vlm import evaluate
 
 __all__ = ["evaluate_realworldqa_checkpoint", "register_profiles"]
 
@@ -90,7 +90,7 @@ def evaluate_realworldqa_checkpoint(
             json.dumps(report, indent=2, sort_keys=True) + "\n",
         )
 
-    result = run.evaluate(
+    result = evaluate(
         args,
         settings_overrides=settings,
         preflight_callback=write_preflight,
