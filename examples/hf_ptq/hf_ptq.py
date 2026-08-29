@@ -276,6 +276,7 @@ _AUTO_QUANTIZE_QFORMATS: frozenset[str] = frozenset(
         "nvfp4_experts_only",
         "nvfp4_omlp_only",
         "nvfp4_w4a4_weight_local_hessian",
+        "nvfp4_w4a4_weight_wmse",
         "mxfp8",
     }
 )

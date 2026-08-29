@@ -47,6 +47,7 @@ from .config import (
     QuantizeConfig,
     SmoothQuantCalibConfig,
     SVDQuantConfig,
+    WmseCalibConfig,
     _QuantizeExportConfig,
 )
 from .conversion import (
@@ -68,6 +69,7 @@ from .model_calib import (
     mse_calibrate,
     smoothquant,
     svdquant,
+    wmse_calibrate,
 )
 
 __all__ = ["BaseCalibrateModeDescriptor"]
@@ -453,6 +455,22 @@ class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
         return LocalHessianCalibConfig
 
     _calib_func = local_hessian_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class WmseModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for weighted-MSE (WMSE) calibration algorithm.
+
+    The local-Hessian objective with the per-block Hessian replaced by its diagonal, the
+    per-input-channel activation importance.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return WmseCalibConfig
+
+    _calib_func = wmse_calibrate
 
 
 @CalibrateModeRegistry.register_mode

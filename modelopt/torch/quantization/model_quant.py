@@ -259,6 +259,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
     "max",
     "mse",
     "local_hessian",
+    "wmse",
     "smoothquant",
     "awq_lite",
     "awq_full",
