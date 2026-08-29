@@ -61,6 +61,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
     "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
+    "Qwen3_5ForConditionalGeneration": qwen3_5_vl_causal_lm_export,
     "Qwen3_5MoeForConditionalGeneration": qwen3_5_vl_causal_lm_export,
 }
 
@@ -69,6 +70,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
 # ``LLAVA_VISION_PREFIXES`` when the model is an MCore ``LLaVAModel``, and to no copy otherwise.
 all_mcore_hf_vision_passthrough_mapping: dict[str, tuple[str, ...]] = {
     "Qwen3VLForConditionalGeneration": QWEN3VL_VISION_PREFIXES,
+    "Qwen3_5ForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
     "Qwen3_5MoeForConditionalGeneration": QWEN3_5_VL_VISION_PREFIXES,
 }
 

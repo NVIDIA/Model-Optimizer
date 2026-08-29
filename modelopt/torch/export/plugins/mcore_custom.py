@@ -128,6 +128,18 @@ class GroupedMLPSlicing(CustomModuleMapping):
         )
 
 
+class GroupedMLPPacking(CustomModuleMapping):
+    """A custom module mapping that packs grouped MoE experts into one stacked tensor."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that packs grouped experts."""
+        super().__init__(
+            func_name="grouped_mlp_packing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 
@@ -247,6 +259,9 @@ def with_language_model_prefix(
     """Nest a text-model mapping under ``model.language_model.``; other prefixes are unchanged."""
     result = {}
     for key, m in mapping.items():
+        if not isinstance(m, CustomModuleMapping):
+            result[key] = m  # plain flags such as ``use_packed_local_experts``
+            continue
         prefix = m.target_name_or_prefix
         if prefix.startswith("model."):
             prefix = "model.language_model." + prefix[len("model.") :]

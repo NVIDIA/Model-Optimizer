@@ -710,7 +710,9 @@ class GPTModelExporter:
         self._state_dict = OrderedDict()
         try:
             for mtp_layer in mtp.layers:
-                inner_layers = mtp_layer.mtp_model_layer.layers
+                # Some architectures (Qwen3.5) put a single TransformerLayer here, not a container.
+                inner = mtp_layer.mtp_model_layer
+                inner_layers = getattr(inner, "layers", None) or [inner]
                 first_id = inner_layers[0].layer_number - 1
                 last_id = inner_layers[-1].layer_number - 1
 
@@ -956,6 +958,7 @@ class GPTModelExporter:
                 "gated_mlp_slicing": self._gated_mlp_slicing,
                 "gated_delta_net_slicing": self._gated_delta_net_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
+                "grouped_mlp_packing": self._grouped_mlp_packing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -1102,8 +1105,11 @@ class GPTModelExporter:
     def _mtp_prefix(prefix: str) -> str:
         """Rewrite a base-model target prefix (backbone/model root) to its MTP counterpart."""
         if "backbone" in prefix:
-            return prefix.replace("backbone", "mtp")
-        return prefix.replace("model", "mtp")
+            return prefix.replace("backbone", "mtp", 1)
+        # Replace the root only: a VLM's "model.language_model." must not become "mtp.language_mtp.".
+        if prefix.startswith("model.language_model."):
+            return "mtp." + prefix[len("model.language_model.") :]
+        return prefix.replace("model", "mtp", 1)
 
     def _name_remapping(
         self,
@@ -1227,8 +1233,69 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
-    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None, is_mtp=False):
+    def _grouped_mlp_packing(self, module, prefix, parallel_config=None, is_mtp=False):
+        """Pack TEGroupedMLP experts into one ``[num_experts, out, in]`` tensor (Qwen3.5 layout).
+
+        Reuses the per-expert path for the EP gather and per-expert quantizers, then stacks by
+        global expert id and re-quantizes once with the max scale, as ``_pack_name_remapping`` does.
+        """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        marker = "\x00pack\x00"
+        saved_state_dict = self._state_dict
+        self._state_dict = OrderedDict()
+        try:
+            qformat, block_size = self._grouped_mlp_slicing(
+                module, marker + "{}", parallel_config=parallel_config, is_mtp=False, quantize=False
+            )
+            per_expert = self._state_dict
+        finally:
+            self._state_dict = saved_state_dict
+
+        def collect(suffix):
+            found = {}
+            for key, value in per_expert.items():
+                if not key.startswith(marker) or not key.endswith(suffix):
+                    continue
+                found[int(key[len(marker) :].split(".", 1)[0])] = value
+            return [found[i] for i in sorted(found)]
+
+        weights = collect(".weight")
+        if not weights:
+            return
+        scales, scales_2 = collect(".weight_scale"), collect(".weight_scale_2")
+        input_scales = collect(".input_scale")
+
+        # Quantize once over the stack, exactly as _pack_name_remapping does.
+        merged_weight = torch.stack(weights, dim=0)
+        if not scales:
+            self._state_dict[prefix] = merged_weight
+        else:
+            if scales_2:
+                # NVFP4 keeps each expert's block scales; only the global scale is merged.
+                merged_scale = torch.stack(scales, dim=0)
+                merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0]
+            else:
+                merged_scale, merged_scale_2 = torch.max(torch.stack(scales, dim=0), dim=0)[0], None
+            self._state_dict[prefix] = to_quantized_weight(
+                merged_weight, merged_scale, qformat, merged_scale_2, block_size
+            )
+            # Same suffixes as _pack_name_remapping so both packed paths agree.
+            self._state_dict[prefix + "_weight_scale"] = merged_scale
+            if merged_scale_2 is not None:
+                self._state_dict[prefix + "_weight_scale_2"] = merged_scale_2
+        if input_scales:
+            self._state_dict[prefix + "_input_scale"] = torch.max(
+                torch.stack(input_scales, dim=0), dim=0
+            )[0]
+
+    def _grouped_mlp_slicing(
+        self, module, prefix, parallel_config=None, is_mtp=False, quantize=True
+    ):
         """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
+
+        ``quantize=False`` emits unquantized weights alongside the scales, which
+        ``_grouped_mlp_packing`` needs so it can quantize once over the stacked tensor.
 
         At EP>1, local ids are mapped to global via ``module.local_expert_indices``
         and per-expert state is ``all_gather_object``-ed across the EP group. All EP ranks
@@ -1347,12 +1414,16 @@ class GPTModelExporter:
                 if weight_scale_cpu is None:
                     local_expert_state[expert_prefix + "weight"] = weight
                 else:
-                    local_expert_state[expert_prefix + "weight"] = to_quantized_weight(
-                        weight,
-                        weight_scale_cpu,
-                        qformat,
-                        weight_scale_2_cpu,
-                        block_size,
+                    local_expert_state[expert_prefix + "weight"] = (
+                        weight
+                        if not quantize
+                        else to_quantized_weight(
+                            weight,
+                            weight_scale_cpu,
+                            qformat,
+                            weight_scale_2_cpu,
+                            block_size,
+                        )
                     )
                     local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
 
@@ -1404,6 +1475,7 @@ class GPTModelExporter:
             del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
+        return seen_qformat, seen_block_size
 
     def _qkv_slicing(
         self,
@@ -1672,8 +1744,8 @@ class GPTModelExporter:
                 # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
                 self.kv_cache_dtype = kv_cache_dtype
 
-    def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False):
-        """Pack name remapping into one tensor."""
+    def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False, transpose=True):
+        """Pack per-expert weights into one tensor; ``transpose`` for HF [E, in, out] layouts."""
         if is_mtp:
             prefix = self._mtp_prefix(prefix)
         weight_list = []
@@ -1700,10 +1772,10 @@ class GPTModelExporter:
 
         merged_weight = torch.stack(weight_list, dim=0)
 
-        # Transpose the last two dimensions to match HuggingFace format
-        # Megatron format: [num_experts, out_features, in_features]
-        # HF format: [num_experts, in_features, out_features]
-        merged_weight = merged_weight.transpose(-2, -1).contiguous()
+        # Megatron is [num_experts, out, in]; most HF layouts want [num_experts, in, out], but
+        # Qwen3.5 keeps Megatron's orientation.
+        if transpose:
+            merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
         if weight_scale_2_list[0] is None:
             merged_weight_scale_2 = None
@@ -1715,8 +1787,8 @@ class GPTModelExporter:
             # NVFP4
             merged_weight_scale_2 = torch.max(torch.stack(weight_scale_2_list, dim=0), dim=0)[0]
             merged_weight_scale = torch.stack(weight_scale_list, dim=0)
-            # Transpose the scaling factors to match the transposed weights
-            merged_weight_scale = merged_weight_scale.transpose(-2, -1).contiguous()
+            if transpose:
+                merged_weight_scale = merged_weight_scale.transpose(-2, -1).contiguous()
 
         if input_scale_list[0] is not None:
             merged_input_scale = torch.max(torch.stack(input_scale_list, dim=0), dim=0)[0]

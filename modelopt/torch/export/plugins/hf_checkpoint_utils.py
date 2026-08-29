@@ -205,7 +205,7 @@ def load_multimodal_components(
     """Load multimodal components from safetensors file.
 
     Args:
-        pretrained_model_path: Path to the pretrained model.
+        pretrained_model_path: Directory or HuggingFace repo id of the pretrained model.
         prefixes: Tensor key prefixes to select.  Defaults to the LLaVA-style
             ``multi_modal_projector`` / ``vision_model`` prefixes.  Pass
             ``("model.visual.",)`` for Qwen3-VL checkpoints.
@@ -215,9 +215,21 @@ def load_multimodal_components(
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     if not hf_checkpoint_path.is_dir():
-        raise ValueError(
-            f"Invalid pretrained model path: {pretrained_model_path}. It should be a directory."
-        )
+        # Also accept a repo id, which is what the example scripts pass to quantize.py.
+        local_files_only = _is_hf_hub_offline()
+        try:
+            hf_checkpoint_path = Path(
+                snapshot_download(
+                    repo_id=str(pretrained_model_path),
+                    allow_patterns=["*.safetensors", "*.safetensors.index.json"],
+                    local_files_only=local_files_only,
+                )
+            )
+        except (LocalEntryNotFoundError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid pretrained model path: {pretrained_model_path}. It should be a "
+                "directory or an available HuggingFace repo id."
+            ) from exc
 
     safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
     safetensors_index_file = Path(hf_checkpoint_path) / "model.safetensors.index.json"
