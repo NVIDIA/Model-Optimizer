@@ -272,30 +272,6 @@ class DFlashGemma4Attention(DFlashAttention):
                     getattr(config, "num_global_key_value_heads", None) or self.num_kv_heads
                 )
             self.num_key_value_groups = self.num_heads // self.num_kv_heads
-            # Keep ``head_dim**-0.5`` even though vLLM serves this draft with
-            # ``scaling = 1.0``. That looks like a train/serve mismatch and it IS one, but
-            # aligning it is measurably WORSE -- do not "fix" this again without repeating
-            # the experiment below.
-            #
-            # vLLM's Gemma4MTPAttention (which Gemma4DSparkAttention inherits) hardcodes
-            # 1.0, matching the Gemma 4 base, which documents that "unlike Gemma2/3,
-            # query_pre_attn_scalar is NOT used here; Q/K norms with learnable weights
-            # handle scaling implicitly". Two full lr 2e-3 runs, identical except for this
-            # line, evaluated under REAL vLLM on 80q MT-Bench at num_spec=7:
-            #
-            #     step   trained 1/sqrt(512)   trained 1.0
-            #     1000   2.0645                1.9710   (-4.5%)
-            #     5000   2.5715                2.5234   (-1.9%)
-            #
-            # The reason is that ``q_norm`` is learnable, so it absorbs the scale: serving
-            # a 1/sqrt(512)-trained draft at 1.0 costs only 0.3% (step 1000) to 2.2%
-            # (step 5000), while TRAINING at 1.0 costs more than that. The small scale is
-            # the better training configuration -- smoother attention, better conditioned --
-            # and it transfers almost intact.
-            #
-            # An earlier estimate of a 7% mismatch penalty came from simulating scale 1.0
-            # inside the hand-written harness rather than measuring vLLM, and overstated it.
-            self.scaling = self.head_dim**-0.5
             attn_bias = getattr(config, "attention_bias", False)
             self.q_proj = nn.Linear(
                 config.hidden_size, self.num_heads * self.head_dim, bias=attn_bias
@@ -308,6 +284,38 @@ class DFlashGemma4Attention(DFlashAttention):
             )
             self.q_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
             self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
+
+        # Gemma 4 puts no ``1/sqrt(head_dim)`` in attention: HF's
+        # ``Gemma4TextAttention.__init__`` sets ``self.scaling = 1.0`` and the config
+        # carries no ``query_pre_attn_scalar``, unlike Gemma2/3. The learnable per-dim
+        # weight of ``q_norm`` absorbs the scale instead. vLLM matches the reference --
+        # both ``gemma4.py`` and ``gemma4_mtp.py`` hardcode 1.0, and
+        # ``Gemma4DSparkAttention`` inherits the latter -- so a draft trained at
+        # ``head_dim**-0.5`` is trained under a scale no serving stack ever applies.
+        #
+        # Outside the ``is_full`` branch on purpose: vLLM uses 1.0 for EVERY Gemma 4
+        # layer type, so sliding layers must not fall through to the parent's
+        # ``head_dim**-0.5`` either.
+        #
+        # Cost of the old mismatch, measured directly by forcing vLLM's draft attention
+        # to the training scale (checkpoint-56000 of the lr 2e-3 5-epoch run, real vLLM,
+        # 80q MT-Bench, num_spec 7):
+        #
+        #     served at        128 tok   1024 tok
+        #     1.0 (stock)      2.7981    2.7685
+        #     512**-0.5        3.1577    3.1363     -> +12.9% / +13.3%
+        #
+        # This line was reverted once before (edcbe3adcf) on the strength of an A/B of
+        # two TRAINING scales: 2.0645 vs 1.9710 at step 1000, 2.5715 vs 2.5234 at step
+        # 5000, both favouring ``head_dim**-0.5``. That A/B served BOTH arms at 1.0, so
+        # it compared a matched configuration against a mismatched one and never measured
+        # the mismatch itself; both points are also under 0.3 epoch, and its gap was
+        # already closing (-4.5% -> -1.9%). Matching is worth ~13%, which the training-side
+        # preference does not come close to paying for.
+        #
+        # Drafters trained before this change carry the old convention and lose that 13%
+        # under stock vLLM; they need a retrain, not a config flag.
+        self.scaling = 1.0
 
         if self.use_k_eq_v:
             # Registered by the parent; drop it so it is neither trained nor exported.

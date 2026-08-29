@@ -576,6 +576,58 @@ class TestDFlashSlidingWindow:
         assert attn.sliding_window is None
 
 
+class TestDFlashGemma4AttentionScale:
+    """Gemma 4 drafts must attend at scale 1.0, matching the base model and vLLM.
+
+    Gemma 4 carries no ``1/sqrt(head_dim)`` in attention -- HF's
+    ``Gemma4TextAttention`` sets ``scaling = 1.0`` and there is no
+    ``query_pre_attn_scalar`` -- and vLLM's ``Gemma4DSparkAttention`` inherits that
+    constant. Training at ``head_dim**-0.5`` instead cost ~13% acceptance length
+    under stock vLLM. That line has already been reverted once, so it is pinned here.
+    """
+
+    @staticmethod
+    def _gemma4_config():
+        from transformers import PretrainedConfig
+
+        return PretrainedConfig(
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            head_dim=16,
+            global_head_dim=32,
+            num_global_key_value_heads=1,
+            attention_k_eq_v=True,
+            rms_norm_eps=1e-6,
+            attention_bias=False,
+            attention_dropout=0.0,
+            layer_types=["full_attention", "sliding_attention"],
+            sliding_window=256,
+            _attn_implementation="sdpa",
+        )
+
+    def test_full_attention_layer_uses_unit_scale(self):
+        """A full-attention draft layer keeps the larger head_dim but scale 1.0."""
+        from modelopt.torch.speculative.plugins.modeling_dflash import DFlashGemma4Attention
+
+        attn = DFlashGemma4Attention(self._gemma4_config(), layer_idx=0)
+        assert attn.head_dim == 32
+        assert attn.scaling == 1.0
+
+    def test_sliding_attention_layer_uses_unit_scale(self):
+        """Sliding layers skip the ``is_full`` branch and must not inherit the parent scale."""
+        from modelopt.torch.speculative.plugins.modeling_dflash import DFlashGemma4Attention
+
+        attn = DFlashGemma4Attention(self._gemma4_config(), layer_idx=1)
+        assert attn.head_dim == 16
+        assert attn.scaling == 1.0
+
+    def test_non_gemma4_draft_keeps_head_dim_scale(self):
+        """The fix is Gemma 4 specific: Qwen3-style drafts still scale by 1/sqrt(d)."""
+        attn = DFlashAttention(self._gemma4_config(), layer_idx=0)
+        assert attn.scaling == pytest.approx(16**-0.5)
+
+
 class TestDFlashSwaMask:
     """Test all-layer non-causal sliding-window attention mask (MiMo-style)."""
 
