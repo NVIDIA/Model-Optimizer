@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -31,12 +32,17 @@ from puzzletron_orchestrator.config import load_experiment_config  # noqa: E402
 
 
 def _register_evaluation_profiles(config: dict) -> None:
-    profiles = {
-        (node.get("config") or {}).get("profile")
-        for flow in ((config.get("post_mip") or {}).get("flows") or {}).values()
-        for node in (flow.get("nodes") or {}).values()
-        if node.get("type") == "downstream_evaluation"
-    }
+    post_mip = config.get("post_mip")
+    flows = post_mip.get("flows") if isinstance(post_mip, Mapping) else None
+    profiles = set()
+    for flow in flows.values() if isinstance(flows, Mapping) else ():
+        nodes = flow.get("nodes") if isinstance(flow, Mapping) else None
+        for node in nodes.values() if isinstance(nodes, Mapping) else ():
+            if not isinstance(node, Mapping) or node.get("type") != "downstream_evaluation":
+                continue
+            node_config = node.get("config")
+            if isinstance(node_config, Mapping):
+                profiles.add(node_config.get("profile"))
     if "qwen35_vlm_realworldqa" in profiles:
         from examples.puzzletron.evaluation.vlm.post_mip import register_profiles
 

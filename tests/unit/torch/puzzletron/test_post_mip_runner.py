@@ -92,18 +92,26 @@ def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypat
         {
             "post_mip": {
                 "flows": {
+                    "null_flow": None,
+                    "invalid_flow": [],
                     "params": {
                         "nodes": {
+                            "null_node": None,
+                            "invalid_node": [],
                             "generic_eval": {
                                 "type": "downstream_evaluation",
                                 "config": None,
+                            },
+                            "invalid_config": {
+                                "type": "downstream_evaluation",
+                                "config": [],
                             },
                             "checkpoint_eval": {
                                 "type": "downstream_evaluation",
                                 "config": {"profile": "qwen35_vlm_realworldqa"},
                             },
                         }
-                    }
+                    },
                 }
             }
         }
