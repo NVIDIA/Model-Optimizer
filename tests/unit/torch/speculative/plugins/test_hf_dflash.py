@@ -576,6 +576,54 @@ class TestDFlashSlidingWindow:
         assert attn.sliding_window is None
 
 
+class TestDFlashFp32MasterWeights:
+    """The draft can hold fp32 parameters while the frozen base stays bf16.
+
+    Motivation is numerical, not cosmetic: a bf16 parameter initialised at exactly 1.0
+    cannot move once the learning rate drops below half the downward ULP there
+    (2**-9 = 0.00195), because every Adam step rounds back. On a 56k-step Gemma-4 run
+    that left 78% of the draft's RMSNorm weights still exactly 1.0.
+    """
+
+    @staticmethod
+    def _bf16_base():
+        model = get_tiny_llama(num_hidden_layers=4)
+        return model.to(torch.bfloat16)
+
+    @staticmethod
+    def _draft_dtypes(model):
+        return {p.dtype for n, p in model.named_parameters() if "dflash_module" in n}
+
+    def test_draft_is_fp32_while_base_stays_bf16(self):
+        """The flag lifts ONLY the draft; the frozen base keeps the target's dtype."""
+        model = self._bf16_base()
+        config = get_dflash_config()
+        config["dflash_fp32_master_weights"] = True
+        mtsp.convert(model, [("dflash", config)])
+        assert self._draft_dtypes(model) == {torch.float32}
+        base = {p.dtype for n, p in model.named_parameters() if "dflash_module" not in n}
+        assert base == {torch.bfloat16}
+
+    def test_default_keeps_the_draft_in_the_base_dtype(self):
+        """Off by default: existing recipes must keep training exactly as before."""
+        model = self._bf16_base()
+        mtsp.convert(model, [("dflash", get_dflash_config())])
+        assert self._draft_dtypes(model) == {torch.bfloat16}
+
+    def test_flag_survives_save_restore(self):
+        """The flag lives in DFlashConfig, so a restored checkpoint must still carry it.
+
+        A checkpoint written with the flag and restored by code that dropped it fails
+        pydantic validation with extra_forbidden -- which is how every eval job for this
+        run failed until the eval container was moved to matching code.
+        """
+        model = self._bf16_base()
+        config = get_dflash_config()
+        config["dflash_fp32_master_weights"] = True
+        mtsp.convert(model, [("dflash", config)])
+        assert model.dflash_fp32_master_weights is True
+
+
 class TestDFlashGemma4AttentionScale:
     """Gemma 4 drafts must attend at scale 1.0, matching the base model and vLLM.
 

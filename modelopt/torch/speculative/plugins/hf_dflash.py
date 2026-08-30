@@ -561,6 +561,14 @@ class HFDFlashModel(DFlashModel):
             base_device = next(self._base_model.layers[-1].parameters()).device
         if base_device.type != "meta":
             self.dflash_module.to(self._base_model.dtype).to(base_device)
+            if self.dflash_fp32_master_weights:
+                # Deliberately AFTER the base-dtype match: that call also moves the module
+                # to the right device, and matching first keeps this a pure dtype change.
+                # Autocast (HF Trainer under bf16=True) casts activations and weights to
+                # bf16 at each op, so compute is unchanged; only the master copy and the
+                # optimizer moments stay fp32. See DFlashConfig.dflash_fp32_master_weights
+                # for why bf16 masters silently freeze the RMSNorm weights.
+                self.dflash_module.float()
 
         # Delete base model layers for offline training (save memory)
         if self.dflash_offline:

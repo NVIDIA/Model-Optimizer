@@ -165,6 +165,24 @@ class DFlashConfig(ModeloptBaseConfig):
         default={}, description="Config for the DFlash draft module architecture."
     )
 
+    dflash_fp32_master_weights: bool = ModeloptField(
+        default=False,
+        description=(
+            "Keep the draft's parameters in fp32 while training under bf16 autocast, i.e. "
+            "classic mixed precision with fp32 master weights. Matmuls still run in bf16 on "
+            "tensor cores, so the cost is memory (12 bytes/param for weight+Adam moments "
+            "instead of 6), not speed.\n\n"
+            "This exists because a pure-bf16 parameter initialised at exactly 1.0 cannot "
+            "move: the downward ULP there is 2**-8 = 0.0039, so an update must exceed "
+            "0.00195 to round to a new value, and the maximum Adam step is the learning "
+            "rate. Under the Gemma-4 recipe's linear decay from 2e-3 that threshold is "
+            "crossed around step 2,600, after which every RMSNorm weight still sitting at "
+            "1.0 is frozen for the rest of the run. Measured on a 56k-step Gemma-4 draft: "
+            "78% of the q_norm/k_norm entries were still exactly 1.0, and the furthest any "
+            "had travelled was 34 ULPs of the 245 needed to reach head_dim**-0.5."
+        ),
+    )
+
     dflash_use_torch_compile: bool = ModeloptField(
         default=True,
         description="Whether to use torch.compile on DFlash forward/loss methods.",

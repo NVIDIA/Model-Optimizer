@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Convert a ModelOpt DSpark drafter export into the layout vLLM's
 Gemma4DSparkForCausalLM expects.
 
@@ -29,6 +44,7 @@ import json
 import os
 import shutil
 
+import torch
 from safetensors.torch import load_file, save_file
 
 ap = argparse.ArgumentParser()
@@ -107,6 +123,11 @@ out["lm_head.weight"] = emb.clone()
 out["embed_tokens.weight"] = emb.clone()
 print("baked lm_head.weight + embed_tokens.weight (tie_word_embeddings=true on Gemma 4)")
 
+# The written config.json declares bfloat16, and a draft trained with fp32 master
+# weights arrives here in fp32 -- saving as-is would double the file and disagree with
+# the config. Cast to whatever the config claims so the two can never drift apart.
+_out_dtype = getattr(torch, cfg.get("torch_dtype", "bfloat16"))
+out = {k: v.to(_out_dtype) for k, v in out.items()}
 save_file(out, os.path.join(args.out, "model.safetensors"), metadata={"format": "pt"})
 for f in ("tokenizer.json", "tokenizer_config.json"):
     src = os.path.join(args.base, f)
