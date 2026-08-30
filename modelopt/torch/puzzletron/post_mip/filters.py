@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 """Deterministic selection modes for post-MIP candidate sets."""
 
 from __future__ import annotations
@@ -23,7 +20,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from .records import CandidateLedger
@@ -257,7 +254,7 @@ def apply_filter(
         metric = str(config["metric"])
         minimum = config.get("min")
         maximum = config.get("max")
-        selected = []
+        threshold_selected: list[str] = []
         for revision_id in revision_ids:
             value = _finite_metric(ledger, revision_id, metric)
             if value is None:
@@ -267,8 +264,8 @@ def apply_filter(
             elif maximum is not None and value > float(maximum):
                 excluded[revision_id] = f"{metric} above maximum"
             else:
-                selected.append(revision_id)
-        return tuple(selected), excluded, scores
+                threshold_selected.append(revision_id)
+        return tuple(threshold_selected), excluded, scores
 
     entries = _metric_entries(config)
     values = {}
@@ -277,9 +274,9 @@ def apply_filter(
         if any(value is None for value in row):
             excluded[revision_id] = "missing one or more required finite metrics"
         else:
-            values[revision_id] = tuple(float(value) for value in row)
+            values[revision_id] = tuple(float(cast("float", value)) for value in row)
     if mode == "pareto":
-        selected = []
+        pareto_selected: list[str] = []
         for revision_id, row in values.items():
             dominated = False
             for other_id, other in values.items():
@@ -303,8 +300,8 @@ def apply_filter(
             if dominated:
                 excluded[revision_id] = "Pareto dominated"
             else:
-                selected.append(revision_id)
-        return tuple(selected), excluded, scores
+                pareto_selected.append(revision_id)
+        return tuple(pareto_selected), excluded, scores
 
     ranks: dict[str, list[tuple[float, float]]] = defaultdict(list)
     for index, entry in enumerate(entries):

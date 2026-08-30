@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Opt-in extension of the one-GPU full-smoke route. The complete benchmark
+# Opt-in end-to-end quality regression. The bounded quality benchmark
 # stage evaluates the student and pinned teacher serially on the same GPU.
 execution:
   defaults:
@@ -28,6 +28,6 @@ execution:
     post.params-90.short_kd: {strategy: sharded, instances: 1}
     post.params-90.final_eval: {strategy: sharded, instances: 1}
     post.params-90.best: {strategy: single, instances: 1}
-    post.params-90.full_benchmarks: {strategy: sharded, instances: 1}
+    post.params-90.quality_benchmarks: {strategy: sharded, instances: 1}
     post.params-90.ifeval_quality_gate: {strategy: single, instances: 1}
     post.params-90.gsm8k_quality_gate: {strategy: single, instances: 1}

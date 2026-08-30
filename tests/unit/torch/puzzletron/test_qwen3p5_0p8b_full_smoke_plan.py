@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -36,8 +37,10 @@ RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke.yaml"
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_smoke.yaml"
-QUALITY_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/quality_regression.yaml"
-QUALITY_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.quality_regression.yaml"
+QUALITY_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_regression.yaml"
+QUALITY_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_quality_regression.yaml"
+CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign.yaml"
+CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
 
 
 def _compile_plan(monkeypatch, tmp_path: Path):
@@ -163,37 +166,103 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     assert nodes["best"]["top_k"] == 1
 
 
-def test_qwen3p5_0p8b_quality_regression_is_opt_in_and_compares_teacher(
+def test_qwen3p5_0p8b_e2e_quality_regression_is_opt_in_and_compares_teacher(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     plan = _compile_quality_plan(monkeypatch, tmp_path)
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
-    benchmark = nodes["full_benchmarks"]
+    benchmark = nodes["quality_benchmarks"]
     stage_ids = tuple(stage.stage_id for stage in plan.stages)
 
-    assert "post.params-90.full_benchmarks" in stage_ids
-    assert stage_ids[-2:] == (
-        "post.params-90.ifeval_quality_gate",
-        "post.params-90.gsm8k_quality_gate",
+    assert "post.params-90.quality_benchmarks" in stage_ids
+    assert stage_ids.index("post.params-90.quality_benchmarks") < stage_ids.index(
+        "post.params-90.ifeval_quality_gate"
+    )
+    assert stage_ids.index("post.params-90.ifeval_quality_gate") < stage_ids.index(
+        "post.params-90.gsm8k_quality_gate"
     )
     assert benchmark["input"] == "short_kd"
     assert benchmark["failure_policy"] == "strict"
     assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
     assert benchmark["config"]["tasks"] == ["ifeval", "gsm8k"]
     assert benchmark["config"]["compatibility_tasks"] == ["gsm8k"]
+    assert benchmark["config"]["task_dataset_revisions"] == {
+        "ifeval": "5a5661c2a35488308556cf4453dc074d1eba91a0",
+        "gsm8k": "740312add88f781978c0658806c59bc2815b9866",
+    }
     assert benchmark["config"]["batch_size"] == 8
-    assert "limit" not in benchmark["config"]
+    assert benchmark["config"]["limit"] == 100
     assert benchmark["config"]["gen_kwargs"] == {
         "do_sample": False,
         "temperature": 0,
     }
     assert nodes["ifeval_quality_gate"]["require_match"] is True
-    assert nodes["ifeval_quality_gate"]["min"] == -0.26
+    assert nodes["ifeval_quality_gate"]["metric"].endswith(
+        "modelopt_ifeval.prompt_level_strict_acc_none"
+    )
+    assert nodes["ifeval_quality_gate"]["min"] == -0.35
     assert nodes["gsm8k_quality_gate"]["metric"].endswith(
         "modelopt_gsm8k.exact_match_flexible-extract"
     )
-    assert nodes["gsm8k_quality_gate"]["min"] == -0.50
+    assert nodes["gsm8k_quality_gate"]["min"] == -0.47
     assert nodes["gsm8k_quality_gate"]["require_match"] is True
     assert all(stage.total_gpus == 1 for stage in plan.stages)
+
+
+def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    campaign = pipeline_config_from_path(CAMPAIGN_PATH)
+    regression = pipeline_config_from_path(QUALITY_RUN_PATH)
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    plan = compile_campaign_plan(
+        experiment_config_path=CAMPAIGN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(CAMPAIGN_EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+    assert campaign["model"]["revision"] == campaign["model_info"]["hf_revision"]
+    assert set(campaign["mip"]["runs"]["runtime-075"]["search_space"]) == {
+        "depth",
+        "embedding",
+    }
+    assert campaign["pruning"]["attention_scored_axes"] == [
+        "kv_groups",
+        "q_heads_per_group",
+    ]
+    assert campaign["pruning"]["gdn_scored_axes"] == [
+        "gdn_key_groups",
+        "gdn_value_head_dim",
+    ]
+    nodes = campaign["post_mip"]["flows"]["runtime-075"]["nodes"]
+    assert tuple(nodes) == (
+        "online_eval",
+        "best_lm",
+        "materialized",
+        "serving",
+        "fastest",
+        "global_kd",
+        "final_eval",
+        "best",
+        "quality_benchmarks",
+    )
+    campaign_quality = nodes["quality_benchmarks"]["config"]
+    regression_quality = regression["post_mip"]["flows"]["params-90"]["nodes"][
+        "quality_benchmarks"
+    ]["config"]
+    assert campaign_quality == campaign["quality_evaluation"]
+    assert regression_quality == regression["quality_evaluation"]
+    assert campaign_quality["reference_checkpoint"] == campaign["teacher_dir"]
+    assert regression_quality["reference_checkpoint"] == regression["teacher_dir"]
+    assert {
+        key: value for key, value in campaign_quality.items() if key != "reference_checkpoint"
+    } == {key: value for key, value in regression_quality.items() if key != "reference_checkpoint"}
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    assert tuple(stages)[-9:] == tuple(f"post.runtime-075.{node_id}" for node_id in nodes)
+    assert stages["post.runtime-075.global_kd"].total_gpus == 1
+    assert stages["post.runtime-075.quality_benchmarks"].total_gpus == 1

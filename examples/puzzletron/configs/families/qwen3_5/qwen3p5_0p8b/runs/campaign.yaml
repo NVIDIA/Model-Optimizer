@@ -1,0 +1,278 @@
+# @package _global_
+
+defaults:
+  - mip_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - /families/qwen3_5/qwen3p5_0p8b/quality_evaluation@_global_
+  - _self_
+
+# Substantial Qwen 3.5 0.8B text campaign example. This route expands the
+# real-checkpoint smoke into a multi-axis search, depth and bypass exploration,
+# serving-aware MIP selection, distillation, and a final teacher/student quality
+# comparison. Its budgets and search choices are starting points to adapt, not
+# prescribed settings. Use e2e_quality_regression.yaml for the
+# affordable automated version of the same final evaluation settings.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
+display_name: Qwen3p5 0.8B text pruning campaign
+
+data:
+  max_sample_length: 4096
+
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train_4096x4096.tokens
+validation_token_cache_path: ${puzzle_dir}/dataset_cache/validation_128x4096.tokens
+
+tokenize_data:
+  workers: 32
+  tokenize_batch_size: 64
+  caches:
+    - output: ${train_token_cache_path}
+      split: train
+      num_samples: 4096
+      seq_length: 4096
+      shuffle_seed: 444
+    - output: ${validation_token_cache_path}
+      split: validation
+      num_samples: 128
+      seq_length: 4096
+      shuffle_seed: 445
+
+embedding_pruning:
+  enabled: true
+  widths: [1024, 768]
+  alignment: 256
+
+pruning:
+  experiment_id: qwen35_0p8b_campaign_4096
+  eval_samples: 4096
+  block_size: 4096
+  seed: 42
+  packed_token_cache_path: ${train_token_cache_path}
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  gdn_scored_axes:
+    - gdn_key_groups
+    - gdn_value_head_dim
+
+sort:
+  deferred_axes: []
+
+sort_sanity:
+  eval_samples: 128
+  block_size: 4096
+  packed_token_cache_path: ${validation_token_cache_path}
+  include_reverse: true
+
+width_sanity:
+  hidden_width_diagnostic: true
+  axes:
+    - hidden_width
+    - ffn_intermediate
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_head_dim
+  target_count_per_axis: 2
+  layer_count: 2
+  methods: [activation, random, reverse]
+  require_beats_random: true
+  require_beats_reverse: true
+  eval_samples: 32
+  block_size: 4096
+  packed_token_cache_path: ${validation_token_cache_path}
+
+slicing_sanity:
+  enabled: true
+  backend: distributed_parent_sweep
+  eval_samples: 128
+  block_size: 4096
+  packed_token_cache_path: ${validation_token_cache_path}
+
+bypass_sanity:
+  enabled: true
+  steps: 32
+  fixed_smallest: true
+  diverse_nested: true
+
+bypass:
+  enabled: true
+  granularity: subblock
+  elastic: true
+  iter_num: 128
+  step_num: 128
+  token_count: 16777216
+  data:
+    block_size: 4096
+    max_eval_samples: 128
+    packed_token_cache_path: ${train_token_cache_path}
+    validation_packed_token_cache_path: ${validation_token_cache_path}
+  training:
+    learning_rate: 0.0003
+    training_tokens: 16777216
+    micro_batch_size: 4
+    val_micro_batch_size: 4
+    eval_interval: 32
+
+depth_importance:
+  enabled: true
+  expected_initial_sublayers: 48
+  max_removals: 4
+  max_subblocks_to_remove: 4
+  eval_samples: 128
+  block_size: 4096
+  packed_token_cache_path: ${validation_token_cache_path}
+
+build_library:
+  enabled: true
+  include_bypass: true
+
+vllm_stats:
+  enabled: true
+  prefill_seq_len: 4096
+  generation_seq_len: 1024
+  runtime_stats:
+    num_iters: 30
+    num_warmup_iters: 10
+    execution: inline
+    include_noop_baselines: false
+
+replacement_scoring:
+  enabled: true
+  eval_samples: 128
+  block_size: 4096
+  packed_token_cache_path: ${validation_token_cache_path}
+
+mip:
+  enabled: true
+  depth_scenario_count: 5
+  workloads:
+    serving-4k:
+      isl: 4096
+      osl: 1024
+      batch_size: 4
+      concurrency: 4
+  runs:
+    params-90: false
+    params-075:
+      constraints:
+        params: {min: 73%, max: 75%}
+      search_space: &campaign_search
+        depth: {range: [0, 4]}
+        embedding: [1024, 768]
+      solver: &campaign_solver
+        backend: auto
+        num_solutions: 8
+        min_hamming_distance: 2
+        max_seconds_per_solution: 300
+      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+    runtime-075:
+      constraints:
+        runtime:
+          at:
+            serving-4k: {min: 73%, max: 75%}
+      search_space: *campaign_search
+      solver: *campaign_solver
+      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+    memory-075:
+      constraints:
+        memory:
+          at:
+            serving-4k: {min: 73%, max: 75%}
+      search_space: *campaign_search
+      solver: *campaign_solver
+      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+
+post_mip:
+  flows:
+    runtime-075:
+      source:
+        run: runtime-075
+        variants: all
+        objectives: all
+      nodes:
+        online_eval:
+          type: evaluation
+          config:
+            eval_samples: 128
+            block_size: 4096
+
+        best_lm:
+          type: filter
+          input: online_eval
+          mode: top_k
+          metric: online_eval.lm_loss
+          direction: minimize
+          top_k: 2
+
+        materialized:
+          type: materialize
+          input: best_lm
+
+        serving:
+          type: aiperf
+          input: materialized
+          config:
+            input_tokens: 4096
+            output_tokens: 1024
+            concurrency: [1, 4, 16]
+            minimum_request_count: 8
+            requests_per_concurrency: 4
+            use_server_token_count: true
+            seed: 42
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+
+        fastest:
+          type: filter
+          input: serving
+          mode: top_k
+          metric: serving.output_token_throughput
+          direction: maximize
+          top_k: 1
+          best_selection_mode: individual_best
+
+        global_kd:
+          type: global_kd
+          input: fastest
+          config:
+            max_steps: 1024
+            global_batch_size: 16
+            local_batch_size: 4
+            checkpoint_every_steps: 128
+
+        final_eval:
+          type: evaluation
+          input: global_kd
+          config:
+            eval_samples: 128
+            block_size: 4096
+
+        best:
+          type: filter
+          input: final_eval
+          mode: top_k
+          metric: final_eval.lm_loss
+          direction: minimize
+          top_k: 1
+
+        quality_benchmarks:
+          type: downstream_evaluation
+          input: best
+          failure_policy: strict
+          config: ${quality_evaluation}
+
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+global_distillation:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false

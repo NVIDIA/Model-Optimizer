@@ -1,20 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 import json
 
@@ -24,31 +9,10 @@ from safetensors.torch import save_file
 
 from modelopt.torch.puzzletron.bypass_distillation import checkpointing
 from modelopt.torch.puzzletron.bypass_distillation.checkpointing import (
-    copy_hf_auxiliary_assets,
     save_ranked_state_checkpoint,
     validate_consolidated_hf_checkpoint,
     validate_ranked_state_checkpoint,
 )
-
-
-def test_copy_hf_auxiliary_assets_preserves_export_and_adds_processor_files(tmp_path):
-    source = tmp_path / "source"
-    consolidated = tmp_path / "consolidated"
-    source.mkdir()
-    consolidated.mkdir()
-    (source / "config.json").write_text("source config")
-    (source / "model.safetensors").write_text("source weights")
-    (source / "preprocessor_config.json").write_text("processor")
-    (source / "custom_code").mkdir()
-    (source / "custom_code/modeling.py").write_text("custom code")
-    (consolidated / "config.json").write_text("export config")
-
-    copy_hf_auxiliary_assets(source, consolidated)
-
-    assert (consolidated / "config.json").read_text() == "export config"
-    assert not (consolidated / "model.safetensors").exists()
-    assert (consolidated / "preprocessor_config.json").read_text() == "processor"
-    assert (consolidated / "custom_code/modeling.py").read_text() == "custom code"
 
 
 def _write_checkpoint(path, tensors_by_shard, weight_map):

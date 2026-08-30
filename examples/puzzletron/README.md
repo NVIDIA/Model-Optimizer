@@ -52,7 +52,7 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 Choose **Balanced pruning** for a first-generated text campaign. For the
 maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the recommended
 Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM, use
-the checked-in VLM pruning smoke linked below. Guided setup can resolve the
+the VLM pruning smoke linked below. Guided setup can resolve the
 same model, the recommended Nemotron-VLM v2 image-text dataset, and site
 settings, but its generic pruning profile is not the VLM example used here.
 Review the detected model, data modality, worker and scheduler settings, and
@@ -64,6 +64,11 @@ jobs. It writes validated `smoke/` and `production/` bundles plus a generated
 the worker environment before launch. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
+
+For a substantial text pruning example, see the
+[Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It covers a broader
+multi-axis search and reuses the deterministic downstream evaluation from the
+bounded opt-in GPU regression.
 
 ### 3. Inspect and launch smoke
 
@@ -82,7 +87,7 @@ python examples/puzzletron/orchestrate.py \
 Review the stage list, worker paths, execution strategies, resources, and
 output directory. `--stage full` runs every stage enabled by the generated
 experiment in dependency order. Remove `--dry-run` to launch the smoke
-campaign. Two checked-in Qwen 3.5 0.8B examples exercise the complete pruning
+campaign. Two Qwen 3.5 0.8B examples exercise the complete pruning
 workflow on one GPU. Use the
 [text pruning smoke](docs/qwen3p5_0p8b_smoke.md) for text-only evaluation,
 serving measurements, distillation, and final model selection. Use the

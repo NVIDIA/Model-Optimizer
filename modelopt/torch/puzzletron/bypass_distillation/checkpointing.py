@@ -1,20 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
 """Checkpoint discovery and publication for AutoModel local distillation."""
 
@@ -22,22 +7,18 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import Iterable
 
 import torch
+from omegaconf import DictConfig
 from safetensors import safe_open
-
-if TYPE_CHECKING:
-    from omegaconf import DictConfig
 
 from ..tools.logger import mprint
 from .bypass_utils import load_bypass_state
 
 __all__ = [
-    "copy_hf_auxiliary_assets",
     "find_latest_completed_checkpoint",
     "publish_elastic_checkpoint",
     "quarantine_incomplete_checkpoint",
@@ -50,35 +31,6 @@ __all__ = [
 ]
 
 
-_HF_WEIGHT_FILENAMES = {
-    "config.json",
-    "model.safetensors",
-    "model.safetensors.index.json",
-    "pytorch_model.bin",
-    "pytorch_model.bin.index.json",
-}
-
-
-def copy_hf_auxiliary_assets(source_dir: str | Path, consolidated_dir: str | Path) -> None:
-    """Copy absent non-weight HF processor assets into a consolidated checkpoint."""
-
-    source_dir = Path(source_dir)
-    consolidated_dir = Path(consolidated_dir)
-    if not source_dir.is_dir() or not consolidated_dir.is_dir():
-        return
-    for source in source_dir.rglob("*"):
-        if not source.is_file():
-            continue
-        relative = source.relative_to(source_dir)
-        if source.name in _HF_WEIGHT_FILENAMES or source.suffix in {".safetensors", ".bin"}:
-            continue
-        destination = consolidated_dir / relative
-        if destination.exists():
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-
-
 def require_distributed_path_consensus(path: str | Path, purpose: str) -> None:
     """Reject rank-local path divergence before entering storage collectives."""
 
@@ -89,7 +41,9 @@ def require_distributed_path_consensus(path: str | Path, purpose: str) -> None:
     torch.distributed.all_gather_object(gathered, resolved)
     unique = sorted({str(value) for value in gathered})
     if len(unique) != 1:
-        raise RuntimeError(f"distributed {purpose} path mismatch across ranks: {unique}")
+        raise RuntimeError(
+            f"distributed {purpose} path mismatch across ranks: {unique}"
+        )
 
 
 def quarantine_incomplete_checkpoint(checkpoint_dir: str | Path) -> Path | None:
@@ -100,7 +54,9 @@ def quarantine_incomplete_checkpoint(checkpoint_dir: str | Path) -> Path | None:
         return None
     if (checkpoint_dir / "saving_completed").is_file():
         raise FileExistsError(f"refusing to replace completed checkpoint: {checkpoint_dir}")
-    quarantine = checkpoint_dir.with_name(f".{checkpoint_dir.name}.quarantine.{uuid.uuid4().hex}")
+    quarantine = checkpoint_dir.with_name(
+        f".{checkpoint_dir.name}.quarantine.{uuid.uuid4().hex}"
+    )
     checkpoint_dir.replace(quarantine)
     return quarantine
 
@@ -136,7 +92,10 @@ def validate_ranked_state_checkpoint(
 
     state_dir = Path(checkpoint_dir) / state_name
     ranks = sorted({int(rank) for rank in expected_ranks})
-    paths = {rank: state_dir / f"{state_name}_dp_rank_{rank}.pt" for rank in ranks}
+    paths = {
+        rank: state_dir / f"{state_name}_dp_rank_{rank}.pt"
+        for rank in ranks
+    }
     missing = [rank for rank, path in paths.items() if not path.is_file()]
     if missing:
         raise RuntimeError(f"{state_name} checkpoint is missing rank file(s): {missing}")
@@ -247,7 +206,8 @@ def validate_consolidated_hf_checkpoint(
     missing_shards = sorted(name for name in shard_names if not (checkpoint_dir / name).is_file())
     if missing_shards:
         raise RuntimeError(
-            f"consolidated checkpoint is missing indexed shard file(s): {missing_shards[:10]}"
+            "consolidated checkpoint is missing indexed shard file(s): "
+            f"{missing_shards[:10]}"
         )
 
     actual_keys: set[str] = set()
@@ -280,7 +240,8 @@ def validate_consolidated_hf_checkpoint(
     ]
     if missing_prefixes:
         raise RuntimeError(
-            f"consolidated checkpoint is missing expected layer prefix(es): {missing_prefixes[:10]}"
+            "consolidated checkpoint is missing expected layer prefix(es): "
+            f"{missing_prefixes[:10]}"
         )
 
     return {
@@ -307,7 +268,9 @@ def find_latest_completed_checkpoint(run_parent_dir: str | Path) -> Path | None:
     latest = run_parent_dir / "latest"
     if latest.exists():
         resolved = latest.resolve()
-        if re.match(r"^step-\d+-ckpt$", resolved.name) and (resolved / "saving_completed").exists():
+        if re.match(r"^step-\d+-ckpt$", resolved.name) and (
+            resolved / "saving_completed"
+        ).exists():
             return resolved
     if not run_parent_dir.exists():
         return None
