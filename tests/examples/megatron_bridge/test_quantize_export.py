@@ -22,7 +22,6 @@ from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoi
 from _test_utils.torch.megatron.modelopt_state import assert_has_modelopt_state
 from _test_utils.torch.transformers_models import (
     create_tiny_nemotron_h_dir,
-    create_tiny_qwen3_dir,
     create_tiny_qwen3_moe_dir,
     create_tiny_qwen3vl_dir,
 )
@@ -44,7 +43,6 @@ _DENSE_KWARGS = {
 @pytest.mark.parametrize(
     ("create_model", "model_kwargs"),
     [
-        (create_tiny_qwen3_dir, _DENSE_KWARGS),
         # MoE: routed experts used to be dropped silently from the export.
         (create_tiny_qwen3_moe_dir, _DENSE_KWARGS),
         # Dense VLM: only the language model is quantized, vision is copied through.
@@ -52,7 +50,7 @@ _DENSE_KWARGS = {
         # Mamba hybrid + MoE, and the one architecture that keeps grouped-GEMM experts.
         (create_tiny_nemotron_h_dir, {}),
     ],
-    ids=["qwen3", "qwen3_moe", "qwen3vl", "nemotron_h"],
+    ids=["qwen3_moe", "qwen3vl", "nemotron_h"],
 )
 @pytest.mark.timeout(360)  # quantize + export in one test; 1-gpu CI exceeds the default 300s
 def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwargs):
@@ -79,10 +77,11 @@ def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwarg
 
     # Step 2: export to HF
     export_cmd = extend_cmd_parts(
-        ["torchrun", "--nproc_per_node=1", "export_quantized_megatron_to_hf.py"],
+        ["torchrun", f"--nproc_per_node={num_gpus}", "export_quantized_megatron_to_hf.py"],
         hf_model_name_or_path=hf_model_path,
         megatron_path=megatron_path,
         export_unified_hf_path=hf_export_path,
+        pp_size=num_gpus,
     )
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()

@@ -267,8 +267,9 @@ def _test_unified_export_megatron(
     ("model_type", "extra_module", "quant_config", "kv_cache_quant_cfg"),
     [
         ("nemotron", None, None, None),
-        # NemotronH (Mamba + attention + grouped-GEMM MoE) supersedes the older Nemotron for
-        # quantized coverage; the plain/eagle/medusa cases below still smoke-test the old arch.
+        # NemotronH (Mamba + attention + grouped-GEMM MoE) is the stronger quantized case, but it
+        # routes no NVFP4 weight through the dense-MLP rules, so keep one dense NVFP4 param too.
+        ("nemotron", None, "NVFP4_DEFAULT_CFG", None),
         ("nemotron_h", None, "NVFP4_DEFAULT_CFG", None),
         ("nemotron_h", None, "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
         ("nemotron", "eagle", None, None),

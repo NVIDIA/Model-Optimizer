@@ -18,6 +18,7 @@ import re
 from functools import cache
 from typing import Any
 
+import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
@@ -237,10 +238,22 @@ def load_modelopt_megatron_checkpoint(
     grouped_re = re.compile(r"experts\.linear_fc[12]\.weight\d")
     ckpt_grouped = any(grouped_re.search(key) for key in checkpoint_keys)
     ckpt_sequential = any(".local_experts." in key for key in checkpoint_keys)
-    model_grouped = any(
-        grouped_re.search(name) for m in unwrap_model(model) for name, _ in m.named_parameters()
-    )
-    if (ckpt_grouped and not model_grouped) or (ckpt_sequential and model_grouped):
+    param_names = [name for m in unwrap_model(model) for name, _ in m.named_parameters()]
+    model_has_experts = any(".experts." in name for name in param_names)
+    model_grouped = any(grouped_re.search(name) for name in param_names)
+    if torch.distributed.is_initialized():
+        # checkpoint_keys is global but named_parameters() is this PP stage only, so a stage
+        # holding no MoE layer would otherwise raise on its own and hang the ranks that do not.
+        flags = torch.tensor(
+            [int(model_has_experts), int(model_grouped)],
+            dtype=torch.int,
+            device=torch.cuda.current_device(),
+        )
+        torch.distributed.all_reduce(flags, op=torch.distributed.ReduceOp.MAX)
+        model_has_experts, model_grouped = bool(flags[0].item()), bool(flags[1].item())
+    if model_has_experts and (
+        (ckpt_grouped and not model_grouped) or (ckpt_sequential and model_grouped)
+    ):
         raise ValueError(
             f"{megatron_path} stores MoE experts as "
             f"{'grouped GEMM (TEGroupedMLP)' if ckpt_grouped else 'SequentialMLP'} but the model "
