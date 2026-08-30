@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 import torch.distributed
-from huggingface_hub import hf_hub_download, snapshot_download
+from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -50,7 +50,6 @@ from .model_config import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .plugins.hf_checkpoint_utils import (
-    _is_hf_hub_offline,
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
@@ -439,25 +438,37 @@ class GPTModelExporter:
             name_template="model-{:05d}-of-{:05d}",
         )
 
-        # Every rank has written its shards; one rank now checks nothing was dropped.
+        # Every rank has written its shards; one rank now checks nothing was dropped. The result is
+        # shared so every rank raises together -- this is public API, and a lone raise would leave
+        # peers hanging in the next collective instead of surfacing the error.
         torch.distributed.barrier()
+        failure = ""
         if is_writer_rank:
-            self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
+            try:
+                self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
+            except RuntimeError as e:
+                failure = str(e)
+        if torch.distributed.is_initialized():
+            # all_gather rather than broadcast: the writer is not necessarily rank 0, and ``src``
+            # must be identical on every rank.
+            gathered: list = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(gathered, failure)
+            failure = next((f for f in gathered if f), "")
+        if failure:
+            raise RuntimeError(failure)
 
     def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
         """Raise if the export dropped tensors the source has: a missing rule emits nothing."""
         if pretrained_model_name_or_path is None:
             return
         source_dir = str(pretrained_model_name_or_path)
-        if not os.path.isdir(source_dir):
-            # A repo id is the documented invocation, so fetch just the index rather than skip.
+        if os.path.isdir(source_dir):
+            source = _read_checkpoint_keys(source_dir)
+        else:
+            # A repo id is the documented invocation. Read the safetensors headers rather than
+            # downloading weights: the export deliberately never fetches them.
             try:
-                source_dir = snapshot_download(
-                    repo_id=source_dir,
-                    # Unsharded repos have no index, only a single model.safetensors.
-                    allow_patterns=["*.safetensors.index.json", "model.safetensors"],
-                    local_files_only=_is_hf_hub_offline(),
-                )
+                source = set(get_safetensors_metadata(source_dir).weight_map)
             except Exception:
                 warn_rank_0(
                     f"Export self-check skipped: cannot read {pretrained_model_name_or_path}."
@@ -474,7 +485,6 @@ class GPTModelExporter:
         else:
             with open(index_file) as f:
                 exported = set(json.load(f)["weight_map"])
-        source = _read_checkpoint_keys(source_dir)
         if not source:
             warn_rank_0(f"Export self-check skipped: no tensor index found in {source_dir}.")
             return
@@ -1288,7 +1298,7 @@ class GPTModelExporter:
         weights = collect(".weight")
         if not weights:
             return
-        handled = (".weight", ".weight_scale", ".weight_scale_2", ".input_scale", ".output_scale")
+        handled = (".weight", ".weight_scale", ".weight_scale_2", ".input_scale")
         unhandled = {k.split(".", 1)[1] for k in per_expert if not k.endswith(handled)}
         assert not unhandled, (
             f"{prefix}: grouped-expert packing has no rule for {sorted(unhandled)}"
@@ -1803,7 +1813,9 @@ class GPTModelExporter:
         Each expert's block scales were derived against its own ``scale_2``; rescaling them by
         ``scale_2_i / scale_2_max`` keeps the quieter experts from losing a mantissa bit.
         """
-        merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0]
+        merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0].clamp_min(
+            torch.finfo(torch.float32).tiny
+        )
         stacked_2 = torch.stack(scales_2, dim=0).reshape(-1, *([1] * scales[0].dim()))
         merged_scale = (
             torch.stack(scales, dim=0).to(torch.float32) * (stacked_2 / merged_scale_2)
