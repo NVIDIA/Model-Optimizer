@@ -197,10 +197,11 @@ class LayerwiseExporter:
 
         self._export_dir = Path(export_dir)
         self._export_dir.mkdir(parents=True, exist_ok=True)
+        # Read here, not in finalize(): it reports on the quantizer modules, which
+        # export_layer replaces as it goes, so by finalize() the model looks unquantized.
+        self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
-        self._kv_cache_format = get_quant_config(
-            model, is_modelopt_qlora=self._ctx.is_modelopt_qlora
-        )["quantization"]["kv_cache_quant_algo"]
+        self._kv_cache_format = self._quant_config["quantization"]["kv_cache_quant_algo"]
         self._finalized = False
 
         self._name_mapper = None
@@ -298,7 +299,7 @@ class LayerwiseExporter:
         self._finalized = True
 
         model = self._ctx.model
-        quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
+        quant_config = self._quant_config
         _add_mtp_exclusions(model, quant_config)
         # No gate/up sync here: export_layer did every layer, and the tail has no experts.
         if getattr(model, "hf_quantizer", None) is not None:

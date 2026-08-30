@@ -85,6 +85,30 @@ def _assert_same_checkpoint(expected, actual):
         assert torch.equal(got.float(), want.float()), f"{key}: values differ"
 
 
+def _assert_same_quant_config(baseline_dir, export_dir):
+    """The metadata a loader reads, which tensor equality never covers.
+
+    ``get_quant_config`` reports on the quantizer modules, and per-layer export replaces
+    them as it goes, so a config read too late describes an unquantized model while the
+    weights are packed.
+    """
+    for name, key in (
+        ("hf_quant_config.json", "quantization"),
+        ("config.json", "quantization_config"),
+    ):
+        want, got = baseline_dir / name, export_dir / name
+        assert want.is_file() == got.is_file(), (
+            f"{name}: present in baseline={want.is_file()} but exported={got.is_file()}"
+        )
+        if not want.is_file():
+            continue
+        expected = json.loads(want.read_text()).get(key)
+        actual = json.loads(got.read_text()).get(key)
+        assert actual == expected, (
+            f"{name}[{key}] differs:\n  baseline={expected}\n  fused={actual}"
+        )
+
+
 def _fp8_cfg():
     return copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 
@@ -220,6 +244,7 @@ def test_export_matches_whole_model_export(
             f"no {expected_key_suffix} keys in the exported checkpoint"
         )
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
+    _assert_same_quant_config(baseline_dir, export_dir)
     # The directory must be loadable on its own, with no follow-up export call.
     for artifact in ("config.json", "hf_quant_config.json", "model.safetensors.index.json"):
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
@@ -401,6 +426,7 @@ def test_moe_export_matches(tmp_path):
     )
 
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
+    _assert_same_quant_config(baseline_dir, export_dir)
 
 
 def test_export_consumes_the_model_without_affecting_the_checkpoint(tmp_path):
