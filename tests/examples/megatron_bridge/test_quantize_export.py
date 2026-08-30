@@ -54,6 +54,7 @@ _DENSE_KWARGS = {
     ],
     ids=["qwen3", "qwen3_moe", "qwen3vl", "nemotron_h"],
 )
+@pytest.mark.timeout(360)  # quantize + export in one test; 1-gpu CI exceeds the default 300s
 def test_quantize_and_export(tmp_path: Path, num_gpus, create_model, model_kwargs):
     """Quantize a tiny model via a YAML recipe and export it to a unified HF checkpoint."""
     hf_model_path = create_model(tmp_path, with_tokenizer=True, **model_kwargs)

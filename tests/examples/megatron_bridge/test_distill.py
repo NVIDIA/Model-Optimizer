@@ -157,7 +157,7 @@ def test_distill_validate_only(tmp_path, num_gpus):
 
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
-@pytest.mark.timeout(360)  # sometimes times out in CI env with default 300s timeout
+@pytest.mark.timeout(420)  # sometimes times out in CI env with default 300s timeout
 def test_distill_vlm(tmp_path, num_gpus):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
