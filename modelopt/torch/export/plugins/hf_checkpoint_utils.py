@@ -216,12 +216,30 @@ def load_multimodal_components(
     hf_checkpoint_path = Path(pretrained_model_path)
     if not hf_checkpoint_path.is_dir():
         # Also accept a repo id, which is what the example scripts pass to quantize.py.
+        # Fetched in two stages: the vision tower is a small fraction of a VLM checkpoint, so
+        # pulling every shard to keep a few would waste tens of GB.
         local_files_only = _is_hf_hub_offline()
+        repo_id = str(pretrained_model_path)
         try:
+            index_dir = Path(
+                snapshot_download(
+                    repo_id=repo_id,
+                    allow_patterns=["model.safetensors.index.json"],
+                    local_files_only=local_files_only,
+                )
+            )
+            index_file = index_dir / "model.safetensors.index.json"
+            if index_file.is_file():
+                weight_map = json.loads(index_file.read_text())["weight_map"]
+                wanted = sorted(
+                    {shard for key, shard in weight_map.items() if key.startswith(prefixes)}
+                )
+            else:
+                wanted = ["model.safetensors"]  # unsharded checkpoint
             hf_checkpoint_path = Path(
                 snapshot_download(
-                    repo_id=str(pretrained_model_path),
-                    allow_patterns=["*.safetensors", "*.safetensors.index.json"],
+                    repo_id=repo_id,
+                    allow_patterns=["model.safetensors.index.json", *wanted],
                     local_files_only=local_files_only,
                 )
             )
@@ -252,7 +270,13 @@ def load_multimodal_components(
         with open(safetensors_index_file) as f:
             safetensors_index = json.load(f)
 
-        all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
+        all_shard_files = sorted(
+            {
+                shard
+                for key, shard in safetensors_index["weight_map"].items()
+                if key.startswith(prefixes)
+            }
+        )
         for shard_file in all_shard_files:
             safetensors_filepath = Path(hf_checkpoint_path) / shard_file
             with safe_open(safetensors_filepath, framework="pt") as f:

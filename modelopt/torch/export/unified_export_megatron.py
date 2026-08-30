@@ -446,8 +446,10 @@ class GPTModelExporter:
         if is_writer_rank:
             try:
                 self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
-            except RuntimeError as e:
-                failure = str(e)
+            except Exception as e:
+                # Any escape would strand peers in the all_gather below, which is what this
+                # block exists to prevent.
+                failure = f"{type(e).__name__}: {e}"
         if torch.distributed.is_initialized():
             # all_gather rather than broadcast: the writer is not necessarily rank 0, and ``src``
             # must be identical on every rank.
