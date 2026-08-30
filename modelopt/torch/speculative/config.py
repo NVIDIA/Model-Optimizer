@@ -185,7 +185,26 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_use_torch_compile: bool = ModeloptField(
         default=True,
-        description="Whether to use torch.compile on DFlash forward/loss methods.",
+        description=(
+            "Whether to torch.compile the compute-heavy parts of DFlash training: the draft "
+            "decoder stack and the DSpark TVD chunk. Costs a one-time compile on the first "
+            "training step; the draft's shapes are static, so it does not recur."
+        ),
+    )
+
+    dflash_use_flex_attention: bool = ModeloptField(
+        default=False,
+        description=(
+            "Compute the draft's attention with torch FlexAttention over a block-sparse "
+            "BlockMask instead of handing SDPA a materialized [B, 1, Q, KV] float mask. "
+            "The mask is only ~33% dense (each query block sees a context PREFIX up to its "
+            "anchor, plus its own block on the diagonal), and the dense form additionally "
+            "forces SDPA onto the cutlass memory-efficient backend -- whose only kernel is "
+            "sm80 -- because the fused backends reject arbitrary masks and cap head_dim at "
+            "256. Measured 4.0x on the draft attention (225 ms -> 56 ms fwd+bwd) at the "
+            "Gemma-4-E4B DSpark shape on B300, within bf16 rounding of the dense path. "
+            "Requires torch >= 2.5. Off by default."
+        ),
     )
 
     dflash_swa_window_size: int | None = ModeloptField(

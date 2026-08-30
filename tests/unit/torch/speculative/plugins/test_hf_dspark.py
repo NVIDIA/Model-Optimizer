@@ -34,7 +34,7 @@ from safetensors.torch import load_file
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.config import DFLASH_DEFAULT_CFG
 from modelopt.torch.speculative.plugins.hf_dflash import HFDFlashModel
-from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel
+from modelopt.torch.speculative.plugins.hf_dspark import HFDSparkModel, _tvd_per_token
 from modelopt.torch.speculative.plugins.modeling_dflash import DFlashModule
 from modelopt.torch.speculative.plugins.modeling_dspark import DSparkModule
 
@@ -311,3 +311,216 @@ class TestDSparkExporter:
         assert dc["shift_label"] is True
         assert "mask_token_id" in dc
         assert "target_layer_ids" in dc
+
+
+class TestTvdPerTokenChunking:
+    """``_tvd_per_token`` must be chunk-size-invariant, and must chunk via ``split``.
+
+    No other DSpark test reaches a second chunk: the tiny fixture yields N = 2 * 12 * 4
+    = 96 rows against the default ``chunk_size=1024``, so every existing test runs in a
+    single chunk and any chunk-boundary bug -- a mis-ordered ``cat``, a ragged tail
+    handled wrong, a row/label misalignment -- passes CI silently. These tests call the
+    helper directly so they can force many chunks on a tiny tensor.
+    """
+
+    @staticmethod
+    def _run(chunk_size, n=12, vocab=32):
+        """Forward + backward through ``_tvd_per_token`` from a fixed seed."""
+        torch.manual_seed(0)
+        final = torch.randn(n, vocab, requires_grad=True)
+        teacher = torch.randn(n, vocab)
+        out = _tvd_per_token(final, teacher, chunk_size=chunk_size)
+        # Weight the rows unequally, so a cat that reassembles the chunks in the wrong
+        # order cannot cancel out in the reduction.
+        (out * torch.arange(1, n + 1, dtype=out.dtype)).sum().backward()
+        return out.detach(), final.grad.detach()
+
+    # 12 rows: 5 and 7 leave a ragged last chunk (5+5+2, 7+5); 13 and 1024 exceed n.
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 7, 11, 12, 13, 1024])
+    def test_chunk_size_invariant(self, chunk_size):
+        ref_out, ref_grad = self._run(12)  # one chunk == the unchunked reference
+        out, grad = self._run(chunk_size)
+        assert torch.equal(out, ref_out), f"TVD value changed at chunk_size={chunk_size}"
+        assert torch.equal(grad, ref_grad), f"TVD grad changed at chunk_size={chunk_size}"
+
+    def test_chunks_via_split_not_slice(self):
+        """Pin the optimization itself, not just its result.
+
+        Slicing and splitting agree on every value, so no numerical test can tell them
+        apart -- only the backward graph can. Slicing costs O(n_chunks * N * vocab)
+        because each ``SliceBackward0`` zero-fills a full [N, vocab] tensor; at the
+        Gemma-4 shape that was 93.2 ms/step. This test is what stops the loop being
+        "simplified" back to ``final_logits[i : i + chunk_size]``.
+        """
+        final = torch.randn(8, 4, requires_grad=True)
+        teacher = torch.randn(8, 4)
+        out = _tvd_per_token(final, teacher, chunk_size=2)
+
+        # `alive` is load-bearing, not debris: accessing `.next_functions` hands back a
+        # FRESH python wrapper for each node every time, so a node we do not hold a
+        # reference to is freed the moment we pop it -- and CPython happily reuses that
+        # address for a later, different node. Without `alive` the id() check reports a
+        # false "already visited" and the walk truncates after three nodes, missing the
+        # Split/Slice node entirely (verified: both variants returned the same
+        # ['AbsBackward0', 'CatBackward0', 'SumBackward1']).
+        seen, visited, alive, stack = set(), set(), [], [out.grad_fn]
+        while stack:
+            fn = stack.pop()
+            if fn is None or id(fn) in visited:
+                continue
+            visited.add(id(fn))
+            alive.append(fn)
+            seen.add(type(fn).__name__)
+            stack.extend(nxt for nxt, _ in fn.next_functions)
+
+        assert any(name.startswith("SplitBackward") for name in seen), (
+            f"expected a SplitBackward node in the graph, saw: {sorted(seen)}"
+        )
+        assert not any(name.startswith("SliceBackward") for name in seen), (
+            f"chunking regressed to per-chunk slicing, saw: {sorted(seen)}"
+        )
+
+    def test_no_grad_path_matches_grad_path(self):
+        """The ``requires_grad=False`` branch skips checkpointing; values must not move."""
+        torch.manual_seed(0)
+        final = torch.randn(12, 32)
+        teacher = torch.randn(12, 32)
+        with torch.no_grad():
+            plain = _tvd_per_token(final, teacher, chunk_size=5)
+        grad_out = _tvd_per_token(final.requires_grad_(True), teacher, chunk_size=5)
+        assert torch.equal(plain, grad_out.detach())
+
+
+def _draft_args(model, n_blocks=2, bsz=1):
+    """Build the draft module's inputs the way the training forward does.
+
+    Worth going through the model's own helpers: the draft attends over the context as
+    keys but only its own blocks as queries, so target_hidden is seq_len long while
+    noise_embedding is n_blocks * block_size, and position_ids spans both. Hand-rolled
+    shapes silently disagree inside apply_rotary_pos_emb.
+    """
+    m = model.dflash_module
+    dt = m.fc.weight.dtype  # the draft carries the base model's dtype, not fp32
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, model.dflash_config.vocab_size, (bsz, SEQ_LEN))
+    anchors = (torch.arange(n_blocks).unsqueeze(0) * BLOCK_SIZE).expand(bsz, -1).contiguous()
+    keep = torch.ones(bsz, n_blocks, dtype=torch.bool)
+    noise = model._build_noise_embedding(input_ids, anchors, keep, n_blocks).to(dt)
+    target = torch.randn(bsz, SEQ_LEN, m.fc.in_features, dtype=dt)
+    pos = model._build_position_ids(SEQ_LEN, anchors, input_ids.device)
+    mask = model._build_draft_attention_mask(
+        SEQ_LEN, anchors, keep, n_blocks, dt, input_ids.device, window=None
+    )
+    return input_ids, anchors, keep, (noise, target, pos, mask)
+
+
+def _dspark_model(use_compile=False, **cfg_kwargs):
+    model = get_tiny_llama(num_hidden_layers=4)
+    cfg = _get_dspark_config(**cfg_kwargs)
+    cfg["dflash_use_torch_compile"] = use_compile
+    mtsp.convert(model, [("dflash", cfg)])
+    model.train()
+    return model
+
+
+class TestDraftStackCompile:
+    """The draft stack is Inductor-compiled only when asked for, and only while training."""
+
+    def test_flag_off_keeps_the_eager_body(self):
+        m = _dspark_model(use_compile=False).dflash_module
+        assert m._body() == m._forward_body
+
+    def test_eval_keeps_the_eager_body(self):
+        """Generation runs this module at a varying length; under dynamic=False that would
+        mint one compile per length -- the cost the pinned block count exists to avoid."""
+        m = _dspark_model(use_compile=True).dflash_module
+        m.eval()
+        assert m._body() == m._forward_body
+
+    def test_compiled_body_is_built_once(self):
+        m = _dspark_model(use_compile=True).dflash_module
+        first = m._body()
+        assert first != m._forward_body
+        assert m._body() is first, "recompiled on a later step"
+
+    def test_compiled_matches_eager(self):
+        """Same weights, same inputs, both bodies -- same hidden states."""
+        model = _dspark_model(use_compile=True)
+        m = model.dflash_module
+        _, _, _, args = _draft_args(model)
+        m._maybe_init_rotary_emb(device=args[0].device)  # normally done by forward()
+
+        with torch.no_grad():
+            ref = m._forward_body(*args)
+            got = m._body()(*args)
+        assert m._body() != m._forward_body, "fixture did not actually compile"
+        # Inductor may fuse and reassociate, so this is agreement to the dtype's precision,
+        # not bitwise equality.
+        torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+
+
+class TestDdpGradientCoverage:
+    """Every draft parameter must get a gradient on every batch, degenerate ones included.
+
+    This is the precondition for ddp_find_unused_parameters=false: DDP aborts the run the
+    first time a parameter that joined the reduction produces no gradient. The confidence
+    head is the one at risk -- it hangs off its own projection and never appears in
+    final_logits, so the branches that skip the loss terms have to reach it deliberately.
+    """
+
+    @staticmethod
+    def _model():
+        return _dspark_model(use_confidence_head=True, confidence_alpha=1.0)
+
+    @staticmethod
+    def _ungraded(model):
+        return [
+            n
+            for n, p in model.dflash_module.named_parameters()
+            if p.requires_grad and p.grad is None
+        ]
+
+    def test_batch_with_no_valid_anchor(self):
+        """Nothing is a training target, so forward() returns before building the draft."""
+        model = self._model()
+        torch.manual_seed(0)
+        input_ids = torch.randint(1, model.dflash_config.vocab_size, (2, SEQ_LEN))
+        out = model(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            labels=torch.full_like(input_ids, -100),
+        )
+        out.loss.backward()
+        assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"
+
+    def test_loss_branch_with_zero_total_weight(self):
+        """Anchors exist but every label position is masked, so the three terms are skipped.
+
+        Driven through the real module rather than synthetic logits: a gradient assertion
+        is only meaningful if the graph actually reaches the parameters.
+        """
+        model = self._model()
+        m = model.dflash_module
+        n_blocks, bsz = 2, 1
+        input_ids, anchors, _, args = _draft_args(model, n_blocks=n_blocks, bsz=bsz)
+        hidden = m(*args)
+        vocab = model.dflash_config.vocab_size
+        backbone_logits = torch.randn(bsz, n_blocks * BLOCK_SIZE, vocab, dtype=hidden.dtype)
+        # The teacher distribution is gathered before the degenerate branch is reached, so
+        # it has to be present even though this batch contributes nothing to the loss.
+        target_model_logits = torch.randn(bsz, SEQ_LEN, vocab, dtype=hidden.dtype)
+        final_logits, confidence_logits = model._apply_markov_head(
+            hidden, backbone_logits, input_ids, anchors, n_blocks
+        )
+        loss, _, _ = model._compute_dspark_loss(
+            backbone_logits,
+            final_logits,
+            confidence_logits,
+            input_ids,
+            anchors,
+            torch.ones(bsz, n_blocks),  # blocks are kept ...
+            torch.zeros(bsz, SEQ_LEN),  # ... but no label position carries weight
+            target_model_logits=target_model_logits,
+        )
+        loss.backward()
+        assert not self._ungraded(model), f"no gradient for {self._ungraded(model)}"

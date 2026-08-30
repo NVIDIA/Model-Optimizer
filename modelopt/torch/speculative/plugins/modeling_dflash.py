@@ -65,10 +65,19 @@ class DFlashBaseModelOutput:
 
     target_hidden: torch.Tensor  # concatenated hidden states from target layers [B, seq, N*H]
     logits: torch.Tensor | None = None  # base model logits [B, seq, vocab]
+    # Post-final-norm base hidden [B, seq, H], i.e. lm_head's input. Consumers that only
+    # need the base distribution at a handful of positions project THIS at those rows
+    # instead of materialising (and then gathering out of) full-sequence logits.
+    base_hidden: torch.Tensor | None = None
 
     @classmethod
     def from_offline_dict(
-        cls, d: dict, base_model_norm=None, base_model_lm_head=None, need_logits=False
+        cls,
+        d: dict,
+        base_model_norm=None,
+        base_model_lm_head=None,
+        need_logits=False,
+        defer_lm_head=False,
     ):
         """Construct from a dict of pre-computed base model outputs (offline training).
 
@@ -85,19 +94,25 @@ class DFlashBaseModelOutput:
         to lm_head would be a corrupt distillation target).
         """
         logits = d.get("base_model_logits")
+        base_hidden = None
         if need_logits and logits is None:
+            out_hiddens = d.get("base_model_hidden_states")
+            if out_hiddens is None:
+                raise KeyError("base_model_hidden_states")
+            base_hidden = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
+            if defer_lm_head:
+                # Caller will project only the rows it needs; skip the full-sequence
+                # [B, seq, vocab] materialisation entirely.
+                return cls(target_hidden=d["aux_hidden_states"], base_hidden=base_hidden)
             if base_model_lm_head is None:
                 raise ValueError(
                     "need_logits=True but base_model_lm_head is None; cannot reconstruct logits."
                 )
-            out_hiddens = d.get("base_model_hidden_states")
-            if out_hiddens is None:
-                raise KeyError("base_model_hidden_states")
-            out_hiddens = _maybe_apply_base_final_norm(out_hiddens, d, base_model_norm)
-            logits = base_model_lm_head(out_hiddens)
+            logits = base_model_lm_head(base_hidden)
         return cls(
             target_hidden=d["aux_hidden_states"],
             logits=logits,
+            base_hidden=base_hidden,
         )
 
 
@@ -185,6 +200,36 @@ class DFlashAttention(nn.Module):
         self._attn_fn = ALL_ATTENTION_FUNCTIONS.get(impl, ALL_ATTENTION_FUNCTIONS["sdpa"])
         return self._attn_fn
 
+    def _attend(self, q, k, v, attention_mask, bsz, q_len):
+        """Run attention and project, routing a FlexAttention BlockMask to the flex kernel.
+
+        ``attention_mask`` is either the dense additive [B, 1, Q, KV] tensor (HF attention
+        dispatch) or a BlockMask carrying the same predicate block-sparsely.
+        """
+        from .dflash_flex_attention import flex_attention_forward, is_block_mask
+
+        if is_block_mask(attention_mask):
+            dropout = 0.0 if not self.training else self.attention_dropout
+            if dropout:
+                raise ValueError(
+                    "FlexAttention path does not support attention_dropout > 0 "
+                    f"(got {dropout}); unset dflash_use_flex_attention."
+                )
+            attn_output = flex_attention_forward(q, k, v, attention_mask, self.scaling)
+        else:
+            attn_fn = self._get_attn_fn()
+            attn_output, _ = attn_fn(
+                self,
+                q,
+                k,
+                v,
+                attention_mask,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                scaling=self.scaling,
+                sliding_window=self.sliding_window,
+            )
+        return self.o_proj(attn_output.reshape(bsz, q_len, -1))
+
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
         """Forward with KV injection.
 
@@ -218,20 +263,7 @@ class DFlashAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        # Use HF's attention dispatch (handles GQA internally)
-        attn_fn = self._get_attn_fn()
-        attn_output, _ = attn_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-        )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
 
 class DFlashGemma4Attention(DFlashAttention):
@@ -361,19 +393,7 @@ class DFlashGemma4Attention(DFlashAttention):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        attn_fn = self._get_attn_fn()
-        attn_output, _ = attn_fn(
-            self,
-            q,
-            k,
-            v,
-            attention_mask,
-            dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=self.sliding_window,
-        )
-        attn_output = attn_output.reshape(bsz, q_len, -1)
-        return self.o_proj(attn_output)
+        return self._attend(q, k, v, attention_mask, bsz, q_len)
 
 
 class DFlashDecoderLayer(nn.Module):
@@ -561,9 +581,38 @@ class DFlashModule(nn.Module):
 
     def forward(self, noise_embedding, target_hidden, position_ids, attention_mask=None):
         """Forward with feature fusion, KV injection, and position embeddings."""
+        # Lazy rotary construction mutates the module, so it stays outside the compiled
+        # region below: Dynamo would either graph-break on it or bake in the first call's
+        # state.
+        self._maybe_init_rotary_emb(device=noise_embedding.device)
+        return self._body()(noise_embedding, target_hidden, position_ids, attention_mask)
+
+    def _body(self):
+        """Return the draft stack, Inductor-compiled on first use when asked for.
+
+        The layer loop is where the step's small-kernel tail lives: at the Gemma-4-E4B
+        shape a profiled step ran ~1500 pointwise launches, 403 ``aten::copy_`` and 205
+        device-to-device memcpys, individually microseconds and collectively about a third
+        of the step. Fusing them is a compiler's job.
+
+        ``dynamic=False`` is only affordable because ``_sample_anchor_positions`` pins the
+        block count; while n_blocks tracked the batch, every new width cost a fresh
+        multi-minute compile.
+
+        Training only. Generation (AR validation, drafting) runs the same module at a
+        different and varying shape, which under ``dynamic=False`` would mint a compile per
+        length -- exactly the trade the pinned block count was introduced to avoid.
+        """
+        if not self.training or not getattr(self, "_dflash_compile_stack", False):
+            return self._forward_body
+        if getattr(self, "_compiled_body", None) is None:
+            self._compiled_body = torch.compile(self._forward_body, dynamic=False)
+        return self._compiled_body
+
+    def _forward_body(self, noise_embedding, target_hidden, position_ids, attention_mask):
+        """Feature fusion, rotary selection, the decoder stack, and the final norm."""
         hidden_states = noise_embedding
         target_hidden = self.hidden_norm(self.fc(target_hidden))
-        self._maybe_init_rotary_emb(device=hidden_states.device)
         per_kind = {
             kind: emb(hidden_states, position_ids)
             for kind, emb in getattr(self, "rotary_emb_by_kind", {}).items()

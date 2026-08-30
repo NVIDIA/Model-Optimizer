@@ -576,6 +576,11 @@ class HFDFlashModel(DFlashModel):
 
         self.is_quantized = False
         self._num_anchors = self.dflash_num_anchors
+        # Opt-in Inductor fusion of the draft stack; see DFlashModule._body for why this is
+        # only affordable now that the block count is static.
+        self.dflash_module._dflash_compile_stack = bool(
+            getattr(self, "dflash_use_torch_compile", False)
+        )
 
     def _build_draft_module(self, dflash_config):
         """Build the draft module. Subclasses override to use an augmented module."""
@@ -592,6 +597,24 @@ class HFDFlashModel(DFlashModel):
 
         Returns (anchor_positions [B, N], block_keep_mask [B, N]).
 
+        ``N`` is fixed by the config and the sequence length, never by the batch
+        contents. It used to be ``min(num_anchors, valid_counts.max() - 1)``, i.e. a
+        function of the longest answer in the batch. ``n_blocks`` sets the draft's
+        ``q_len`` and ``kv_len``, and both the block-mask builder and the attention are
+        ``torch.compile(..., dynamic=False)``, so every distinct value cost a fresh
+        170-300 s recompile -- and new values kept appearing indefinitely, since any
+        batch whose answers are all shorter than the cap mints one. A 3-node production
+        run spent 1360 of its first 1510 training seconds frozen in recompilation
+        against a 0.6 s/step steady state.
+
+        Which anchors get sampled is unchanged: ``cap`` below still applies the old
+        data-dependent bound, just on-device and before the sort rather than as a slice
+        width. The surplus columns carry ``keep=False``, which every consumer already
+        handles because rows shorter than the batch maximum have always produced them:
+        the losses normalize by the weight sum derived from ``block_keep_mask``, and
+        ``mask_mod`` ands the same flag in, so FlexAttention skips those tiles instead
+        of computing them.
+
         TODO: Fix the random seed per epoch (change between epochs) so that anchor
         positions are deterministic within an epoch. This would allow caching the derived
         masks and position IDs across steps while preserving the same data augmentation
@@ -604,27 +627,34 @@ class HFDFlashModel(DFlashModel):
 
         valid = loss_mask[:, : max_anchor + 1] > 0.5
         valid_counts = valid.sum(dim=1)
-        max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
 
-        if max_n <= 0:
-            # No valid anchors — return empty
-            anchors = torch.zeros(bsz, 1, dtype=torch.long, device=device)
-            keep = torch.zeros(bsz, 1, dtype=torch.bool, device=device)
-            return anchors, keep
+        # Static. Bounded by max_anchor + 1 as well as num_anchors so that short sequences
+        # (unit tests, short-context recipes) cannot ask for more columns than exist.
+        max_n = min(num_anchors, max_anchor + 1)
+
+        # The bound the old code computed, kept on-device so the shapes above stay static
+        # and the .item() sync is gone. valid_counts <= max_anchor + 1 by construction, so
+        # clamping to max_n leaves this equal to min(num_anchors, valid_counts.max() - 1).
+        cap = (valid_counts.max() - 1).clamp(min=0, max=max_n)
 
         indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
-        masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+        fill = torch.tensor(seq_len + 1, device=device)
+        masked_indices = torch.where(valid, indices, fill)
 
         random_vals = torch.rand(bsz, max_anchor + 1, device=device)
         random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
 
         _, sorted_idx = random_vals.sort(dim=1)
         gathered = torch.gather(masked_indices, 1, sorted_idx)
-        anchors = gathered[:, :max_n].sort(dim=1).values
 
-        keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
-            max=max_n
-        )
+        # Blank past `cap` BEFORE sorting, not after. Sorting a wider slice would pull
+        # anchors from beyond the old bound into the front of the row and silently change
+        # which positions are trained on; blanking first reproduces the old
+        # ``gathered[:, :cap].sort()`` exactly and leaves the surplus as fill.
+        cols = torch.arange(max_n, device=device).unsqueeze(0)
+        anchors = torch.where(cols < cap, gathered[:, :max_n], fill).sort(dim=1).values
+
+        keep = cols < torch.minimum(valid_counts, cap).unsqueeze(1)
         anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
         return anchors, keep
 
@@ -674,6 +704,24 @@ class HFDFlashModel(DFlashModel):
         block_size = self.dflash_block_size
         q_len = n_blocks * block_size
         kv_len = seq_len + q_len
+
+        # FlexAttention consumes the same predicate as a BlockMask and skips the ~67% of
+        # tiles that are entirely masked; DFlashAttention routes a BlockMask to
+        # flex_attention_forward. See dflash_flex_attention.py for why this matters so
+        # much here (dense mask -> sm80 memory-efficient kernel -> 59% of the step).
+        if getattr(self, "dflash_use_flex_attention", False):
+            from .dflash_flex_attention import build_draft_block_mask
+
+            return build_draft_block_mask(
+                seq_len,
+                anchor_positions,
+                block_keep_mask,
+                n_blocks,
+                block_size,
+                window,
+                device,
+                head_dim=self.dflash_module.layers[0].self_attn.head_dim,
+            )
 
         q_indices = torch.arange(q_len, device=device).view(1, 1, -1, 1)
         kv_indices = torch.arange(kv_len, device=device).view(1, 1, 1, -1)

@@ -103,7 +103,13 @@ training:
   bf16: true
   tf32: true
   remove_unused_columns: false
-  ddp_find_unused_parameters: true
+  # false: every draft parameter gets a gradient on every batch, including the
+  # no-valid-anchor batches that skip the three loss terms -- forward() and the
+  # valid_count <= 1 branch both walk dflash_module.parameters() to keep DDP fed. True
+  # costs an extra autograd-graph traversal per iteration for nothing (torch itself warns
+  # it "did not find any unused parameters"). Precondition for this recipe:
+  # dflash_confidence_head_alpha > 0, otherwise the confidence head is never in the loss.
+  ddp_find_unused_parameters: false
   ddp_timeout: 1800
   report_to: none
 

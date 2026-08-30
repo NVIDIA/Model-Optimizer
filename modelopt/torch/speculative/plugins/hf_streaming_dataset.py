@@ -536,14 +536,22 @@ class EagleVllmStreamingDataset(StreamingDataset):
             time.sleep(0.0002)
         agent.release_xfer_handle(h)
         hidden_states = view.clone()  # copy out before /done so the gen check brackets the read
-        # /done frees the slot + reports valid; valid=False -> ring lapped us mid-read, bytes
-        # stale -> resample. A failed /done can't prove staleness, so default valid=True.
+        # /done frees the slot and reports whether the ring lapped us mid-read (stale bytes).
+        # It fails CLOSED: a /done that errors cannot prove the slot is still ours either, and
+        # the two mistakes are not symmetric. Discarding a good sample costs one resample;
+        # keeping a lapped one trains the draft on another prompt's activations, and nothing
+        # downstream catches that -- the token_ids check below compares the server's
+        # per-request record, not the bytes just read, so it passes on a mis-slotted read.
+        # A rising resample rate is at least visible in the logs; silent corruption is not.
         try:
             valid = self._http_rdma.get(
                 f"http://{host}:{port}/done", params={"req_id": rid}
             ).json()["valid"]
-        except Exception:
-            valid = True
+        except Exception as exc:
+            # Deliberately distinct from the lap message below: a wave of these is a sidecar
+            # problem, not ring pressure, and the two call for different fixes.
+            warn_rank_0(f"[streaming] /done failed for {sample['cid']} ({exc!r}); resampling")
+            return None
         if not valid:
             warn_rank_0(f"[streaming] slot lapped mid-read for {sample['cid']}; resampling")
             return None

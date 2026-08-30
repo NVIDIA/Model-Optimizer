@@ -50,4 +50,5 @@ class DFlashModel(DynamicModule):
         self.dflash_use_torch_compile = config.dflash_use_torch_compile
         self.dflash_fp32_master_weights = config.dflash_fp32_master_weights
         self.dflash_swa_window_size = config.dflash_swa_window_size
+        self.dflash_use_flex_attention = config.dflash_use_flex_attention
         self.dflash_export_rope_scaling = config.dflash_export_rope_scaling
