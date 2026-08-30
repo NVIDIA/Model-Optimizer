@@ -230,6 +230,22 @@ def load_modelopt_megatron_checkpoint(
         print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
         model = [get_language_model(m)[0] for m in unwrapped_model]
 
+    # The layout is baked into the checkpoint, so a model built with the other one silently
+    # mismatches. The keys are already read above, so check rather than trust the config.
+    ckpt_grouped = any(".experts.weight0" in key for key in checkpoint_keys)
+    ckpt_sequential = any(".local_experts." in key for key in checkpoint_keys)
+    if ckpt_grouped or ckpt_sequential:
+        built_sequential = any(
+            ".local_experts." in name for m in unwrap_model(model) for name, _ in m.named_modules()
+        )
+        if ckpt_sequential != built_sequential:
+            raise ValueError(
+                f"{megatron_path} stores MoE experts as "
+                f"{'SequentialMLP' if ckpt_sequential else 'grouped GEMM (TEGroupedMLP)'} but the "
+                f"model was built as {'SequentialMLP' if built_sequential else 'grouped GEMM'}. "
+                "Pass the same --no_moe_grouped_gemm setting used to write the checkpoint."
+            )
+
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory
     if restore_modelopt_state:

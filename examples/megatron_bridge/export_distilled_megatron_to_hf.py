@@ -69,7 +69,6 @@ from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
-    use_moe_grouped_gemm,
 )
 
 # Megatron-Bridge checkpoint iteration directories use names like ``iter_0000100``.
@@ -256,11 +255,8 @@ def main(args: argparse.Namespace):
         _bridge, _provider, _model, full_model, _tokenizer = load_mbridge_model_from_hf(
             hf_model_name_or_path=args.student_hf_path,
             trust_remote_code=args.trust_remote_code,
-            moe_grouped_gemm=use_moe_grouped_gemm(
-                args.student_hf_path,
-                trust_remote_code=args.trust_remote_code,
-                force_sequential=args.no_moe_grouped_gemm,
-            ),
+            # Mirrors distill.py's unquantized branch
+            moe_grouped_gemm=not args.no_moe_grouped_gemm,
             provider_overrides={
                 "tensor_model_parallel_size": args.tp_size,
                 "pipeline_model_parallel_size": args.pp_size,

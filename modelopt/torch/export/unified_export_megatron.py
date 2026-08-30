@@ -29,7 +29,7 @@ from typing import Any
 
 import torch
 import torch.distributed
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -50,6 +50,7 @@ from .model_config import (
     QUANTIZATION_W4A16_NVFP4,
 )
 from .plugins.hf_checkpoint_utils import (
+    _is_hf_hub_offline,
     copy_hf_ckpt_remote_code,
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
@@ -445,16 +446,25 @@ class GPTModelExporter:
 
     def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
         """Raise if the export dropped tensors the source has: a missing rule emits nothing."""
-        if pretrained_model_name_or_path is None or not os.path.isdir(
-            str(pretrained_model_name_or_path)
-        ):
-            return  # hub id: not worth a download inside export
+        if pretrained_model_name_or_path is None:
+            return
+        source_dir = str(pretrained_model_name_or_path)
+        if not os.path.isdir(source_dir):
+            # A repo id is the documented invocation, so fetch just the index rather than skip.
+            try:
+                source_dir = snapshot_download(
+                    repo_id=source_dir,
+                    allow_patterns=["*.safetensors.index.json"],
+                    local_files_only=_is_hf_hub_offline(),
+                )
+            except Exception:
+                return  # source unreachable: skip rather than fail an otherwise good export
         index_file = Path(save_directory) / "model.safetensors.index.json"
         if not index_file.exists():
             return
         with open(index_file) as f:
             exported = set(json.load(f)["weight_map"])
-        source = _read_checkpoint_keys(pretrained_model_name_or_path)
+        source = _read_checkpoint_keys(source_dir)
         if not source:
             return
 
@@ -1267,6 +1277,11 @@ class GPTModelExporter:
         weights = collect(".weight")
         if not weights:
             return
+        handled = (".weight", ".weight_scale", ".weight_scale_2", ".input_scale", ".output_scale")
+        unhandled = {k.split(".", 1)[1] for k in per_expert if not k.endswith(handled)}
+        assert not unhandled, (
+            f"{prefix}: grouped-expert packing has no rule for {sorted(unhandled)}"
+        )
         # Record against the packed prefix, as _pack_name_remapping does for the other packed path.
         if qformat in (None, QUANTIZATION_NONE):
             self._record_excluded_module(prefix)
@@ -1282,9 +1297,8 @@ class GPTModelExporter:
             self._state_dict[prefix] = merged_weight
         else:
             if scales_2:
-                # NVFP4 keeps each expert's block scales; only the global scale is merged.
-                merged_scale = torch.stack(scales, dim=0)
-                merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0]
+                # NVFP4 keeps each expert's block scales, rescaled onto the merged global scale.
+                merged_scale, merged_scale_2 = self._merge_nvfp4_expert_scales(scales, scales_2)
             else:
                 merged_scale, merged_scale_2 = torch.max(torch.stack(scales, dim=0), dim=0)[0], None
             self._state_dict[prefix] = to_quantized_weight(
@@ -1771,6 +1785,20 @@ class GPTModelExporter:
                 # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
                 self.kv_cache_dtype = kv_cache_dtype
 
+    @staticmethod
+    def _merge_nvfp4_expert_scales(scales: list, scales_2: list):
+        """Merge per-expert NVFP4 scales onto one global scale, preserving each expert's FP4 range.
+
+        Each expert's block scales were derived against its own ``scale_2``; rescaling them by
+        ``scale_2_i / scale_2_max`` keeps the quieter experts from losing a mantissa bit.
+        """
+        merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0]
+        stacked_2 = torch.stack(scales_2, dim=0).reshape(-1, *([1] * scales[0].dim()))
+        merged_scale = (
+            torch.stack(scales, dim=0).to(torch.float32) * (stacked_2 / merged_scale_2)
+        ).to(scales[0].dtype)
+        return merged_scale, merged_scale_2
+
     def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False, transpose=True):
         """Pack per-expert weights into one tensor; ``transpose`` for HF [E, in, out] layouts."""
         if is_mtp:
@@ -1812,8 +1840,9 @@ class GPTModelExporter:
                 merged_weight_scale = None
         else:
             # NVFP4
-            merged_weight_scale_2 = torch.max(torch.stack(weight_scale_2_list, dim=0), dim=0)[0]
-            merged_weight_scale = torch.stack(weight_scale_list, dim=0)
+            merged_weight_scale, merged_weight_scale_2 = self._merge_nvfp4_expert_scales(
+                weight_scale_list, weight_scale_2_list
+            )
             if transpose:
                 merged_weight_scale = merged_weight_scale.transpose(-2, -1).contiguous()
 
