@@ -1,0 +1,173 @@
+# Gemma-4-E4B DSpark, lr 2e-3 / theta 1e6, attn scale 1.0, 5 epochs -- FP32 MASTER
+# WEIGHTS rerun. Identical to hf_streaming_dspark_lr2e3_5ep_scale1_3n.yaml except for
+# dflash_fp32_master_weights and the dtype diagnostic below.
+#
+# Why. With scaling = 1.0 the draft has to LEARN the 1/sqrt(512) that the old arm got
+# as a free constant, and RMSNorm normalises away any scale in its input, so q_proj
+# cannot supply it -- only q_norm.weight can. That weight starts at exactly 1.0, where
+# bf16 spacing is 0.0039 and a step must clear 0.00195 to round anywhere. The recipe's
+# linear decay from 2e-3 puts the MAXIMUM Adam step below that at step ~2,559, so for
+# 97% of the run the parameter cannot move at all. Confirmed on the previous run's
+# checkpoint: weights BF16, Adam exp_avg and exp_avg_sq BF16, no master copy anywhere;
+# 78% of q_norm/k_norm still exactly 1.0 at step 56,000.
+#
+# fp32 spacing at 1.0 is 6e-8, so the barrier disappears. This also fixes bf16
+# exp_avg_sq, which is a separate accuracy problem affecting every parameter.
+#
+# Expected extra memory: draft is ~2.1B params, so weight+moments go 12.7 -> 25.4 GB
+# per rank against 275 GB of B300. Expected slowdown: small, since no fp32 matmul is
+# introduced -- if the step time moves much past 0.6 s something else is wrong.
+#
+# Gemma-4-E4B DSpark, lr 2e-3 / theta 1e6, 5 epochs from step 0 -- the SCALE-1 rerun.
+#
+# Byte-for-byte the same training configuration as the previous 5-epoch run
+# (experiment cicd_1787983450, whose curve reached AL 3.1176 at step 56,000). The only
+# ALGORITHMIC difference is in the code: DFlashGemma4Attention now attends at
+# scaling = 1.0 instead of global_head_dim**-0.5.
+#
+# Why. Gemma 4 puts no 1/sqrt(head_dim) in attention -- HF's Gemma4TextAttention sets
+# scaling = 1.0 and there is no query_pre_attn_scalar -- and vLLM follows the reference,
+# so the old draft was trained under a scale no serving stack applies. Measured on
+# checkpoint-56000 of the previous run, real vLLM, 80q MT-Bench, num_spec 7:
+#
+#     served at        128 tok   1024 tok
+#     1.0 (stock)      2.7981    2.7685
+#     512**-0.5        3.1577    3.1363     -> +12.9% / +13.3%
+#
+# So the previous run's drafter is legacy: it needs a patched vLLM to reach its own
+# numbers. This run should land near 3.16 on STOCK vLLM instead. Its harness numbers
+# will NOT be comparable to the old curve's -- the harness was told to use the training
+# scale, and the training scale changed -- so compare vLLM AL to vLLM AL.
+#
+# CODE: worktree g4-run2, detached at 753aa6fd3
+#   = haoguo/dflash-training-perf @ a1e5ae6ad  (PR #2279, newest perf work)
+#   + 52da250c42 cherry-picked   (PR #2186, the scaling fix)
+# The perf branch already contains PR #2186 through 0a9c92538b, so the cherry-pick was
+# the only graft needed and it applied clean.
+#
+# New in the perf head since the last run (a1e5ae6ad): dflash_use_torch_compile now
+# wraps DFlashModule's body, not just the DSpark TVD chunk, and the recipe's
+# ddp_find_unused_parameters flipped to false. Author measured 0.5497 -> 0.4927 s/step
+# on 3 nodes, at the cost of ~28 s more one-time compile. Expected wall for 88,350
+# steps: ~12.1 h of compute.
+#
+# TOPOLOGY: 3 nodes = 1 serve + 2 trainer. The launcher splits WHOLE nodes, so:
+#   2 trainer nodes x 8 GPU        = 16 DP ranks
+#   per_device_train_batch_size 4  x grad_accum 1
+#   -> global batch = 16 * 4 * 1   = 64
+#   corpus 1,130,852 rows / 64     ~= 17,670 steps per epoch, 88,350 for 5
+#
+# CORPUS: must be the CLEANED copy (g4_corpus_train). The raw synthesis output carries
+# a user-only `messages` column, and hf_streaming_dataset prefers `messages` over
+# `conversations` -- that yields an all-zero loss mask under answer_only_loss, every row
+# is rejected, and streaming SILENTLY HANGS with no error.
+#
+# Gemma-4-E4B specifics (verified on PDX 2026-08-12, unchanged):
+#  * EAGLE_CAPTURE_IDS: vLLM captures POST-layer with the residual added and indexes as
+#    layer_idx+1, so valid ids are 1..42 and 42 is the TRUE final layer. Gemma 4 repeats
+#    5x sliding + 1x full attention, so full-attention layers sit at ids
+#    [6,12,18,24,30,36,42]; we sample 6 (must be num_draft_layers + 1) to land on
+#    residual-stream boundaries.
+#  * No --trust-remote-code and no vLLM patch; gemma4 is native in the 2026-08-11 nightly.
+#
+# save_steps 2000, not 1000: each checkpoint is 6.9 GB, so 1000 would write 607 GB and
+# spend roughly 5% of the run in checkpoint I/O. 2000 still yields 44 curve points.
+
+job_name: Gemma-4-E4B_DSpark_lr2e3_5ep_scale1_fp32m_3n
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/gemma-4-E4B-it
+
+  task_0:
+    script: common/eagle3/train_eagle_streaming.sh
+    args:
+      - --config modules/Model-Optimizer/modelopt_recipes/general/speculative_decoding/dspark_gemma4_e4b.yaml
+      - model.model_name_or_path=<<global_vars.hf_model>>
+      - model.use_fake_base_for_offline=true
+      - data.mode=streaming
+      # Gemma 4's stock chat template has NO generation markers, so answer_only_loss
+      # silently yields an all-zero loss_mask and every row is rejected. This copy adds
+      # them; see the template file header.
+      - data.chat_template=examples/google/gemma-4-E4B-it/chat_template_train.jinja
+      - data.data_path=/traindata
+      - training.output_dir=/scratchspace/dspark_lr2e3_5ep_scale1_fp32m_3n
+      - training.training_seq_len=4096
+      - training.disable_tqdm=true
+      - training.ar_validate_steps=0
+      - training.num_train_epochs=5
+      - training.per_device_train_batch_size=4
+      - training.gradient_accumulation_steps=1
+      - training.learning_rate=2.0e-3
+      - dflash.dflash_use_flex_attention=true
+      # Now compiles the whole DFlashModule body, not just the TVD chunk (a1e5ae6ad).
+      - dflash.dflash_use_torch_compile=true
+      # Keep the draft's parameters and Adam moments in fp32 under bf16 autocast.
+      # Matmuls still run bf16 on tensor cores; this costs memory (12 B/param instead
+      # of 6), not speed. Without it a bf16 weight initialised at exactly 1.0 is frozen
+      # after ~step 2,600 -- the downward ULP there is 0.0039, an update must clear
+      # 0.00195, and the max Adam step is the LR, which the linear decay drops below
+      # that. Measured on the previous run: 78% of q_norm/k_norm entries were still
+      # EXACTLY 1.0 at step 56,000, and the furthest any had moved was 34 of the 245
+      # ULPs needed to reach head_dim**-0.5.
+      - dflash.dflash_fp32_master_weights=true
+      # Plain default rope at theta 1e6 -- all 256 freq pairs rotated. Set here rather
+      # than in the shared recipe so the other arms keep the recipe's theta 1e4.
+      - dflash.dflash_architecture_config.rope_override_rope_theta=1000000.0
+      - dflash.dflash_architecture_config.rope_override_rope_type=default
+      - training.warmup_steps=500
+      - training.logging_steps=20
+      - training.save_steps=2000
+      # All checkpoints are kept (user's call): HF save_total_limit defaults to None.
+      - training.answer_only_loss=true
+      - training.report_to=none
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      # MUST be exactly num_draft_layers + 1 (5 draft layers -> 6 ids).
+      - EAGLE_CAPTURE_IDS: "[6,12,18,24,36,42]"
+      - SERVE_NODES: "1"
+      - SERVE_GPU_MEM_UTIL: "0.9"
+      - SERVE_MAX_MODEL_LEN: "4352"
+      - SERVE_MAX_NUM_SEQS: "256"
+      - SERVE_READY_TIMEOUT: "2400"
+      - STREAMING_NUM_WORKERS: "4"
+      # Kept on purpose: a1e5ae6ad puts a NEW dynamic=False compiled region around the
+      # draft stack, so this run has a compile surface the previous one did not. If the
+      # recompile counter climbs past its initial plateau, that is the first symptom.
+      # Prints every parameter dtype once at startup. On purpose: the whole point of
+      # this run is a dtype change, and a silent no-op would look like "fp32 masters do
+      # not help" rather than "fp32 masters were never applied".
+      - DFLASH_LOG_PARAM_DTYPES: "1"
+      - TORCH_LOGS: recompiles
+      # FlexAttention pulls in torch.compile, and Triton's default cache lands on a
+      # shared filesystem where 8 ranks per node race each other: an early run died with
+      # OSError [Errno 116] Stale file handle while reading back a just-compiled kernel.
+      # /tmp is node-local ext4 and allows exec (/dev/shm is EXEC_BLOCKED), so Triton's
+      # rename protocol is atomic again.
+      - TRITON_CACHE_DIR: /tmp/g4_triton_cache
+      - TORCHINDUCTOR_CACHE_DIR: /tmp/g4_inductor_cache
+      - VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "1200"
+      - VLLM_ENGINE_ITERATION_TIMEOUT_S: "1200"
+      # NIXL hidden-state transport. Without these NIXL falls back to UCX, which reports
+      # "UCX CUDA support was not found" and dies with NIXL_ERR_REMOTE_DISCONNECT the
+      # moment the trainer pulls hidden states.
+      - NIXL_BACKENDS: LIBFABRIC
+      - FI_PROVIDER: efa
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 3
+      # WITHOUT THIS the launcher requests its 4h default and Slurm kills the run
+      # mid-epoch with State=TIMEOUT and no traceback.
+      # QUOTES ARE LOAD-BEARING: unquoted 72:00:00 is YAML sexagesimal and parses as an
+      # int that sbatch reads as MINUTES.
+      time: "72:00:00"
+      ntasks_per_node: 1
+      gpus_per_node: 8
+      # The auxfix image carries the AWS libfabric stack that NIXL needs.
+      container: /home/haoguo/lustre/containers/vllm-nightly-efa-x86_64-auxfix.sqsh
+      container_mounts:
+        - /home/haoguo/lustre/hf-local:/hf-local
+        - /home/haoguo/lustre/g4_corpus_train:/traindata
