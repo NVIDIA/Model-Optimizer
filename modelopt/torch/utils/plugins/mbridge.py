@@ -14,6 +14,7 @@
 # limitations under the License.
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
+import re
 from functools import cache
 from typing import Any
 
@@ -229,6 +230,24 @@ def load_modelopt_megatron_checkpoint(
     ):
         print_rank_0("Language-model-only checkpoint: loading into the VLM's `.language_model`.")
         model = [get_language_model(m)[0] for m in unwrapped_model]
+
+    # The expert layout is baked into the checkpoint and the two layouts use different key names,
+    # so a model built with the other one would load its experts as random init: the load is
+    # non-strict. Fires only when the layout is positively identified, so unknown naming is silent.
+    grouped_re = re.compile(r"experts\.linear_fc[12]\.weight\d")
+    ckpt_grouped = any(grouped_re.search(key) for key in checkpoint_keys)
+    ckpt_sequential = any(".local_experts." in key for key in checkpoint_keys)
+    model_grouped = any(
+        grouped_re.search(name) for m in unwrap_model(model) for name, _ in m.named_parameters()
+    )
+    if (ckpt_grouped and not model_grouped) or (ckpt_sequential and model_grouped):
+        raise ValueError(
+            f"{megatron_path} stores MoE experts as "
+            f"{'grouped GEMM (TEGroupedMLP)' if ckpt_grouped else 'SequentialMLP'} but the model "
+            f"was built as {'grouped GEMM' if model_grouped else 'SequentialMLP'}; the expert "
+            "weights would load as random init. Rebuild with the matching layout "
+            "(--no_moe_grouped_gemm toggles it)."
+        )
 
     # Restore the ModelOpt state before loading weights.
     # has_modelopt_state / load_modelopt_state resolves the latest iter_* directory

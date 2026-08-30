@@ -228,26 +228,32 @@ def load_multimodal_components(
                     local_files_only=local_files_only,
                 )
             )
-            index_file = index_dir / "model.safetensors.index.json"
-            if index_file.is_file():
-                weight_map = json.loads(index_file.read_text())["weight_map"]
-                wanted = sorted(
-                    {shard for key, shard in weight_map.items() if key.startswith(prefixes)}
-                )
-            else:
-                wanted = ["model.safetensors"]  # unsharded checkpoint
-            hf_checkpoint_path = Path(
-                snapshot_download(
-                    repo_id=repo_id,
-                    allow_patterns=["model.safetensors.index.json", *wanted],
-                    local_files_only=local_files_only,
-                )
-            )
         except (LocalEntryNotFoundError, OSError, ValueError) as exc:
             raise ValueError(
                 f"Invalid pretrained model path: {pretrained_model_path}. It should be a "
                 "directory or an available HuggingFace repo id."
             ) from exc
+
+        index_file = index_dir / "model.safetensors.index.json"
+        if index_file.is_file():
+            try:
+                weight_map = json.loads(index_file.read_text())["weight_map"]
+            except (json.JSONDecodeError, KeyError) as exc:
+                raise ValueError(f"Malformed safetensors index in {repo_id}.") from exc
+            wanted = sorted(
+                {shard for key, shard in weight_map.items() if key.startswith(prefixes)}
+            )
+        else:
+            wanted = ["model.safetensors"]  # unsharded checkpoint
+        # Kept separate from the resolution failure above: a hub outage or a full disk here is
+        # retryable, not a bad path.
+        hf_checkpoint_path = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["model.safetensors.index.json", *wanted],
+                local_files_only=local_files_only,
+            )
+        )
 
     safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
     safetensors_index_file = Path(hf_checkpoint_path) / "model.safetensors.index.json"
@@ -286,6 +292,12 @@ def load_multimodal_components(
 
     else:
         print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
+
+    if not multimodal_state_dict:
+        raise ValueError(
+            f"No tensors under {prefixes} in {pretrained_model_path}; the vision tower would be "
+            "missing from the export. The checkpoint's prefixes have likely changed."
+        )
 
     print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
     return multimodal_state_dict
