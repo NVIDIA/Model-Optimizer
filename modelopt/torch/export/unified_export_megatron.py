@@ -454,18 +454,29 @@ class GPTModelExporter:
             try:
                 source_dir = snapshot_download(
                     repo_id=source_dir,
-                    allow_patterns=["*.safetensors.index.json"],
+                    # Unsharded repos have no index, only a single model.safetensors.
+                    allow_patterns=["*.safetensors.index.json", "model.safetensors"],
                     local_files_only=_is_hf_hub_offline(),
                 )
             except Exception:
-                return  # source unreachable: skip rather than fail an otherwise good export
+                warn_rank_0(
+                    f"Export self-check skipped: cannot read {pretrained_model_name_or_path}."
+                )
+                return
         index_file = Path(save_directory) / "model.safetensors.index.json"
         if not index_file.exists():
-            return
-        with open(index_file) as f:
-            exported = set(json.load(f)["weight_map"])
+            single = Path(save_directory) / "model.safetensors"
+            if not single.exists():
+                warn_rank_0("Export self-check skipped: no safetensors written.")
+                return
+            with safe_open(str(single), framework="pt", device="cpu") as f:
+                exported = set(f.keys())
+        else:
+            with open(index_file) as f:
+                exported = set(json.load(f)["weight_map"])
         source = _read_checkpoint_keys(source_dir)
         if not source:
+            warn_rank_0(f"Export self-check skipped: no tensor index found in {source_dir}.")
             return
 
         # Narrow on purpose: compare module prefixes, not tensor names, since a quantized source
