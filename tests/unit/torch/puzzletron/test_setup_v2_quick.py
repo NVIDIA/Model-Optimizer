@@ -355,7 +355,7 @@ def test_quality_comparison_limit_must_be_a_positive_integer(limit):
         SetupError,
         match=r"post_mip\.quality_comparison\.limit must be a positive integer",
     ):
-        wizard_module._quality_comparison_defaults(resolver)
+        wizard_module._quality_comparison_defaults(resolver, modality="text")
 
 
 # Bundle generation and review output

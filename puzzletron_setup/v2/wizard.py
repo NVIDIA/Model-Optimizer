@@ -3543,7 +3543,9 @@ def _quality_comparison_defaults(
             "enabled post_mip.quality_comparison defaults require reference_checkpoint"
         )
     limit = comparison.get("limit")
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+    if (limit is not None or "profile" not in comparison) and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
         raise SetupError(
             f"post_mip.quality_comparison.limit must be a positive integer; got {limit!r}"
         )
