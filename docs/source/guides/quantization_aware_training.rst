@@ -156,7 +156,9 @@ revision. For Megatron-LM alone, omit them and use the bundled scripts at
 Megatron-Bridge
 ---------------
 
-Megatron-Bridge converts the Hugging Face model to Megatron-Core automatically.
+Megatron-Bridge converts the Hugging Face model to Megatron-Core automatically. The `Megatron-Bridge README <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
+includes the complete PTQ, QAD, data-preparation, and export options.
+
 First create a quantized Megatron checkpoint; it is the input to either QAT or QAD:
 
 .. code-block:: bash
@@ -207,9 +209,6 @@ Export the final QAD checkpoint to a deployable unified Hugging Face checkpoint:
         --hf_model_name_or_path "$MODEL" \
         --megatron_path /workspace/qwen3-0.6b-nvfp4-qad/checkpoints \
         --export_unified_hf_path /workspace/qwen3-0.6b-nvfp4-qad-hf
-
-The `Megatron-Bridge README <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_
-includes the complete PTQ, QAD, data-preparation, and export options.
 
 There is also a complete Slurm launcher example for QAD. It tokenizes the data,
 performs NVFP4 PTQ, distills the quantized student, and exports a unified Hugging
