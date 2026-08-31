@@ -182,8 +182,16 @@ def test_task_launcher_slices_visibility_and_propagates_payload_exit_status(
 def test_task_launcher_exports_shared_multi_node_rendezvous(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    monkeypatch.setenv("RANK", "99")
-    monkeypatch.setenv("WORLD_SIZE", "99")
+    distributed_keys = (
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "RANK",
+        "WORLD_SIZE",
+    )
+    for key in distributed_keys:
+        monkeypatch.setenv(key, "99")
     monkeypatch.setenv("PUZZLETRON_TASK_INDEX", "1")
     monkeypatch.setenv("PUZZLETRON_LOCAL_TASK_INDEX", "0")
     monkeypatch.setenv("PUZZLETRON_TASK_HOSTS", "node-a,node-b")
@@ -226,8 +234,7 @@ def test_task_launcher_exports_shared_multi_node_rendezvous(monkeypatch) -> None
     assert env["PUZZLETRON_GROUP_RANK"] == "1"
     assert env["PUZZLETRON_RENDEZVOUS_ENDPOINT"].startswith("node-a:")
     assert env["PUZZLETRON_RENDEZVOUS_ID"] == "attempt-a-group-0"
-    assert "RANK" not in env
-    assert "WORLD_SIZE" not in env
+    assert all(key not in env for key in distributed_keys)
 
 
 def test_run_worker_consumes_multi_node_task_launcher_identity(tmp_path: Path) -> None:

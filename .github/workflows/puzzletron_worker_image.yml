@@ -43,7 +43,7 @@ jobs:
             --build-arg "MODELOPT_REVISION=${GITHUB_SHA}" \
             --tag "${IMAGE}" \
             .
-      - name: Verify the baked worker contract
+      - name: Verify the installed worker environment
         run: |
           test "$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMAGE}")" = "${GITHUB_SHA}"
           docker run --rm "${IMAGE}" \

@@ -13,7 +13,7 @@ runner:
   execution_contract:
     repository: /opt/puzzletron/src/modelopt
     venv: /venv
-    container: REPLACE_WITH_REVIEWED_PUZZLETRON_IMAGE
+    container: REPLACE_WITH_PUZZLETRON_IMAGE
     container_mounts: REPLACE_WITH_REQUIRED_CONTAINER_MOUNTS
     prerun_commands: []
     postrun_commands: []

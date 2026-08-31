@@ -11,11 +11,11 @@ runner:
     max_nodes: 20
     time_limit: "4:00:00"
   execution_contract:
-    # These paths are provided by the canonical Puzzletron worker image.
+    # These paths are provided by the Puzzletron worker image.
     repository: /opt/puzzletron/src/modelopt
     venv: /venv
-    # Replace with a registry reference or materialized copy of that image.
-    container: REPLACE_WITH_REVIEWED_PUZZLETRON_IMAGE
+    # Replace with a registry reference or cluster-readable copy of that image.
+    container: REPLACE_WITH_PUZZLETRON_IMAGE
     # Replace with the host and container paths required by the campaign.
     container_mounts: "REPLACE_WITH_HOST_PATH:REPLACE_WITH_CONTAINER_PATH"
     # Optional site setup, for example cache or authentication variables.

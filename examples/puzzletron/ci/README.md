@@ -1,9 +1,10 @@
 # Puzzletron image validation
 
-The root [`Dockerfile`](../Dockerfile) is the canonical Puzzletron worker and
-GPU CI environment. [`ci_environment.json`](../ci_environment.json) records
-its immutable VCS inputs, selected direct package versions, CUDA architecture
-targets, NLTK resource checksums, and the reviewed Mamba compatibility patch.
+The [`Dockerfile`](../Dockerfile) builds the Puzzletron worker image.
+[`ci_environment.json`](../ci_environment.json) is the shared manifest read by
+the Dockerfile and its verifier. It keeps selected package versions, source
+revisions, CUDA targets, NLTK resource checksums, and the Mamba patch checksum
+together so installation and validation values do not drift.
 
 Build and verify the image from the repository root:
 
@@ -38,11 +39,11 @@ The image is Linux amd64-only because the current CUDA extension set and Linux
 `eva-decord 0.6.1` dependency do not have a validated ARM build path.
 The verifier checks package versions and sources, CUDA compatibility, worker
 imports, LMMS-Eval task configs, and the NLTK resources used by teacher
-evaluation. The image build therefore fails when the recorded worker contract
-is incomplete.
+evaluation. The image build therefore fails when the recorded requirements
+are incomplete.
 
 Use the resulting image directly with Docker, publish it to a registry, or
-materialize it in the format accepted by the target Slurm container plugin.
+convert it to the format accepted by the target Slurm container plugin.
 Workers and GPU CI jobs use the same `/venv` environment and the repository at
 `/opt/puzzletron/src/modelopt`. Publication and full workload validation are
 separate steps; they do not require another package installation recipe.

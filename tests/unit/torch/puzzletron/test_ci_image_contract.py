@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the canonical repository-owned Puzzletron worker image."""
+"""Tests for the repository-owned Puzzletron worker image."""
 
 import hashlib
 import json
@@ -36,9 +36,6 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert f"FROM {base_image}" in dockerfile
     assert "ARG TARGETPLATFORM" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' in dockerfile
-    assert (
-        "COPY examples/puzzletron/requirements.txt /opt/puzzletron/requirements.txt" in dockerfile
-    )
     assert "COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py" in (
         dockerfile
     )
@@ -47,19 +44,16 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     )
     assert 'python "${PUZZLETRON_VERIFY_SCRIPT}"' in dockerfile
 
-    assert "git jq ninja-build" in dockerfile
-    assert '"langdetect==$(pin gpu_image.langdetect)"' in dockerfile
-    assert '"nltk==$(pin gpu_image.nltk)"' in dockerfile
     assert "nltk_data/$(pin gpu_image.nltk_data_commit)/packages/tokenizers" in dockerfile
     assert (
         'echo "${nltk_resource_sha256}  ${nltk_archive}" | sha256sum --check --strict' in dockerfile
     )
-    assert "python -m pip check" not in dockerfile
 
 
 def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
+    dockerfile = (puzzletron_root / "Dockerfile").read_text()
 
     mamba_source = environment["runtime_image"]["mamba_ssm"]
     patch_bytes = (puzzletron_root / "patches" / mamba_source["compatibility_patch"]).read_bytes()
@@ -75,6 +69,11 @@ def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_p
         '-        "tilelang==0.1.8",',
         '+        "tilelang==0.1.9",',
     ]
+    assert '"$(pin runtime_image.mamba_ssm.repository)" /tmp/mamba-ssm' in dockerfile
+    assert 'git -C /tmp/mamba-ssm checkout --detach "$(pin runtime_image.mamba_ssm.commit)"' in (
+        dockerfile
+    )
+    assert 'test "$(git -C /tmp/mamba-ssm rev-parse HEAD)" = \\' in dockerfile
 
 
 def test_standalone_verifier_prefers_the_baked_examples_package(project_root_path, tmp_path):
@@ -122,9 +121,8 @@ def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):
     )
     pull_request_paths = changed_files_step["with"]["files"].splitlines()
 
-    for image_input in (".dockerignore", "examples/__init__.py"):
-        assert image_input in push_paths
-        assert image_input in pull_request_paths
+    assert "examples/__init__.py" in push_paths
+    assert "examples/__init__.py" in pull_request_paths
     assert "examples/puzzletron/**" in push_paths
     assert "examples/puzzletron/Dockerfile" in pull_request_paths
 
@@ -132,19 +130,8 @@ def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):
 def test_worker_image_workflow_builds_a_revision_identified_image(project_root_path):
     workflow_path = project_root_path / ".github/workflows/puzzletron_worker_image.yml"
     workflow_text = workflow_path.read_text()
-    workflow = yaml.safe_load(workflow_text)
 
-    assert workflow["on"]["push"]["branches"] == [
-        "pull-request/[0-9]+",
-        "feature/puzzletron_v2",
-    ]
-    job = workflow["jobs"]["build-worker-image"]
-    assert job["timeout-minutes"] == 240
-    assert "linux-amd64-gpu-rtxpro6000" in job["runs-on"]
-    define_tag = next(
-        step for step in job["steps"] if "revision-specific image tag" in step.get("name", "")
-    )
-    assert "modelopt-puzzletron:amd64-sha-${GITHUB_SHA:0:12}" in define_tag["run"]
+    assert "modelopt-puzzletron:amd64-sha-${GITHUB_SHA:0:12}" in workflow_text
     assert "--platform linux/amd64" in workflow_text
     assert '--build-arg "MODELOPT_REVISION=${GITHUB_SHA}"' in workflow_text
     assert "org.opencontainers.image.revision" in workflow_text

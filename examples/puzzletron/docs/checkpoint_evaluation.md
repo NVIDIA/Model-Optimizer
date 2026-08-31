@@ -22,7 +22,7 @@ separate [VLM checkpoint evaluator](vlm_checkpoint_evaluation.md).
 
 ## Quick start
 
-Run the command in the canonical Puzzletron worker image described in the
+Run the command in the Puzzletron worker image described in the
 [environment setup guide](environment_setup.md#worker-environment). Mount the
 checkpoint and output paths into the container, then run the default smoke:
 

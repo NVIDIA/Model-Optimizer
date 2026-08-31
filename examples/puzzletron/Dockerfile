@@ -126,7 +126,7 @@ COPY puzzletron_orchestrator /opt/puzzletron/src/modelopt/puzzletron_orchestrato
 COPY puzzletron_setup /opt/puzzletron/src/modelopt/puzzletron_setup
 COPY examples/puzzletron /opt/puzzletron/src/modelopt/examples/puzzletron
 
-# Verify the worker contract directly: package versions and sources, required
+# Verify the installed worker environment: package versions and sources, required
 # imports and assets, and the CUDA ABI used by Puzzletron.
 RUN python -m pip install --no-build-isolation --no-deps -e \
         "/opt/puzzletron/src/modelopt[hf,puzzletron,dev-test]" && \

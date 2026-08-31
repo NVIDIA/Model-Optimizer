@@ -33,14 +33,14 @@ ModelOpt, CUDA, the worker container, or the worker virtual environment.
 
 ## Worker environment
 
-The repository [`Dockerfile`](../Dockerfile) is the worker environment. It
+The repository [`Dockerfile`](../Dockerfile) builds the worker image. It
 installs ModelOpt, the pinned vLLM and AutoModel sources, AIPerf, LMMS-Eval,
 the required CUDA extensions, and the teacher-evaluation resources. Do not
 maintain a second set of worker installation commands outside the Dockerfile.
 
 Build the Linux amd64 image from the repository root by following the
 [image build and validation guide](../ci/README.md). That guide provides the
-canonical command and the revision-specific image tag.
+build command and the revision-specific image tag.
 
 The amd64 platform is required because the current CUDA extension set and
 Linux `eva-decord 0.6.1` dependency do not have a validated ARM build path.
@@ -57,7 +57,7 @@ Inside the image, the runner contract is:
 
 - `repository: /opt/puzzletron/src/modelopt`
 - `venv: /venv`
-- `container: <registry reference or cluster-visible materialization of the image>`
+- `container: <registry reference or cluster-readable image path>`
 
 Add site-specific data, model, cache, and result mounts through
 `container_mounts`. A registry upload or conversion to a cluster container

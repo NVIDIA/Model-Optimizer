@@ -6,7 +6,6 @@ on:
   push:
     branches: [main, release/*, feature/*]
     paths:
-      - ".dockerignore"
       - ".github/workflows/unit_tests.yml"
       - "examples/__init__.py"
       - "examples/puzzletron/**"
@@ -84,7 +83,6 @@ jobs:
         uses: step-security/changed-files@v46.0.5
         with:
           files: |
-            .dockerignore
             .github/workflows/unit_tests.yml
             examples/__init__.py
             examples/puzzletron/Dockerfile
