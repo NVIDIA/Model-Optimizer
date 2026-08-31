@@ -19,7 +19,6 @@ Supports per-category MT-Bench evaluation and online (context-dependent) validat
 """
 
 import argparse
-import json
 from collections import defaultdict
 
 from accelerate import Accelerator
@@ -29,7 +28,11 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.speculative.plugins.hf_eagle import HFARValidation
-from modelopt.torch.speculative.utils import load_vlm_or_llm
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 mto.enable_huggingface_checkpointing()
 
@@ -105,15 +108,11 @@ def main():
         "--config_overrides",
         type=str,
         default=None,
-        help=(
-            "JSON dict of config fields to override on the model config and its text_config "
-            "before instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints "
-            "whose nested text_config dims don't propagate to the parent config."
-        ),
+        help=CONFIG_OVERRIDES_HELP,
     )
     args = parser.parse_args()
 
-    config_overrides = json.loads(args.config_overrides) if args.config_overrides else None
+    config_overrides = parse_config_overrides(args.config_overrides)
 
     accelerator = Accelerator()
     model = load_vlm_or_llm(

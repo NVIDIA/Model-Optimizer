@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import importlib.util
+import json
 import os
 import sys
 import warnings
@@ -582,6 +583,34 @@ def enable_cp_ttt_patch(cp_size: int = 1):
             yield
         finally:
             modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = False
+
+
+CONFIG_OVERRIDES_HELP = (
+    "JSON object of config fields to override on the model config and its text_config before "
+    "instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints whose nested "
+    "text_config dims don't propagate to the parent config."
+)
+
+
+def parse_config_overrides(raw: str | None) -> dict | None:
+    """Parse a ``--config_overrides`` CLI value into a dict, or ``None`` if not supplied.
+
+    Rejects malformed JSON and non-object payloads here, with an actionable message, rather than
+    letting them surface later as a raw ``JSONDecodeError`` or an ``AttributeError`` from deep
+    inside model loading.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"--config_overrides is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"--config_overrides must be a JSON object mapping field names to values, got "
+            f"{type(parsed).__name__}: {raw!r}"
+        )
+    return parsed
 
 
 def load_vlm_or_llm(

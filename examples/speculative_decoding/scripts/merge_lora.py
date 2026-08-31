@@ -28,13 +28,16 @@ merges them into the base weights, and saves the fused model + tokenizer.
 """
 
 import argparse
-import json
 from pathlib import Path
 
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from modelopt.torch.speculative.utils import load_vlm_or_llm
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 
 def parse_args():
@@ -68,11 +71,7 @@ def parse_args():
         "--config_overrides",
         type=str,
         default=None,
-        help=(
-            "JSON dict of config fields to override on the base model config and its text_config "
-            "before instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints "
-            "whose nested text_config dims don't propagate to the parent config."
-        ),
+        help=CONFIG_OVERRIDES_HELP,
     )
     return parser.parse_args()
 
@@ -108,7 +107,7 @@ def main():
         dtype="auto",
         device_map="cpu",
         trust_remote_code=args.trust_remote_code,
-        config_overrides=json.loads(args.config_overrides) if args.config_overrides else None,
+        config_overrides=parse_config_overrides(args.config_overrides),
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_path, trust_remote_code=args.trust_remote_code
