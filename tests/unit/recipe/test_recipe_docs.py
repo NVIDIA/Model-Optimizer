@@ -117,24 +117,34 @@ def test_checkpoint_recipes_live_in_the_top_level_models_tier():
     """Lock in the model_type-vs-checkpoint split.
 
     Checkpoint-mirror recipes belong at ``models/<org>/<model_id>/``; ``huggingface/``
-    holds only per-``model_type`` recipes. A checkpoint recipe dropped back under
-    ``huggingface/`` (a re-created ``huggingface/models/``, or a nested
-    ``huggingface/<model_type>/<checkpoint>/<task>/``) fails loudly here instead of
-    silently shipping both tiers — e.g. on a bad merge that re-adds the old layout.
+    holds only per-``model_type`` recipes. ``huggingface/models`` is kept as a
+    backward-compatibility **symlink** to the top-level ``models/`` tier, so the old
+    ``--recipe huggingface/models/<org>/<model_id>/...`` paths still resolve; it must
+    stay a symlink that points at ``../models`` and never become a real directory that
+    holds recipes. A checkpoint recipe nested under a ``model_type`` (e.g.
+    ``huggingface/<model_type>/<checkpoint>/<task>/``) still fails loudly here instead
+    of silently shipping both tiers — e.g. on a bad merge that re-adds the old layout.
     """
     hf = RECIPES_DIR / "huggingface"
     models = RECIPES_DIR / "models"
-    assert not (hf / "models").exists(), (
-        "huggingface/models/ must not exist — checkpoint-mirror recipes live in the "
-        "top-level modelopt_recipes/models/ tier."
+    hf_models = hf / "models"
+    assert hf_models.is_symlink(), (
+        "huggingface/models must be a symlink to the top-level modelopt_recipes/models/ "
+        "tier (a backward-compat alias for the old --recipe paths), not a real directory."
+    )
+    assert hf_models.resolve() == models.resolve(), (
+        f"huggingface/models must resolve to the top-level models/ tier; resolves to "
+        f"{hf_models.resolve()} instead of {models.resolve()}."
     )
     # Every recipe under huggingface/ must be <model_type>/<task>/<file> (3 parts);
     # anything deeper is a checkpoint nested under a model_type and belongs in models/.
+    # Skip the huggingface/models symlink so the models/ recipes it aliases (4 parts)
+    # aren't miscounted as nested here.
     nested = sorted(
         str(p.relative_to(RECIPES_DIR))
         for ext in ("*.yaml", "*.yml")
         for p in hf.glob(f"**/{ext}")
-        if len(p.relative_to(hf).parts) != 3
+        if hf_models not in p.parents and len(p.relative_to(hf).parts) != 3
     )
     assert not nested, (
         f"Recipes under huggingface/ must be <model_type>/<task>/<file>; found nested "
