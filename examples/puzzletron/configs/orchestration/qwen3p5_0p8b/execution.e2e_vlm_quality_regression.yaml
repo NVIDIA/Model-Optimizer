@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Opt-in one-GPU automated route with production-equivalent lifecycle stages
-# and final evaluation, but reduced search, serving, and distillation budgets.
+# Opt-in one-GPU automated route with the shared final evaluation, but reduced
+# search, serving, and distillation budgets.
 execution:
   defaults:
     failure_policy: strict

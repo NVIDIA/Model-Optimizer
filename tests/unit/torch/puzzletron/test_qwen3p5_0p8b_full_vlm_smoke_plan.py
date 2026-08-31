@@ -38,14 +38,14 @@ EXECUTION_PATH = (
 )
 PRODUCTION_RUN_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml"
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
-PRODUCTION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.production_vlm_campaign.yaml"
+PRODUCTION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.vlm_campaign.yaml"
 REGRESSION_RUN_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_full_eval_regression.yaml"
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_regression.yaml"
 )
-REGRESSION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_full_eval_regression.yaml"
+REGRESSION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_vlm_quality_regression.yaml"
 
 
 def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revision"):
@@ -168,7 +168,7 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["global_distillation"]["freeze_policy"] == "train_all"
 
 
-def test_qwen3p5_0p8b_regression_reuses_production_final_evaluation_contract(
+def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contract(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -190,6 +190,12 @@ def test_qwen3p5_0p8b_regression_reuses_production_final_evaluation_contract(
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
     benchmark = nodes["final_vlm_evaluation"]
     stages = {stage.stage_id: stage for stage in regression.stages}
+
+    production_defaults = yaml.safe_load(PRODUCTION_RUN_PATH.read_text())["defaults"]
+    regression_defaults = yaml.safe_load(REGRESSION_RUN_PATH.read_text())["defaults"]
+    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_"
+    assert production_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
+    assert regression_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
 
     production_evaluation = dict(production_nodes["final_vlm_evaluation"]["config"])
     regression_evaluation = dict(benchmark["config"])

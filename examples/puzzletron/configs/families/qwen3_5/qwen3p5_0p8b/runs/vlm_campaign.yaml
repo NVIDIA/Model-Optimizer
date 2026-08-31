@@ -2,13 +2,14 @@
 
 defaults:
   - full_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_
   - _self_
 
 # Substantial one-model VLM campaign for Qwen 3.5 0.8B. This route expands the
 # real multimodal search, candidate selection, serving measurement, and
 # distillation budgets before applying the shared bounded final evaluation.
-puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_production_vlm}
-display_name: Qwen3p5 0.8B production VLM pruning campaign
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
+display_name: Qwen3p5 0.8B VLM pruning campaign
 
 pruning:
   eval_samples: 128
@@ -60,21 +61,3 @@ post_mip:
           type: downstream_evaluation
           input: short_vlm_kd
           failure_policy: strict
-          config:
-            profile: qwen35_vlm_e2e_full_eval
-            reference_checkpoint: ${teacher_dir}
-            batch_size: 1
-            timeout_seconds: 14400
-            dtype: bfloat16
-            gpu_memory_utilization: 0.5
-            max_model_len: 16384
-            limit_mm_per_prompt: {image: 12}
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1

@@ -1,14 +1,15 @@
 # @package _global_
 
 defaults:
-  - production_vlm_campaign
+  - full_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_
   - _self_
 
-# Opt-in automated full-lifecycle regression. It keeps the production route's
-# final evaluation contract unchanged while reducing search, serving, and KD
-# budgets. Its measured gates validate shared machinery, not production quality.
-puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_full_eval_regression}
-display_name: Qwen3p5 0.8B E2E full-evaluation regression
+# Opt-in automated full-lifecycle regression. It is independent from the larger
+# campaign but consumes the same pinned final-evaluation contract. Its measured
+# gates validate shared machinery, not production quality.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality_regression}
+display_name: Qwen3p5 0.8B E2E VLM quality regression
 
 pruning:
   eval_samples: 8
@@ -56,6 +57,11 @@ post_mip:
             global_batch_size: 1
             local_batch_size: 1
             checkpoint_every_steps: 2
+
+        final_vlm_evaluation:
+          type: downstream_evaluation
+          input: short_vlm_kd
+          failure_policy: strict
 
         # Repeated bounded runs measured deltas of -0.36 (RealWorldQA) and
         # -0.10 (MMMU). Two percentage points of explicit headroom cover GPU
