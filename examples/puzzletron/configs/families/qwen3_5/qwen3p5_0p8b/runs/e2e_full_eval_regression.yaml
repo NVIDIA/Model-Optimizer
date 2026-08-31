@@ -1,0 +1,78 @@
+# @package _global_
+
+defaults:
+  - production_vlm_campaign
+  - _self_
+
+# Opt-in automated full-lifecycle regression. It keeps the production route's
+# final evaluation contract unchanged while reducing search, serving, and KD
+# budgets. Its measured gates validate shared machinery, not production quality.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_full_eval_regression}
+display_name: Qwen3p5 0.8B E2E full-evaluation regression
+
+pruning:
+  eval_samples: 8
+
+sort_sanity:
+  eval_samples: 2
+
+width_sanity:
+  target_count_per_axis: 1
+  layer_count: 2
+  eval_samples: 2
+
+replacement_scoring:
+  eval_samples: 2
+
+mip:
+  runs:
+    params-90:
+      solver:
+        num_solutions: 1
+        min_hamming_distance: 2
+        max_seconds_per_solution: 30
+      homogeneous:
+        keep: 5
+
+post_mip:
+  flows:
+    params-90:
+      nodes:
+        image_eval:
+          config:
+            eval_samples: 2
+            block_size: 512
+        best_vlm_loss:
+          top_k: 2
+        vlm_serving:
+          config:
+            concurrency: [1]
+            request_count: 1
+            readiness_timeout: 300
+            benchmark_timeout: 300
+        short_vlm_kd:
+          config:
+            max_steps: 2
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 2
+
+        # Repeated bounded runs measured deltas of -0.36 (RealWorldQA) and
+        # -0.10 (MMMU). Two percentage points of explicit headroom cover GPU
+        # variability without turning this reduced-budget run into a production
+        # quality oracle.
+        realworldqa_quality_gate:
+          type: filter
+          input: final_vlm_evaluation
+          mode: threshold
+          metric: final_vlm_evaluation.delta.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
+          min: -0.38
+          require_match: true
+
+        mmmu_quality_gate:
+          type: filter
+          input: realworldqa_quality_gate
+          mode: threshold
+          metric: final_vlm_evaluation.delta.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none
+          min: -0.12
+          require_match: true

@@ -36,6 +36,16 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
+PRODUCTION_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml"
+)
+PRODUCTION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.production_vlm_campaign.yaml"
+REGRESSION_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_full_eval_regression.yaml"
+)
+REGRESSION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_full_eval_regression.yaml"
 
 
 def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revision"):
@@ -49,6 +59,18 @@ def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revi
         experiment_config_path=RUN_PATH,
         runner=load_runner_config(RUNNER_PATH),
         execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+
+def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path, execution_path: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
+    return compile_campaign_plan(
+        experiment_config_path=run_path,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(execution_path),
         stage_filter="full",
     )
 
@@ -144,3 +166,71 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert nodes["vlm_serving"]["config"]["topology"]["server_context_overhead_tokens"] == 16384
     assert config["global_distillation"]["domain"] == "vlm"
     assert config["global_distillation"]["freeze_policy"] == "train_all"
+
+
+def test_qwen3p5_0p8b_regression_reuses_production_final_evaluation_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    production = _compile_campaign(
+        monkeypatch,
+        tmp_path,
+        run_path=PRODUCTION_RUN_PATH,
+        execution_path=PRODUCTION_EXECUTION_PATH,
+    )
+    regression = _compile_campaign(
+        monkeypatch,
+        tmp_path,
+        run_path=REGRESSION_RUN_PATH,
+        execution_path=REGRESSION_EXECUTION_PATH,
+    )
+    production_config = production.experiment_config
+    config = regression.experiment_config
+    production_nodes = production_config["post_mip"]["flows"]["params-90"]["nodes"]
+    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
+    benchmark = nodes["final_vlm_evaluation"]
+    stages = {stage.stage_id: stage for stage in regression.stages}
+
+    production_evaluation = dict(production_nodes["final_vlm_evaluation"]["config"])
+    regression_evaluation = dict(benchmark["config"])
+    assert production_evaluation.pop("reference_checkpoint") == production_config["teacher_dir"]
+    assert regression_evaluation.pop("reference_checkpoint") == config["teacher_dir"]
+    assert regression_evaluation == production_evaluation
+    assert stages["post.params-90.final_vlm_evaluation"].parents == ("post.params-90.short_vlm_kd",)
+    assert stages["post.params-90.realworldqa_quality_gate"].parents == (
+        "post.params-90.final_vlm_evaluation",
+    )
+    assert set(stages["post.params-90.mmmu_quality_gate"].parents) == {
+        "post.params-90.realworldqa_quality_gate",
+        "post.params-90.final_vlm_evaluation",
+    }
+    assert benchmark["input"] == "short_vlm_kd"
+    assert benchmark["failure_policy"] == "strict"
+    assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
+    assert benchmark["config"]["batch_size"] == 1
+    assert benchmark["config"]["timeout_seconds"] == 14400
+    assert benchmark["config"]["max_model_len"] == 16384
+    assert benchmark["config"]["limit_mm_per_prompt"] == {"image": 12}
+    assert nodes["realworldqa_quality_gate"] == {
+        "type": "filter",
+        "input": "final_vlm_evaluation",
+        "mode": "threshold",
+        "metric": (
+            "final_vlm_evaluation.delta."
+            "modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
+        ),
+        "min": -0.38,
+        "require_match": True,
+    }
+    assert nodes["mmmu_quality_gate"]["input"] == "realworldqa_quality_gate"
+    assert nodes["mmmu_quality_gate"]["metric"].endswith("mmmu_val.mmmu_acc_none")
+    assert nodes["mmmu_quality_gate"]["min"] == -0.12
+    assert nodes["mmmu_quality_gate"]["require_match"] is True
+    assert production_config["pruning"]["eval_samples"] == 128
+    assert config["pruning"]["eval_samples"] == 8
+    assert production_nodes["vlm_serving"]["config"]["request_count"] == 32
+    assert nodes["vlm_serving"]["config"]["request_count"] == 1
+    assert production_nodes["short_vlm_kd"]["config"]["max_steps"] == 256
+    assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
+    assert all(stage.total_gpus == 1 for stage in (*production.stages, *regression.stages))

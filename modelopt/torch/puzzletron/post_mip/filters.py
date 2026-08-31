@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Deterministic selection modes for post-MIP candidate sets."""
 
@@ -43,7 +55,15 @@ def _metric_entries(config: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 
 def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
-    common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
+    common = {
+        "type",
+        "input",
+        "model_source",
+        "failure_policy",
+        "config",
+        "mode",
+        "require_match",
+    }
     allowed = {
         "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
         "threshold": common | {"metric", "min", "max"},
@@ -52,6 +72,8 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     }
     if mode not in allowed:
         raise ValueError("filter.mode must be top_k, threshold, pareto, or aggregate_rank")
+    if not isinstance(config.get("require_match", False), bool):
+        raise TypeError("filter.require_match must be a boolean")
     unknown = set(config) - allowed[mode]
     if unknown:
         raise ValueError(f"unknown {mode} filter fields: {sorted(unknown)}")
@@ -232,7 +254,7 @@ def apply_filter(
         metric = str(config["metric"])
         minimum = config.get("min")
         maximum = config.get("max")
-        selected = []
+        threshold_selected = []
         for revision_id in revision_ids:
             value = _finite_metric(ledger, revision_id, metric)
             if value is None:
@@ -242,8 +264,8 @@ def apply_filter(
             elif maximum is not None and value > float(maximum):
                 excluded[revision_id] = f"{metric} above maximum"
             else:
-                selected.append(revision_id)
-        return tuple(selected), excluded, scores
+                threshold_selected.append(revision_id)
+        return tuple(threshold_selected), excluded, scores
 
     entries = _metric_entries(config)
     values = {}
@@ -252,9 +274,9 @@ def apply_filter(
         if any(value is None for value in row):
             excluded[revision_id] = "missing one or more required finite metrics"
         else:
-            values[revision_id] = tuple(float(value) for value in row)
+            values[revision_id] = tuple(value for value in row if value is not None)
     if mode == "pareto":
-        selected = []
+        pareto_selected = []
         for revision_id, row in values.items():
             dominated = False
             for other_id, other in values.items():
@@ -278,8 +300,8 @@ def apply_filter(
             if dominated:
                 excluded[revision_id] = "Pareto dominated"
             else:
-                selected.append(revision_id)
-        return tuple(selected), excluded, scores
+                pareto_selected.append(revision_id)
+        return tuple(pareto_selected), excluded, scores
 
     ranks: dict[str, list[tuple[float, float]]] = defaultdict(list)
     for index, entry in enumerate(entries):

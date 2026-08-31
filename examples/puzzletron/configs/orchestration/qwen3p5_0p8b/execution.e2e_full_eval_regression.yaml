@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Opt-in one-GPU automated route with production-equivalent lifecycle stages
+# and final evaluation, but reduced search, serving, and distillation budgets.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    convert: {strategy: single, instances: 1}
+    width_importance: {strategy: single, instances: 1}
+    sort: {strategy: single, instances: 1}
+    sort_sanity: {strategy: single, instances: 1}
+    width_sanity: {strategy: single, instances: 1}
+    slicing_sanity: {strategy: single, instances: 1}
+    build_library: {strategy: single, instances: 1}
+    replacement_scoring: {strategy: single, instances: 1}
+    mip: {strategy: single, instances: 1}
+    post.params-90.image_eval: {strategy: sharded, instances: 1}
+    post.params-90.best_vlm_loss: {strategy: single, instances: 1}
+    post.params-90.materialized: {strategy: sharded, instances: 1}
+    post.params-90.checkpoint_eval: {strategy: sharded, instances: 1}
+    post.params-90.vlm_serving: {strategy: sharded, instances: 1}
+    post.params-90.fastest_vlm: {strategy: single, instances: 1}
+    post.params-90.short_vlm_kd: {strategy: sharded, instances: 1}
+    post.params-90.post_kd_checkpoint_eval: {strategy: sharded, instances: 1}
+    post.params-90.final_image_eval: {strategy: sharded, instances: 1}
+    post.params-90.best: {strategy: single, instances: 1}
+    post.params-90.final_vlm_evaluation: {strategy: sharded, instances: 1}
+    post.params-90.realworldqa_quality_gate: {strategy: single, instances: 1}
+    post.params-90.mmmu_quality_gate: {strategy: single, instances: 1}

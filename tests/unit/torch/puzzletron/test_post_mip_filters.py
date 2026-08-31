@@ -265,6 +265,18 @@ def test_best_selection_mode_is_rejected_on_non_top_k_filter():
         )
 
 
+def test_require_match_must_be_boolean():
+    with pytest.raises(TypeError, match="require_match"):
+        validate_filter_config(
+            {
+                "mode": "threshold",
+                "metric": "evaluation.delta.accuracy",
+                "min": -0.1,
+                "require_match": "yes",
+            }
+        )
+
+
 @pytest.mark.parametrize("metric", ["output_token_throughput", "mip.score"])
 def test_sweep_selection_requires_a_node_qualified_metric(metric):
     with pytest.raises(ValueError, match="node-qualified"):

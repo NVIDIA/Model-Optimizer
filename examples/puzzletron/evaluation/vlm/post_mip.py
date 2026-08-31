@@ -30,7 +30,11 @@ if TYPE_CHECKING:
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import evaluate
 
-__all__ = ["evaluate_realworldqa_checkpoint", "register_profiles"]
+__all__ = [
+    "evaluate_e2e_full_eval_checkpoint",
+    "evaluate_realworldqa_checkpoint",
+    "register_profiles",
+]
 
 _RUNNER_OVERRIDES = frozenset(
     {
@@ -43,25 +47,13 @@ _RUNNER_OVERRIDES = frozenset(
 )
 
 
-def register_profiles() -> None:
-    """Install the example-owned profile into the generic post-MIP runner."""
-
-    from modelopt.torch.puzzletron.post_mip.runner import register_downstream_evaluation_profile
-
-    register_downstream_evaluation_profile(
-        "qwen35_vlm_realworldqa",
-        evaluate_realworldqa_checkpoint,
-    )
-
-
-def evaluate_realworldqa_checkpoint(
+def _run_profile(
     checkpoint_path: str | Path,
     *,
     output_root: str | Path,
     settings: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Run the two-sample pinned RealWorldQA profile for one saved checkpoint."""
-
+    suite: str,
+) -> tuple[argparse.Namespace, dict[str, object], Path]:
     settings = dict(settings)
     unexpected = set(settings) - _RUNNER_OVERRIDES - {"batch_size", "timeout_seconds"}
     if unexpected:
@@ -71,7 +63,7 @@ def evaluate_realworldqa_checkpoint(
     args = argparse.Namespace(
         checkpoint=Path(checkpoint_path).expanduser().absolute(),
         output_dir=output_dir,
-        suite="realworldqa-smoke",
+        suite=suite,
         batch_size=int(settings.pop("batch_size", 1)),
         seed=42,
         timeout_seconds=settings.pop("timeout_seconds", None),
@@ -95,7 +87,91 @@ def evaluate_realworldqa_checkpoint(
         settings_overrides=settings,
         preflight_callback=write_preflight,
     )
+    return args, result, profile_path
+
+
+def register_profiles() -> None:
+    """Install the example-owned profile into the generic post-MIP runner."""
+
+    from modelopt.torch.puzzletron.post_mip.runner import register_downstream_evaluation_profile
+
+    register_downstream_evaluation_profile(
+        "qwen35_vlm_realworldqa",
+        evaluate_realworldqa_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        "qwen35_vlm_e2e_full_eval",
+        evaluate_e2e_full_eval_checkpoint,
+    )
+
+
+def evaluate_realworldqa_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run the two-sample pinned RealWorldQA profile for one saved checkpoint."""
+
+    _args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="realworldqa-smoke",
+    )
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
         raise RuntimeError("pinned RealWorldQA profile returned an invalid run count")
     return {**runs[0], "profile_path": str(profile_path)}
+
+
+def evaluate_e2e_full_eval_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run and average the repeated, bounded final-evaluation contract."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="e2e-full-eval",
+    )
+    runs = result["runs"]
+    if (
+        not isinstance(runs, list)
+        or len(runs) != 2
+        or not all(isinstance(item, dict) for item in runs)
+    ):
+        raise RuntimeError("pinned VLM final-evaluation profile returned an invalid run count")
+    metric_names = set(runs[0].get("metrics") or {})
+    if not metric_names or any(set(item.get("metrics") or {}) != metric_names for item in runs[1:]):
+        raise RuntimeError("pinned VLM final-evaluation repetitions produced different metrics")
+    metrics = {
+        name: sum(float(item["metrics"][name]) for item in runs) / len(runs)
+        for name in sorted(metric_names)
+    }
+    result_paths = [str(item["result_path"]) for item in runs]
+    summary_path = args.output_dir / "e2e_full_eval_summary.json"
+    checkpoint.write_generated(
+        summary_path,
+        json.dumps(
+            {
+                "checkpoint": str(args.checkpoint),
+                "metrics": metrics,
+                "result_paths": result_paths,
+                "suite": args.suite,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    return {
+        "metrics": metrics,
+        "profile_path": str(profile_path),
+        "result_path": str(summary_path),
+        "run_result_paths": result_paths,
+    }

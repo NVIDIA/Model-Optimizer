@@ -194,6 +194,7 @@ def _report(
             suites.manifest_sha256(quick_manifest) if quick_manifest is not None else None
         ),
         "short_repetitions": execution_policy["repetitions"] if suite == "short" else None,
+        "repetitions": execution_policy["repetitions"],
         "judge_policy": judge_policy,
         "network_policy": "offline_cached_data_only",
     }
@@ -220,6 +221,7 @@ def settings(
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
         "reasoning_parser": "qwen3",
+        "log_samples": True,
         "model_args": {
             "fps": frame_policy["fps"],
             "max_frame_num": frame_policy["max_frames"],

@@ -188,6 +188,53 @@ multimodal API and provides a value for candidate selection, but it is not a
 performance benchmark. Use more requests, realistic concurrency, and your
 deployment image sizes before drawing throughput conclusions.
 
+## Choose the production or automated E2E route
+
+Both routes use only the pinned Qwen 3.5 0.8B VLM. The substantial
+`production_vlm_campaign.yaml` route uses realistic multimodal search,
+candidate evaluation, MIP selection, serving measurement, distillation, and
+final evaluation budgets. The opt-in `e2e_full_eval_regression.yaml` route
+runs the same complete lifecycle with reduced search, serving, and training
+budgets so it is suitable for automated regression.
+
+The regression inherits the production campaign's final-evaluation node rather
+than restating it. A plan test checks that the resolved contracts remain equal.
+That shared contract evaluates the same final student and pinned teacher on the
+first 100 rows of the pinned RealWorldQA and MMMU task revisions, twice. It pins
+the evaluator revision, generated task definitions, selection rule, seed,
+batch size, frame policy, and greedy generation settings. Per-sample outputs,
+student metrics, teacher metrics, and student-minus-teacher deltas are retained.
+
+Repeated bounded GPU runs produced identical student-minus-teacher deltas of
+-0.36 on RealWorldQA and -0.10 on MMMU. The regression filters allow two
+percentage points of explicit headroom beyond those measurements: -0.38 and
+-0.12, respectively. This margin covers small GPU variation without requiring
+bit-for-bit reproducibility. The regression validates the shared pipeline and
+evaluation machinery; its reduced-budget checkpoint is not evidence for the
+production campaign's final numerical quality.
+
+Run the automated route with a site-specific runner. A completed evaluation
+repetition is identity-bound and resumable, so a later allocation can continue
+without rerunning it. Set a distinct output root; this route requires the
+pinned RealWorldQA and MMMU caches and is intentionally excluded from default
+CI:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_full_eval_regression.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.e2e_full_eval_regression.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_full_eval_regression
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+Inspect the compiled stage order and one-GPU allocation before launch. Then
+omit `--dry-run` to launch or resume the exact same three-input campaign.
+
 ## Evaluate a saved checkpoint separately
 
 The campaign evaluates saved checkpoints automatically and records the results
@@ -208,13 +255,14 @@ If preflight succeeds, run the same command without `--preflight-only`. The
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 
-## Plan a larger run
+## Run the production campaign
 
-Start from `full_vlm_smoke.yaml` and `execution.single_gpu.yaml`. Copy the run
-config, keep the VLM-specific order of evaluation, materialization, image
-serving, selection, and distillation, then change each small smoke limit for
-your use case. Keep the shared execution profile for a one-GPU run or select a
-profile that matches the intended resources.
+Use `production_vlm_campaign.yaml` with
+`execution.single_gpu.yaml`. It keeps the same final evaluation contract but
+expands the search measurements, MIP solution set, serving requests and
+concurrency, and VLM distillation budget. Tune site resources and the pinned
+training dataset for the intended campaign; do not substitute a tiny model as
+a quality oracle.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:

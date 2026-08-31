@@ -1,0 +1,80 @@
+# @package _global_
+
+defaults:
+  - full_vlm_smoke
+  - _self_
+
+# Substantial one-model VLM campaign for Qwen 3.5 0.8B. This route expands the
+# real multimodal search, candidate selection, serving measurement, and
+# distillation budgets before applying the shared bounded final evaluation.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_production_vlm}
+display_name: Qwen3p5 0.8B production VLM pruning campaign
+
+pruning:
+  eval_samples: 128
+
+sort_sanity:
+  eval_samples: 16
+
+width_sanity:
+  target_count_per_axis: 2
+  layer_count: 8
+  eval_samples: 16
+
+replacement_scoring:
+  eval_samples: 64
+
+mip:
+  runs:
+    params-90:
+      solver:
+        num_solutions: 8
+        min_hamming_distance: 2
+        max_seconds_per_solution: 300
+      homogeneous:
+        keep: 8
+
+post_mip:
+  flows:
+    params-90:
+      nodes:
+        image_eval:
+          config:
+            eval_samples: 64
+            block_size: 512
+        best_vlm_loss:
+          top_k: 4
+        vlm_serving:
+          config:
+            concurrency: [1, 4]
+            request_count: 32
+            readiness_timeout: 600
+            benchmark_timeout: 1800
+        short_vlm_kd:
+          config:
+            max_steps: 256
+            global_batch_size: 4
+            local_batch_size: 1
+            checkpoint_every_steps: 32
+        final_vlm_evaluation:
+          type: downstream_evaluation
+          input: short_vlm_kd
+          failure_policy: strict
+          config:
+            profile: qwen35_vlm_e2e_full_eval
+            reference_checkpoint: ${teacher_dir}
+            batch_size: 1
+            timeout_seconds: 14400
+            dtype: bfloat16
+            gpu_memory_utilization: 0.5
+            max_model_len: 16384
+            limit_mm_per_prompt: {image: 12}
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
