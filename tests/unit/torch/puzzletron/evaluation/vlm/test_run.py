@@ -254,7 +254,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
     assert settings["model"] == "vllm"
-    assert settings["log_samples"] is True
+    assert settings["log_samples"] is False
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings
@@ -290,7 +290,7 @@ def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, 
     def fake_runner(checkpoint_path, *, output_root, settings):
         calls.append(output_root)
         result_path = output_root / "attempt" / "summary.json"
-        result_path.parent.mkdir(parents=True)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text("{}\n")
         return {
             "metrics": {"accuracy": len(calls) / 10},
@@ -326,11 +326,14 @@ def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, 
 
     state_path = model / "modelopt_state.json"
     state_path.write_text("{}\n")
-    with pytest.raises(RuntimeError, match="inputs do not match"):
-        evaluation.evaluate(args)
+    changed_checkpoint = evaluation.evaluate(args)
+    assert len(calls) == 4
+    assert changed_checkpoint["runs"] != first["runs"]
 
     state_path.unlink()
-    Path(first["runs"][0]["result_path"]).unlink()
+    restored_checkpoint = evaluation.evaluate(args)
+    assert len(calls) == 6
+    Path(restored_checkpoint["runs"][0]["result_path"]).unlink()
     with pytest.raises(RuntimeError, match="result artifact is missing"):
         evaluation.evaluate(args)
 

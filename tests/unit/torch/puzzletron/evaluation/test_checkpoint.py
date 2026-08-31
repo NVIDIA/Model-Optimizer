@@ -75,10 +75,14 @@ def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(monkey
         SimpleNamespace(stdout=f"{checkpoint.LMMS_EVAL_REVISION}\n"),
         SimpleNamespace(stdout=""),
     ]
+
+    def missing_distribution(_name):
+        raise checkpoint.importlib.metadata.PackageNotFoundError("lmms-eval")
+
     monkeypatch.setattr(
         checkpoint.importlib.metadata,
         "distribution",
-        lambda _name: _distribution(None),
+        missing_distribution,
     )
     monkeypatch.setattr(
         checkpoint.importlib.util,

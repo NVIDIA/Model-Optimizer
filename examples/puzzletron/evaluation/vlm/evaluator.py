@@ -85,7 +85,7 @@ def _load_completed_run(
     if not isinstance(payload, Mapping) or payload.get("schema") != _COMPLETED_RUN_SCHEMA:
         raise RuntimeError(f"invalid completed VLM evaluation record: {completion_path}")
     if payload.get("identity") != dict(identity):
-        raise RuntimeError(f"completed VLM evaluation inputs do not match: {completion_path}")
+        return None
     return _validated_run_result(payload.get("result"), label="completed VLM evaluation")
 
 
