@@ -109,10 +109,11 @@ for the teacher. The evaluated `params-90` student retained about 89.96% of the
 checkpoint parameters, or about 10.04% parameter pruning. Its realized
 architecture reduced every one of the 24 FFN intermediate widths from 3584 to
 2048, a 42.86% reduction within those FFN dimensions. These results establish
-the comparison mechanism, not an acceptable quality baseline. The current
-two-step smoke distillation does not preserve downstream quality, especially
-on GSM8K. Establish and validate a stronger pruning and distillation recipe
-before adding regression thresholds.
+the comparison mechanism, not an acceptable quality baseline. The observation
+combines this FFN reduction with only two distillation optimizer steps, so it
+does not isolate the effect of pruning and does not test whether a longer,
+tuned distillation phase can recover quality. Establish and validate a stronger
+pruning and distillation recipe before adding regression thresholds.
 
 These historical measurements are stored only in the opt-in comparison recipe.
 They are not setup defaults and are not emitted by the wizard or inherited by

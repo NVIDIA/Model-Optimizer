@@ -8,7 +8,8 @@ defaults:
 # Bounded Qwen 3.5 0.8B campaign using the same FFN-only search that has been
 # exercised by the real-checkpoint smoke. Additional hidden-width, attention,
 # GDN, depth, and bypass dimensions remain opt-in and have less real-checkpoint
-# validation.
+# validation. The pruning and distillation values below are starting points for
+# exercising the route, not settings optimized for downstream quality.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
 display_name: Qwen3p5 0.8B text pruning campaign
 

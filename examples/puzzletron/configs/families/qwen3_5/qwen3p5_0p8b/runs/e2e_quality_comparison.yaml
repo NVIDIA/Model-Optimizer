@@ -17,8 +17,10 @@ display_name: Qwen3p5 0.8B end-to-end quality comparison
 
 # Historical evidence belongs to this checkpoint-specific regression recipe,
 # not to the reusable evaluator settings or generated setup defaults. Two
-# identical 100-example GPU runs produced these values. Fresh runs publish
-# observation_delta.* metrics but never gate on them.
+# identical 100-example GPU runs produced these values after only two
+# distillation optimizer steps. The result therefore combines pruning with an
+# intentionally short smoke distillation phase and cannot isolate pruning
+# impact. Fresh runs publish observation_delta.* metrics but never gate on them.
 quality_evaluation:
   recorded_observation:
     repeat_count: 2

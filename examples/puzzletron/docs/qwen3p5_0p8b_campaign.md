@@ -9,7 +9,10 @@ downstream evaluation.
 
 The campaign uses larger scoring, validation, serving, and distillation budgets
 than the smoke recipes. Complete a smoke run before allocating resources to
-this campaign.
+this campaign. The checked-in search and distillation parameters are starting
+values for exercising the route, not settings optimized for downstream quality.
+Tune the pruning amount and distillation duration together before using the
+resulting scores as expected model quality.
 
 ## Inspect the complete plan
 
