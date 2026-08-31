@@ -22,11 +22,21 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
+import torch.nn as nn
+from _test_utils.torch.transformers_models import (
+    get_tiny_gemma3vl,
+    get_tiny_llama,
+    get_tiny_qwen3_moe,
+)
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
+from modelopt.torch.export.layerwise_export import (
+    LayerwiseExporter,
+    export_parent,
+    layer_shard_name,
+)
+from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -409,7 +419,7 @@ def test_tied_embeddings_are_refused(tmp_path, make_cfg):
     model.config.architectures = ["LlamaForCausalLM"]
 
     cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=make_cfg())
-    with pytest.raises(NotImplementedError, match="weight-tied quantized modules"):
+    with pytest.raises(NotImplementedError, match="weight-tied modules"):
         mtq.quantize(model, cfg, _calib)
 
 
@@ -477,3 +487,73 @@ def test_awq_is_refused(tmp_path, make_cfg, method, match):
 
     with pytest.raises(NotImplementedError, match=match):
         mtq.quantize(_build_model(), cfg, _calib)
+
+
+def _disable_quant_on_towers(vlm):
+    """Mirror ``extract_and_prepare_language_model_from_vl``: towers get disabled quantizers.
+
+    hf_ptq runs this before calibration, so by the time the exporter walks the parent the
+    vision tower and projector carry ``TensorQuantizer`` children. That changes what
+    ``_module_formats`` and the tail dispatch see, so the test has to reproduce it.
+    """
+    lineage = get_language_model_from_vl(vlm)
+    language_model, ancestors = lineage[-1], lineage[:-1]
+    disabled = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"}
+    memo = set(ancestors) | {language_model}
+    for ancestor in ancestors:
+        for _, module in ancestor.named_children():
+            if module not in memo:
+                mtq.quantize(module, copy.deepcopy(disabled), forward_loop=None)
+                memo.add(module)
+    return language_model
+
+
+def _build_vlm():
+    torch.manual_seed(0)
+    model = get_tiny_gemma3vl(tie_word_embeddings=False).cuda().eval()
+    # The kwarg only reaches text_config; the outer config still ties lm_head to the
+    # embedding, and tied weights are refused. Untie for real so this test stays on the
+    # namespace/towers/config behaviour it exists for.
+    model.config.tie_word_embeddings = False
+    model._tied_weights_keys = {}
+    model.all_tied_weights_keys = {}
+    model.lm_head.weight = nn.Parameter(model.lm_head.weight.detach().clone())
+    # is_multimodal_model reads this, and the tiny fixtures leave it unset.
+    model.config.architectures = ["Gemma3ForConditionalGeneration"]
+    return model
+
+
+def _calib_vlm(language_model):
+    # use_cache=False: this calls the text model directly, so a retained cache would make
+    # batch 2 build a mask for 31 positions against 16 keys.
+    for batch in CALIB_BATCHES:
+        language_model(batch.cuda(), use_cache=False)
+
+
+def test_vlm_export_matches_whole_model_export(tmp_path):
+    """A VLM calibrates its language model but must export the whole model."""
+    baseline_vlm = _build_vlm()
+    baseline_lm = _disable_quant_on_towers(baseline_vlm)
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    mtq.quantize(baseline_lm, cfg, _calib_vlm)
+    baseline_dir = tmp_path / "baseline"
+    export_hf_checkpoint(baseline_vlm, export_dir=baseline_dir)
+
+    vlm = _build_vlm()
+    language_model = _disable_quant_on_towers(vlm)
+    export_dir = tmp_path / "fused"
+    with export_parent(vlm):
+        mtq.quantize(language_model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib_vlm)
+
+    exported = _load_checkpoint(export_dir)
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
+    _assert_same_quant_config(baseline_dir, export_dir)
+
+    assert any(k.startswith("language_model.") for k in exported), "lost the VLM namespace"
+    assert any(k.startswith(("vision_tower", "multi_modal_projector")) for k in exported), (
+        "the towers outside the language model were not exported"
+    )
+    assert "vision_config" in json.loads((export_dir / "config.json").read_text()), (
+        "config.json describes the submodel, not the VLM"
+    )

@@ -16,7 +16,9 @@
 """Write each decoder layer's quantized checkpoint shard as soon as it is calibrated."""
 
 import contextlib
+import contextvars
 import json
+import re
 import warnings
 from pathlib import Path
 
@@ -82,8 +84,8 @@ def _module_formats(model: nn.Module) -> set:
     }
 
 
-def _tied_quantized_modules(model: nn.Module) -> list[str]:
-    """Quantized modules sharing a weight with another.
+def _tied_weight_modules(model: nn.Module) -> list[str]:
+    """Modules sharing a weight with another, quantized or not.
 
     Grouped by name, which survives offload: a ``data_ptr`` grouping sees nothing when the
     weights are on meta and would pass vacuously. Falls back to ``data_ptr`` when the model
@@ -94,7 +96,7 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
     by_ptr: dict[int, list[str]] = {}
     for name, module in model.named_modules():
         weight = getattr(module, "weight", None)
-        if weight is None or not _is_quantized_module(module):
+        if weight is None:
             continue
         key = tied_map.group_key(f"{name}.weight")
         if key is not None:
@@ -127,16 +129,15 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
     """Raise unless per-layer export is valid for this model."""
     assert_formats_supported(model, "before calibration")
 
-    tied = _tied_quantized_modules(model)
+    tied = _tied_weight_modules(model)
     if tied:
         raise NotImplementedError(
-            f"layerwise export does not support weight-tied quantized modules {tied[:6]}: "
-            "the whole-model path merges their input_quantizer amaxes via "
-            "sync_tied_input_amax so both sides share one input_scale, which a per-layer "
-            "pass cannot do because a tie partner may be uncalibrated or already written. "
-            "Conversion quantizes every nn.Linear and nn.Embedding, so disabling their "
-            "quantizers does not lift this -- tie_word_embeddings models need "
-            "export_hf_checkpoint()."
+            f"layerwise export does not support weight-tied modules {tied[:6]}: quantized, "
+            "the whole-model path merges their input_quantizer amaxes via sync_tied_input_amax "
+            "so both sides share one input_scale, which a per-layer pass cannot do because a "
+            "tie partner may be uncalibrated or already written; unquantized, save_pretrained "
+            "drops the duplicate key and writing shards directly does not. "
+            "tie_word_embeddings models need export_hf_checkpoint()."
         )
 
     if dist.is_initialized() and dist.size() > 1:
@@ -144,6 +145,75 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
             "layerwise export does not support multi-process jobs (e.g. FSDP2): every rank "
             "would write the same shard files. Use single-process calibration."
         )
+
+
+_export_parent: contextvars.ContextVar[nn.Module | None] = contextvars.ContextVar(
+    "layerwise_export_parent", default=None
+)
+
+
+@contextlib.contextmanager
+def export_parent(parent: nn.Module):
+    """Export the checkpoint for ``parent`` while calibration runs on one of its submodules.
+
+    The decoder layers are the same objects either way, so walking the parent yields
+    parent-namespace names, the full config and the untouched towers with no prefixing.
+    """
+    token = _export_parent.set(parent)
+    try:
+        yield
+    finally:
+        _export_parent.reset(token)
+
+
+def _resolve_export_parent(model: nn.Module) -> nn.Module:
+    """Return the model the checkpoint should describe. Membership is by identity, not name."""
+    parent = _export_parent.get()
+    if parent is None or parent is model:
+        return model
+    if all(m is not model for m in parent.modules()):
+        raise ValueError(
+            f"export_parent() was given a {type(parent).__name__} that does not contain the "
+            "calibrated model."
+        )
+    return parent
+
+
+def build_legacy_name_mapper(model: nn.Module):
+    r"""Hub-name mapper for transformers < 5, or ``None``.
+
+    ``save_pretrained`` is what reverses ``_checkpoint_conversion_mapping``, and per-layer
+    export writes shards directly without it. ``build_reverse_name_mapper`` is no help
+    either: it reads transformers 5's ``conversion_mapping`` and raises on 4.x.
+
+    Rules are inverted (the mapping is stored hub -> in-memory) and applied longest-prefix
+    first, or a short one shadows a longer (``lm_head`` inside ``model.language_model...``).
+    The hub side is a regex: its groups are stripped exactly as save_pretrained strips them
+    when reversing the same mapping, and the remainder has its backslashes neutralised so a
+    pattern like ``layers\.(\d+)`` substitutes literally instead of raising on ``\d``.
+    """
+    mapping = getattr(model, "_checkpoint_conversion_mapping", None)
+    if not mapping:
+        return None
+    rules = sorted(
+        (
+            (
+                re.compile("^" + re.escape(mem)),
+                re.sub(r"\(.*\)", "", hub.lstrip("^")).replace("\\", "\\\\"),
+            )
+            for hub, mem in mapping.items()
+        ),
+        key=lambda r: -len(r[0].pattern),
+    )
+
+    def _map(name: str) -> str:
+        for pattern, replacement in rules:
+            new, n = pattern.subn(replacement, name, count=1)
+            if n:
+                return new
+        return name
+
+    return _map
 
 
 class LayerwiseExporter:
@@ -163,6 +233,7 @@ class LayerwiseExporter:
 
         Runs before calibration, so nothing amax-dependent exists yet.
         """
+        model = _resolve_export_parent(model)
         assert_layerwise_export_supported(model)
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
@@ -208,10 +279,12 @@ class LayerwiseExporter:
         try:
             self._name_mapper = build_reverse_name_mapper(model)
         except Exception as exc:
-            warnings.warn(
-                f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
-                "match the original HF hub checkpoint."
-            )
+            self._name_mapper = build_legacy_name_mapper(model)
+            if self._name_mapper is None:
+                warnings.warn(
+                    f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
+                    "match the original HF hub checkpoint."
+                )
 
     def export_layer(
         self,

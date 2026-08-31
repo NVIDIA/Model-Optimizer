@@ -1800,13 +1800,20 @@ def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     if not _is_supported_hf_model(model):
         return None
 
-    decoder = model
-    if hasattr(decoder, "model"):
-        decoder = decoder.model
-    if hasattr(decoder, "language_model"):
-        decoder = decoder.language_model
-    if hasattr(decoder, "layers"):
-        return decoder.layers
+    # Take the shallowest ``layers`` but keep descending while wrappers remain: the nesting
+    # order varies, e.g. Kimi-K3 keeps its layers at ``language_model.model.layers``.
+    decoder, seen = model, set()
+    while id(decoder) not in seen:
+        seen.add(id(decoder))
+        if isinstance(getattr(decoder, "layers", None), nn.ModuleList):
+            return decoder.layers
+        for attr in ("model", "language_model"):
+            inner = getattr(decoder, attr, None)
+            if isinstance(inner, nn.Module):
+                decoder = inner
+                break
+        else:
+            return None
 
     return None
 
