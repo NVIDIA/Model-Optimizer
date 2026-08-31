@@ -11,7 +11,6 @@ ENV PIP_NO_CACHE_DIR=1
 ENV NLTK_DATA=/opt/puzzletron/nltk_data
 ENV PUZZLETRON_CI_ENVIRONMENT=/opt/puzzletron/ci_environment.json
 ENV PUZZLETRON_REQUIREMENTS=/opt/puzzletron/requirements.txt
-ENV PUZZLETRON_VERIFY_SCRIPT=/opt/puzzletron/verify_image_environment.py
 ENV PUZZLETRON_ROOT=/opt/puzzletron/src/modelopt
 ENV PUZZLETRON_VENV=/venv
 ENV PUZZLETRON_VLLM_ANYMODEL=1
@@ -21,13 +20,10 @@ ENV PYTHONUNBUFFERED=1
 COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json
 COPY examples/puzzletron/requirements.txt /opt/puzzletron/requirements.txt
 COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py
-COPY examples/puzzletron/ci_environment.py /opt/puzzletron/src/modelopt/examples/puzzletron/ci_environment.py
-COPY examples/puzzletron/ci/verify_image_environment.py /opt/puzzletron/verify_image_environment.py
 COPY examples/puzzletron/patches /opt/puzzletron/patches
 COPY pyproject.toml LICENSE_HEADER /opt/modelopt-dependencies/
 
-# Base build tools and a lightweight manifest check fail quickly, before any
-# expensive CUDA extensions are compiled.
+# Install base build tools before compiling CUDA extensions.
 RUN test "${TARGETPLATFORM}" = "linux/amd64" || \
         (echo "Puzzletron requires linux/amd64 because its CUDA stack and video decoder are not validated for Linux ARM" >&2; exit 1) && \
     apt-get update && \
@@ -38,10 +34,7 @@ RUN test "${TARGETPLATFORM}" = "linux/amd64" || \
     python3 -m venv "${VIRTUAL_ENV}" && \
     python -m pip install --upgrade \
         pip "setuptools>=80,<81" "setuptools-scm>=8,<10" setuptools-rust wheel \
-        "packaging>=24.2" "cmake>=3.26.1" ninja jinja2 && \
-    python "${PUZZLETRON_VERIFY_SCRIPT}" \
-        --environment "${PUZZLETRON_CI_ENVIRONMENT}" \
-        --manifest-only
+        "packaging>=24.2" "cmake>=3.26.1" ninja jinja2
 
 # `pin` keeps ci_environment.json as the single source of dependency versions
 # while leaving the install commands readable.
@@ -126,12 +119,26 @@ COPY puzzletron_orchestrator /opt/puzzletron/src/modelopt/puzzletron_orchestrato
 COPY puzzletron_setup /opt/puzzletron/src/modelopt/puzzletron_setup
 COPY examples/puzzletron /opt/puzzletron/src/modelopt/examples/puzzletron
 
-# Verify the installed worker environment: package versions and sources, required
-# imports and assets, and the CUDA ABI used by Puzzletron.
+# Smoke-test the installed environment. Pins and source revisions are checked
+# by the repository tests and by the install commands above.
 RUN python -m pip install --no-build-isolation --no-deps -e \
         "/opt/puzzletron/src/modelopt[hf,puzzletron,dev-test]" && \
-    python "${PUZZLETRON_VERIFY_SCRIPT}" \
-        --environment "${PUZZLETRON_CI_ENVIRONMENT}"
+    pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
+    for module in \
+        aiperf causal_conv1d decord fla grouped_gemm langdetect lmms_eval \
+        mamba_ssm modelopt nemo_automodel nltk puzzletron_orchestrator \
+        puzzletron_setup tilelang torch transformers vllm; do \
+        python -c "import ${module}"; \
+    done && \
+    test "$(python -c 'import torch; print(torch.version.cuda)')" = \
+        "$(pin gpu_image.torch_cuda)" && \
+    while read -r nltk_resource; do \
+        python -c "import nltk; nltk.data.find('tokenizers/${nltk_resource}')"; \
+    done < <(jq -r '.gpu_image.nltk_resources[]' "${PUZZLETRON_CI_ENVIRONMENT}") && \
+    lmms_root="$(python -c 'import lmms_eval; print(next(iter(lmms_eval.__path__)))')" && \
+    while read -r task_config; do \
+        test -f "${lmms_root}/${task_config}"; \
+    done < <(jq -r '.lmms_eval.task_configs[]' "${PUZZLETRON_CI_ENVIRONMENT}")
 
 LABEL org.opencontainers.image.source="https://github.com/NVIDIA/Model-Optimizer" \
     org.opencontainers.image.revision="${MODELOPT_REVISION}" \

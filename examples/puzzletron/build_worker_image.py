@@ -245,19 +245,6 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             f"Puzzletron image revision mismatch: expected {revision}, found {recorded_revision}"
         )
-    _run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            image,
-            "python",
-            "/opt/puzzletron/verify_image_environment.py",
-            "--environment",
-            "/opt/puzzletron/ci_environment.json",
-        ]
-    )
-
     if args.output_dir is not None:
         if archive is not None:
             _export_archive(image, archive)

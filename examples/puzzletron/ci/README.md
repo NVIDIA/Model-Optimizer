@@ -15,10 +15,10 @@ with Docker:
 python examples/puzzletron/build_worker_image.py
 ```
 
-The command builds the image, checks its installed environment, and prints its
-local Docker name. That name is only a convenience. The full source commit is
-recorded in the image, and exported files use the same readable commit-based
-filename.
+The command builds the image and prints its local Docker name. The Docker build
+checks the installed modules, CUDA version, and required evaluation data. The
+local name is only a convenience. The full source commit is recorded in the
+image, and exported files use the same readable commit-based filename.
 
 ## Export
 
@@ -50,22 +50,13 @@ Verify an exported file from its output directory with:
 sha256sum --check modelopt-puzzletron-linux-amd64-git-<12-character-commit>.sqsh.sha256
 ```
 
-## Check
+## GPU check
 
-The build command already checks the installed packages, source revisions,
-CUDA version, imports, and evaluation data. To repeat that check later, first
-set the local Docker name printed by the build command:
+The build does not require a GPU. On a host with an NVIDIA GPU, check CUDA
+access using the local Docker name printed by the build command:
 
 ```bash
 image="modelopt-puzzletron:linux-amd64-git-$(git rev-parse --short=12 HEAD)"
-docker run --rm "${image}" \
-  python /opt/puzzletron/verify_image_environment.py \
-    --environment /opt/puzzletron/ci_environment.json
-```
-
-On a host with an NVIDIA GPU, also check CUDA access:
-
-```bash
 docker run --gpus all --ipc=host --rm "${image}" \
   python -c 'import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
 ```

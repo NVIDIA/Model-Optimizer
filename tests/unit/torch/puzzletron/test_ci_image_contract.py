@@ -17,11 +17,7 @@
 
 import hashlib
 import json
-import os
 import re
-import shutil
-import subprocess
-import sys
 
 import yaml
 
@@ -36,13 +32,27 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert f"FROM {base_image}" in dockerfile
     assert "ARG TARGETPLATFORM" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' in dockerfile
-    assert "COPY examples/__init__.py /opt/puzzletron/src/modelopt/examples/__init__.py" in (
-        dockerfile
+    assert (
+        "COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json"
+        in dockerfile
     )
-    assert "COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json" in (
-        dockerfile
-    )
-    assert 'python "${PUZZLETRON_VERIFY_SCRIPT}"' in dockerfile
+    assert "for module in" in dockerfile
+    assert "nltk.data.find" in dockerfile
+    assert ".lmms_eval.task_configs[]" in dockerfile
+
+    vcs_sources = [
+        environment["lmms_eval"],
+        environment["nemo_automodel"],
+        environment["vllm"],
+        environment["runtime_image"]["grouped_gemm"],
+        environment["runtime_image"]["mamba_ssm"],
+    ]
+    assert all(re.fullmatch(r"[0-9a-f]{40}", source["commit"]) for source in vcs_sources)
+
+    nltk_resources = environment["gpu_image"]["nltk_resources"]
+    nltk_checksums = environment["gpu_image"]["nltk_resource_sha256"]
+    assert set(nltk_checksums) == set(nltk_resources)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", checksum) for checksum in nltk_checksums.values())
 
     assert "nltk_data/$(pin gpu_image.nltk_data_commit)/packages/tokenizers" in dockerfile
     assert (
@@ -74,39 +84,6 @@ def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_p
         dockerfile
     )
     assert 'test "$(git -C /tmp/mamba-ssm rev-parse HEAD)" = \\' in dockerfile
-
-
-def test_standalone_verifier_prefers_the_baked_examples_package(project_root_path, tmp_path):
-    image_root = tmp_path / "image-root"
-    baked_examples = image_root / "examples"
-    baked_puzzletron = baked_examples / "puzzletron"
-    baked_puzzletron.mkdir(parents=True)
-    shutil.copy(project_root_path / "examples/__init__.py", baked_examples / "__init__.py")
-    shutil.copy(
-        project_root_path / "examples/puzzletron/ci_environment.py",
-        baked_puzzletron / "ci_environment.py",
-    )
-
-    shadow_examples = tmp_path / "site-packages/examples"
-    shadow_examples.mkdir(parents=True)
-    (shadow_examples / "__init__.py").write_text(
-        "raise RuntimeError('third-party examples package was imported')\n"
-    )
-
-    subprocess.run(
-        [
-            sys.executable,
-            str(project_root_path / "examples/puzzletron/ci/verify_image_environment.py"),
-            "--environment",
-            str(project_root_path / "examples/puzzletron/ci_environment.json"),
-            "--manifest-only",
-        ],
-        check=True,
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join([str(image_root), str(tmp_path / "site-packages")]),
-        },
-    )
 
 
 def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):
