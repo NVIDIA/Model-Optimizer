@@ -27,10 +27,17 @@ import pytest
 import yaml
 from PIL import Image
 
+from examples.puzzletron.evaluation.vlm import profile as evaluation_profile
+from examples.puzzletron.evaluation.vlm import suites as evaluation_suites
 from modelopt.torch.puzzletron.dataset.multimodal import materialize_normalized_conversation_samples
+from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
+    assert_pruned_checkpoints_completed_benchmark,
+)
 
-RUN_PATH = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_vlm_smoke.yaml"
-EXECUTION_PATH = "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_smoke.yaml"
+RUN_PATH = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml"
+EXECUTION_PATH = (
+    "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_vlm_smoke.yaml"
+)
 
 
 def _materialize_image_conversations(path: Path) -> None:
@@ -100,18 +107,39 @@ def _write_local_runner(path: Path, project_root: Path) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.manual(reason="downloads and prunes the real Qwen 3.5 0.8B VLM checkpoint")
-@pytest.mark.timeout(2400)
-def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
+@pytest.mark.manual(
+    reason=(
+        "downloads and prunes the real checkpoint, evaluates the cached pinned RealWorldQA "
+        "snapshot on saved pre-KD and post-KD checkpoints through lmms-eval/vLLM, and "
+        "benchmarks it with AIPerf"
+    )
+)
+@pytest.mark.timeout(8700)
+def test_qwen3p5_0p8b_orchestrated_vlm_full_smoke_completes(
     project_root_path: Path,
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Run through MIP and prove that image inputs reach the vision tower."""
+    """Run the bounded VLM lifecycle on one H100 with populated offline benchmark caches."""
 
     dataset = tmp_path / "dataset"
     results = tmp_path / "results"
-    cache = tmp_path / "cache"
+    benchmark_hf_home = os.environ.get("PUZZLETRON_VLM_BENCHMARK_HF_HOME")
+    if not benchmark_hf_home:
+        pytest.fail("requires PUZZLETRON_VLM_BENCHMARK_HF_HOME with the pinned RealWorldQA cache")
+    benchmark_hf_home_path = Path(benchmark_hf_home).expanduser().absolute()
+    if not benchmark_hf_home_path.is_dir():
+        pytest.fail(f"benchmark cache is not a directory: {benchmark_hf_home_path}")
+    benchmark_hub_cache = benchmark_hf_home_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(benchmark_hub_cache))
+    try:
+        evaluation_suites.offline_dataset_snapshot(
+            benchmark_hf_home_path,
+            "realworldqa",
+            evaluation_profile.VLM_BENCHMARK_DATASETS["realworldqa"].revision,
+        )
+    except ValueError as error:
+        pytest.fail(str(error))
     runner = tmp_path / "runner.yaml"
     _materialize_image_conversations(dataset)
     _write_local_runner(runner, project_root_path)
@@ -122,10 +150,11 @@ def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
     environment = os.environ.copy()
     environment.update(
         {
-            "HF_HOME": str(cache / "huggingface"),
-            "HF_DATASETS_CACHE": str(cache / "datasets"),
-            "TORCH_HOME": str(cache / "torch"),
-            "XDG_CACHE_HOME": str(cache / "xdg"),
+            "HF_HOME": str(benchmark_hf_home_path),
+            "HF_HUB_CACHE": str(benchmark_hub_cache),
+            "HF_DATASETS_CACHE": str(benchmark_hf_home_path / "datasets"),
+            "TORCH_HOME": str(tmp_path / "cache/torch"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache/xdg"),
         }
     )
     completed = subprocess.run(
@@ -148,7 +177,7 @@ def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=2300,
+        timeout=8600,
         check=False,
     )
     if completed.returncode:
@@ -197,3 +226,14 @@ def test_qwen3p5_0p8b_orchestrated_vlm_mip_smoke_completes(
     active_profiles = json.loads((results / "mip/active_profiles.json").read_text())
     assert active_profiles["status"] == "success"
     assert active_profiles["profile_ids"] == ["params-90"]
+    for checkpoint_node, evaluation_node in (
+        ("materialized", "checkpoint_eval"),
+        ("short_vlm_kd", "post_kd_checkpoint_eval"),
+    ):
+        assert_pruned_checkpoints_completed_benchmark(
+            results,
+            checkpoint_node=checkpoint_node,
+            evaluation_node=evaluation_node,
+            task=evaluation_suites.task_name("realworldqa"),
+            limit=2,
+        )

@@ -178,14 +178,33 @@ Selection still follows `input`; `model_source` only chooses the artifact operat
 on. This supports a long KD run selected using short-KD/PTQ results but restarted
 from the original candidate.
 
-## Downstream evaluation
+## Evaluate saved checkpoints
 
 `downstream_evaluation` adapts the generic
-[checkpoint evaluator](checkpoint_evaluation.md) to materialized campaign
-candidates and publishes their task metrics. Add it after a `materialize` node;
-the linked example config shows the complete flow. Use the standalone
+[checkpoint evaluator](checkpoint_evaluation.md) to campaign checkpoints and
+publishes their task metrics. Add it after any checkpoint-producing node, such
+as `materialize` or `global_kd`. Use the standalone
 [checkpoint evaluation](checkpoint_evaluation.md) command when campaign
 lineage, filtering, and reports are not needed.
+
+Materialization writes a reloadable Hugging Face checkpoint directory. Its
+configuration records the realized per-layer block sizes, and its safetensors
+contain the physically sliced weights. Evaluation passes that saved directory
+unchanged to a fresh `lmms-eval` process backed by vLLM. It does not convert the
+AnyModel instance back into an AutoModel instance. Modality-specific profiles
+may prepare pinned task adapters and offline dataset snapshots first, but they
+delegate checkpoint execution and completion validation to the same evaluator.
+
+Global KD publishes a consolidated Hugging Face checkpoint and preserves the
+realized pruning configuration and required tokenizer or processor assets. A
+downstream evaluation node after KD therefore uses the same checkpoint contract
+as one after materialization. The Qwen 3.5 text and VLM smoke flows evaluate the
+selected checkpoint both before and after their short KD stage.
+
+The post-MIP graph does not treat the teacher as a candidate revision. To compare
+a distilled student with its teacher, evaluate the teacher separately with the
+same task, evaluator version, dataset revision, prompt settings, and sample
+limit, then compare those metrics with the post-KD node's metrics.
 
 ## Filters
 

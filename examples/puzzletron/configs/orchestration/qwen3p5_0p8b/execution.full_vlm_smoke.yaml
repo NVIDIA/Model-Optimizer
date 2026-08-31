@@ -21,8 +21,10 @@ execution:
     post.params-90.image_eval: {strategy: sharded, instances: 1}
     post.params-90.best_vlm_loss: {strategy: single, instances: 1}
     post.params-90.materialized: {strategy: sharded, instances: 1}
+    post.params-90.checkpoint_eval: {strategy: sharded, instances: 1}
     post.params-90.vlm_serving: {strategy: sharded, instances: 1}
     post.params-90.fastest_vlm: {strategy: single, instances: 1}
     post.params-90.short_vlm_kd: {strategy: sharded, instances: 1}
+    post.params-90.post_kd_checkpoint_eval: {strategy: sharded, instances: 1}
     post.params-90.final_image_eval: {strategy: sharded, instances: 1}
     post.params-90.best: {strategy: single, instances: 1}

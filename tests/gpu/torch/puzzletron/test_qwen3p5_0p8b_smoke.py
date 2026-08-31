@@ -32,6 +32,10 @@ import pytest
 import yaml
 from datasets import Dataset, DatasetDict
 
+from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
+    assert_pruned_checkpoints_completed_benchmark,
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -54,13 +58,18 @@ def _save_messages_dataset(path: Path) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.manual(reason="downloads and prunes the real Qwen 3.5 0.8B checkpoint")
-@pytest.mark.timeout(2400)
-def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
+@pytest.mark.manual(
+    reason=(
+        "downloads and prunes the real checkpoint, runs IFEval on saved pre-KD and "
+        "post-KD checkpoints through lmms-eval/vLLM, and benchmarks it with AIPerf"
+    )
+)
+@pytest.mark.timeout(7300)
+def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
     project_root_path: Path,
     tmp_path: Path,
 ) -> None:
-    """Run the enabled DAG through MIP; requires one H100 80GB GPU."""
+    """Run the bounded lifecycle on one H100 with network or populated benchmark caches."""
 
     dataset = tmp_path / "dataset"
     results = tmp_path / "results"
@@ -105,14 +114,14 @@ def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
             "--experiment",
             str(
                 project_root_path / "examples/puzzletron/configs/families/qwen3_5/"
-                "qwen3p5_0p8b/runs/mip_smoke.yaml"
+                "qwen3p5_0p8b/runs/full_smoke.yaml"
             ),
             "--runner",
             str(runner),
             "--execution",
             str(
                 project_root_path / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/"
-                "execution.smoke.yaml"
+                "execution.full_smoke.yaml"
             ),
             "--stage",
             "full",
@@ -124,7 +133,7 @@ def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
         env=environment,
         capture_output=True,
         text=True,
-        timeout=2300,
+        timeout=7200,
         check=False,
     )
     if completed.returncode:
@@ -165,7 +174,7 @@ def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
     run_config = yaml.safe_load(
         (
             project_root_path
-            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/mip_smoke.yaml"
+            / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml"
         ).read_text(encoding="utf-8")
     )
     width_sanity_config = run_config["width_sanity"]
@@ -207,3 +216,14 @@ def test_qwen3p5_0p8b_orchestrated_mip_smoke_completes(
     assert active_profiles["profile_ids"] == ["params-90"]
     assert [profile["id"] for profile in active_profiles["profiles"]] == ["params-90"]
     assert active_profiles["profiles"][0]["feasible_count"] >= 1
+    for checkpoint_node, evaluation_node in (
+        ("materialized", "checkpoint_eval"),
+        ("short_kd", "post_kd_checkpoint_eval"),
+    ):
+        assert_pruned_checkpoints_completed_benchmark(
+            results,
+            checkpoint_node=checkpoint_node,
+            evaluation_node=evaluation_node,
+            task="ifeval",
+            limit=2,
+        )

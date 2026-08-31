@@ -25,7 +25,8 @@ from types import ModuleType
 import pytest
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import preflight, profile, suites, tasks
+from examples.puzzletron.evaluation.vlm import model as vlm_model
+from examples.puzzletron.evaluation.vlm import post_mip, preflight, profile, suites, tasks
 from examples.puzzletron.evaluation.vlm import run as evaluation
 
 _QWEN_CONFIG = {
@@ -49,6 +50,32 @@ def _write_checkpoint(root: Path) -> Path:
     model.mkdir()
     (model / "config.json").write_text(json.dumps(_QWEN_CONFIG) + "\n")
     return model
+
+
+def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        architectures=["AnyModel"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config_path.write_text(json.dumps(config) + "\n")
+
+    vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+    config["base_architecture"] = "OtherForConditionalGeneration"
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="AnyModel base_architecture"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+    config.update(
+        architectures=["AnyModel", "Qwen3_5ForConditionalGeneration"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="AnyModel base_architecture"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
 def _write_lmms_tasks(root: Path, tasks: tuple[str, ...]) -> Path:
@@ -234,6 +261,52 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
         "max_frames": settings["model_args"]["max_frame_num"],
     }
     assert report["generation_policy"] == settings["gen_kwargs"]
+
+
+def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):
+    model = _write_checkpoint(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    output = tmp_path / "output"
+    captured = {}
+
+    def fake_runner(checkpoint_path, *, output_root, settings):
+        report = json.loads((output / "profile.json").read_text())
+        assert report["configured_tasks"] == ["modelopt_vlm_benchmark_realworldqa"]
+        assert report["sample_limit"] == 2
+        captured.update(
+            checkpoint=checkpoint_path,
+            output_root=output_root,
+            settings=settings,
+        )
+        return {
+            "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
+        }
+
+    monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
+    result = post_mip.evaluate_realworldqa_checkpoint(
+        model,
+        output_root=output,
+        settings={
+            "batch_size": 1,
+            "timeout_seconds": 900,
+            "dtype": "bfloat16",
+            "topology": {"tensor_parallel_size": 1},
+        },
+    )
+
+    assert captured["checkpoint"] == model
+    assert captured["output_root"] == output
+    assert captured["settings"]["tasks"] == "modelopt_vlm_benchmark_realworldqa"
+    assert captured["settings"]["limit"] == 2
+    assert captured["settings"]["timeout_seconds"] == 900
+    assert captured["settings"]["dtype"] == "bfloat16"
+    assert captured["settings"]["topology"] == {"tensor_parallel_size": 1}
+    assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
+    assert result["profile_path"] == str(output / "profile.json")
 
 
 def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):

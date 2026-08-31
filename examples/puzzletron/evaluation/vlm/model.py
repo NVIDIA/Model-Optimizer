@@ -43,8 +43,15 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     if config.get("model_type") != _MODEL_TYPE:
         raise ValueError(f"{profile} checkpoint model_type must be qwen3_5")
     architectures = config.get("architectures")
-    if not isinstance(architectures, list) or _ARCHITECTURE not in architectures:
-        raise ValueError(f"{profile} checkpoint architectures must contain {_ARCHITECTURE}")
+    native_checkpoint = architectures == [_ARCHITECTURE]
+    realized_checkpoint = (
+        architectures == ["AnyModel"] and config.get("base_architecture") == _ARCHITECTURE
+    )
+    if not native_checkpoint and not realized_checkpoint:
+        raise ValueError(
+            f"{profile} checkpoint must identify {_ARCHITECTURE} directly or as the "
+            "AnyModel base_architecture"
+        )
     text_config = config.get("text_config")
     if not isinstance(text_config, dict) or text_config.get("model_type") != "qwen3_5_text":
         raise ValueError(f"{profile} checkpoint text_config.model_type must be qwen3_5_text")

@@ -23,8 +23,10 @@ execution:
     post.params-90.online_eval: {strategy: sharded, instances: 1}
     post.params-90.best_lm: {strategy: single, instances: 1}
     post.params-90.materialized: {strategy: sharded, instances: 1}
+    post.params-90.checkpoint_eval: {strategy: sharded, instances: 1}
     post.params-90.serving: {strategy: sharded, instances: 1}
     post.params-90.fastest: {strategy: single, instances: 1}
     post.params-90.short_kd: {strategy: sharded, instances: 1}
+    post.params-90.post_kd_checkpoint_eval: {strategy: sharded, instances: 1}
     post.params-90.final_eval: {strategy: sharded, instances: 1}
     post.params-90.best: {strategy: single, instances: 1}

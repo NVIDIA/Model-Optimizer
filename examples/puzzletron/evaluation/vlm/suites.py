@@ -59,6 +59,7 @@ SHORT_TASKS = ("realworldqa", "mmmu_val")
 QUICK_TASKS = ("realworldqa", "mmmu_val", "mvbench")
 ADAPTER_SMOKE_TASKS = ("videomme", "perceptiontest_val_mc")
 SINGLE_TASK_SMOKE_SUITES = {
+    "realworldqa-smoke": "realworldqa",
     "video-mmmu-smoke": "video_mmmu",
     "mmvu-smoke": "mmvu_val",
     "longvideobench-smoke": "longvideobench_val_v",
@@ -155,7 +156,7 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     return {
         "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
         "generation": {"temperature": 0, "do_sample": False},
-        "limit": 8 if is_smoke else None,
+        "limit": 2 if suite == "realworldqa-smoke" else 8 if is_smoke else None,
         "repetitions": 2 if suite == "short" else 1,
         "timeout_seconds": (
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds

@@ -99,9 +99,11 @@ def test_qwen3p5_0p8b_full_smoke_compiles_the_complete_one_gpu_route(
         "post.params-90.online_eval",
         "post.params-90.best_lm",
         "post.params-90.materialized",
+        "post.params-90.checkpoint_eval",
         "post.params-90.serving",
         "post.params-90.fastest",
         "post.params-90.short_kd",
+        "post.params-90.post_kd_checkpoint_eval",
         "post.params-90.final_eval",
         "post.params-90.best",
     )
@@ -124,6 +126,14 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     assert config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 1
     assert config["mip"]["runs"]["params-90"]["homogeneous"]["keep"] == 5
     assert nodes["best_lm"]["top_k"] == 2
+    assert nodes["checkpoint_eval"]["type"] == "downstream_evaluation"
+    assert nodes["checkpoint_eval"]["failure_policy"] == "strict"
+    assert nodes["checkpoint_eval"]["config"]["tasks"] == ["ifeval"]
+    assert nodes["checkpoint_eval"]["config"]["limit"] == 2
+    assert nodes["checkpoint_eval"]["config"]["batch_size"] == 1
+    assert nodes["checkpoint_eval"]["config"]["timeout_seconds"] == 600
+    assert nodes["serving"]["config"]["readiness_timeout"] == 300
+    assert nodes["serving"]["config"]["benchmark_timeout"] == 300
     assert nodes["serving"]["config"]["request_count"] == 4
     assert nodes["serving"]["config"]["concurrency"] == [1]
     assert nodes["fastest"]["top_k"] == 1
@@ -133,5 +143,8 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
         "local_batch_size": 1,
         "checkpoint_every_steps": 2,
     }
+    assert nodes["post_kd_checkpoint_eval"]["type"] == "downstream_evaluation"
+    assert nodes["post_kd_checkpoint_eval"]["failure_policy"] == "strict"
+    assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
     assert nodes["best"]["top_k"] == 1

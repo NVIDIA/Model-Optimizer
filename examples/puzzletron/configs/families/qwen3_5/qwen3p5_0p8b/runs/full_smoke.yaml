@@ -44,16 +44,39 @@ post_mip:
         materialized:
           type: materialize
           input: best_lm
+        checkpoint_eval:
+          type: downstream_evaluation
+          input: materialized
+          failure_policy: strict
+          config: &ifeval_smoke_config
+            tasks: [ifeval]
+            limit: 2
+            batch_size: 1
+            timeout_seconds: 600
+            reasoning_parser: qwen3
+            dtype: bfloat16
+            gpu_memory_utilization: 0.5
+            max_model_len: 4096
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
         serving:
           type: aiperf
-          input: materialized
+          input: checkpoint_eval
           config:
             input_tokens: 128
             output_tokens: 32
             concurrency: [1]
             request_count: 4
             use_server_token_count: true
-            benchmark_timeout: 900
+            readiness_timeout: 300
+            benchmark_timeout: 300
             allow_aiperf_v011_online_tokenizer_resolution: true
             topology:
               tensor_parallel_size: 1
@@ -84,9 +107,14 @@ post_mip:
             global_batch_size: 1
             local_batch_size: 1
             checkpoint_every_steps: 2
+        post_kd_checkpoint_eval:
+          type: downstream_evaluation
+          input: short_kd
+          failure_policy: strict
+          config: *ifeval_smoke_config
         final_eval:
           type: evaluation
-          input: short_kd
+          input: post_kd_checkpoint_eval
           config:
             eval_samples: 2
             block_size: 512
