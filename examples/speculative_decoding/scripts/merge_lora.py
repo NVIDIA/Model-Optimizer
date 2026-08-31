@@ -78,6 +78,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    config_overrides = parse_config_overrides(args.config_overrides)
     lora_dir = Path(args.exported_lora_dir)
 
     # Verify exported files exist (standard peft naming)
@@ -107,7 +108,7 @@ def main():
         dtype="auto",
         device_map="cpu",
         trust_remote_code=args.trust_remote_code,
-        config_overrides=parse_config_overrides(args.config_overrides),
+        config_overrides=config_overrides,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.base_model_path, trust_remote_code=args.trust_remote_code
@@ -161,7 +162,7 @@ def main():
     # re-supply the same overrides.
     base_config = Path(args.base_model_path) / "config.json"
     output_config = Path(args.output_path) / "config.json"
-    if args.config_overrides:
+    if config_overrides:
         print(
             "  Keeping the saved config.json (config_overrides were applied, so the original "
             "base config would not match the merged weights)"
