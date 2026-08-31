@@ -37,11 +37,11 @@ EXPLICIT_SETUP_DEFAULTS_PATH = (
 RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke.yaml"
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
-EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_smoke.yaml"
+EXECUTION_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
+)
 QUALITY_COMPARISON_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_comparison.yaml"
-QUALITY_COMPARISON_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_quality_comparison.yaml"
 CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign.yaml"
-CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
 EXTENDED_CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign_extended.yaml"
 
 
@@ -62,7 +62,7 @@ def _compile_quality_comparison_plan(monkeypatch, tmp_path: Path):
     return compile_campaign_plan(
         experiment_config_path=QUALITY_COMPARISON_RUN_PATH,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(QUALITY_COMPARISON_EXECUTION_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
     )
 
@@ -229,7 +229,7 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     plan = compile_campaign_plan(
         experiment_config_path=CAMPAIGN_PATH,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(CAMPAIGN_EXECUTION_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
     )
 
@@ -301,7 +301,7 @@ def test_qwen3p5_0p8b_extended_campaign_exposes_additional_axes(
     plan = compile_campaign_plan(
         experiment_config_path=EXTENDED_CAMPAIGN_PATH,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(CAMPAIGN_EXECUTION_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
     )
 

@@ -17,7 +17,7 @@ Use the campaign experiment and execution files with a site-specific runner:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_campaign
 export PUZZLETRON_DATASET_PATH=/path/to/puzzle_kd_dataset
@@ -42,11 +42,11 @@ GDN value-head dimension, embedding width, and depth. These dimensions are
 available for additional searches, but have less real-checkpoint coverage and
 may need model-specific fixes.
 
-Run the extended variant with the shared campaign execution config:
+Run the extended variant with the same single-GPU execution profile:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign_extended.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 ```
 
 To create another variant, copy a run config and make each new dimension

@@ -35,9 +35,7 @@ from tests._test_utils.torch.puzzletron.checkpoint_evaluation import (
 )
 
 RUN_PATH = "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml"
-EXECUTION_PATH = (
-    "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_vlm_smoke.yaml"
-)
+EXECUTION_PATH = "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 
 
 def _materialize_image_conversations(path: Path) -> None:

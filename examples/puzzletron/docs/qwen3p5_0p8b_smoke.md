@@ -32,8 +32,8 @@ and for reproducing the bounded GPU comparison.
 
 ## Run and resume the text workflow
 
-Use the `full_smoke.yaml` experiment and `execution.full_smoke.yaml` execution
-config together. The `runner.slurm.yaml` file is a portable template, not a
+Use the `full_smoke.yaml` experiment with the shared `execution.single_gpu.yaml`
+profile. The `runner.slurm.yaml` file is a portable template, not a
 runnable site configuration. Copy it to a site-specific location and replace its
 `REPLACE_WITH_` values before launching. Dry-run accepts the portable template
 for plan inspection, but the orchestrator rejects unresolved placeholders
@@ -41,7 +41,7 @@ before submitting work.
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_full_smoke
 ```
@@ -127,13 +127,13 @@ bit-for-bit equality. Each fresh comparison also publishes
 `comparison.json` for the four headline scores above. These differences are
 diagnostic values only; no tolerance or pass/fail rule is applied.
 
-Use `execution.e2e_quality_comparison.yaml` with a site-specific runner whose
-walltime covers both serial evaluations. Set a distinct
+Use the shared `execution.single_gpu.yaml` profile with a site-specific runner
+whose walltime covers both serial evaluations. Set a distinct
 `PUZZLETRON_RUN_ROOT`; the comparison is intentionally not part of default CI:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_quality_comparison.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.e2e_quality_comparison.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_quality_comparison
 

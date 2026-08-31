@@ -405,7 +405,21 @@ def _bundle_readme(
                 "```",
             )
         )
-    for budget in ("smoke", "production"):
+    sections = (
+        (
+            "smoke",
+            "Validate setup",
+            "This bounded run checks the generated model, data, worker, and campaign wiring.",
+            "After reviewing the plan and worker paths, launch the validation run:",
+        ),
+        (
+            "production",
+            "Run campaign",
+            "Run this campaign after the setup validation succeeds.",
+            "After reviewing the plan and worker paths, launch the campaign:",
+        ),
+    )
+    for budget, heading, introduction, launch_introduction in sections:
         bundle = campaign_dir / budget
         orchestrator_args = [
             "python",
@@ -424,7 +438,9 @@ def _bundle_readme(
         lines.extend(
             [
                 "",
-                f"## {budget.title()}",
+                f"## {heading}",
+                "",
+                introduction,
                 "",
                 "Inspect the complete plan without submitting jobs:",
                 "",
@@ -432,7 +448,7 @@ def _bundle_readme(
                 inspect_command,
                 "```",
                 "",
-                "After reviewing the plan and worker paths, launch the campaign:",
+                launch_introduction,
                 "",
                 "```bash",
                 launch_command,

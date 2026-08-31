@@ -120,8 +120,8 @@ def test_qwen3p5_0p8b_orchestrated_full_smoke_completes(
             str(runner),
             "--execution",
             str(
-                project_root_path / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/"
-                "execution.full_smoke.yaml"
+                project_root_path
+                / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
             ),
             "--stage",
             "full",

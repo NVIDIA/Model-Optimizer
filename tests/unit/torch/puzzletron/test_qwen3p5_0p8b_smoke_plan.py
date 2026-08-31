@@ -32,7 +32,9 @@ RUN_PATH = (
 )
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
-EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.smoke.yaml"
+EXECUTION_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
+)
 
 
 def _compile_plan(monkeypatch, tmp_path: Path):
