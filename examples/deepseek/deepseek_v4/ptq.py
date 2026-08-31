@@ -93,6 +93,7 @@ from safetensors.torch import load_model
 from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
@@ -273,6 +274,18 @@ def load_deepseek_v4(
     return model
 
 
+_PUBLISHED_RECIPE = "huggingface/models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
+
+
+def _quant_cfg_from_recipe(recipe_path: str) -> dict:
+    """Load a ModelOpt recipe and return an ``mtq.quantize`` config.
+
+    ``mtq.quantize`` accepts ``algorithm`` as a string or as a dict keyed on
+    ``method``, which is the shape a recipe yields, so no translation is needed.
+    """
+    return load_recipe(recipe_path).quantize.model_dump()
+
+
 def _build_nvfp4_experts_cfg() -> dict:
     """Quant config: NVFP4 weight + NVFP4 input, routed experts only.
 
@@ -322,6 +335,7 @@ def ptq(
     calib_size: int,
     calib_datasets: list[str],
     calib_seq: int = 512,
+    recipe: str | None = None,
 ):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -357,7 +371,8 @@ def ptq(
         dist.barrier()
         _trace("pre-calib barrier done")
 
-    mtq_cfg = _build_nvfp4_experts_cfg()
+    mtq_cfg = _quant_cfg_from_recipe(recipe) if recipe else _build_nvfp4_experts_cfg()
+    _trace(f"quant config from {'recipe ' + recipe if recipe else 'built-in default'}")
     _trace("calling mtq.quantize")
     model = mtq.quantize(model, mtq_cfg, calibrate_loop)
     _trace("mtq.quantize returned")
@@ -462,6 +477,15 @@ def main():
         help="where to dump amax files and quantized_layers_manifest.json",
     )
     p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument(
+        "--recipe",
+        default=None,
+        help=(
+            "ModelOpt recipe describing the quant config, loaded by path relative to "
+            f"modelopt_recipes/ (published: {_PUBLISHED_RECIPE}). Defaults to the "
+            "built-in routed-experts-only NVFP4 config, which this recipe mirrors."
+        ),
+    )
     p.add_argument("--calib_size", type=int, default=64)
     p.add_argument(
         "--calib_seq",
@@ -509,7 +533,13 @@ def main():
         args.model_path, trust_remote_code=args.trust_remote_code
     )
     model = ptq(
-        model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets, args.calib_seq
+        model,
+        tokenizer,
+        args.batch_size,
+        args.calib_size,
+        args.calib_datasets,
+        args.calib_seq,
+        args.recipe,
     )
     save_amax_and_quant_config(model, args.output_path)
 
