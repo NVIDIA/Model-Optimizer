@@ -1819,9 +1819,13 @@ class GPTModelExporter:
             torch.finfo(torch.float32).tiny
         )
         stacked_2 = torch.stack(scales_2, dim=0).reshape(-1, *([1] * scales[0].dim()))
-        merged_scale = (
-            torch.stack(scales, dim=0).to(torch.float32) * (stacked_2 / merged_scale_2)
-        ).to(scales[0].dtype)
+        # Rescaling only ever shrinks a block scale, so clamp before the cast: a block already
+        # near the E4M3 floor would otherwise flush to zero and take its weights with it.
+        rescaled = torch.stack(scales, dim=0).to(torch.float32) * (stacked_2 / merged_scale_2)
+        smallest = torch.finfo(scales[0].dtype).smallest_normal
+        merged_scale = torch.where(rescaled > 0, rescaled.clamp_min(smallest), rescaled).to(
+            scales[0].dtype
+        )
         return merged_scale, merged_scale_2
 
     def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False, transpose=True):
