@@ -47,7 +47,7 @@ class TestValidateCalibrationDir:
     """``_validate_calibration_dir`` gates the shard-directory loader against runaway sizes."""
 
     def test_empty_dir_raises(self, tmp_path):
-        with pytest.raises(FileNotFoundError, match="No .npz files"):
+        with pytest.raises(FileNotFoundError, match=r"No \.npz files"):
             cli._validate_calibration_dir(str(tmp_path))
 
     def test_directory_with_shards_under_limit_passes(self, tmp_path):
@@ -196,7 +196,7 @@ class TestMain:
         calib_dir.mkdir()
         # Empty dir -> _validate_calibration_dir raises before score() runs.
         monkeypatch.setattr(cli, "score", lambda **_: self._stub_result())
-        with pytest.raises(FileNotFoundError, match="No .npz files"):
+        with pytest.raises(FileNotFoundError, match=r"No \.npz files"):
             cli.main(
                 [
                     "--onnx_path",
