@@ -37,6 +37,11 @@ KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
 KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
 
 
+# Attributes under which a checkpoint may nest its text-tower config. Mirrors
+# modelopt.torch.speculative.plugins.modeling_fakebase._VLM_CONFIG_ATTRS.
+NESTED_CONFIG_ATTRS = ["text_config", "llm_config"]
+
+
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
@@ -640,18 +645,23 @@ def load_vlm_or_llm(
             propagate from a checkpoint's nested text config).
     """
 
-    def _reject_overrides_on_fake_base():
+    def _warn_overrides_on_fake_base():
         # FakeBaseModel.from_source re-reads the checkpoint config itself, so overrides applied
-        # here never reach it. Refuse rather than hand back a model built from the uncorrected
-        # dims the caller explicitly asked to fix.
+        # here never reach it -- but it is not silently wrong: from_source resolves dims from the
+        # nested text_config/llm_config first (modeling_fakebase._VLM_CONFIG_ATTRS), which is the
+        # very problem config_overrides exists to work around, so this path is already correct
+        # without them. Warn rather than raise: main.py forwards config_overrides unconditionally,
+        # so hard-failing would leave a single recipe unable to run offline at all.
         if config_overrides:
-            raise NotImplementedError(
-                "config_overrides is not supported on the FakeBaseModel path: from_source "
-                "rebuilds the config from the checkpoint and would silently ignore them."
+            warnings.warn(
+                "config_overrides is ignored on the FakeBaseModel path: from_source rebuilds the "
+                "config from the checkpoint, reading dims from the nested text_config/llm_config "
+                "directly, so the overrides are not needed there.",
+                stacklevel=2,
             )
 
     if use_offline_training and use_fake_base:
-        _reject_overrides_on_fake_base()
+        _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -666,10 +676,20 @@ def load_vlm_or_llm(
         trust_remote_code=trust_remote_code,
     )
 
-    # Apply caller-supplied config corrections to both the parent config and its
-    # nested text_config (some checkpoints don't propagate text_config dims).
+    # Apply caller-supplied config corrections to the parent config and every nested config
+    # (some checkpoints don't propagate the nested dims up to the parent).
     if config_overrides:
-        targets = [cfg for cfg in (model_config, getattr(model_config, "text_config", None)) if cfg]
+        # Cover every nested attribute VLM detection accepts, not just text_config: an
+        # llm_config-nesting checkpoint mirrors the fields on the parent as None, so an override
+        # would land on the parent, count as "applied", and never reach the real text tower.
+        targets = [
+            cfg
+            for cfg in (
+                model_config,
+                *(getattr(model_config, a, None) for a in NESTED_CONFIG_ATTRS),
+            )
+            if cfg is not None
+        ]
         unmatched = []
         for key, value in config_overrides.items():
             applied = False
@@ -691,13 +711,13 @@ def load_vlm_or_llm(
     # Detect VLMs: either "vl" in model_type (e.g. "llava") or has a nested text config
     # (e.g. Mistral3Config with model_type="mistral3" and text_config attribute).
     _is_vlm = "vl" in model_config.model_type.lower() or any(
-        getattr(model_config, attr, None) is not None for attr in ["text_config", "llm_config"]
+        getattr(model_config, attr, None) is not None for attr in NESTED_CONFIG_ATTRS
     )
 
     if _is_vlm and use_offline_training:
         # For VLMs in offline training, FakeBaseModel loads only embed_tokens + lm_head
         # and auto-detects VLM weight key layouts (e.g. "language_model.model.embed_tokens").
-        _reject_overrides_on_fake_base()
+        _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
