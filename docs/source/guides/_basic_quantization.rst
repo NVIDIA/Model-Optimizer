@@ -46,13 +46,14 @@ rounded to the nearest quantized value. An example of a more advanced calibratio
 `SVDQuant <https://arxiv.org/pdf/2411.05007>`_.
 
 Quantization-aware training (QAT) and Quantization-aware distillation (QAD)
-*********************************
-QAT or QAD can be viewed as regular PTQ followed by fine-tuning during which the original, unquantized
-weights are updated to minimize the loss. Compared to regular fine-tuning, we must model the effect
-of quantization on the forward and backward passes. Commonly used QAT techniques like
-`Straight-Through Estimator (STE) <https://arxiv.org/abs/1308.3432>`_ or STE with clipping have
-fixed scaling factors and tune the weights during training to minimize the loss. ModelOpt implements
-STE with clipping for QAT and QAD. See :ref:`quantization-aware-training` for more details.
+***************************************************************************
+QAT and QAD both start from PTQ and update the underlying unquantized weights while modeling the
+effect of quantization in the forward and backward passes. QAT uses the normal supervised loss,
+such as cross-entropy against labeled data. QAD instead uses a frozen BF16 teacher to guide the
+quantized student with a distillation loss. Commonly used QAT techniques like `Straight-Through
+Estimator (STE) <https://arxiv.org/abs/1308.3432>`_ or STE with clipping have fixed scaling factors
+and tune the weights during training to minimize the loss. ModelOpt implements STE with clipping for
+QAT and QAD. See :ref:`quantization-aware-training` for more details.
 
 
 More Readings

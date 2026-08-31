@@ -1,3 +1,5 @@
+.. _quantization-aware-training:
+
 ===============================================
 Quantization-Aware Training and Distillation
 ===============================================
@@ -228,6 +230,8 @@ for your environment.
 
 Megatron-LM
 -----------
+
+Megatron-LM can be used when more control over training parameters is needed. See the `Megatron-LM post-training README <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_ for more details. 
 
 For manual QAT, first apply PTQ, then fine-tune the quantized checkpoint with the
 ModelOpt-enabled Megatron-LM post-training scripts. QAT uses the standard SFT/CE
