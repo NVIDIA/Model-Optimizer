@@ -18,9 +18,9 @@
 
 ``examples/deepseek/deepseek_v4/ptq.py`` keeps ``_build_nvfp4_experts_cfg()`` as its
 default, so the recipe and that builder can drift apart without anything failing --
-the symptom would only show up as a difference between two amax dumps. Kept beside
-the other recipe tests rather than under ``tests/examples/``: CI runs ``tests/unit``
-on every change, while the example lanes cover an allowlist that excludes deepseek.
+the symptom would only show up as a difference between two amax dumps. Lives here rather
+than under ``tests/examples/``: CI runs ``tests/unit`` on every change, while the example
+lanes cover a fixed allowlist that has no deepseek entry.
 """
 
 import copy
