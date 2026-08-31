@@ -14,8 +14,11 @@
 # limitations under the License.
 """Utility functions for running example commands reused in multiple example tests."""
 
+import contextlib
 import os
+import signal
 import subprocess
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -61,13 +64,76 @@ def extend_cmd_parts(cmd_parts: list[str], **kwargs):
     return cmd_parts
 
 
+# Grace period for descendants to flush and close the inherited output pipe after the command exits,
+# then a short bound on the post-SIGKILL drain (the fds close as the kernel tears the group down).
+_ORPHAN_PIPE_TIMEOUT_S = 30
+_KILLED_PIPE_TIMEOUT_S = 5
+
+
 def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
-    """Run a command, capturing combined stdout/stderr to catch transient HF errors."""
-    result = subprocess.run(
-        cmd_parts, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+    """Run a command, streaming and capturing combined stdout/stderr to catch transient HF errors.
+
+    Drained by a reader thread rather than ``subprocess.run``, which waits for EOF: a descendant
+    outliving the command keeps the pipe open, hanging the read and discarding every log line.
+    """
+    chunks: list[str] = []
+    process = subprocess.Popen(
+        cmd_parts,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
     )
-    print(result.stdout, end="")
-    return result.returncode, result.stdout
+    # start_new_session makes the child its own group leader, so the group id is its pid (read now:
+    # os.getpgid() stops resolving it once wait() reaps the child).
+    pgid = process.pid
+
+    def _kill_process_group():
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if os.name == "posix":
+                os.killpg(pgid, signal.SIGKILL)
+            else:  # no process groups; the command itself is the best we can reach
+                process.kill()
+
+    def _drain():
+        with contextlib.suppress(ValueError):  # the stream is closed under us on the escape path
+            for line in process.stdout:  # type: ignore[union-attr]
+                print(line, end="")
+                chunks.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    try:
+        if os.name == "posix":
+            # Wait *without* reaping: a reaped pid can be recycled, and pgid == the child's pid, so
+            # reaping before the kill below would risk signalling an unrelated group.
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        else:  # no process groups, so nothing to protect the pid for
+            process.wait()
+    except BaseException:
+        # Interrupted (most likely pytest-timeout) while the command runs: its own process group is
+        # not swept up with pytest's, so take the descendants down rather than leak them.
+        _kill_process_group()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=_KILLED_PIPE_TIMEOUT_S)  # reap: WNOWAIT left it waitable
+        raise
+    reader.join(_ORPHAN_PIPE_TIMEOUT_S)
+
+    if reader.is_alive():
+        warnings.warn(
+            f"{cmd_parts[0]} left descendants holding its output pipe open; killing the process "
+            "group. Output may be truncated."
+        )
+        _kill_process_group()
+        reader.join(_KILLED_PIPE_TIMEOUT_S)
+
+    returncode = process.wait()
+
+    with contextlib.suppress(Exception):
+        process.stdout.close()  # type: ignore[union-attr]
+    return returncode, "".join(chunks)
 
 
 def run_example_command(

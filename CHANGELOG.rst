@@ -8,8 +8,12 @@ Changelog
 
 *Quantization*
 
+- Add a Muse Glimmer AutoQuantize recipe that searches language-model MLP projections, self-attention projections, and ``lm_head`` over W4A16 NVFP4 Four-Over-Six, FP8, and BF16 fallback at 5.5 effective bits while leaving the vision tower unquantized.
+- Add ``examples/alpamayo/qad.py``, which runs quantization-aware distillation on the quantized Alpamayo checkpoint produced by ``examples/alpamayo/quantize.py``. It distills the quantized VLM against the original FP16 VLM with ``QADTrainer``, supports FSDP2 for multi-GPU runs, and ``--export`` reassembles the trained VLM into a full AlpamayoR1 checkpoint that ``AlpamayoR1.from_pretrained`` can reload.
+- Add a calibration-free streaming Kimi-K3 converter and checkpoint-mirror recipe for NVFP4 routed experts with ``input_scale=1.0`` and 128x128 block-FP8 KDA/MLA attention weights. The converter operates shard-by-shard on the source checkpoint's packed MXFP4 experts instead of loading the 2.8T model through the in-memory ``hf_ptq.py`` path.
 - Add ``mtq.temporarily_fold_weights`` for repeated frozen-weight inference and ``mtq.preserve_quantizer_attributes_context`` for restoring temporary quantizer property and type changes. Temporary folding snapshots affected fake-quant weights on a configurable device and restores them with their quantizer state; retained pre-quant scales are inactive, while shared weights, shared quantizers, and ``SequentialQuantizer`` weights are unsupported.
 - Add the ``nvfp4_act_headroom`` calibration algorithm for NVFP4 **activation** global scales. Instead of setting the global scale from the largest per-block amax seen during calibration (plain ``max``, which leaves no room above it so any larger activation saturates), it anchors the scale to a low percentile of the per-block amax distribution, leaving the rest of the FP8 block-scale range as headroom: ``amax = max(rho * anchor, upper)``, where ``anchor`` and ``upper`` are the per-block amaxes at ``anchor_percentile`` (default 1) and ``upper_percentile`` (default 99.99; set to 100 to never clip calibration data), and ``rho`` (default 16384) is the headroom factor. Applies only to NVFP4 dynamic-block input quantizers; ``SequentialQuantizer`` activation quantizers raise. Weight scales are an orthogonal axis selected by a nested ``weight_scale_algorithm`` (``max`` by default, or ``mse`` / ``local_hessian``), so one recipe can combine a weight calibration with this activation policy in a single pass. Ships ``modelopt_recipes/general/ptq/nvfp4_act_headroom-kv_fp8_cast.yaml``, which mirrors ``nvfp4_default-kv_fp8_cast`` with only the calibration algorithm swapped and exports a standard NVFP4 checkpoint.
+- Add ``layerwise.export_dir``: layerwise calibration writes each decoder layer to its own quantized checkpoint shard as it finishes, so no separate ``export_hf_checkpoint()`` pass is needed and, with ``layerwise.checkpoint_dir``, an interrupted run resumes without redoing finished layers. Supports FP8 and NVFP4 on single-process models, resident or offloaded; other formats and placements raise ``NotImplementedError`` before calibration starts.
 
 *Megatron Framework (M-LM / M-Bridge)*
 
@@ -41,6 +45,8 @@ Changelog
 
 **Bug Fixes**
 
+- Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
+- Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
 - Update HuggingFace checkpoint export to use name-based tied-weight deduplication instead of the previous address-based approach. The address-based deduplication could incorrectly drop an untied weight that happened to share memory with a tied one, producing an incomplete checkpoint (observed as a false positive on MiniMax-M2.7).
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.

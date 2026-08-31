@@ -29,7 +29,7 @@ supported combinations.
 ### The shipped recipes
 
 <details>
-<summary>All 24 <code>general/ptq/</code> recipes (click to expand)</summary>
+<summary>All 25 <code>general/ptq/</code> recipes (click to expand)</summary>
 
 | Recipe | Model body | KV cache | Calibration |
 |--------|-----------|----------|-------------|
@@ -48,6 +48,7 @@ supported combinations.
 | `nvfp4_experts_only-kv_fp8_cast` | NVFP4 W4A4, MoE experts only | FP8 (constant amax) | max |
 | `nvfp4_experts_only-kv_fp8_layerwise` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise |
 | `nvfp4_experts_only-kv_fp8_layerwise_offload` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise (non-mutating, for disk offload) |
+| `nvfp4_experts_only-kv_fp8_layerwise_export` | NVFP4 W4A4, MoE experts only | FP8 (calibrated) | max, layerwise (exports each layer as it is calibrated) |
 | `nvfp4_experts_only_mse-kv_fp8_cast` | NVFP4 W4A4, MoE experts only | FP8 (constant amax) | MSE + FP8 sweep |
 | `nvfp4_experts_only_input_scale1-kv_fp8_cast` | NVFP4 W4A4, MoE experts only, expert `input_scale` pinned to 1.0 | FP8 (constant amax) | max (weights); expert activations uncalibrated |
 | `nvfp4_omlp_only-kv_fp8` | NVFP4 W4A4, o_proj + MLP/MoE | FP8 (calibrated) | max |
@@ -195,6 +196,10 @@ How the quantization scales are searched. The default (no suffix) is `max`.
 - **`layerwise`** (`nvfp4_experts_only-kv_fp8_layerwise`) — max calibration done
   one decoder layer at a time to **lower peak memory**; same numerics as the
   non-layerwise variant.
+- **`layerwise export`** (`nvfp4_experts_only-kv_fp8_layerwise_export`) — the same
+  calibration, additionally writing each decoder layer to the export checkpoint as
+  soon as it is calibrated. A run interrupted part-way **resumes without redoing
+  finished layers**, and no separate export pass is needed. Same numerics again.
 
 These can also be **stacked** when a single method isn't enough — e.g. `mse` +
 `gptq` combines an MSE-searched weight scale with GPTQ's layerwise update.
@@ -347,6 +352,14 @@ everything else matches the general recipe.
 The `huggingface/models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
+- **`models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention`** mirrors
+  `nvidia/Kimi-K3-NVFP4`: the source MXFP4 routed experts are cast to NVFP4,
+  with activation `input_scale=1.0`, while KDA and MLA projection weights use
+  128x128 block FP8. Attention activations are dynamic; shared and latent
+  experts, routers, convolutions, norms, the vision tower, `lm_head`, and KV
+  cache remain BF16. Because the 2.8T source uses packed MXFP4 expert tensors,
+  use the calibration-free streaming converter in `examples/kimi/` rather than
+  the in-memory `hf_ptq.py` flow.
 - **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections

@@ -609,9 +609,9 @@ class TestLayerwiseNestedConfig:
             warnings.simplefilter("error", DeprecationWarning)
             MaxCalibConfig(layerwise={"enable": True})
 
-    def test_checkpoint_dir_requires_enable(self):
-        with pytest.raises(ValidationError, match=r"requires layerwise.enable=True"):
-            MaxCalibConfig(layerwise={"checkpoint_dir": "/x"})
+    def test_directories_are_inert_without_enable(self):
+        """Not an error: with enable=False nothing reads them."""
+        assert MaxCalibConfig(layerwise={"checkpoint_dir": "/x"}).layerwise.enable is False
 
     @pytest.mark.parametrize(
         ("cfg_cls", "expected_qdq"),
@@ -648,6 +648,7 @@ class TestLayerwiseNestedConfig:
             "get_qdq_activations_from_prev_layer": False,
             "checkpoint_dir": None,
             "save_every": 1,
+            "export_dir": None,
             "calib_mutates_weights": True,
         }
         assert "layerwise_checkpoint_dir" not in dumped
