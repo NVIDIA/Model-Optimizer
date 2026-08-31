@@ -22,11 +22,20 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
+from _test_utils.torch.transformers_models import (
+    get_tiny_gemma3vl,
+    get_tiny_llama,
+    get_tiny_qwen3_moe,
+)
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
+from modelopt.torch.export.layerwise_export import (
+    LayerwiseExporter,
+    export_parent,
+    layer_shard_name,
+)
+from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -477,3 +486,54 @@ def test_awq_is_refused(tmp_path, make_cfg, method, match):
 
     with pytest.raises(NotImplementedError, match=match):
         mtq.quantize(_build_model(), cfg, _calib)
+
+
+def _build_vlm():
+    torch.manual_seed(0)
+    # tie_word_embeddings=False: per-layer export does not dedup tied weights on
+    # transformers 4 (see the TODO in unified_export_hf_streaming), and Kimi-K3 does not tie,
+    # so keep this test on the namespace/towers/config behaviour it exists for.
+    model = get_tiny_gemma3vl(tie_word_embeddings=False).cuda().eval()
+    # is_multimodal_model reads this, and the tiny fixtures leave it unset.
+    model.config.architectures = ["Gemma3ForConditionalGeneration"]
+    return model
+
+
+def _calib_vlm(language_model):
+    # use_cache=False: this calls the text model directly rather than the CausalLM wrapper,
+    # so a retained KV cache would make batch 2 build a mask for 31 positions against 16 keys.
+    for batch in CALIB_BATCHES:
+        language_model(batch.cuda(), use_cache=False)
+
+
+def test_vlm_export_matches_whole_model_export(tmp_path):
+    """A VLM calibrates its language model but must export the whole model.
+
+    Without the parent link the shards lose the ``language_model.`` namespace, the vision
+    tower and projector are never written at all, and config.json describes the submodel.
+    """
+    baseline_vlm = _build_vlm()
+    baseline_lm = get_language_model_from_vl(baseline_vlm)[-1]
+    cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+    cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
+    mtq.quantize(baseline_lm, cfg, _calib_vlm)
+    baseline_dir = tmp_path / "baseline"
+    export_hf_checkpoint(baseline_vlm, export_dir=baseline_dir)
+
+    vlm = _build_vlm()
+    language_model = get_language_model_from_vl(vlm)[-1]
+    export_dir = tmp_path / "fused"
+    with export_parent(vlm):
+        mtq.quantize(language_model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib_vlm)
+
+    exported = _load_checkpoint(export_dir)
+    _assert_same_checkpoint(_load_checkpoint(baseline_dir), exported)
+    _assert_same_quant_config(baseline_dir, export_dir)
+
+    assert any(k.startswith("language_model.") for k in exported), "lost the VLM namespace"
+    assert any(k.startswith(("vision_tower", "multi_modal_projector")) for k in exported), (
+        "the towers outside the language model were not exported"
+    )
+    assert "vision_config" in json.loads((export_dir / "config.json").read_text()), (
+        "config.json describes the submodel, not the VLM"
+    )

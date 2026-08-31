@@ -16,6 +16,7 @@
 """Write each decoder layer's quantized checkpoint shard as soon as it is calibrated."""
 
 import contextlib
+import contextvars
 import json
 import warnings
 from pathlib import Path
@@ -146,6 +147,73 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
         )
 
 
+_export_parent: contextvars.ContextVar[nn.Module | None] = contextvars.ContextVar(
+    "layerwise_export_parent", default=None
+)
+
+
+@contextlib.contextmanager
+def export_parent(parent: nn.Module):
+    """Export the checkpoint for ``parent`` while calibration runs on one of its submodules.
+
+    Multimodal pipelines calibrate the extracted language model, but the shards and config
+    have to describe the whole VLM. The decoder layers are the same objects either way, so
+    walking the parent yields parent-namespace tensor names, the full config and the
+    untouched towers with no prefixing.
+    """
+    token = _export_parent.set(parent)
+    try:
+        yield
+    finally:
+        _export_parent.reset(token)
+
+
+def _resolve_export_parent(model: nn.Module) -> nn.Module:
+    """Return the model the checkpoint should describe. Membership is by identity, not name."""
+    parent = _export_parent.get()
+    if parent is None or parent is model:
+        return model
+    if all(m is not model for m in parent.modules()):
+        raise ValueError(
+            f"export_parent() was given a {type(parent).__name__} that does not contain the "
+            "calibrated model."
+        )
+    return parent
+
+
+def build_legacy_name_mapper(model: nn.Module):
+    """Hub-name mapper for transformers < 5, or ``None``.
+
+    The whole-model path writes through ``save_pretrained``, and it is save_pretrained that
+    reverses ``_checkpoint_conversion_mapping`` (in-memory ``model.language_model.*`` ->
+    published ``language_model.model.*``). Per-layer export writes shards directly, so it
+    never passes through that. ``build_reverse_name_mapper`` does not cover it either: it
+    reads transformers 5's ``conversion_mapping`` module and raises on 4.x.
+
+    The mapping is stored hub-pattern -> in-memory-prefix, so it is inverted here. Longest
+    in-memory prefix first, or a short rule shadows a longer one (``lm_head`` inside
+    ``model.language_model...``).
+    """
+    import re
+
+    mapping = getattr(model, "_checkpoint_conversion_mapping", None)
+    if not mapping:
+        return None
+    rules = sorted(
+        ((re.compile("^" + re.escape(mem)), hub.lstrip("^")) for hub, mem in mapping.items()),
+        key=lambda r: -len(r[0].pattern),
+    )
+
+    def _map(name: str) -> str:
+        for pattern, replacement in rules:
+            new, n = pattern.subn(replacement, name, count=1)
+            if n:
+                return new
+        return name
+
+    return _map
+
+
 class LayerwiseExporter:
     """Writes one decoder layer's quantized shard per call, then the tail and index.
 
@@ -163,6 +231,7 @@ class LayerwiseExporter:
 
         Runs before calibration, so nothing amax-dependent exists yet.
         """
+        model = _resolve_export_parent(model)
         assert_layerwise_export_supported(model)
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
@@ -208,10 +277,14 @@ class LayerwiseExporter:
         try:
             self._name_mapper = build_reverse_name_mapper(model)
         except Exception as exc:
-            warnings.warn(
-                f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
-                "match the original HF hub checkpoint."
-            )
+            # transformers < 5 has no conversion_mapping module; fall back to the legacy
+            # mapping save_pretrained would have applied.
+            self._name_mapper = build_legacy_name_mapper(model)
+            if self._name_mapper is None:
+                warnings.warn(
+                    f"Reverse name mapper unavailable ({exc}); exported tensor names may not "
+                    "match the original HF hub checkpoint."
+                )
 
     def export_layer(
         self,

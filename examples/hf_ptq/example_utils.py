@@ -41,6 +41,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
+    PretrainedConfig,
     PreTrainedTokenizerBase,
     ProcessorMixin,
 )
@@ -703,6 +704,20 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
         return hf_config
 
 
+def _force_attn_implementation(model, attn_implementation: str) -> None:
+    """Re-apply the caller's ``attn_implementation`` after ``__init__``.
+
+    Kimi-K3's remote code rewrites ``text_config._attn_implementation`` to
+    ``flash_attention_2`` unconditionally, so an uninstalled backend fails later at the
+    export trace forward instead of at load. Drop this once flash-attn is installed
+    reliably here and the checkpoint is fixed upstream.
+    """
+    sub_configs = (v for v in vars(model.config).values() if isinstance(v, PretrainedConfig))
+    for cfg in (model.config, *sub_configs):
+        if getattr(cfg, "_attn_implementation", None) not in (None, attn_implementation):
+            cfg._attn_implementation = attn_implementation
+
+
 def _get_config_dtype(config):
     config_dtype = (
         getattr(config, "dtype", None) or getattr(config, "torch_dtype", None) or torch.bfloat16
@@ -967,6 +982,12 @@ def get_model(
             **model_kwargs2,
         )
     model.eval()
+
+    # Honour the caller's explicit choice even when remote modeling code overwrote it
+    # during __init__ (see _force_attn_implementation).
+    if attn_implementation is not None:
+        _force_attn_implementation(model, attn_implementation)
+
     if has_pack_quantized_config(hf_config):
         _unpack_compressed_linear_weights(model, ckpt_path)
 

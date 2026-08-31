@@ -78,6 +78,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import export_parent
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -758,7 +759,12 @@ def mono_quantize(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
             )
         else:
-            language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+            # A VLM calibrates its language model but must export the whole thing.
+            parent = full_model if args.layerwise_export else language_model
+            with export_parent(parent):
+                language_model = mtq.quantize(
+                    language_model, quant_cfg, forward_loop=calibrate_loop
+                )
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -779,12 +785,16 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
     calibration begins, the user has already paid for the whole run.
     """
     if is_multimodal_model(full_model):
-        raise NotImplementedError(
-            "layerwise.export_dir does not support multimodal models: calibration runs on the "
-            "extracted language model, so the shards and config.json would describe that "
-            "submodel rather than the full VLM, and the VLM export path would then "
-            "overwrite config.json with the unquantized source config."
-        )
+        # Calibration runs on the extracted language model, so the exporter is pointed at the
+        # full model below. That needs the submodel to be reachable from it by identity.
+        lineage = get_language_model_from_vl(full_model)
+        language_model = lineage[-1] if lineage else None
+        if language_model is None or all(m is not language_model for m in full_model.modules()):
+            raise NotImplementedError(
+                "layerwise.export_dir does not support this multimodal model: its language "
+                "model could not be located inside the full model, so the exported tensor "
+                "names cannot be resolved against the VLM."
+            )
 
     if mtp_layer_prefixes:
         raise NotImplementedError(
@@ -859,15 +869,17 @@ def export_quantized(
         is_vlm = is_multimodal_model(full_model)
 
         if is_vlm:
-            # Save original model config and the processor config to the export path for VLMs.
-            print(f"Saving original model config to {export_path}")
+            # Skipped under per-layer export: calibration already wrote a config carrying the
+            # quantization_config, and the source config is unquantized.
+            if not args.layerwise_export:
+                print(f"Saving original model config to {export_path}")
 
-            config_kwargs = {"trust_remote_code": args.trust_remote_code}
-            if args.attn_implementation is not None:
-                config_kwargs["attn_implementation"] = args.attn_implementation
-            AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
-                export_path
-            )
+                config_kwargs = {"trust_remote_code": args.trust_remote_code}
+                if args.attn_implementation is not None:
+                    config_kwargs["attn_implementation"] = args.attn_implementation
+                AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
+                    export_path
+                )
 
             # Try to save processor config if available
             try:
