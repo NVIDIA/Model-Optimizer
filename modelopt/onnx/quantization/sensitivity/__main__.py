@@ -22,6 +22,7 @@ and to a JSON file.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import sys
@@ -53,8 +54,6 @@ def _validate_calibration_dir(path: str) -> None:
         FileNotFoundError: If ``path`` contains no ``.npz`` files.
         ValueError: If any shard or the aggregate exceeds the limit.
     """
-    import glob
-
     files = sorted(glob.glob(os.path.join(path, "*.npz")))
     if not files:
         raise FileNotFoundError(f"No .npz files found under calibration directory: {path}")

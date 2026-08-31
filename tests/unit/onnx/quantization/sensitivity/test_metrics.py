@@ -63,6 +63,13 @@ class TestCosDistOrthogonal:
         q = np.zeros((2, 4), dtype=np.float32)
         assert cos_dist(p, q) == pytest.approx(0.0, abs=1e-6)
 
+    def test_asymmetric_zero_vectors_return_max_distance(self):
+        # Different vectors (with one being zero) should score as orthogonal (distance 1)
+        p = np.array([[1.0, 0.0]], dtype=np.float32)
+        q = np.array([[0.0, 0.0]], dtype=np.float32)
+        assert cos_dist(p, q) == pytest.approx(1.0, abs=1e-6)
+        assert cos_dist(q, p) == pytest.approx(1.0, abs=1e-6)
+
 
 class TestScaleSensitivity:
     """``mse`` scales with input magnitude; ``cos_dist`` does not; ``kl_div`` is invariant on

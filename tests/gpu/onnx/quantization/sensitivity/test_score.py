@@ -157,10 +157,15 @@ def test_coatnet_op_type_matches_manual_groundtruth():
     scores = result["scores"]
     ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
+    expected_top4 = ("Add", "Mul", "LayerNormalization", "ReduceMean")
     top4 = {name for name, _ in ranked[:4]}
-    assert {"Add", "Mul", "LayerNormalization", "ReduceMean"}.issubset(top4), (
-        f"Top-4 sensitive ops should include Add / Mul / LayerNormalization / "
-        f"ReduceMean (all > 1.5 KL), got {ranked}"
+    assert set(expected_top4).issubset(top4), (
+        f"Top-4 sensitive ops should include {expected_top4}, got {ranked}"
+    )
+    # Pin the quantitative threshold from the docstring.
+    assert all(scores[name] > 1.5 for name in expected_top4), (
+        f"Each expected top-4 op should score above 1.5 KL, got "
+        f"{ {name: scores[name] for name in expected_top4} }"
     )
     assert scores["Conv"] < 0.5, (
         f"Conv score {scores['Conv']:.3f} unexpectedly high (top-4 are all > 1.5)"

@@ -95,7 +95,10 @@ def cos_dist(fp16_act: np.ndarray, quant_act: np.ndarray) -> float:
     """
     p = _flatten_per_sample(fp16_act).astype(np.float64)
     q = _flatten_per_sample(quant_act).astype(np.float64)
+    p_norm = np.linalg.norm(p, axis=-1)
+    q_norm = np.linalg.norm(q, axis=-1)
     dot = np.sum(p * q, axis=-1)
-    norm = np.linalg.norm(p, axis=-1) * np.linalg.norm(q, axis=-1)
-    cos = np.where(norm > 0, dot / (norm + _EPS), 1.0)
+    # Both zero: identical (cos_sim = 1, distance 0); only one zero: orthogonal (distance 1)
+    both_zero = (p_norm == 0) & (q_norm == 0)
+    cos = np.where(both_zero, 1.0, dot / (p_norm * q_norm + _EPS))
     return float(np.mean(1.0 - cos))
