@@ -156,9 +156,18 @@ def main():
     # Since LoRA only changes weights — not architecture — the original config is correct.
     import shutil
 
+    # ...but only when the loaded config still matches the base's. With --config_overrides the
+    # weights were built from corrected dims, so copying the uncorrected base config back would
+    # leave config.json disagreeing with model.safetensors and force every downstream reader to
+    # re-supply the same overrides.
     base_config = Path(args.base_model_path) / "config.json"
     output_config = Path(args.output_path) / "config.json"
-    if base_config.exists():
+    if args.config_overrides:
+        print(
+            "  Keeping the saved config.json (config_overrides were applied, so the original "
+            "base config would not match the merged weights)"
+        )
+    elif base_config.exists():
         shutil.copy2(str(base_config), str(output_config))
         print(f"  Restored original config.json from {base_config}")
 
