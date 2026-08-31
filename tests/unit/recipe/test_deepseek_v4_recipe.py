@@ -129,6 +129,10 @@ def _entry(name, **cfg_overrides):
             ),
             "non-dict 'cfg'",
         ),
+        (
+            lambda c: c["quant_cfg"].append(_entry("*mtp.*ffn.experts.*w*_weight_quantizer")),
+            "MTP quantizers",
+        ),
     ],
     ids=[
         "wrong-algorithm",
@@ -137,6 +141,7 @@ def _entry(name, **cfg_overrides):
         "static-block-quantization",
         "wrong-scale-bits",
         "list-valued-cfg",
+        "mtp-experts-enabled",
     ],
 )
 def test_guard_rejects_recipes_the_export_path_cannot_represent(monkeypatch, mutate, match):

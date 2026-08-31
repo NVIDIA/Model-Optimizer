@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import json
 import os
 import re
@@ -277,6 +278,19 @@ def load_deepseek_v4(
 _PUBLISHED_RECIPE = "huggingface/models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
 
 
+_MTP_PROBE = "mtp.0.ffn.experts.0.w1_weight_quantizer"
+
+
+def _effective_enable(quant_cfg, name: str) -> bool:
+    """Whether ``name`` ends up enabled; mtq applies rules in order, so later ones win."""
+    enabled = False
+    for entry in quant_cfg:
+        if isinstance(entry, dict) and "quantizer_name" in entry:
+            if fnmatch.fnmatch(name, entry["quantizer_name"]):
+                enabled = entry.get("enable", True) is True
+    return enabled
+
+
 def _quant_cfg_from_recipe(recipe_path: str) -> dict:
     """Load a ModelOpt recipe and return an ``mtq.quantize`` config.
 
@@ -338,6 +352,16 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
 
     if not enabled_experts:
         raise ValueError("recipe enables no routed-expert quantizers (*ffn.experts.*)")
+
+    # The scope check above is a substring test, so a pattern such as
+    # *mtp.*ffn.experts.* satisfies it. MTP experts match save_amax's
+    # \.experts\.\d+\.w[123]_ regex too, so resolve the rules the way mtq applies
+    # them (in order, last match wins) and reject a recipe that leaves them on.
+    if _effective_enable(cfg.get("quant_cfg", []), _MTP_PROBE):
+        raise ValueError(
+            f"recipe enables MTP quantizers (matched {_MTP_PROBE!r}); this pipeline "
+            "leaves the MTP/DSpark block in its source format"
+        )
     return cfg
 
 
