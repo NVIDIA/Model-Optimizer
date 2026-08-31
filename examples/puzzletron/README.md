@@ -38,9 +38,8 @@ environment or container selected during setup. Prepare the
 
 ### Worker image
 
-The repository includes a Dockerfile for Puzzletron workers. The Puzzletron
-image workflow builds and checks it. Build and validation commands are in the
-[image guide](ci/README.md).
+The repository includes a Dockerfile for Puzzletron workers. Follow the
+[image guide](ci/README.md) to build and check it.
 
 ### 2. Generate a campaign
 

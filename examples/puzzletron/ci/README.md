@@ -1,12 +1,14 @@
-# Puzzletron image validation
+# Build the Puzzletron worker image
 
-The [`Dockerfile`](../Dockerfile) builds the Puzzletron worker image.
-[`ci_environment.json`](../ci_environment.json) is the shared manifest read by
-the Dockerfile and its verifier. It keeps selected package versions, source
-revisions, CUDA targets, NLTK resource checksums, and the Mamba patch checksum
-together so installation and validation values do not drift.
+The [`Dockerfile`](../Dockerfile) contains the worker installation steps.
+[`ci_environment.json`](../ci_environment.json) stores the versions, source
+revisions, CUDA targets, and downloaded-file checksums used by those steps.
+The image checker reads the same file, so installation and validation use the
+same values.
 
-Build and verify the image from the repository root:
+## Build
+
+Run this command from the repository root on a Linux amd64 system with Docker:
 
 ```bash
 test -z "$(git status --porcelain)"
@@ -18,39 +20,40 @@ docker build \
   --build-arg MODELOPT_REVISION="${revision}" \
   --tag "${image}" \
   .
+```
 
+The tag includes the platform and source commit. The image also records the
+full commit in its `org.opencontainers.image.revision` label.
+
+## Check
+
+In the same shell, check the installed packages, source revisions, CUDA
+version, imports, and evaluation data:
+
+```bash
 docker run --rm "${image}" \
   python /opt/puzzletron/verify_image_environment.py \
     --environment /opt/puzzletron/ci_environment.json
 ```
 
-The `amd64-sha-<12-character commit>` tag identifies the platform and gives
-people a compact source reference. The `org.opencontainers.image.revision`
-label retains the full source commit that identifies the exact Dockerfile and
-repository inputs. When an image is published, retain the commit tag and record
-the registry digest; consumers should prefer the digest when they need an
-immutable reference.
+On a host with an NVIDIA GPU, also check CUDA access:
 
-The tag identifies the recipe revision, not a bit-for-bit reproducible rebuild:
-transitive Python dependencies are still resolved when the image is built. Use
-the recorded registry digest to reuse one exact built image.
+```bash
+docker run --gpus all --ipc=host --rm "${image}" \
+  python -c 'import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
+```
 
-The image is Linux amd64-only because the current CUDA extension set and Linux
-`eva-decord 0.6.1` dependency do not have a validated ARM build path.
-The verifier checks package versions and sources, CUDA compatibility, worker
-imports, LMMS-Eval task configs, and the NLTK resources used by teacher
-evaluation. The image build therefore fails when the recorded requirements
-are incomplete.
+## Use
 
-Use the resulting image directly with Docker, publish it to a registry, or
-convert it to the format accepted by the target Slurm container plugin.
-Workers and GPU CI jobs use the same `/venv` environment and the repository at
-`/opt/puzzletron/src/modelopt`. Publication and full workload validation are
-separate steps; they do not require another package installation recipe.
+The image contains the worker environment at `/venv` and the ModelOpt checkout
+at `/opt/puzzletron/src/modelopt`. Use the image directly with Docker, publish
+it to a registry, or convert it to the format accepted by the target Slurm
+container plugin.
 
-The `Puzzletron worker image` GitHub workflow builds and smoke-tests the image
-for relevant pull-request updates, changes merged into `feature/puzzletron_v2`,
-and later changes to the worker recipe. It records the runner-local image ID
-and source revision but does not publish the image to a registry. The smoke
-test verifies CUDA access; teacher evaluation remains a separate integration
-test.
+The current image supports Linux amd64 only. Its CUDA extensions and
+`eva-decord 0.6.1` dependency have not been validated on Linux ARM.
+
+The source tag identifies the recipe revision, but rebuilding that revision may
+resolve newer transitive Python dependencies. Record the registry digest when
+the exact built image must be reused. This repository does not publish the
+image automatically.
