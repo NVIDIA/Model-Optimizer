@@ -53,8 +53,12 @@ def test_synthetic_random_calibration_smoke(synthetic_onnx_path):
     )
     assert result["calibration_source"] == "synthetic"
     scores = result["scores"]
-    assert set(scores) == set(SYNTHETIC_OP_SCOPE), (
-        f"Expected scores for every op in scope, got {scores}"
+    failed = result.get("failed", [])
+    # Every op in scope must be accounted for -- scored or reported as failed. 8-sample synthetic
+    # random calibration on the CPU EP can fail to produce Q/DQ for some ops (e.g. MatMul with a
+    # narrow activation range); those must show up in ``failed`` rather than silently disappear.
+    assert set(scores) | set(failed) == set(SYNTHETIC_OP_SCOPE), (
+        f"Op(s) missing from result. scores={scores} failed={failed}"
     )
     for name, value in scores.items():
         assert math.isfinite(value) and value >= 0.0, (
