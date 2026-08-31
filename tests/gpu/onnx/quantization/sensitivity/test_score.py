@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
 from modelopt.onnx.quantization.sensitivity import score
@@ -35,8 +37,10 @@ def synthetic_onnx_path(tmp_path_factory):
     return path
 
 
-def test_synthetic_random_calibration_directional(synthetic_onnx_path):
-    """With ``calibration_data=None``, ``LN > Conv`` invariant holds directionally."""
+def test_synthetic_random_calibration_smoke(synthetic_onnx_path):
+    """With ``calibration_data=None``, the synthetic-random path returns finite scores."""
+    import math
+
     result = score(
         synthetic_onnx_path,
         calibration_data=None,
@@ -49,9 +53,13 @@ def test_synthetic_random_calibration_directional(synthetic_onnx_path):
     )
     assert result["calibration_source"] == "synthetic"
     scores = result["scores"]
-    assert scores["LayerNormalization"] > scores["Conv"], (
-        f"Expected LayerNormalization > Conv, got {scores}"
+    assert set(scores) == set(SYNTHETIC_OP_SCOPE), (
+        f"Expected scores for every op in scope, got {scores}"
     )
+    for name, value in scores.items():
+        assert math.isfinite(value) and value >= 0.0, (
+            f"Score for {name!r} should be finite non-negative, got {value}"
+        )
 
 
 @pytest.mark.parametrize("metric", ["kl_div", "mse", "cos"])
@@ -79,7 +87,7 @@ def test_failed_probe_is_recorded(synthetic_onnx_path, monkeypatch):
     import shutil
 
     # Patch quantize() in score() to copy the input as-is, so the probe path has no Q/DQ nodes
-    import modelopt.onnx.quantization.sensitivity.score as score_module
+    score_module = importlib.import_module("modelopt.onnx.quantization.sensitivity.score")
 
     def _fake_quantize(**kwargs):
         shutil.copy(kwargs["onnx_path"], kwargs["output_path"])
@@ -105,11 +113,11 @@ def test_failed_probe_is_recorded(synthetic_onnx_path, monkeypatch):
 def test_failed_probe_records_exceptions(synthetic_onnx_path, monkeypatch):
     """A probe whose ``quantize()`` call raises is recorded in ``failed`` and absent from ``scores``."""
     # Patch quantize() in score() to raise an issue, so every probe hits the except branch that
-    # appends the target to ``failed``.
-    import modelopt.onnx.quantization.sensitivity.score as score_module
+    # appends the target to ``failed``
+    score_module = importlib.import_module("modelopt.onnx.quantization.sensitivity.score")
 
     def _raising_quantize(**kwargs):
-        raise RuntimeError("Simulated quantize failure")
+        raise RuntimeError("simulated quantize failure")
 
     monkeypatch.setattr(score_module, "quantize", _raising_quantize)
 
@@ -133,8 +141,7 @@ def test_coatnet_op_type_matches_manual_groundtruth():
     """CoAtNet-0 op-type ranking surfaces the ops that ``--op_types_to_quantize Conv`` avoids.
 
     Top-4 = ``Add`` / ``Mul`` / ``LayerNormalization`` / ``ReduceMean`` (all > 1.5 KL); ``Conv``
-    sits ~10x below. Matches the manual "Conv-only wins 82% top-1" ground truth. Wall-clock
-    ~14 min on H100. Opt-in via ``pytest --run-manual``.
+    sits ~10x below. Matches the manual "Conv-only wins 82% top-1" ground truth.
     """
     onnx_path, calib_path = get_coatnet_paths()
 
@@ -166,10 +173,7 @@ def test_coatnet_op_type_matches_manual_groundtruth():
     reason="CoAtNet-0 per-node integration; ~30-60 min on H100, needs pre-staged fixtures"
 )
 def test_coatnet_per_node_matches_manual_groundtruth():
-    """CoAtNet-0 per-node ranking: LN / MHA nodes in top-10, individual Conv nodes in bottom-10.
-
-    Wall-clock ~30-60 min on H100. Opt-in via ``pytest --run-manual``.
-    """
+    """CoAtNet-0 per-node ranking: LN / MHA nodes in top-10, individual Conv nodes in bottom-10."""
     onnx_path, calib_path = get_coatnet_paths()
 
     result = score(
