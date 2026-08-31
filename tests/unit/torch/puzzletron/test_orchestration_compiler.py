@@ -260,6 +260,16 @@ def test_runner_config_rejects_partition_directive_injection(tmp_configs) -> Non
         load_runner_config(runner_path)
 
 
+def test_runner_config_rejects_job_name_prefix_directive_injection(tmp_configs) -> None:
+    _experiment_path, runner_path, _execution_path = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"]["job_name_prefix"] = "trusted\n#SBATCH --qos=unexpected"
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError, match=r"runner\.slurm\.job_name_prefix"):
+        load_runner_config(runner_path)
+
+
 @pytest.mark.parametrize("scope", ["defaults", "stage"])
 def test_execution_config_rejects_partition_directive_injection(tmp_configs, scope: str) -> None:
     _, _, execution_path = tmp_configs

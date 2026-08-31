@@ -24,3 +24,6 @@ infrastructure:
       # Optional. Use one partition name or a list of eligible names. When
       # omitted, Slurm uses the site's default partition.
       partition:
+      # Optional. CPU-only stages use this partition instead of the default.
+      # Set it when the default partition requires a GPU request.
+      partition_cpu:

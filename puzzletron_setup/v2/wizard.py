@@ -716,6 +716,7 @@ def infrastructure_section(
         ("infrastructure.runner.slurm.account", ""),
         ("infrastructure.runner.slurm.job_name_prefix", "pt"),
         ("infrastructure.runner.slurm.partition", None),
+        ("infrastructure.runner.slurm.partition_cpu", None),
         ("infrastructure.runner.slurm.time_limit", "4:00:00"),
         ("infrastructure.runner.slurm.qos", None),
         ("infrastructure.runner.slurm.max_nodes", 64),
@@ -817,6 +818,11 @@ def infrastructure_section(
             "Eligible Slurm partitions (comma-separated; blank for site default):",
             "",
         ),
+        (
+            "infrastructure.runner.slurm.partition_cpu",
+            "Eligible CPU-only Slurm partitions (comma-separated; blank to reuse the default):",
+            "",
+        ),
         ("infrastructure.runner.slurm.time_limit", "Default time limit:", "4:00:00"),
     ):
         value = _text_field(
@@ -828,7 +834,11 @@ def infrastructure_section(
             validate=validate_worker_path if path in worker_path_fields else None,
             render_default=(
                 _render_partition_default
-                if path == "infrastructure.runner.slurm.partition"
+                if path
+                in {
+                    "infrastructure.runner.slurm.partition",
+                    "infrastructure.runner.slurm.partition_cpu",
+                }
                 else None
             ),
         )

@@ -81,20 +81,6 @@ model_overrides:
           gen_kwargs:
             do_sample: false
             temperature: 0
-          recorded_observation:
-            repeat_count: 2
-            candidate_architecture:
-              parameter_pruning_percent: 10.042
-              parameter_retention_percent: 89.958
-              ffn_layers: 24
-              teacher_intermediate_size: 3584
-              student_intermediate_size: 2048
-              ffn_width_pruning_percent: 42.857
-            metrics:
-              candidate.ifeval.prompt_level_strict_acc_none: 0.23
-              reference.ifeval.prompt_level_strict_acc_none: 0.55
-              candidate.modelopt_gsm8k.exact_match_flexible-extract: 0.01
-              reference.modelopt_gsm8k.exact_match_flexible-extract: 0.45
           topology:
             tensor_parallel_size: 1
             pipeline_parallel_size: 1

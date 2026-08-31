@@ -1,16 +1,15 @@
 # Qwen 3.5 0.8B text campaign
 
-Use this example when you want to run a substantial Qwen 3.5 0.8B text pruning
-campaign rather than a small workflow test. It searches FFN width, hidden
-width, grouped attention, GDN, embedding, and depth choices; learns bypass
-candidates; selects a serving-aware MIP solution; distills the selected
-student; and finishes with a student-versus-teacher downstream evaluation.
+Use this example to run a Qwen 3.5 0.8B text pruning campaign. It searches FFN
+intermediate sizes of 3072 and 2048, with the teacher size of 3584 retained as
+an option. Other architecture dimensions remain at their teacher values. The
+campaign scores replacements, selects a parameter-constrained MIP solution,
+benchmarks and distills it, and finishes with a student-versus-teacher
+downstream evaluation.
 
 The campaign uses larger scoring, validation, serving, and distillation budgets
-than the smoke recipes. These choices demonstrate a broad workflow, but they
-are starting points rather than prescribed settings. Adapt the search space,
-constraints, workloads, data, and training budget to the deployment target.
-Complete a smoke run before allocating resources to the larger campaign.
+than the smoke recipes. Complete a smoke run before allocating resources to
+this campaign.
 
 ## Inspect the complete plan
 
@@ -34,6 +33,28 @@ Inspect every requested stage, node count, walltime, and worker path before
 removing `--dry-run`. Relaunch the same command to resume compatible work;
 completed stages are not submitted again.
 
+## Change the search dimensions
+
+The checked-in Qwen 3.5 0.8B campaign and its validation cover only
+`ffn.intermediate_size`. Additional dimensions are configurable, but are not
+covered by this campaign. To create a variant, copy the run config and make
+each new dimension explicit in three places:
+
+1. Declare its legal candidate values in the model config.
+2. Enable its measurement, sanity, and replacement-scoring stages in the run
+   config.
+3. Add the measured axis to each applicable `mip.runs.<name>.search_space`.
+
+Keep `axes_default: teacher` so omitted dimensions retain the teacher value.
+The [configuration guide](configuration_overrides.md) explains where model and
+run settings live, and [MIP profiles](mip_profiles.md#search-space) documents
+the search-space syntax. The
+[advanced Qwen overlay](../configs/families/qwen3_5/qwen3p5_0p8b/advanced.yaml)
+shows the configuration shape for additional Qwen axes; use those axes only
+after validating their measurements and slicing behavior for the selected
+checkpoint. Run the resulting campaign with `--dry-run`, then exercise it as a
+smoke before increasing its budgets.
+
 ## Interpret the final quality comparison
 
 The final quality step evaluates the distilled student and pinned teacher on
@@ -41,11 +62,7 @@ the first 100 examples of pinned IFEval and GSM8K revisions. Both models use the
 same evaluator version, greedy generation settings, seed, batch size, and task
 definitions. The result contains student, teacher, and student-minus-teacher
 metrics plus generated samples for qualitative inspection.
-The shared configuration also records the repeated bounded observation and
-publishes the difference between a fresh run and those four headline scores.
-That comparison is machine-readable but does not gate the campaign.
-
 The [opt-in quality comparison](qwen3p5_0p8b_smoke.md#run-the-opt-in-end-to-end-quality-comparison)
 uses smaller search and distillation budgets and reuses the same downstream
-evaluation settings. It exercises the campaign's final evaluation without
-repeating the larger search, but it does not define acceptance thresholds.
+evaluation settings. Its checkpoint-specific historical observation is not
+inherited by this campaign, and neither route defines acceptance thresholds.

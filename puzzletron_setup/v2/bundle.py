@@ -234,6 +234,13 @@ def _render_experiment_v2(
     flows = _plain(config.post_mip_flows)
     if config.post_mip_flows_configured:
         rendered["post_mip"] = {"flows": deepcopy(flows)}
+        if budget == "smoke":
+            for flow in rendered["post_mip"]["flows"].values():
+                for node in _mapping(flow.get("nodes")).values():
+                    if node.get("type") == "downstream_evaluation":
+                        node_config = _mapping(node.get("config"))
+                        node_config["limit"] = min(int(node_config.get("limit", 8) or 8), 8)
+                        node["config"] = node_config
 
     batch_mirrors = {
         "pruning.micro_batch_size": "data.calibration.micro_batch_size",

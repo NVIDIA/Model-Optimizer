@@ -90,6 +90,7 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "infrastructure.runner.kind": "slurm",
         "infrastructure.runner.slurm.account": "account",
         "infrastructure.runner.slurm.partition": "cluster-default",
+        "infrastructure.runner.slurm.partition_cpu": "cpu-default",
         "infrastructure.gpus_per_node": 8,
         "output.result_root": "/results",
     }
@@ -372,7 +373,18 @@ def test_runner_compatibility_override_is_applied_to_resolved_runner(tmp_path: P
     runner = render_runner_v2(state, "production")
 
     assert runner["runner"]["slurm"]["partition"] == ["late-a", "late-b"]
+    assert runner["runner"]["slurm"]["partition_cpu"] == "cpu-default"
     assert runner["runner"]["slurm"]["account"] == "account"
+
+
+def test_cpu_partition_routes_generated_zero_gpu_stages(tmp_path: Path) -> None:
+    state = _campaign_state(tmp_path)
+
+    stages = render_execution_v2(state, "production")["execution"]["stages"]
+
+    for stage_id in ("convert", "tokenize_data", "build_library", "mip"):
+        assert stages[stage_id]["resource"] == "cpu"
+        assert stages[stage_id]["partition"] == "cpu-default"
 
 
 def test_runner_compatibility_override_accepts_scalar_partition(tmp_path: Path) -> None:

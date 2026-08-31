@@ -114,6 +114,10 @@ two-step smoke distillation does not preserve downstream quality, especially
 on GSM8K. Establish and validate a stronger pruning and distillation recipe
 before adding regression thresholds.
 
+These historical measurements are stored only in the opt-in comparison recipe.
+They are not setup defaults and are not emitted by the wizard or inherited by
+the larger campaign.
+
 The evaluator commit, dataset revisions, first 100 rows, seed, generation
 settings, and batch size are fixed. Keep batch size 8 when comparing runs.
 Backend numerical variation can still change a small number of outputs, so

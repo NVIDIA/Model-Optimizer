@@ -15,6 +15,26 @@ defaults:
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_quality_comparison}
 display_name: Qwen3p5 0.8B end-to-end quality comparison
 
+# Historical evidence belongs to this checkpoint-specific regression recipe,
+# not to the reusable evaluator settings or generated setup defaults. Two
+# identical 100-example GPU runs produced these values. Fresh runs publish
+# observation_delta.* metrics but never gate on them.
+quality_evaluation:
+  recorded_observation:
+    repeat_count: 2
+    candidate_architecture:
+      parameter_pruning_percent: 10.042
+      parameter_retention_percent: 89.958
+      ffn_layers: 24
+      teacher_intermediate_size: 3584
+      student_intermediate_size: 2048
+      ffn_width_pruning_percent: 42.857
+    metrics:
+      candidate.modelopt_ifeval.prompt_level_strict_acc_none: 0.23
+      reference.modelopt_ifeval.prompt_level_strict_acc_none: 0.55
+      candidate.modelopt_gsm8k.exact_match_flexible-extract: 0.01
+      reference.modelopt_gsm8k.exact_match_flexible-extract: 0.45
+
 post_mip:
   flows:
     params-90:

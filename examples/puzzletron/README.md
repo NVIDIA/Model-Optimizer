@@ -67,10 +67,11 @@ results without imposing an acceptance threshold. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
-For a substantial text pruning example, see the
-[Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It covers a broader
-multi-axis search and reuses the deterministic downstream evaluation from the
-bounded opt-in GPU comparison.
+For a Qwen 3.5 0.8B text pruning example, see the
+[Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It searches two FFN
+intermediate sizes, increases the scoring, serving, and distillation budgets,
+and reuses the same downstream evaluation settings as the opt-in quality
+comparison.
 
 ### 3. Inspect and launch smoke
 
@@ -183,6 +184,10 @@ and infrastructure.
 - Use [configuration and overrides](docs/configuration_overrides.md) to find
   the built-in configuration files, choose where campaign outputs are stored,
   or temporarily change experiment settings.
+- Use the
+  [Qwen campaign extension steps](docs/qwen3p5_0p8b_campaign.md#change-the-search-dimensions)
+  to add a measured architecture dimension while keeping omitted dimensions
+  at their teacher values.
 - Use [Slurm configuration](docs/slurm_configuration.md) to change partitions,
   CPU-only stages, log locations, and accepted compatibility fields.
 - Use the [setup wizard guide](docs/setup_wizard.md) to change profiles,

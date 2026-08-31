@@ -167,6 +167,7 @@ _STRING_OR_SEQUENCE_PATHS = {
     "data.subsets",
     "data.acquisition.subsets",
     "infrastructure.runner.slurm.partition",
+    "infrastructure.runner.slurm.partition_cpu",
 }
 _SCHEMA = {
     "schema_version": None,
@@ -212,6 +213,7 @@ _SCHEMA = {
                 "account": None,
                 "job_name_prefix": None,
                 "partition": None,
+                "partition_cpu": None,
                 "max_nodes": None,
                 "time_limit": None,
                 "qos": None,

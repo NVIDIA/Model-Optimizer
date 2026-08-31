@@ -206,14 +206,13 @@ def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
             "ffn_width_pruning_percent": 42.857,
         },
         "metrics": {
-            "candidate.ifeval.prompt_level_strict_acc_none": 0.23,
-            "reference.ifeval.prompt_level_strict_acc_none": 0.55,
+            "candidate.modelopt_ifeval.prompt_level_strict_acc_none": 0.23,
+            "reference.modelopt_ifeval.prompt_level_strict_acc_none": 0.55,
             "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
             "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
         },
     }
-    assert all("quality_gate" not in node_id for node_id in nodes)
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
+    assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
 
 
 def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
@@ -234,30 +233,22 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     )
 
     assert campaign["model"]["revision"] == campaign["model_info"]["hf_revision"]
-    assert set(campaign["mip"]["runs"]["runtime-075"]["search_space"]) == {
-        "depth",
-        "embedding",
+    assert campaign["search_space"]["axes"] == {
+        "ffn_intermediate": {
+            "enabled": True,
+            "teacher_value": 3584,
+            "values": [3072, 2048],
+        }
     }
-    assert campaign["pruning"]["attention_scored_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
-    ]
-    assert campaign["pruning"]["gdn_scored_axes"] == [
-        "gdn_key_groups",
-        "gdn_value_head_dim",
-    ]
-    nodes = campaign["post_mip"]["flows"]["runtime-075"]["nodes"]
-    assert tuple(nodes) == (
-        "online_eval",
-        "best_lm",
-        "materialized",
-        "serving",
-        "fastest",
-        "global_kd",
-        "final_eval",
-        "best",
-        "quality_benchmarks",
-    )
+    assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+    assert campaign["bypass"]["enabled"] is False
+    assert campaign["depth_importance"]["enabled"] is False
+    nodes = campaign["post_mip"]["flows"]["params-90"]["nodes"]
     campaign_quality = nodes["quality_benchmarks"]["config"]
     comparison_quality = comparison["post_mip"]["flows"]["params-90"]["nodes"][
         "quality_benchmarks"
@@ -265,16 +256,20 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
         "quality_comparison"
     ]
-    assert wizard_quality.pop("enabled") is True
-    assert wizard_quality == quality_evaluation
+    assert wizard_quality["enabled"] is True
+    assert {key: value for key, value in wizard_quality.items() if key != "enabled"} == (
+        quality_evaluation
+    )
     assert campaign_quality == campaign["quality_evaluation"]
     assert comparison_quality == comparison["quality_evaluation"]
+    assert "recorded_observation" not in campaign_quality
+    assert "recorded_observation" not in wizard_quality
+    assert {
+        key: value
+        for key, value in comparison_quality.items()
+        if key not in {"recorded_observation", "reference_checkpoint"}
+    } == {key: value for key, value in quality_evaluation.items() if key != "reference_checkpoint"}
     assert campaign_quality["reference_checkpoint"] == campaign["teacher_dir"]
     assert comparison_quality["reference_checkpoint"] == comparison["teacher_dir"]
-    assert {
-        key: value for key, value in campaign_quality.items() if key != "reference_checkpoint"
-    } == {key: value for key, value in comparison_quality.items() if key != "reference_checkpoint"}
     stages = {stage.stage_id: stage for stage in plan.stages}
-    assert tuple(stages)[-9:] == tuple(f"post.runtime-075.{node_id}" for node_id in nodes)
-    assert stages["post.runtime-075.global_kd"].total_gpus == 1
-    assert stages["post.runtime-075.quality_benchmarks"].total_gpus == 1
+    assert stages["post.params-90.quality_benchmarks"].total_gpus == 1

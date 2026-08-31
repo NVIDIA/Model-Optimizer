@@ -46,7 +46,10 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 The example uses repository-relative values. Copy it and add site-specific
 data, scheduler, and container settings before selecting it. The defaults file
 is loaded only when passed explicitly and takes precedence over the selected
-profile.
+profile. If the primary Slurm partition requires GPUs, set
+`infrastructure.runner.slurm.partition_cpu` to an eligible CPU partition; the
+generated execution routes conversion, tokenization, MIP, materialization, and
+other zero-GPU stages there.
 
 Use the full flow to expose every section and nested setting:
 

@@ -350,10 +350,7 @@ def _post_mip_flows(
                 config.setdefault("batch_size", 1)
                 config.setdefault("log_samples", True)
                 config.setdefault("topology", deepcopy(dict(default_serving_topology)))
-                # A recorded observation describes the complete pinned evaluator
-                # input, including its sample limit.  Shrinking that limit would
-                # make the generated observation deltas compare different runs.
-                if smoke and "recorded_observation" not in config:
+                if smoke:
                     config["limit"] = min(int(config.get("limit", 8) or 8), 8)
             elif node_type == "global_kd":
                 config.setdefault("automodel", {})["parallel"] = _parallel(global_kd_mesh)
