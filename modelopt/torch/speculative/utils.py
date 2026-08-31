@@ -607,7 +607,12 @@ def parse_config_overrides(raw: str | None) -> dict | None:
     if not raw:
         return None
     try:
-        parsed = json.loads(raw)
+        # Reject the JSON5-ish constants Python's json accepts by default: NaN/Infinity
+        # would sail through as floats and land on a config field as a dimension.
+        def _reject(const):
+            raise ValueError(f"--config_overrides contains non-finite value {const!r}")
+
+        parsed = json.loads(raw, parse_constant=_reject)
     except json.JSONDecodeError as e:
         raise ValueError(f"--config_overrides is not valid JSON: {e}") from e
     if not isinstance(parsed, dict):
