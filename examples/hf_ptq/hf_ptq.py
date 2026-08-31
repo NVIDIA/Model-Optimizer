@@ -785,8 +785,6 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
     calibration begins, the user has already paid for the whole run.
     """
     if is_multimodal_model(full_model):
-        # Calibration runs on the extracted language model, so the exporter is pointed at the
-        # full model below. That needs the submodel to be reachable from it by identity.
         lineage = get_language_model_from_vl(full_model)
         language_model = lineage[-1] if lineage else None
         if language_model is None or all(m is not language_model for m in full_model.modules()):
@@ -869,8 +867,8 @@ def export_quantized(
         is_vlm = is_multimodal_model(full_model)
 
         if is_vlm:
-            # Skipped under per-layer export: calibration already wrote a config carrying the
-            # quantization_config, and the source config is unquantized.
+            # Not under per-layer export: it already wrote a config with the
+            # quantization_config, and this source config is unquantized.
             if not args.layerwise_export:
                 print(f"Saving original model config to {export_path}")
 

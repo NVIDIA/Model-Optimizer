@@ -490,9 +490,8 @@ def test_awq_is_refused(tmp_path, make_cfg, method, match):
 
 def _build_vlm():
     torch.manual_seed(0)
-    # tie_word_embeddings=False: per-layer export does not dedup tied weights on
-    # transformers 4 (see the TODO in unified_export_hf_streaming), and Kimi-K3 does not tie,
-    # so keep this test on the namespace/towers/config behaviour it exists for.
+    # tie_word_embeddings=False: per-layer export does not dedup tied weights, and K3 does
+    # not tie -- keep this test on the namespace/towers/config behaviour it exists for.
     model = get_tiny_gemma3vl(tie_word_embeddings=False).cuda().eval()
     # is_multimodal_model reads this, and the tiny fixtures leave it unset.
     model.config.architectures = ["Gemma3ForConditionalGeneration"]
@@ -500,18 +499,14 @@ def _build_vlm():
 
 
 def _calib_vlm(language_model):
-    # use_cache=False: this calls the text model directly rather than the CausalLM wrapper,
-    # so a retained KV cache would make batch 2 build a mask for 31 positions against 16 keys.
+    # use_cache=False: this calls the text model directly, so a retained cache would make
+    # batch 2 build a mask for 31 positions against 16 keys.
     for batch in CALIB_BATCHES:
         language_model(batch.cuda(), use_cache=False)
 
 
 def test_vlm_export_matches_whole_model_export(tmp_path):
-    """A VLM calibrates its language model but must export the whole model.
-
-    Without the parent link the shards lose the ``language_model.`` namespace, the vision
-    tower and projector are never written at all, and config.json describes the submodel.
-    """
+    """A VLM calibrates its language model but must export the whole model."""
     baseline_vlm = _build_vlm()
     baseline_lm = get_language_model_from_vl(baseline_vlm)[-1]
     cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)

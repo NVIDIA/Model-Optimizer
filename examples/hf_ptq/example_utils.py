@@ -707,10 +707,8 @@ def _resolve_init_config(hf_config, auto_model_module, ckpt_path, config_kwargs)
 def _force_attn_implementation(model, attn_implementation: str) -> None:
     """Re-apply the caller's ``attn_implementation`` after ``__init__``.
 
-    Kimi-K3's remote code rewrites ``text_config._attn_implementation`` to
-    ``flash_attention_2`` unconditionally, so an uninstalled backend fails later at the
-    export trace forward instead of at load. Drop this once flash-attn is installed
-    reliably here and the checkpoint is fixed upstream.
+    Kimi-K3's remote code overwrites it unconditionally, so an uninstalled backend fails at
+    the export forward rather than at load. Drop once the checkpoint is fixed upstream.
     """
     sub_configs = (v for v in vars(model.config).values() if isinstance(v, PretrainedConfig))
     for cfg in (model.config, *sub_configs):
@@ -983,8 +981,6 @@ def get_model(
         )
     model.eval()
 
-    # Honour the caller's explicit choice even when remote modeling code overwrote it
-    # during __init__ (see _force_attn_implementation).
     if attn_implementation is not None:
         _force_attn_implementation(model, attn_implementation)
 

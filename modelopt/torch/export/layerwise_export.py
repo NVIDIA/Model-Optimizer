@@ -156,10 +156,8 @@ _export_parent: contextvars.ContextVar[nn.Module | None] = contextvars.ContextVa
 def export_parent(parent: nn.Module):
     """Export the checkpoint for ``parent`` while calibration runs on one of its submodules.
 
-    Multimodal pipelines calibrate the extracted language model, but the shards and config
-    have to describe the whole VLM. The decoder layers are the same objects either way, so
-    walking the parent yields parent-namespace tensor names, the full config and the
-    untouched towers with no prefixing.
+    The decoder layers are the same objects either way, so walking the parent yields
+    parent-namespace names, the full config and the untouched towers with no prefixing.
     """
     token = _export_parent.set(parent)
     try:
@@ -184,15 +182,12 @@ def _resolve_export_parent(model: nn.Module) -> nn.Module:
 def build_legacy_name_mapper(model: nn.Module):
     """Hub-name mapper for transformers < 5, or ``None``.
 
-    The whole-model path writes through ``save_pretrained``, and it is save_pretrained that
-    reverses ``_checkpoint_conversion_mapping`` (in-memory ``model.language_model.*`` ->
-    published ``language_model.model.*``). Per-layer export writes shards directly, so it
-    never passes through that. ``build_reverse_name_mapper`` does not cover it either: it
-    reads transformers 5's ``conversion_mapping`` module and raises on 4.x.
+    ``save_pretrained`` is what reverses ``_checkpoint_conversion_mapping``, and per-layer
+    export writes shards directly without it. ``build_reverse_name_mapper`` is no help
+    either: it reads transformers 5's ``conversion_mapping`` and raises on 4.x.
 
-    The mapping is stored hub-pattern -> in-memory-prefix, so it is inverted here. Longest
-    in-memory prefix first, or a short rule shadows a longer one (``lm_head`` inside
-    ``model.language_model...``).
+    Rules are inverted (the mapping is stored hub -> in-memory) and applied longest-prefix
+    first, or a short one shadows a longer (``lm_head`` inside ``model.language_model...``).
     """
     import re
 
@@ -277,8 +272,6 @@ class LayerwiseExporter:
         try:
             self._name_mapper = build_reverse_name_mapper(model)
         except Exception as exc:
-            # transformers < 5 has no conversion_mapping module; fall back to the legacy
-            # mapping save_pretrained would have applied.
             self._name_mapper = build_legacy_name_mapper(model)
             if self._name_mapper is None:
                 warnings.warn(
