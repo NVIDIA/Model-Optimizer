@@ -13,7 +13,7 @@ model for downstream tasks.
 
 .. note::
 
-    Some pruning and distillation methods don't need special handling for saving and restoring ModelOpt states and can be saved and restored using their standard APIs.
+    Some pruning and distillation methods don't need special handling for saving and restoring ModelOpt states. These checkpoints with ModelOpt states can be saved and restored using their standard APIs.
 
 This guide describes various options for saving and restoring the ModelOpt-modified models correctly.
 
