@@ -57,10 +57,10 @@ capture. See below.
 - `--answer-only-loss` and `--chat-template` — must agree with the training task's
   `training.answer_only_loss` and `data.chat_template`.
 
-> Both offline example YAMLs comment `--aux-layers dflash` with "Must match the draft
-> model's num_hidden_layers (recipe default: 5)". That comment is misleading — it
-> attaches the constraint to the wrong flag. The constraint is real; the knob is
-> `--num-draft-layers` (vLLM) or an explicit id list (HF / TRT-LLM).
+> Both offline example YAMLs used to attach this constraint to `--aux-layers`, which
+> carries no count. Their comments were corrected alongside this sheet — if you find
+> the old wording anywhere else, the knob is `--num-draft-layers` (vLLM) or an
+> explicit id list (HF / TRT-LLM).
 
 Offline training additionally needs `data.mode=offline`,
 `model.use_fake_base_for_offline=true` (loads only `lm_head` + `embed_tokens` rather
@@ -102,7 +102,7 @@ Export is automatic: after training, rank 0 exports every `checkpoint-<step>` to
 | Situation | What to change |
 | --- | --- |
 | Any model | Pin `dflash.dflash_mask_token_id` to a token that **already exists in the target's embedding** — the draft reuses the target's `embed_tokens`. Unset falls back to `tokenizer.mask_token_id`, which many tokenizers lack. MiniMax-M2.7 uses a reserved row (200054); Qwen3-8B uses 151669. |
-| `answer_only_loss=true` (recipe default) | The chat template must contain `{% generation %}` / `{% endgeneration %}` tags. Most stock templates don't — supply one via `data.chat_template=<path>.jinja`. Each model keeps its own next to its example YAML (`examples/<Org>/<Model>/chat_template_train.jinja`); copy the closest one. Note `dflash.yaml`'s comment points at a `chat_templates/` recipe directory that does not exist — ignore it. |
+| `answer_only_loss=true` (recipe default) | The chat template must contain `{% generation %}` / `{% endgeneration %}` tags. Most stock templates don't — supply one via `data.chat_template=<path>.jinja`. Each model keeps its own next to its example YAML (`examples/<Org>/<Model>/chat_template_train.jinja`); copy the closest one. |
 | `trust_remote_code` MoE with an older transformers pin | Set `OVERRIDE_TRANSFORMERS` in the task environment (MiniMax-M2.7 needs 4.57.1). Set `ACCELERATE_CONFIG` when the model needs FSDP2 via accelerate config rather than transformers-native `ParallelismConfig`. |
 | Very large MoE base | Use the offline variant with `model.use_fake_base_for_offline=true`; plain DDP suffices, so no FSDP2 patches. Set `MIXED_PRECISION: "no"` with `training.bf16=false` if the model requires it. |
 | Draft trained at short context, served long | Set `dflash.dflash_export_rope_scaling` (YaRN); factor = target context / `training_seq_len`. |
