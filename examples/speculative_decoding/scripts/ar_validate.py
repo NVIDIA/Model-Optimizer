@@ -124,8 +124,11 @@ def main():
     )
 
     if not results:
+        # validate_ar() clamps to len(ds), so report what was actually attempted rather than
+        # the requested --num_samples, which can be larger than the dataset.
+        attempted = min(args.num_samples, len(ds))
         raise RuntimeError(
-            f"AR validation produced no results: all {args.num_samples} samples failed. "
+            f"AR validation produced no results: all {attempted} samples failed. "
             "See the per-sample WARNING lines above for the underlying error. "
             "Exiting non-zero so this is not mistaken for a successful validation."
         )
