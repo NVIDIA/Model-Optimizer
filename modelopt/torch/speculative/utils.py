@@ -617,10 +617,8 @@ def load_vlm_or_llm(
 
     # Import the transformers-cosmos3 plugin if available: it registers the `cosmos3_omni`
     # architecture with AutoConfig on import, so the from_pretrained below recognizes it.
-    try:
+    with contextlib.suppress(ImportError):
         import transformers_cosmos3  # noqa: F401
-    except ImportError:
-        pass
 
     model_config = transformers.AutoConfig.from_pretrained(
         model_name_or_path,
