@@ -203,43 +203,44 @@ multimodal API and provides a value for candidate selection, but it is not a
 performance benchmark. Use more requests, realistic concurrency, and your
 deployment image sizes before drawing throughput conclusions.
 
-## Choose the production or automated E2E route
+## Choose the campaign or quality-comparison route
 
 Both routes use only the pinned Qwen 3.5 0.8B VLM and the checked-in
 `ffn_intermediate` search axis. The `vlm_campaign.yaml` route raises candidate
 evaluation, MIP selection, serving measurement, distillation, and final
-evaluation budgets. The opt-in `e2e_vlm_quality_regression.yaml` route runs the
-same lifecycle with reduced search, serving, and training budgets so it is
-suitable for automated regression.
+evaluation budgets. It requests 16 heterogeneous solutions plus up to eight
+homogeneous solutions, screens each returned candidate with 16 image-text
+samples, and keeps four for materialization and serving. The longer downstream
+comparison runs only after serving selects one candidate.
 
-The campaign and regression independently inherit their bounded lifecycle and
-consume one shared pinned final-evaluator specification. A plan test checks
-that both resolve the same settings. The evaluator measures the final student and pinned
-teacher on the first 100 rows of the pinned RealWorldQA and MMMU task revisions,
-twice. It pins the evaluator revision, generated task definitions, selection
-rule, seed, batch size, frame policy, and greedy generation settings. Per-sample
-outputs, student metrics, teacher metrics, and student-minus-teacher deltas are
-retained.
+The opt-in `e2e_vlm_quality_comparison.yaml` route runs the same lifecycle with
+reduced search, serving, and training budgets. The campaign and comparison are
+independent experiment configs that consume one shared pinned evaluation
+specification. The evaluator measures the final student and pinned teacher on
+the first 100 rows of the pinned RealWorldQA and MMMU task revisions, twice. It
+pins the evaluator revision, generated task definitions, selection rule, seed,
+batch size, frame policy, and greedy generation settings. Per-sample outputs,
+student metrics, teacher metrics, and student-minus-teacher deltas are retained.
 
 Repeated bounded GPU runs produced the same measurements. With 10.04% overall
 parameter pruning, the student scored 0.24 on RealWorldQA and 0.25 on MMMU; the
 teacher scored 0.60 and 0.35, respectively. Fresh runs retain these observations
 and report their differences, but do not use the smoke scores as acceptance
-thresholds. The regression validates the shared pipeline and evaluation
+thresholds. The comparison exercises the shared pipeline and evaluation
 machinery; its reduced-budget checkpoint is not evidence for the campaign's
 final numerical quality.
 
-Run the automated route with a site-specific runner. A completed evaluation
+Run the comparison route with a site-specific runner. A completed evaluation
 repetition is identity-bound and resumable, so a later allocation can continue
 without rerunning it. Set a distinct output root; this route requires the
 pinned RealWorldQA and MMMU caches and is intentionally excluded from default
 CI:
 
 ```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_regression.yaml
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml
 EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality_regression
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality_comparison
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \

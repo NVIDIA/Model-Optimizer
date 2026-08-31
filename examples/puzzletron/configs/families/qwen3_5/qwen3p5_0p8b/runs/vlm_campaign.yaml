@@ -2,12 +2,13 @@
 
 defaults:
   - full_vlm_smoke
-  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
 # Qwen 3.5 0.8B VLM campaign using the same FFN-only search as the bounded
-# smoke. This route raises the candidate, serving, and distillation budgets and
-# applies the shared pinned final evaluation.
+# smoke. It expands the MIP grid, screens candidates with a small image-text
+# sample, and applies the longer pinned comparison only after the serving-based
+# selection. The params-90 route targets roughly 10% whole-model pruning.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B VLM pruning campaign
 
@@ -29,7 +30,7 @@ mip:
   runs:
     params-90:
       solver:
-        num_solutions: 8
+        num_solutions: 16
         min_hamming_distance: 2
         max_seconds_per_solution: 300
       homogeneous:
@@ -41,7 +42,7 @@ post_mip:
       nodes:
         image_eval:
           config:
-            eval_samples: 64
+            eval_samples: 16
             block_size: 512
         best_vlm_loss:
           top_k: 4
@@ -57,7 +58,8 @@ post_mip:
             global_batch_size: 4
             local_batch_size: 1
             checkpoint_every_steps: 32
-        final_vlm_evaluation:
+        quality_benchmarks:
           type: downstream_evaluation
           input: short_vlm_kd
           failure_policy: strict
+          config: ${vlm_quality_evaluation}

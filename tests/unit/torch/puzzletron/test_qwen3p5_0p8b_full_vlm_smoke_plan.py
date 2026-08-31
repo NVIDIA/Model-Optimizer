@@ -40,16 +40,16 @@ PRODUCTION_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
-REGRESSION_RUN_PATH = (
+COMPARISON_RUN_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_regression.yaml"
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml"
 )
 FAMILY_PRESETS_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/setup_v2_defaults.yaml"
 )
-VLM_EVALUATOR_PATH = (
+VLM_EVALUATION_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator.yaml"
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation.yaml"
 )
 
 
@@ -187,7 +187,7 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["global_distillation"]["freeze_policy"] == "train_all"
 
 
-def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contract(
+def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluation_contract(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -197,28 +197,26 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
         run_path=PRODUCTION_RUN_PATH,
         execution_path=EXECUTION_PATH,
     )
-    regression = _compile_campaign(
+    comparison = _compile_campaign(
         monkeypatch,
         tmp_path,
-        run_path=REGRESSION_RUN_PATH,
+        run_path=COMPARISON_RUN_PATH,
         execution_path=EXECUTION_PATH,
     )
     production_config = production.experiment_config
-    config = regression.experiment_config
+    config = comparison.experiment_config
     production_nodes = production_config["post_mip"]["flows"]["params-90"]["nodes"]
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
-    benchmark = nodes["final_vlm_evaluation"]
-    stages = {stage.stage_id: stage for stage in regression.stages}
+    benchmark = nodes["quality_benchmarks"]
+    stages = {stage.stage_id: stage for stage in comparison.stages}
     family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
-    evaluator = yaml.safe_load(VLM_EVALUATOR_PATH.read_text())["post_mip"]["flows"]["params-90"][
-        "nodes"
-    ]["final_vlm_evaluation"]["config"]
+    evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
 
     production_defaults = yaml.safe_load(PRODUCTION_RUN_PATH.read_text())["defaults"]
-    regression_defaults = yaml.safe_load(REGRESSION_RUN_PATH.read_text())["defaults"]
-    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_"
+    comparison_defaults = yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"]
+    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
     assert production_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
-    assert regression_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
+    assert comparison_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
     assert production_config["mip"]["runs"]["params-90"]["search_space"] == {
         "depth": [0],
         "embedding": [1024],
@@ -226,13 +224,13 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
         "axes": {"ffn.intermediate_size": "all"},
     }
 
-    production_evaluation = dict(production_nodes["final_vlm_evaluation"]["config"])
-    regression_evaluation = dict(benchmark["config"])
+    production_evaluation = dict(production_nodes["quality_benchmarks"]["config"])
+    comparison_evaluation = dict(benchmark["config"])
     assert production_evaluation.pop("reference_checkpoint") == production_config["teacher_dir"]
-    assert regression_evaluation.pop("reference_checkpoint") == config["teacher_dir"]
-    recorded_observation = regression_evaluation.pop("recorded_observation")
-    assert regression_evaluation == production_evaluation
-    assert stages["post.params-90.final_vlm_evaluation"].parents == ("post.params-90.short_vlm_kd",)
+    assert comparison_evaluation.pop("reference_checkpoint") == config["teacher_dir"]
+    recorded_observation = comparison_evaluation.pop("recorded_observation")
+    assert comparison_evaluation == production_evaluation
+    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
     assert benchmark["input"] == "short_vlm_kd"
     assert benchmark["failure_policy"] == "strict"
     assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
@@ -266,9 +264,12 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
     assert "recorded_observation" not in evaluator
     assert wizard_quality == evaluator
     assert production_config["pruning"]["eval_samples"] == 128
+    assert production_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 16
+    assert production_nodes["image_eval"]["config"]["eval_samples"] == 16
+    assert production_nodes["best_vlm_loss"]["top_k"] == 4
     assert config["pruning"]["eval_samples"] == 8
     assert production_nodes["vlm_serving"]["config"]["request_count"] == 32
     assert nodes["vlm_serving"]["config"]["request_count"] == 1
     assert production_nodes["short_vlm_kd"]["config"]["max_steps"] == 256
     assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
-    assert all(stage.total_gpus == 1 for stage in (*production.stages, *regression.stages))
+    assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))
