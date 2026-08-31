@@ -814,15 +814,6 @@ def _aggregate_filter(
     execution_identity: str,
 ) -> tuple[list[NodeObservation], CandidateSet]:
     selected, excluded, scores = apply_filter(ledger, input_set.revision_ids, node.config)
-    if node.config.get("require_match") and not selected:
-        reasons = "; ".join(
-            f"{revision_id}: {excluded.get(revision_id, 'not selected')}"
-            for revision_id in input_set.revision_ids
-        )
-        raise RuntimeError(
-            f"required post-MIP filter {node.node_id!r} selected no candidates"
-            + (f": {reasons}" if reasons else "")
-        )
     observations = [
         NodeObservation(
             node_id=node.node_id,

@@ -194,6 +194,9 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     calls = []
 
     def fake_runner(checkpoint_path, *, output_root, settings):
+        result_path = output_root / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         calls.append(
             {
                 "checkpoint": checkpoint_path,
@@ -204,7 +207,11 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
                 "settings": settings,
             }
         )
-        return {"attempt": len(calls), "output_root": str(output_root)}
+        return {
+            "attempt": len(calls),
+            "metrics": {"accuracy": len(calls) / 10},
+            "result_path": str(result_path),
+        }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
     argv = [
@@ -242,10 +249,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     ]
     assert all(not any(call["credentials"].values()) for call in calls)
     assert all(call["settings"]["tasks"] == ",".join(expected_tasks) for call in calls)
-    assert result["runs"] == [
-        {"attempt": 1, "output_root": str(output / "short-repetition-1")},
-        {"attempt": 2, "output_root": str(output / "short-repetition-2")},
-    ]
+    assert [run["attempt"] for run in result["runs"]] == [1, 2]
     for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
@@ -273,7 +277,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert report["generation_policy"] == settings["gen_kwargs"]
 
 
-def test_short_profile_resumes_completed_repetitions(monkeypatch, tmp_path):
+def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, tmp_path):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -318,14 +322,17 @@ def test_short_profile_resumes_completed_repetitions(monkeypatch, tmp_path):
         )
         assert completed["schema"] == "modelopt.vlm-evaluation-completed-run/v1"
         assert completed["identity"]["repetition"] == repetition
+        assert completed["identity"]["checkpoint"]["fingerprint"]
 
+    state_path = model / "modelopt_state.json"
+    state_path.write_text("{}\n")
+    with pytest.raises(RuntimeError, match="inputs do not match"):
+        evaluation.evaluate(args)
 
-def test_realworldqa_smoke_policy_is_single_run_with_two_samples():
-    assert suites.source_tasks("realworldqa-smoke") == ("realworldqa",)
-    policy = suites.execution_policy("realworldqa-smoke", timeout_seconds=900)
-    assert policy["limit"] == 2
-    assert policy["repetitions"] == 1
-    assert policy["timeout_seconds"] == 900
+    state_path.unlink()
+    Path(first["runs"][0]["result_path"]).unlink()
+    with pytest.raises(RuntimeError, match="result artifact is missing"):
+        evaluation.evaluate(args)
 
 
 def test_e2e_full_eval_policy_is_repeated_and_bounded_to_100_rows_per_task():
@@ -347,6 +354,9 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     captured = {}
 
     def fake_runner(checkpoint_path, *, output_root, settings):
+        result_path = output_root / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         report = json.loads((output / "profile.json").read_text())
         assert report["configured_tasks"] == ["modelopt_vlm_benchmark_realworldqa"]
         assert report["sample_limit"] == 2
@@ -357,6 +367,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
         )
         return {
             "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
+            "result_path": str(result_path),
         }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)

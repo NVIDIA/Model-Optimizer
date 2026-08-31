@@ -289,9 +289,9 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 ```
 
 Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. The wizard's
-pruning profile and post-MIP graph are generic, so do not treat the generated
-graph as the maintained VLM example. Apply its site settings to your copied VLM
-configuration instead.
+generated production bundle follows the maintained FFN-only VLM route and
+includes the selected site settings. Use the checked-in `vlm_campaign.yaml`
+when you need the fixed reference configuration instead of a generated bundle.
 
 Choose larger-run settings deliberately:
 

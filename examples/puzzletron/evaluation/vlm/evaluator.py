@@ -37,18 +37,36 @@ _COMPLETED_RUN_SCHEMA = "modelopt.vlm-evaluation-completed-run/v1"
 _COMPLETED_RUN_FILENAME = "completed_run.json"
 
 
+def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
+    """Return the canonical checkpoint fingerprint without loading it."""
+    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+
+    return checkpoint_identity(checkpoint_path)
+
+
 def _completion_identity(
     checkpoint_path: Path,
     settings: Mapping[str, object],
     *,
+    profile_identity: Mapping[str, object],
     repetition: int,
 ) -> dict[str, object]:
     """Describe the immutable inputs for one resumable evaluation repetition."""
     return {
-        "checkpoint": str(checkpoint_path.resolve()),
+        "checkpoint": _checkpoint_identity(checkpoint_path),
+        "profile": dict(profile_identity),
         "repetition": repetition,
         "settings": dict(settings),
     }
+
+
+def _validated_run_result(result: object, *, label: str) -> dict[str, object]:
+    if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
+        raise RuntimeError(f"invalid {label} result")
+    result_path = result.get("result_path")
+    if not isinstance(result_path, str) or not Path(result_path).is_file():
+        raise RuntimeError(f"{label} result artifact is missing: {result_path}")
+    return dict(result)
 
 
 def _load_completed_run(
@@ -68,13 +86,7 @@ def _load_completed_run(
         raise RuntimeError(f"invalid completed VLM evaluation record: {completion_path}")
     if payload.get("identity") != dict(identity):
         raise RuntimeError(f"completed VLM evaluation inputs do not match: {completion_path}")
-    result = payload.get("result")
-    if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
-        raise RuntimeError(f"invalid completed VLM evaluation result: {completion_path}")
-    result_path = result.get("result_path")
-    if not isinstance(result_path, str) or not Path(result_path).is_file():
-        raise RuntimeError(f"completed VLM evaluation artifact is missing: {result_path}")
-    return dict(result)
+    return _validated_run_result(payload.get("result"), label="completed VLM evaluation")
 
 
 def _write_completed_run(
@@ -86,6 +98,7 @@ def _write_completed_run(
     """Atomically mark one repetition complete after its result artifact exists."""
     completion_path = output_root / _COMPLETED_RUN_FILENAME
     output_root.mkdir(parents=True, exist_ok=True)
+    result = _validated_run_result(result, label="VLM evaluation")
     content = (
         json.dumps(
             {
@@ -157,6 +170,13 @@ def evaluate(
     )
     settings.update(settings_overrides or {})
     repetitions = prepared.execution_policy["repetitions"]
+    profile_identity = {
+        "dataset_revisions": report["dataset_revisions"],
+        "lmms_eval_revision": report["lmms_eval_revision"],
+        "quick_manifest_sha256": report.get("quick_manifest_sha256"),
+        "source_tasks": report["source_tasks"],
+        "suite": prepared.suite,
+    }
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
@@ -166,6 +186,7 @@ def evaluate(
             identity = _completion_identity(
                 args.checkpoint,
                 settings,
+                profile_identity=profile_identity,
                 repetition=repetition,
             )
             run_result = _load_completed_run(output_root, identity=identity)

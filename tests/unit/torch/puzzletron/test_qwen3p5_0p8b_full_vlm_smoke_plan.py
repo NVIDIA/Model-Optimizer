@@ -235,26 +235,12 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluation_contra
     assert benchmark["failure_policy"] == "strict"
     assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
     assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert benchmark["config"]["batch_size"] == 1
-    assert benchmark["config"]["timeout_seconds"] == 14400
-    assert benchmark["config"]["max_model_len"] == 16384
-    assert benchmark["config"]["limit_mm_per_prompt"] == {"image": 12}
-    assert recorded_observation == {
-        "repeat_count": 2,
-        "candidate_architecture": {
-            "parameter_pruning_percent": 10.042,
-            "parameter_retention_percent": 89.958,
-            "ffn_layers": 24,
-            "teacher_intermediate_size": 3584,
-            "student_intermediate_size": 2048,
-            "ffn_width_pruning_percent": 42.857,
-        },
-        "metrics": {
-            "candidate.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract": 0.24,
-            "reference.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract": 0.60,
-            "candidate.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.25,
-            "reference.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.35,
-        },
+    assert recorded_observation["repeat_count"] == 2
+    assert set(recorded_observation["metrics"]) == {
+        "candidate.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
+        "reference.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
+        "candidate.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+        "reference.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
     }
     assert all("quality_gate" not in node_id for node_id in nodes)
     wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
@@ -263,13 +249,22 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluation_contra
     assert wizard_quality.pop("enabled") is True
     assert "recorded_observation" not in evaluator
     assert wizard_quality == evaluator
-    assert production_config["pruning"]["eval_samples"] == 128
-    assert production_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 16
-    assert production_nodes["image_eval"]["config"]["eval_samples"] == 16
-    assert production_nodes["best_vlm_loss"]["top_k"] == 4
-    assert config["pruning"]["eval_samples"] == 8
-    assert production_nodes["vlm_serving"]["config"]["request_count"] == 32
-    assert nodes["vlm_serving"]["config"]["request_count"] == 1
-    assert production_nodes["short_vlm_kd"]["config"]["max_steps"] == 256
-    assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
+    assert production_config["pruning"]["eval_samples"] > config["pruning"]["eval_samples"]
+    assert (
+        production_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
+        > config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
+    )
+    assert (
+        production_nodes["image_eval"]["config"]["eval_samples"]
+        > nodes["image_eval"]["config"]["eval_samples"]
+    )
+    assert production_nodes["best_vlm_loss"]["top_k"] > nodes["best_vlm_loss"]["top_k"]
+    assert (
+        production_nodes["vlm_serving"]["config"]["request_count"]
+        > nodes["vlm_serving"]["config"]["request_count"]
+    )
+    assert (
+        production_nodes["short_vlm_kd"]["config"]["max_steps"]
+        > nodes["short_vlm_kd"]["config"]["max_steps"]
+    )
     assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))

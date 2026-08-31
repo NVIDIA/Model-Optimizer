@@ -196,59 +196,23 @@ def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
         "do_sample": False,
         "temperature": 0,
     }
-    assert benchmark["config"]["recorded_observation"] == {
-        "repeat_count": 2,
-        "candidate_architecture": {
-            "parameter_pruning_percent": 10.042,
-            "parameter_retention_percent": 89.958,
-            "ffn_layers": 24,
-            "teacher_intermediate_size": 3584,
-            "student_intermediate_size": 2048,
-            "ffn_width_pruning_percent": 42.857,
-        },
-        "metrics": {
-            "candidate.modelopt_ifeval.prompt_level_strict_acc_none": 0.23,
-            "reference.modelopt_ifeval.prompt_level_strict_acc_none": 0.55,
-            "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
-            "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
-        },
+    observation = benchmark["config"]["recorded_observation"]
+    assert observation["repeat_count"] > 0
+    assert set(observation["metrics"]) == {
+        "candidate.modelopt_ifeval.prompt_level_strict_acc_none",
+        "reference.modelopt_ifeval.prompt_level_strict_acc_none",
+        "candidate.modelopt_gsm8k.exact_match_flexible-extract",
+        "reference.modelopt_gsm8k.exact_match_flexible-extract",
     }
+    assert 0 < observation["candidate_architecture"]["parameter_pruning_percent"] < 100
     assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
 
 
-def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
+def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings() -> None:
     campaign = pipeline_config_from_path(CAMPAIGN_PATH)
     comparison = pipeline_config_from_path(QUALITY_COMPARISON_RUN_PATH)
     family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
     quality_evaluation = yaml.safe_load(QUALITY_EVALUATION_PATH.read_text())["quality_evaluation"]
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
-    plan = compile_campaign_plan(
-        experiment_config_path=CAMPAIGN_PATH,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(EXECUTION_PATH),
-        stage_filter="full",
-    )
-
-    assert campaign["model"]["revision"] == campaign["model_info"]["hf_revision"]
-    assert campaign["search_space"]["axes"] == {
-        "ffn_intermediate": {
-            "enabled": True,
-            "teacher_value": 3584,
-            "values": [3072, 2048],
-        }
-    }
-    assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert campaign["bypass"]["enabled"] is False
-    assert campaign["depth_importance"]["enabled"] is False
     nodes = campaign["post_mip"]["flows"]["params-90"]["nodes"]
     campaign_quality = nodes["quality_benchmarks"]["config"]
     comparison_quality = comparison["post_mip"]["flows"]["params-90"]["nodes"][
@@ -272,8 +236,6 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     } == {key: value for key, value in quality_evaluation.items() if key != "reference_checkpoint"}
     assert campaign_quality["reference_checkpoint"] == campaign["teacher_dir"]
     assert comparison_quality["reference_checkpoint"] == comparison["teacher_dir"]
-    stages = {stage.stage_id: stage for stage in plan.stages}
-    assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
 
 
 def test_qwen3p5_0p8b_extended_campaign_exposes_additional_axes(

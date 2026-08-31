@@ -55,15 +55,7 @@ def _metric_entries(config: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 
 def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
-    common = {
-        "type",
-        "input",
-        "model_source",
-        "failure_policy",
-        "config",
-        "mode",
-        "require_match",
-    }
+    common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
     allowed = {
         "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
         "threshold": common | {"metric", "min", "max"},
@@ -72,8 +64,6 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     }
     if mode not in allowed:
         raise ValueError("filter.mode must be top_k, threshold, pareto, or aggregate_rank")
-    if not isinstance(config.get("require_match", False), bool):
-        raise TypeError("filter.require_match must be a boolean")
     unknown = set(config) - allowed[mode]
     if unknown:
         raise ValueError(f"unknown {mode} filter fields: {sorted(unknown)}")
