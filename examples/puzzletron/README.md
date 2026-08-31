@@ -38,8 +38,9 @@ environment or container selected during setup. Prepare the
 
 ### Worker image
 
-The repository includes a Dockerfile for Puzzletron workers. Follow the
-[image guide](ci/README.md) to build and check it.
+The repository includes a Dockerfile and build command for Puzzletron workers.
+Follow the [image guide](ci/README.md) to build, check, or export a Docker
+archive or Enroot/Pyxis SquashFS image.
 
 ### 2. Generate a campaign
 

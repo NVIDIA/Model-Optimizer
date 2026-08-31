@@ -8,29 +8,56 @@ same values.
 
 ## Build
 
-Run this command from the repository root on a Linux amd64 system with Docker:
+Run the build command from a clean repository checkout on a Linux amd64 system
+with Docker:
 
 ```bash
-test -z "$(git status --porcelain)"
-revision="$(git rev-parse HEAD)"
-image="modelopt-puzzletron:amd64-sha-$(git rev-parse --short=12 HEAD)"
-docker build \
-  --platform linux/amd64 \
-  --file examples/puzzletron/Dockerfile \
-  --build-arg MODELOPT_REVISION="${revision}" \
-  --tag "${image}" \
-  .
+python examples/puzzletron/build_worker_image.py
 ```
 
-The tag includes the platform and source commit. The image also records the
-full commit in its `org.opencontainers.image.revision` label.
+The command builds the image, checks its installed environment, and prints its
+local Docker name. That name is only a convenience. The full source commit is
+recorded in the image, and exported files use the same readable commit-based
+filename.
+
+## Export
+
+Add `--archive` for a portable Docker archive, `--sqsh` for an Enroot/Pyxis
+image, or both:
+
+```bash
+python examples/puzzletron/build_worker_image.py \
+  --output-dir /path/to/output \
+  --archive \
+  --sqsh
+```
+
+Creating a Docker archive also requires `zstd`. Creating a SquashFS image
+requires Enroot and Docker on the same build host.
+
+Both formats use the same source identity:
+
+```text
+modelopt-puzzletron-linux-amd64-git-<12-character-commit>.tar.zst
+modelopt-puzzletron-linux-amd64-git-<12-character-commit>.sqsh
+```
+
+Each image file has a matching `.sha256` file.
+
+Verify an exported file from its output directory with:
+
+```bash
+sha256sum --check modelopt-puzzletron-linux-amd64-git-<12-character-commit>.sqsh.sha256
+```
 
 ## Check
 
-In the same shell, check the installed packages, source revisions, CUDA
-version, imports, and evaluation data:
+The build command already checks the installed packages, source revisions,
+CUDA version, imports, and evaluation data. To repeat that check later, first
+set the local Docker name printed by the build command:
 
 ```bash
+image="modelopt-puzzletron:linux-amd64-git-$(git rev-parse --short=12 HEAD)"
 docker run --rm "${image}" \
   python /opt/puzzletron/verify_image_environment.py \
     --environment /opt/puzzletron/ci_environment.json
@@ -53,7 +80,8 @@ container plugin.
 The current image supports Linux amd64 only. Its CUDA extensions and
 `eva-decord 0.6.1` dependency have not been validated on Linux ARM.
 
-The source tag identifies the recipe revision, but rebuilding that revision may
-resolve newer transitive Python dependencies. Record the registry digest when
-the exact built image must be reused. This repository does not publish the
-image automatically.
+The artifact filename identifies the recipe revision. Keep the image and its
+checksum together; those files identify the exact export without relying on a
+local Docker tag. Rebuilding that revision may still resolve newer transitive
+Python dependencies. Record the registry digest if the image is later
+published. This repository does not publish the image automatically.
