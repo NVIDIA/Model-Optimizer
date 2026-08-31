@@ -282,8 +282,47 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
 
     ``mtq.quantize`` accepts ``algorithm`` as a string or as a dict keyed on
     ``method``, which is the shape a recipe yields, so no translation is needed.
+
+    The recipe is validated against what the rest of this pipeline can actually
+    export. ``save_amax_and_quant_config`` persists only routed-expert quantizer
+    state and writes a manifest hardcoded to ``NVFP4_W4A4``/``num_bits [2, 1]``/
+    ``block_size 16``, which ``quantize_to_nvfp4.py`` then consumes as ground
+    truth. A recipe that enables anything else, or asks for a different numeric
+    format, would produce a mislabeled manifest and silently drop quantizers --
+    so reject it here instead. Mirrors the guard in
+    ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
     """
-    return load_recipe(recipe_path).quantize.model_dump()
+    cfg = load_recipe(recipe_path).quantize.model_dump()
+
+    algo = cfg.get("algorithm")
+    method = algo.get("method") if isinstance(algo, dict) else algo
+    if method != "max":
+        raise ValueError(f"recipe must use the 'max' calibration algorithm, got {method!r}")
+
+    enabled_experts = False
+    for entry in cfg.get("quant_cfg", []):
+        if not isinstance(entry, dict) or entry.get("enable") is not True:
+            continue
+        name = entry.get("quantizer_name", "")
+        if "ffn.experts." not in name:
+            raise ValueError(
+                f"recipe enables {name!r}, but this pipeline exports only routed-expert "
+                "quantizers (*ffn.experts.*); the manifest and quantize_to_nvfp4.py "
+                "would not represent it"
+            )
+        qcfg = entry.get("cfg") or {}
+        block_sizes = qcfg.get("block_sizes") or {}
+        if tuple(qcfg.get("num_bits") or ()) != (2, 1) or block_sizes.get(-1) != 16:
+            raise ValueError(
+                f"recipe entry {name!r} must be block-16 NVFP4 (num_bits (2, 1), "
+                f"block_sizes[-1] 16) to match the exported manifest, got "
+                f"num_bits={qcfg.get('num_bits')!r} block_sizes={block_sizes!r}"
+            )
+        enabled_experts = True
+
+    if not enabled_experts:
+        raise ValueError("recipe enables no routed-expert quantizers (*ffn.experts.*)")
+    return cfg
 
 
 def _build_nvfp4_experts_cfg() -> dict:
@@ -372,7 +411,7 @@ def ptq(
         _trace("pre-calib barrier done")
 
     mtq_cfg = _quant_cfg_from_recipe(recipe) if recipe else _build_nvfp4_experts_cfg()
-    _trace(f"quant config from {'recipe ' + recipe if recipe else 'built-in default'}")
+    _trace(f"quant config from {'recipe' if recipe else 'built-in default'}")
     _trace("calling mtq.quantize")
     model = mtq.quantize(model, mtq_cfg, calibrate_loop)
     _trace("mtq.quantize returned")

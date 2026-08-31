@@ -360,6 +360,15 @@ checkpoint's** quant config verbatim:
   cache remain BF16. Because the 2.8T source uses packed MXFP4 expert tensors,
   use the calibration-free streaming converter in `examples/kimi/` rather than
   the in-memory `hf_ptq.py` flow.
+- **`models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`** mirrors
+  `nvidia/DeepSeek-V4-Pro-0813-NVFP4`: the source MXFP4 routed experts are cast to
+  NVFP4 (weights and activations, block 16), while shared experts, attention,
+  router gates, `lm_head` and the MTP/DSpark speculative-decoding block stay in
+  their source format. Because the 1.65T source ships its experts packed as MXFP4
+  in DeepSeek's native layout, calibration runs through
+  `examples/deepseek/deepseek_v4/ptq.py` and the cast through
+  `quantize_to_nvfp4.py --cast_mxfp4_to_nvfp4`, rather than the in-memory
+  `hf_ptq.py` flow.
 - **`models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib`** mirrors
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
