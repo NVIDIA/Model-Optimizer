@@ -28,8 +28,8 @@ import os
 import sys
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.__main__ import validate_file_size
 from modelopt.onnx.quantization.sensitivity.score import Granularity, Metric, score
+from modelopt.onnx.utils import validate_file_size
 
 # 2 GiB matches the ``--onnx_path`` guard in ``modelopt.onnx.quantization.__main__``.
 _ONNX_MAX_SIZE_BYTES = 2 * (1024**3)

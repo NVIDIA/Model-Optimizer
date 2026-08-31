@@ -19,6 +19,7 @@ import importlib
 import os
 
 import onnx
+import onnx_graphsurgeon as gs
 import onnxruntime
 import pytest
 import torch
@@ -27,7 +28,7 @@ from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 from packaging import version
 
 import modelopt.onnx.quantization as moq
-from modelopt.onnx.utils import get_opset_version
+from modelopt.onnx.utils import get_opset_version, save_onnx
 
 # Mapping of quantization mode to minimum required opset
 MIN_OPSET = {
@@ -205,10 +206,6 @@ def test_quantize_honors_nodes_to_quantize_allowlist(tmp_path):
     Guards the primitive the ONNX sensitivity scanner relies on to isolate a single node for a
     per-target probe; also documents the API contract of the flag itself.
     """
-    import onnx_graphsurgeon as gs
-
-    from modelopt.onnx.utils import save_onnx
-
     onnx_model = build_conv_concat_model()
     onnx_path = os.path.join(tmp_path, "conv_concat.onnx")
     save_onnx(onnx_model, onnx_path)

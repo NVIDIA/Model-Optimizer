@@ -163,6 +163,15 @@ class TestBlocks:
             "b1"
         }
 
+    def test_unmatched_node_name_collision_with_group_name_stays_isolated(self):
+        # Node "g" (unmatched) must not merge into group "g" (members g_n1, g_n2).
+        scores = {"g_n1": 0.01, "g_n2": 0.01, "g": 10.0}
+        blocks = {"g": [r"^g_"]}
+        excluded = suggest_exclusion(scores, threshold=1.0, blocks=blocks, block_agg="sum")
+        assert set(excluded) == {"g"}, (
+            f"Standalone node 'g' should not be merged into group 'g': got {excluded}"
+        )
+
     def test_invalid_block_agg_raises(self):
         with pytest.raises(ValueError, match="block_agg"):
             suggest_exclusion(

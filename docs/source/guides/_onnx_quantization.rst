@@ -222,12 +222,8 @@ Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
       Conv                0.181
       AveragePool         0.057
       Sigmoid             0.039
-      MatMul              0.015
-      Relu               ~0
-      Softmax            ~0
-      GlobalAveragePool  ~0
-      Gemm                0     <-- lowest impact
-      (1 target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)
+      MatMul              0.015  <-- lowest impact
+      (4 target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)
     Wrote coatnet-0.sensitivity.json
 
 .. note::
@@ -248,9 +244,10 @@ reports what the exclusion set covers.
 
 Two policy modes are supported:
 
-- **Coverage mode** (default): exclude the largest node set whose cumulative sensitivity score
-  stays at or below ``coverage * total_mass``. Architecture-portable -- ``coverage=0.90`` means
-  the same thing on any model.
+- **Coverage mode** (default): walk targets in descending score order, accumulating them into
+  the exclusion set until the next one would push the cumulative score above
+  ``coverage * total_mass``, at which point it stops (rank-prefix). Architecture-portable --
+  ``coverage=0.90`` means the same thing on any model.
 - **Threshold mode**: exclude every node whose individual score exceeds ``threshold``. Simpler
   when the operator already knows a per-node cutoff for a specific model. Setting ``threshold``
   ignores ``coverage``.

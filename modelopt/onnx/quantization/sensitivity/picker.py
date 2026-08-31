@@ -165,13 +165,15 @@ def _assign_groups(
         for gname, patterns in blocks.items()
     }
     groups: dict[str, list[str]] = {}
+    # Sentinel prefix keeps unmatched-node singleton keys disjoint from configured group names.
+    singleton_prefix = "\0singleton:"
     for node_name in scores:
         matched: str | None = None
         for gname, pats in compiled.items():
             if any(pat.match(node_name) for pat in pats):
                 matched = gname
                 break
-        key = matched if matched is not None else node_name
+        key = matched if matched is not None else singleton_prefix + node_name
         groups.setdefault(key, []).append(node_name)
     return groups
 
