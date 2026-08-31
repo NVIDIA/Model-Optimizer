@@ -1120,6 +1120,9 @@ def scoring_stage(config: dict[str, Any], manifest: StageManifest):
 
 def mip_stage(config: dict[str, Any], manifest: StageManifest):
     hydra_cfg = load_runtime_hydra_config(config)
+    scoring_parent = ensure_scoring_parent(config)
+    OmegaConf.set_struct(hydra_cfg, False)
+    hydra_cfg.scoring.source_checkpoint_dir = str(scoring_parent.path)
     coverage_report = None
     if str(hydra_cfg.mip.get("score_granularity", "block")) == "subblock":
         from ..artifact_coverage import verify_real_campaign_artifacts
