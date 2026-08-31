@@ -285,12 +285,13 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
 
     The recipe is validated against what the rest of this pipeline can actually
     export. ``save_amax_and_quant_config`` persists only routed-expert quantizer
-    state and writes a manifest hardcoded to ``NVFP4_W4A4``/``num_bits [2, 1]``/
-    ``block_size 16``, which ``quantize_to_nvfp4.py`` then consumes as ground
-    truth. A recipe that enables anything else, or asks for a different numeric
-    format, would produce a mislabeled manifest and silently drop quantizers --
-    so reject it here instead. Mirrors the guard in
-    ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
+    state and writes ``quantized_layers_manifest.json`` hardcoded to
+    ``NVFP4_W4A4``/``num_bits [2, 1]``/``block_size 16``/``scale_bits [4, 3]``,
+    and ``quantize_to_nvfp4.py`` re-derives expert paths itself and emits E4M3
+    block scales unconditionally. A recipe that enables anything else, or asks
+    for a different numeric format, would silently drop quantizers and describe
+    the result with a manifest that does not match the amax it ships beside.
+    Mirrors the guard in ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
     """
     cfg = load_recipe(recipe_path).quantize.model_dump()
 
@@ -307,16 +308,22 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
         if "ffn.experts." not in name:
             raise ValueError(
                 f"recipe enables {name!r}, but this pipeline exports only routed-expert "
-                "quantizers (*ffn.experts.*); the manifest and quantize_to_nvfp4.py "
-                "would not represent it"
+                "quantizers (*ffn.experts.*); it would be dropped from the amax dump "
+                "and the manifest without any error"
             )
         qcfg = entry.get("cfg") or {}
         block_sizes = qcfg.get("block_sizes") or {}
-        if tuple(qcfg.get("num_bits") or ()) != (2, 1) or block_sizes.get(-1) != 16:
+        if (
+            tuple(qcfg.get("num_bits") or ()) != (2, 1)
+            or block_sizes.get(-1) != 16
+            or block_sizes.get("type") != "dynamic"
+            or tuple(block_sizes.get("scale_bits") or ()) != (4, 3)
+        ):
             raise ValueError(
                 f"recipe entry {name!r} must be block-16 NVFP4 (num_bits (2, 1), "
-                f"block_sizes[-1] 16) to match the exported manifest, got "
-                f"num_bits={qcfg.get('num_bits')!r} block_sizes={block_sizes!r}"
+                f"block_sizes[-1] 16, type 'dynamic', scale_bits (4, 3)) to match "
+                f"the exported manifest, got num_bits={qcfg.get('num_bits')!r} "
+                f"block_sizes={block_sizes!r}"
             )
         enabled_experts = True
 
