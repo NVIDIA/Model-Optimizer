@@ -18,6 +18,7 @@
 import contextlib
 import contextvars
 import json
+import re
 import warnings
 from pathlib import Path
 
@@ -179,7 +180,7 @@ def _resolve_export_parent(model: nn.Module) -> nn.Module:
 
 
 def build_legacy_name_mapper(model: nn.Module):
-    """Hub-name mapper for transformers < 5, or ``None``.
+    r"""Hub-name mapper for transformers < 5, or ``None``.
 
     ``save_pretrained`` is what reverses ``_checkpoint_conversion_mapping``, and per-layer
     export writes shards directly without it. ``build_reverse_name_mapper`` is no help
@@ -187,14 +188,21 @@ def build_legacy_name_mapper(model: nn.Module):
 
     Rules are inverted (the mapping is stored hub -> in-memory) and applied longest-prefix
     first, or a short one shadows a longer (``lm_head`` inside ``model.language_model...``).
+    The hub side is a regex: its groups are stripped exactly as save_pretrained strips them
+    when reversing the same mapping, and the remainder has its backslashes neutralised so a
+    pattern like ``layers\.(\d+)`` substitutes literally instead of raising on ``\d``.
     """
-    import re
-
     mapping = getattr(model, "_checkpoint_conversion_mapping", None)
     if not mapping:
         return None
     rules = sorted(
-        ((re.compile("^" + re.escape(mem)), hub.lstrip("^")) for hub, mem in mapping.items()),
+        (
+            (
+                re.compile("^" + re.escape(mem)),
+                re.sub(r"\(.*\)", "", hub.lstrip("^")).replace("\\", "\\\\"),
+            )
+            for hub, mem in mapping.items()
+        ),
         key=lambda r: -len(r[0].pattern),
     )
 

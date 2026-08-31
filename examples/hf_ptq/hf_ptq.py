@@ -754,14 +754,15 @@ def mono_quantize(
                     else None,
                 )
 
-        if calibration_only:
-            language_model = mtq.calibrate(
-                language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
-            )
-        else:
-            # A VLM calibrates its language model but must export the whole thing.
-            parent = full_model if args.layerwise_export else language_model
-            with export_parent(parent):
+        # A VLM calibrates its language model but must export the whole thing. Both branches
+        # reach the same layerwise machinery, so the link is set over both.
+        parent = full_model if args.layerwise_export else language_model
+        with export_parent(parent):
+            if calibration_only:
+                language_model = mtq.calibrate(
+                    language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
+                )
+            else:
                 language_model = mtq.quantize(
                     language_model, quant_cfg, forward_loop=calibrate_loop
                 )

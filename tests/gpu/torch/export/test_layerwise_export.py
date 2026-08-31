@@ -489,6 +489,25 @@ def test_awq_is_refused(tmp_path, make_cfg, method, match):
         mtq.quantize(_build_model(), cfg, _calib)
 
 
+def _disable_quant_on_towers(vlm):
+    """Mirror ``extract_and_prepare_language_model_from_vl``: towers get disabled quantizers.
+
+    hf_ptq runs this before calibration, so by the time the exporter walks the parent the
+    vision tower and projector carry ``TensorQuantizer`` children. That changes what
+    ``_module_formats`` and the tail dispatch see, so the test has to reproduce it.
+    """
+    lineage = get_language_model_from_vl(vlm)
+    language_model, ancestors = lineage[-1], lineage[:-1]
+    disabled = {"quant_cfg": [{"quantizer_name": "*", "enable": False}], "algorithm": "max"}
+    memo = set(ancestors) | {language_model}
+    for ancestor in ancestors:
+        for _, module in ancestor.named_children():
+            if module not in memo:
+                mtq.quantize(module, copy.deepcopy(disabled), forward_loop=None)
+                memo.add(module)
+    return language_model
+
+
 def _build_vlm():
     torch.manual_seed(0)
     model = get_tiny_gemma3vl(tie_word_embeddings=False).cuda().eval()
@@ -514,7 +533,7 @@ def _calib_vlm(language_model):
 def test_vlm_export_matches_whole_model_export(tmp_path):
     """A VLM calibrates its language model but must export the whole model."""
     baseline_vlm = _build_vlm()
-    baseline_lm = get_language_model_from_vl(baseline_vlm)[-1]
+    baseline_lm = _disable_quant_on_towers(baseline_vlm)
     cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
     cfg["algorithm"] = {"method": "max", "layerwise": {"enable": True}}
     mtq.quantize(baseline_lm, cfg, _calib_vlm)
@@ -522,7 +541,7 @@ def test_vlm_export_matches_whole_model_export(tmp_path):
     export_hf_checkpoint(baseline_vlm, export_dir=baseline_dir)
 
     vlm = _build_vlm()
-    language_model = get_language_model_from_vl(vlm)[-1]
+    language_model = _disable_quant_on_towers(vlm)
     export_dir = tmp_path / "fused"
     with export_parent(vlm):
         mtq.quantize(language_model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib_vlm)

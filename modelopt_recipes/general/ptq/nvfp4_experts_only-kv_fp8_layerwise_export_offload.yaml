@@ -23,9 +23,12 @@ metadata:
   recipe_type: ptq
   description: >
     NVFP4 W4A4 on routed experts only, FP8 KV cache, max layerwise calibration, with each
-    decoder layer exported to its own shard as soon as it is calibrated. Same intent as
-    nvfp4_experts_only-kv_fp8_layerwise_export, but scoped and paired for a model too large
-    to hold resident: use with --offload_folder and per-device memory budgets.
+    decoder layer exported to its own shard as soon as it is calibrated.
+
+    The only functional difference from nvfp4_experts_only-kv_fp8_layerwise_export is the
+    narrower expert scope below; nothing here configures offload, which comes from
+    --offload_folder and the per-device memory budgets. The suffix records the pairing this
+    recipe was validated in -- a model too large to hold resident -- not a setting it sets.
 
     Expert scoping is '*.experts.*' rather than '*block_sparse_moe*'. On fine-grained MoE
     models the broader glob also matches shared_experts.*, routed_expert_{up,down}_proj and
