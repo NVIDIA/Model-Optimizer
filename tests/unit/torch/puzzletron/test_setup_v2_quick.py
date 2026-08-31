@@ -175,10 +175,11 @@ def test_cli_invalid_noninteractive_vllm_topology_fails_fast(tmp_path, monkeypat
                 "model": {"source": str(model_path)},
                 "data": {"source": str(dataset), "modality": "text"},
                 "infrastructure": {
+                    "gpus_per_node": 1,
                     "execution_contract": {
                         "repository": "/worker/modelopt",
                         "venv": "/worker/venv",
-                    }
+                    },
                 },
                 "vllm": {
                     "enabled": True,
@@ -331,6 +332,27 @@ def test_guided_data_rejects_an_explicit_modality_incompatible_with_the_model(
         )
 
 
+@pytest.mark.parametrize("limit", ["not-a-number", -1, 0, True])
+def test_quality_comparison_limit_must_be_a_positive_integer(limit):
+    resolver = DefaultsResolver(
+        file_defaults={
+            "post_mip": {
+                "quality_comparison": {
+                    "enabled": True,
+                    "reference_checkpoint": "/teacher",
+                    "limit": limit,
+                }
+            }
+        }
+    )
+
+    with pytest.raises(
+        SetupError,
+        match=r"post_mip\.quality_comparison\.limit must be a positive integer",
+    ):
+        wizard_module._quality_comparison_defaults(resolver)
+
+
 # Bundle generation and review output
 
 
@@ -379,10 +401,14 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
                     "sequence_length": 32,
                 },
                 "infrastructure": {
+                    "gpus_per_node": 1,
+                    "runner": {
+                        "slurm": {"job_name_prefix": "acct-puzzletron"},
+                    },
                     "execution_contract": {
                         "repository": "/worker/modelopt",
                         "venv": "/worker/venv",
-                    }
+                    },
                 },
             },
             sort_keys=False,
@@ -413,6 +439,26 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "value": 8,
         "source": "model_profile",
     }
+    assert (
+        generated.collection("default_resolutions")["post_mip.quality_comparison"]["source"]
+        == "model_profile"
+    )
+    smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
+    smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
+    smoke_comparison = smoke_flow["nodes"]["quality_benchmarks"]
+    assert smoke_comparison["config"]["limit"] == 8
+    assert "recorded_observation" not in smoke_comparison["config"]
+    smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
+    assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
+    production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    flow = next(iter(production["post_mip"]["flows"].values()))
+    comparison = flow["nodes"]["quality_benchmarks"]
+    assert comparison["type"] == "downstream_evaluation"
+    assert comparison["input"] == "best"
+    assert comparison["failure_policy"] == "strict"
+    assert comparison["config"]["tasks"] == ["ifeval", "gsm8k"]
+    assert comparison["config"]["limit"] == 100
+    assert "recorded_observation" not in comparison["config"]
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {
         "value": 1,
@@ -443,22 +489,62 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
 # Interactive prompt navigation
 
 
+def test_guided_infrastructure_records_cpu_partition_default(tmp_path):
+    state = WizardState.start(tmp_path / "campaign", defaults_path=None)
+    resolver = DefaultsResolver(
+        file_defaults={
+            "infrastructure": {
+                "execution_contract": {
+                    "repository": "/worker/modelopt",
+                    "venv": "/worker/venv",
+                },
+                "runner": {
+                    "kind": "slurm",
+                    "slurm": {
+                        "account": "acct",
+                        "partition": "gpu",
+                        "partition_cpu": "cpu",
+                    },
+                },
+            }
+        }
+    )
+
+    assert infrastructure_section(
+        WizardSession(state, ScriptedBackend(["defaults"]), guided=True),
+        resolver,
+        {},
+    )
+
+    assert state.get_field("infrastructure.runner.slurm.partition") == "gpu"
+    assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu"
+
+
 def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_path):
     state = WizardState.start(tmp_path / "campaign", defaults_path=None)
     resolver = DefaultsResolver(
         file_defaults={
             "infrastructure": {
-                "runner": {"slurm": {"partition": ["gpu-a", "gpu-b"]}},
+                "runner": {
+                    "slurm": {
+                        "partition": ["gpu-a", "gpu-b"],
+                        "partition_cpu": ["cpu-a", "cpu-b"],
+                    }
+                },
             }
         }
     )
 
     class PartitionDefaultBackend(ScriptedBackend):
         partition_default = None
+        cpu_partition_default = None
 
         def text(self, message: str, default: str) -> str:
             if message.startswith("Eligible Slurm partitions"):
                 self.partition_default = default
+                return default
+            if message.startswith("Eligible CPU-only Slurm partitions"):
+                self.cpu_partition_default = default
                 return default
             return super().text(message, default)
 
@@ -470,6 +556,7 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
             "",
             "",
             "acct",
+            "pt",
             "4:00:00",
             "8",
             "",
@@ -483,7 +570,9 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
     )
 
     assert backend.partition_default == "gpu-a,gpu-b"
+    assert backend.cpu_partition_default == "cpu-a,cpu-b"
     assert state.get_field("infrastructure.runner.slurm.partition") == "gpu-a,gpu-b"
+    assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu-a,cpu-b"
     assert backend.remaining == 0
 
 

@@ -267,7 +267,7 @@ class SlurmExecutor(Executor):
         )
         if partition is not None:
             partition = str(partition)
-        job_name = f"pt-{attempt.stage_id[:18]}-{attempt.attempt_id[:8]}"
+        job_name = f"{slurm.job_name_prefix}-{attempt.stage_id[:18]}-{attempt.attempt_id[:8]}"
         script_path = self.scripts_dir / f"{attempt.stage_id}_{attempt.attempt_id}.sh"
         script_path.write_text(
             render_sbatch_script(

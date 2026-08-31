@@ -51,6 +51,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
             "kind": "slurm",
             "slurm": {
                 "account": "",
+                "job_name_prefix": "pt",
                 "partition": None,
                 "time_limit": "4:00:00",
                 "qos": None,
@@ -166,6 +167,7 @@ _STRING_OR_SEQUENCE_PATHS = {
     "data.subsets",
     "data.acquisition.subsets",
     "infrastructure.runner.slurm.partition",
+    "infrastructure.runner.slurm.partition_cpu",
 }
 _SCHEMA = {
     "schema_version": None,
@@ -209,7 +211,9 @@ _SCHEMA = {
             "kind": None,
             "slurm": {
                 "account": None,
+                "job_name_prefix": None,
                 "partition": None,
+                "partition_cpu": None,
                 "max_nodes": None,
                 "time_limit": None,
                 "qos": None,

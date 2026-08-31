@@ -20,10 +20,64 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from modelopt.torch.puzzletron.evaluation import lmms
+
+
+def test_compatibility_tasks_pin_text_regression_datasets(monkeypatch, tmp_path):
+    package = tmp_path / "lmms_eval"
+    gsm8k = package / "tasks/gsm8k/gsm8k.yaml"
+    ifeval = package / "tasks/ifeval/ifeval.yaml"
+    for upstream in (gsm8k, ifeval):
+        upstream.parent.mkdir(parents=True)
+        upstream.write_text(f"task: {upstream.stem}\n")
+    monkeypatch.setattr(
+        lmms.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(submodule_search_locations=[str(package)]),
+    )
+
+    settings = lmms._prepare_compatibility_tasks(
+        tmp_path / "attempt",
+        {
+            "tasks": ["ifeval", "gsm8k"],
+            "compatibility_tasks": "gsm8k",
+            "task_dataset_revisions": {
+                "ifeval": "ifeval-revision",
+                "gsm8k": "gsm8k-revision",
+            },
+        },
+    )
+
+    assert settings["tasks"] == ["modelopt_ifeval", "modelopt_gsm8k"]
+    task_root = Path(settings["extra_args"][-1])
+    assert settings["extra_args"][-2] == "--include_path"
+    assert json.loads((task_root / "modelopt_gsm8k.yaml").read_text()) == {
+        "dataset_kwargs": {"revision": "gsm8k-revision"},
+        "dataset_path": "openai/gsm8k",
+        "fewshot_config": {"sampler": "default"},
+        "include": str(gsm8k),
+        "task": "modelopt_gsm8k",
+    }
+    assert json.loads((task_root / "modelopt_ifeval.yaml").read_text()) == {
+        "dataset_kwargs": {"revision": "ifeval-revision"},
+        "include": str(ifeval),
+        "task": "modelopt_ifeval",
+    }
+
+
+def test_dataset_revision_must_target_a_configured_task(tmp_path):
+    with pytest.raises(ValueError, match="unconfigured tasks: \\['gsm8k'\\]"):
+        lmms._prepare_compatibility_tasks(
+            tmp_path / "attempt",
+            {
+                "tasks": ["ifeval"],
+                "task_dataset_revisions": {"gsm8k": "gsm8k-revision"},
+            },
+        )
 
 
 def _settings(*tasks: str) -> dict:

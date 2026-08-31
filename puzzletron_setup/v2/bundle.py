@@ -234,6 +234,13 @@ def _render_experiment_v2(
     flows = _plain(config.post_mip_flows)
     if config.post_mip_flows_configured:
         rendered["post_mip"] = {"flows": deepcopy(flows)}
+        if budget == "smoke":
+            for flow in rendered["post_mip"]["flows"].values():
+                for node in _mapping(flow.get("nodes")).values():
+                    if node.get("type") == "downstream_evaluation":
+                        node_config = _mapping(node.get("config"))
+                        node_config["limit"] = min(int(node_config.get("limit", 8) or 8), 8)
+                        node["config"] = node_config
 
     batch_mirrors = {
         "pruning.micro_batch_size": "data.calibration.micro_batch_size",
@@ -398,7 +405,21 @@ def _bundle_readme(
                 "```",
             )
         )
-    for budget in ("smoke", "production"):
+    sections = (
+        (
+            "smoke",
+            "Validate setup",
+            "This bounded run checks the generated model, data, worker, and campaign wiring.",
+            "After reviewing the plan and worker paths, launch the validation run:",
+        ),
+        (
+            "production",
+            "Run campaign",
+            "Run this campaign after the setup validation succeeds.",
+            "After reviewing the plan and worker paths, launch the campaign:",
+        ),
+    )
+    for budget, heading, introduction, launch_introduction in sections:
         bundle = campaign_dir / budget
         orchestrator_args = [
             "python",
@@ -417,7 +438,9 @@ def _bundle_readme(
         lines.extend(
             [
                 "",
-                f"## {budget.title()}",
+                f"## {heading}",
+                "",
+                introduction,
                 "",
                 "Inspect the complete plan without submitting jobs:",
                 "",
@@ -425,7 +448,7 @@ def _bundle_readme(
                 inspect_command,
                 "```",
                 "",
-                "After reviewing the plan and worker paths, launch the campaign:",
+                launch_introduction,
                 "",
                 "```bash",
                 launch_command,

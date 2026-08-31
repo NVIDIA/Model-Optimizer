@@ -525,21 +525,115 @@ def _downstream_evaluation(
         / source.architecture_id
         / "lmms_eval"
     )
-    settings = dict(node.config.get("config") or {})
+    settings = copy.deepcopy(dict(node.config.get("config") or {}))
+    reference_checkpoint = settings.pop("reference_checkpoint", None)
+    recorded_observation = settings.pop("recorded_observation", None)
     profile = settings.pop("profile", None)
+    evaluator = run_lmms_eval_checkpoint
     if profile is not None:
         evaluator = _DOWNSTREAM_EVALUATION_PROFILES.get(str(profile))
         if evaluator is None:
             raise ValueError(f"unsupported downstream evaluation profile: {profile}")
-        return evaluator(
-            source.artifact["checkpoint"],
-            output_root=output_root,
-            settings=settings,
-        )
-    return run_lmms_eval_checkpoint(
+    if recorded_observation is not None and reference_checkpoint is None:
+        raise ValueError("recorded_observation requires reference_checkpoint")
+    candidate = evaluator(
         source.artifact["checkpoint"],
         output_root=output_root,
         settings=settings,
+    )
+    if reference_checkpoint is None:
+        return candidate
+
+    reference = evaluator(
+        reference_checkpoint,
+        output_root=output_root.parent / "reference",
+        settings=settings,
+    )
+    candidate_metrics = dict(candidate["metrics"])
+    reference_metrics = dict(reference["metrics"])
+    if candidate_metrics.keys() != reference_metrics.keys():
+        raise RuntimeError(
+            "candidate and reference downstream evaluations produced different metrics: "
+            f"candidate_only={sorted(candidate_metrics.keys() - reference_metrics.keys())}, "
+            f"reference_only={sorted(reference_metrics.keys() - candidate_metrics.keys())}"
+        )
+    comparison_metrics = {
+        **candidate_metrics,
+        **{f"candidate.{name}": value for name, value in candidate_metrics.items()},
+        **{f"reference.{name}": value for name, value in reference_metrics.items()},
+        **{
+            f"delta.{name}": value - reference_metrics[name]
+            for name, value in candidate_metrics.items()
+        },
+    }
+    observation_comparison, observation_metrics = _compare_recorded_observation(
+        recorded_observation,
+        comparison_metrics,
+    )
+    comparison_metrics.update(observation_metrics)
+    comparison_path = _atomic_json(
+        output_root / "comparison.json",
+        {
+            "candidate": {
+                "checkpoint": source.artifact["checkpoint"],
+                "metrics": candidate_metrics,
+                "result_path": candidate["result_path"],
+            },
+            "reference": {
+                "checkpoint": str(reference_checkpoint),
+                "metrics": reference_metrics,
+                "result_path": reference["result_path"],
+            },
+            "delta": {
+                name: candidate_metrics[name] - reference_metrics[name]
+                for name in candidate_metrics
+            },
+            **(
+                {"recorded_observation": observation_comparison}
+                if observation_comparison is not None
+                else {}
+            ),
+        },
+    )
+    return {
+        **candidate,
+        "metrics": comparison_metrics,
+        "comparison_path": str(comparison_path),
+        "reference_result_path": reference["result_path"],
+    }
+
+
+def _compare_recorded_observation(
+    observation: Any,
+    actual_metrics: Mapping[str, float],
+) -> tuple[dict[str, Any] | None, dict[str, float]]:
+    """Compare with a historical observation without creating an acceptance gate."""
+    if observation is None:
+        return None, {}
+    if not isinstance(observation, Mapping):
+        raise TypeError("recorded_observation must be a mapping")
+    raw_metrics = observation.get("metrics")
+    if not isinstance(raw_metrics, Mapping) or not raw_metrics:
+        raise ValueError("recorded_observation.metrics must be a non-empty mapping")
+    recorded = {}
+    for name, value in raw_metrics.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"recorded observation metric {name!r} must be numeric")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"recorded observation metric {name!r} must be finite")
+        recorded[str(name)] = numeric
+    missing = sorted(set(recorded) - actual_metrics.keys())
+    if missing:
+        raise ValueError(f"recorded observation metrics were not produced: {missing}")
+    differences = {name: actual_metrics[name] - value for name, value in recorded.items()}
+    return (
+        {
+            **{key: copy.deepcopy(value) for key, value in observation.items() if key != "metrics"},
+            "metrics": recorded,
+            "difference_from_recorded": differences,
+        },
+        {f"observation_delta.{name}": value for name, value in differences.items()},
     )
 
 

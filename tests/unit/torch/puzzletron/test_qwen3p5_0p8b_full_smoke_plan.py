@@ -20,6 +20,7 @@ from pathlib import Path
 
 import yaml
 
+from modelopt.torch.puzzletron.pipeline_config import pipeline_config_from_path
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -29,13 +30,19 @@ from puzzletron_orchestrator.compiler import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5"
 FAMILY_PRESETS_PATH = FAMILY_ROOT / "setup_v2_defaults.yaml"
+QUALITY_EVALUATION_PATH = FAMILY_ROOT / "qwen3p5_0p8b/quality_evaluation.yaml"
 EXPLICIT_SETUP_DEFAULTS_PATH = (
     REPOSITORY_ROOT / "tests/_test_utils/torch/puzzletron/tiny_qwen_setup_defaults.yaml"
 )
 RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke.yaml"
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
-EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_smoke.yaml"
+EXECUTION_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
+)
+QUALITY_COMPARISON_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_comparison.yaml"
+CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign.yaml"
+EXTENDED_CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign_extended.yaml"
 
 
 def _compile_plan(monkeypatch, tmp_path: Path):
@@ -43,6 +50,17 @@ def _compile_plan(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     return compile_campaign_plan(
         experiment_config_path=RUN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+
+def _compile_quality_comparison_plan(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "quality-comparison-results"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    return compile_campaign_plan(
+        experiment_config_path=QUALITY_COMPARISON_RUN_PATH,
         runner=load_runner_config(RUNNER_PATH),
         execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
@@ -148,3 +166,145 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
     assert nodes["best"]["top_k"] == 1
+
+
+def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    plan = _compile_quality_comparison_plan(monkeypatch, tmp_path)
+    config = plan.experiment_config
+    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
+    benchmark = nodes["quality_benchmarks"]
+    stage_ids = tuple(stage.stage_id for stage in plan.stages)
+    stages = {stage.stage_id: stage for stage in plan.stages}
+
+    assert "post.params-90.quality_benchmarks" in stage_ids
+    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_kd",)
+    assert benchmark["input"] == "short_kd"
+    assert benchmark["failure_policy"] == "strict"
+    assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
+    assert benchmark["config"]["tasks"] == ["ifeval", "gsm8k"]
+    assert benchmark["config"]["compatibility_tasks"] == ["gsm8k"]
+    assert benchmark["config"]["task_dataset_revisions"] == {
+        "ifeval": "5a5661c2a35488308556cf4453dc074d1eba91a0",
+        "gsm8k": "740312add88f781978c0658806c59bc2815b9866",
+    }
+    assert benchmark["config"]["batch_size"] == 8
+    assert benchmark["config"]["limit"] == 100
+    assert benchmark["config"]["gen_kwargs"] == {
+        "do_sample": False,
+        "temperature": 0,
+    }
+    assert benchmark["config"]["recorded_observation"] == {
+        "repeat_count": 2,
+        "candidate_architecture": {
+            "parameter_pruning_percent": 10.042,
+            "parameter_retention_percent": 89.958,
+            "ffn_layers": 24,
+            "teacher_intermediate_size": 3584,
+            "student_intermediate_size": 2048,
+            "ffn_width_pruning_percent": 42.857,
+        },
+        "metrics": {
+            "candidate.modelopt_ifeval.prompt_level_strict_acc_none": 0.23,
+            "reference.modelopt_ifeval.prompt_level_strict_acc_none": 0.55,
+            "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
+            "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
+        },
+    }
+    assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
+
+
+def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    campaign = pipeline_config_from_path(CAMPAIGN_PATH)
+    comparison = pipeline_config_from_path(QUALITY_COMPARISON_RUN_PATH)
+    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
+    quality_evaluation = yaml.safe_load(QUALITY_EVALUATION_PATH.read_text())["quality_evaluation"]
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    plan = compile_campaign_plan(
+        experiment_config_path=CAMPAIGN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+    assert campaign["model"]["revision"] == campaign["model_info"]["hf_revision"]
+    assert campaign["search_space"]["axes"] == {
+        "ffn_intermediate": {
+            "enabled": True,
+            "teacher_value": 3584,
+            "values": [3072, 2048],
+        }
+    }
+    assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+    assert campaign["bypass"]["enabled"] is False
+    assert campaign["depth_importance"]["enabled"] is False
+    nodes = campaign["post_mip"]["flows"]["params-90"]["nodes"]
+    campaign_quality = nodes["quality_benchmarks"]["config"]
+    comparison_quality = comparison["post_mip"]["flows"]["params-90"]["nodes"][
+        "quality_benchmarks"
+    ]["config"]
+    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
+        "quality_comparison"
+    ]
+    assert wizard_quality["enabled"] is True
+    assert {key: value for key, value in wizard_quality.items() if key != "enabled"} == (
+        quality_evaluation
+    )
+    assert campaign_quality == campaign["quality_evaluation"]
+    assert comparison_quality == comparison["quality_evaluation"]
+    assert "recorded_observation" not in campaign_quality
+    assert "recorded_observation" not in wizard_quality
+    assert {
+        key: value
+        for key, value in comparison_quality.items()
+        if key not in {"recorded_observation", "reference_checkpoint"}
+    } == {key: value for key, value in quality_evaluation.items() if key != "reference_checkpoint"}
+    assert campaign_quality["reference_checkpoint"] == campaign["teacher_dir"]
+    assert comparison_quality["reference_checkpoint"] == comparison["teacher_dir"]
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
+
+
+def test_qwen3p5_0p8b_extended_campaign_exposes_additional_axes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    campaign = pipeline_config_from_path(EXTENDED_CAMPAIGN_PATH)
+    assert campaign["width_sanity"]["axes"] == [
+        "hidden_width",
+        "ffn_intermediate",
+        "kv_groups",
+        "q_heads_per_group",
+        "gdn_key_groups",
+        "gdn_value_head_dim",
+    ]
+    assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0, 1, 2],
+        "embedding": [1024, 768],
+        "axes_default": "all",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "extended-campaign"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    plan = compile_campaign_plan(
+        experiment_config_path=EXTENDED_CAMPAIGN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+    stage_ids = {stage.stage_id for stage in plan.stages}
+    assert "depth_importance" in stage_ids
+    assert "post.params-90.quality_benchmarks" in stage_ids

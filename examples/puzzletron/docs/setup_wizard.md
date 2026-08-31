@@ -17,6 +17,12 @@ The selected profile supplies pruning and search defaults from the detected
 model family's `setup_v2_defaults.yaml`. The wizard then asks for the model,
 dataset, worker environment, and cluster settings.
 
+Model-specific defaults can also extend the recommended post-MIP flow. For
+Qwen 3.5 0.8B, generated smoke and production bundles finish by evaluating the
+final selected student and the teacher on pinned IFEval and GSM8K subsets. This
+comparison records measurements and samples; it does not enforce a quality
+threshold.
+
 ## Models and datasets
 
 At the **Model** prompt, provide an existing local checkpoint or configuration
@@ -40,7 +46,10 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 The example uses repository-relative values. Copy it and add site-specific
 data, scheduler, and container settings before selecting it. The defaults file
 is loaded only when passed explicitly and takes precedence over the selected
-profile.
+profile. If the primary Slurm partition requires GPUs, set
+`infrastructure.runner.slurm.partition_cpu` to an eligible CPU partition; the
+generated execution routes conversion, tokenization, MIP, materialization, and
+other zero-GPU stages there.
 
 Use the full flow to expose every section and nested setting:
 
@@ -78,9 +87,11 @@ python examples/puzzletron/puzzletron_setup_v2.py --resume /path/to/campaign
 ## Generated files
 
 The final review writes `resolved_defaults.yaml`, one campaign `README.md`, and
-validated `smoke/` and `production/` bundles. Each bundle contains experiment,
-runner, and execution YAML plus a `dry-run-plan.txt`. The wizard does not submit
-either bundle, and the production bundle is not automatically gated on smoke.
+validated `smoke/` and `production/` bundles. The generated README presents
+these as **Validate setup** and **Run campaign**. Each bundle contains
+experiment, runner, and execution YAML plus a `dry-run-plan.txt`; users do not
+need to construct a smoke configuration themselves. The wizard does not submit
+either bundle, and the campaign is not automatically gated on validation.
 
 The generated configuration can include reusable execution profiles, multiple
 deployment measurements, independent optimization goals, and editable

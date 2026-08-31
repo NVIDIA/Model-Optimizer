@@ -83,7 +83,7 @@ template into the output directory and replace its site-specific placeholders:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_vlm_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER_TEMPLATE=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml
 RUNNER="$PUZZLETRON_RUN_ROOT/runner.slurm.yaml"
 
@@ -210,10 +210,11 @@ result files, and cache preparation.
 
 ## Plan a larger run
 
-Start from `full_vlm_smoke.yaml` and `execution.full_vlm_smoke.yaml`. Copy both
-files, keep the VLM-specific order of evaluation, materialization, image
+Start from `full_vlm_smoke.yaml` and `execution.single_gpu.yaml`. Copy the run
+config, keep the VLM-specific order of evaluation, materialization, image
 serving, selection, and distillation, then change each small smoke limit for
-your use case.
+your use case. Keep the shared execution profile for a one-GPU run or select a
+profile that matches the intended resources.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:

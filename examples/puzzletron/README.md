@@ -16,9 +16,9 @@ evaluate, benchmark, materialize, or distill those candidates.
 
 ## First campaign
 
-The usual path is to prepare Puzzletron, generate a campaign, inspect and run a
-small smoke campaign, and then repeat the run with production settings. The
-same command resumes compatible work after an interruption.
+The usual path is to prepare Puzzletron, generate a campaign, validate the
+generated setup with a bounded run, and then launch the campaign. The same
+command resumes compatible work after an interruption.
 
 For an image-text walkthrough using Qwen 3.5 0.8B and the recommended
 Nemotron-VLM dataset, follow the
@@ -52,20 +52,31 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 Choose **Balanced pruning** for a first-generated text campaign. For the
 maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the recommended
 Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM, use
-the checked-in VLM pruning smoke linked below. Guided setup can resolve the
+the VLM pruning smoke linked below. Guided setup can resolve the
 same model, the recommended Nemotron-VLM v2 image-text dataset, and site
 settings, but its generic pruning profile is not the VLM example used here.
 Review the detected model, data modality, worker and scheduler settings, and
 output directory.
 
 The wizard reads model configuration, not model weights, and does not submit
-jobs. It writes validated `smoke/` and `production/` bundles plus a generated
-`README.md`. Run any dataset preparation command in that generated README from
-the worker environment before launch. See the
+jobs. It writes a bounded validation bundle under `smoke/`, a campaign bundle
+under `production/`, and a generated `README.md` with the commands for both.
+Users do not need to assemble or edit a separate smoke configuration. Run any
+dataset preparation command in that generated README from the worker
+environment before launch. For Qwen 3.5 0.8B, both bundles include
+a final pinned student-versus-teacher downstream comparison that records
+results without imposing an acceptance threshold. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
-### 3. Inspect and launch smoke
+For a Qwen 3.5 0.8B text pruning example, see the
+[Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It searches two FFN
+intermediate sizes, increases the scoring, serving, and distillation budgets,
+and reuses the same downstream evaluation settings as the opt-in quality
+comparison. The same guide includes an opt-in extended variant with hidden
+width, attention, GDN, embedding-width, and depth pruning.
+
+### 3. Validate the generated setup
 
 Activate `.venv-puzzletron` and inspect the generated smoke plan:
 
@@ -79,21 +90,18 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Review the stage list, worker paths, execution strategies, resources, and
-output directory. `--stage full` runs every stage enabled by the generated
-experiment in dependency order. Remove `--dry-run` to launch the smoke
-campaign. Two checked-in Qwen 3.5 0.8B examples exercise the complete pruning
-workflow on one GPU. Use the
-[text pruning smoke](docs/qwen3p5_0p8b_smoke.md) for text-only evaluation,
-serving measurements, distillation, and final model selection. Use the
-[VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md) for the same workflow with
-real image-conversation inputs, image-aware measurements, and guidance for
-sizing a larger campaign.
+Review the stage list, worker paths, resources, and output directory.
+`--stage full` runs every stage enabled by the generated validation experiment
+in dependency order. Remove `--dry-run` to launch it. This bounded run is the
+default setup check; detailed smoke limits and manually maintained smoke recipes
+are documented for advanced use and reproducibility in the
+[text](docs/qwen3p5_0p8b_smoke.md) and
+[VLM](docs/qwen3p5_0p8b_vlm_smoke.md) guides.
 
-### 4. Launch production
+### 4. Launch the campaign
 
-After smoke succeeds, change `smoke` to `production`, inspect that plan with
-`--dry-run`, and launch it with the same command.
+After validation succeeds, change `smoke` to `production`, inspect that plan
+with `--dry-run`, and launch it with the same command.
 
 The experiment file defines the model and algorithm choices, the runner file
 defines the worker environment, and the execution file says how each stage
@@ -176,6 +184,10 @@ and infrastructure.
 - Use [configuration and overrides](docs/configuration_overrides.md) to find
   the built-in configuration files, choose where campaign outputs are stored,
   or temporarily change experiment settings.
+- Use the
+  [Qwen campaign extension steps](docs/qwen3p5_0p8b_campaign.md#change-the-search-dimensions)
+  to add a measured architecture dimension while keeping omitted dimensions
+  at their teacher values.
 - Use [Slurm configuration](docs/slurm_configuration.md) to change partitions,
   CPU-only stages, log locations, and accepted compatibility fields.
 - Use the [setup wizard guide](docs/setup_wizard.md) to change profiles,

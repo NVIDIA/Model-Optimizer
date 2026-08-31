@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import math
 import os
@@ -86,6 +87,21 @@ DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 _PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
 _TIMEOUT_ERRORS = (TimeoutError, asyncio.TimeoutError)
+_COMPATIBILITY_TASKS: dict[str, dict[str, Any]] = {
+    "gsm8k": {
+        "alias": "modelopt_gsm8k",
+        "config": "tasks/gsm8k/gsm8k.yaml",
+        "overrides": {
+            "dataset_path": "openai/gsm8k",
+            "fewshot_config": {"sampler": "default"},
+        },
+    },
+    "ifeval": {
+        "alias": "modelopt_ifeval",
+        "config": "tasks/ifeval/ifeval.yaml",
+        "overrides": {},
+    },
+}
 
 
 class LmmsEvalTimeoutError(TimeoutError):
@@ -366,6 +382,74 @@ def _build_command(
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("lmms-eval timeout must be a finite positive number")
     return argv, env, timeout
+
+
+def _prepare_compatibility_tasks(output: Path, settings: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve explicitly requested task fixes without modifying the pinned evaluator."""
+
+    prepared = dict(settings)
+    raw_requested = prepared.pop("compatibility_tasks", None)
+    requested = set(
+        (
+            task.strip()
+            for task in _join_cli_values(
+                raw_requested,
+                path="evaluation settings.compatibility_tasks",
+            ).split(",")
+        )
+        if raw_requested is not None
+        else ()
+    )
+    raw_revisions = prepared.pop("task_dataset_revisions", None)
+    if raw_revisions is None:
+        revisions: dict[str, str] = {}
+    elif isinstance(raw_revisions, Mapping):
+        revisions = {str(task): str(revision) for task, revision in raw_revisions.items()}
+    else:
+        raise TypeError("evaluation settings.task_dataset_revisions must be a mapping")
+    empty_revisions = sorted(task for task, revision in revisions.items() if not revision.strip())
+    if empty_revisions:
+        raise ValueError(f"empty lmms-eval dataset revisions for tasks: {empty_revisions}")
+    requested.update(revisions)
+    unknown = sorted(requested - _COMPATIBILITY_TASKS.keys())
+    if unknown:
+        raise ValueError(f"unknown lmms-eval compatibility tasks: {unknown}")
+    if not requested:
+        return prepared
+    configured_tasks = _configured_tasks(prepared)
+    unconfigured = sorted(requested - set(configured_tasks))
+    if unconfigured:
+        raise ValueError(
+            f"lmms-eval compatibility settings reference unconfigured tasks: {unconfigured}"
+        )
+
+    spec = importlib.util.find_spec("lmms_eval")
+    locations = spec.submodule_search_locations if spec is not None else None
+    if not locations:
+        raise RuntimeError("lmms_eval is not installed")
+    package = Path(next(iter(locations)))
+    tasks = [
+        str(_COMPATIBILITY_TASKS[task]["alias"]) if task in requested else task
+        for task in configured_tasks
+    ]
+    task_root = output / "task_configs"
+    task_root.mkdir(parents=True, exist_ok=True)
+    for task in sorted(requested):
+        task_spec = _COMPATIBILITY_TASKS[task]
+        upstream = package / str(task_spec["config"])
+        if not upstream.is_file():
+            raise RuntimeError(f"installed lmms_eval has no {task} task config: {upstream}")
+        task_config = {
+            "include": str(upstream.resolve()),
+            "task": str(task_spec["alias"]),
+            **dict(task_spec["overrides"]),
+        }
+        if task in revisions:
+            task_config["dataset_kwargs"] = {"revision": revisions[task]}
+        _atomic_json(task_root / f"{task_spec['alias']}.yaml", task_config)
+    prepared["tasks"] = tasks
+    prepared["extra_args"] = [*_extra_args(prepared), "--include_path", str(task_root)]
+    return prepared
 
 
 def _numeric_metrics(task_payload: Mapping[str, Any]) -> dict[str, float]:
@@ -657,13 +741,13 @@ def run_lmms_eval_checkpoint(
     if not checkpoint_path.is_dir():
         raise FileNotFoundError(f"checkpoint is not a local directory: {checkpoint_path}")
     output = Path(output_root).expanduser().absolute() / f"attempt_{uuid.uuid4().hex}"
-    settings = dict(settings)
+    output.mkdir(parents=True, exist_ok=True)
+    settings = _prepare_compatibility_tasks(output, settings)
     argv, env, timeout = _build_command(
         settings,
         checkpoint=str(checkpoint_path),
         output_path=output,
     )
-    output.mkdir(parents=True, exist_ok=True)
     command_path = _atomic_json(
         output / "command.json",
         {
