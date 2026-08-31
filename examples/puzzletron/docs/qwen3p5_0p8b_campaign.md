@@ -35,10 +35,22 @@ completed stages are not submitted again.
 
 ## Change the search dimensions
 
-The checked-in Qwen 3.5 0.8B campaign and its validation cover only
-`ffn.intermediate_size`. Additional dimensions are configurable, but are not
-covered by this campaign. To create a variant, copy the run config and make
-each new dimension explicit in three places:
+The default Qwen 3.5 0.8B campaign and its real-checkpoint validation cover
+only `ffn.intermediate_size`. The opt-in `campaign_extended.yaml` variant
+also exposes hidden width, grouped-attention KV and query heads, GDN key groups,
+GDN value-head dimension, embedding width, and depth. These dimensions are
+available for additional searches, but have less real-checkpoint coverage and
+may need model-specific fixes.
+
+Run the extended variant with the shared campaign execution config:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign_extended.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+```
+
+To create another variant, copy a run config and make each new dimension
+explicit in three places:
 
 1. Declare its legal candidate values in the model config.
 2. Enable its measurement, sanity, and replacement-scoring stages in the run

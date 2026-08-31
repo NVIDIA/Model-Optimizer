@@ -11,6 +11,7 @@ execution:
   stages:
     convert: {strategy: single, instances: 1}
     tokenize_data: {strategy: single, instances: 1}
+    depth_importance: {strategy: single, instances: 1}
     width_importance: {strategy: single, instances: 1}
     sort: {strategy: single, instances: 1}
     sort_sanity: {strategy: single, instances: 1}

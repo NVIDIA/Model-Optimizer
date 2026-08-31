@@ -71,7 +71,8 @@ For a Qwen 3.5 0.8B text pruning example, see the
 [Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It searches two FFN
 intermediate sizes, increases the scoring, serving, and distillation budgets,
 and reuses the same downstream evaluation settings as the opt-in quality
-comparison.
+comparison. The same guide includes an opt-in extended variant with hidden
+width, attention, GDN, embedding-width, and depth pruning.
 
 ### 3. Inspect and launch smoke
 
