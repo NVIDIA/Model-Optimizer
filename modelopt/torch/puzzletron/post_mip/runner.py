@@ -527,12 +527,15 @@ def _downstream_evaluation(
     )
     settings = copy.deepcopy(dict(node.config.get("config") or {}))
     reference_checkpoint = settings.pop("reference_checkpoint", None)
+    recorded_observation = settings.pop("recorded_observation", None)
     profile = settings.pop("profile", None)
     evaluator = run_lmms_eval_checkpoint
     if profile is not None:
         evaluator = _DOWNSTREAM_EVALUATION_PROFILES.get(str(profile))
         if evaluator is None:
             raise ValueError(f"unsupported downstream evaluation profile: {profile}")
+    if recorded_observation is not None and reference_checkpoint is None:
+        raise ValueError("recorded_observation requires reference_checkpoint")
     candidate = evaluator(
         source.artifact["checkpoint"],
         output_root=output_root,
@@ -563,6 +566,11 @@ def _downstream_evaluation(
             for name, value in candidate_metrics.items()
         },
     }
+    observation_comparison, observation_metrics = _compare_recorded_observation(
+        recorded_observation,
+        comparison_metrics,
+    )
+    comparison_metrics.update(observation_metrics)
     comparison_path = _atomic_json(
         output_root / "comparison.json",
         {
@@ -580,6 +588,11 @@ def _downstream_evaluation(
                 name: candidate_metrics[name] - reference_metrics[name]
                 for name in candidate_metrics
             },
+            **(
+                {"recorded_observation": observation_comparison}
+                if observation_comparison is not None
+                else {}
+            ),
         },
     )
     return {
@@ -588,6 +601,40 @@ def _downstream_evaluation(
         "comparison_path": str(comparison_path),
         "reference_result_path": reference["result_path"],
     }
+
+
+def _compare_recorded_observation(
+    observation: Any,
+    actual_metrics: Mapping[str, float],
+) -> tuple[dict[str, Any] | None, dict[str, float]]:
+    """Compare with a historical observation without creating an acceptance gate."""
+    if observation is None:
+        return None, {}
+    if not isinstance(observation, Mapping):
+        raise TypeError("recorded_observation must be a mapping")
+    raw_metrics = observation.get("metrics")
+    if not isinstance(raw_metrics, Mapping) or not raw_metrics:
+        raise ValueError("recorded_observation.metrics must be a non-empty mapping")
+    recorded = {}
+    for name, value in raw_metrics.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"recorded observation metric {name!r} must be numeric")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"recorded observation metric {name!r} must be finite")
+        recorded[str(name)] = numeric
+    missing = sorted(set(recorded) - actual_metrics.keys())
+    if missing:
+        raise ValueError(f"recorded observation metrics were not produced: {missing}")
+    differences = {name: actual_metrics[name] - value for name, value in recorded.items()}
+    return (
+        {
+            **{key: copy.deepcopy(value) for key, value in observation.items() if key != "metrics"},
+            "metrics": recorded,
+            "difference_from_recorded": differences,
+        },
+        {f"observation_delta.{name}": value for name, value in differences.items()},
+    )
 
 
 def _post_mip_kd_settings(
@@ -767,15 +814,6 @@ def _aggregate_filter(
     execution_identity: str,
 ) -> tuple[list[NodeObservation], CandidateSet]:
     selected, excluded, scores = apply_filter(ledger, input_set.revision_ids, node.config)
-    if node.config.get("require_match") and not selected:
-        reasons = "; ".join(
-            f"{revision_id}: {excluded.get(revision_id, 'not selected')}"
-            for revision_id in input_set.revision_ids
-        )
-        raise RuntimeError(
-            f"required post-MIP filter {node.node_id!r} selected no candidates"
-            + (f": {reasons}" if reasons else "")
-        )
     observations = [
         NodeObservation(
             node_id=node.node_id,

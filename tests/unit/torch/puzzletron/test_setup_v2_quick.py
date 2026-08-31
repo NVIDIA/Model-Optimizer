@@ -175,10 +175,11 @@ def test_cli_invalid_noninteractive_vllm_topology_fails_fast(tmp_path, monkeypat
                 "model": {"source": str(model_path)},
                 "data": {"source": str(dataset), "modality": "text"},
                 "infrastructure": {
+                    "gpus_per_node": 1,
                     "execution_contract": {
                         "repository": "/worker/modelopt",
                         "venv": "/worker/venv",
-                    }
+                    },
                 },
                 "vllm": {
                     "enabled": True,
@@ -379,10 +380,14 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
                     "sequence_length": 32,
                 },
                 "infrastructure": {
+                    "gpus_per_node": 1,
+                    "runner": {
+                        "slurm": {"job_name_prefix": "acct-puzzletron"},
+                    },
                     "execution_contract": {
                         "repository": "/worker/modelopt",
                         "venv": "/worker/venv",
-                    }
+                    },
                 },
             },
             sort_keys=False,
@@ -405,6 +410,7 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert generated.collection("pruning")["depth_remove"] == 1
     assert generated.collection("pruning")["width_importance_samples"] == 8
     assert generated.collection("pruning")["replacement_samples"] == 4
+    assert generated.collection("stage_resources")["replacement_scoring"]["instances"] == 2
     assert generated.collection("default_resolutions")["pruning.depth_remove"] == {
         "value": 1,
         "source": "preset",
@@ -412,6 +418,70 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert generated.collection("default_resolutions")["pruning.width_importance_samples"] == {
         "value": 8,
         "source": "model_profile",
+    }
+    assert (
+        generated.collection("default_resolutions")["post_mip.quality_comparison"]["source"]
+        == "model_profile"
+    )
+    smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
+    smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
+    assert smoke_flow["nodes"]["quality_benchmarks"]["config"]["limit"] == 100
+    smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
+    assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
+    production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    flow = next(iter(production["post_mip"]["flows"].values()))
+    comparison = flow["nodes"]["quality_benchmarks"]
+    assert comparison["type"] == "downstream_evaluation"
+    assert comparison["input"] == "best"
+    assert comparison["failure_policy"] == "strict"
+    assert comparison["config"] == {
+        "reference_checkpoint": "${teacher_dir}",
+        "model": "vllm",
+        "tasks": ["ifeval", "gsm8k"],
+        "compatibility_tasks": ["gsm8k"],
+        "task_dataset_revisions": {
+            "ifeval": "5a5661c2a35488308556cf4453dc074d1eba91a0",
+            "gsm8k": "740312add88f781978c0658806c59bc2815b9866",
+        },
+        "limit": 100,
+        "batch_size": 8,
+        "log_samples": True,
+        "seed": 42,
+        "timeout_seconds": 7200,
+        "gen_kwargs": {"do_sample": False, "temperature": 0},
+        "recorded_observation": {
+            "repeat_count": 2,
+            "candidate_architecture": {
+                "parameter_pruning_percent": 10.042,
+                "parameter_retention_percent": 89.958,
+                "ffn_layers": 24,
+                "teacher_intermediate_size": 3584,
+                "student_intermediate_size": 2048,
+                "ffn_width_pruning_percent": 42.857,
+            },
+            "metrics": {
+                "candidate.ifeval.prompt_level_strict_acc_none": 0.23,
+                "reference.ifeval.prompt_level_strict_acc_none": 0.55,
+                "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
+                "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
+            },
+        },
+        "topology": {
+            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
+            "data_parallel_size": 1,
+            "prefill_context_parallel_size": 1,
+            "decode_context_parallel_size": 1,
+            "enable_expert_parallel": False,
+            "distributed_executor_backend": "mp",
+            "gpu_group_size": 1,
+        },
+        "model_args": {
+            "dtype": "bfloat16",
+            "gpu_memory_utilization": 0.85,
+            "max_model_len": 8192,
+            "reasoning_parser": "qwen3",
+        },
     }
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {
@@ -470,6 +540,7 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
             "",
             "",
             "acct",
+            "pt",
             "4:00:00",
             "8",
             "",

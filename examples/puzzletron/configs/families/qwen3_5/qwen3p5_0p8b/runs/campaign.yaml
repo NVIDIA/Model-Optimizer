@@ -10,7 +10,7 @@ defaults:
 # real-checkpoint smoke into a multi-axis search, depth and bypass exploration,
 # serving-aware MIP selection, distillation, and a final teacher/student quality
 # comparison. Its budgets and search choices are starting points to adapt, not
-# prescribed settings. Use e2e_quality_regression.yaml for the
+# prescribed settings. Use e2e_quality_comparison.yaml for the
 # affordable automated version of the same final evaluation settings.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
 display_name: Qwen3p5 0.8B text pruning campaign

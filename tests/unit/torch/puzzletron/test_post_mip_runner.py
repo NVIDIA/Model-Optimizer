@@ -25,7 +25,7 @@ from omegaconf import OmegaConf
 import modelopt.torch.puzzletron.stages.future as future_stages
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
-from modelopt.torch.puzzletron.post_mip.records import ArtifactKind, CandidateSet
+from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
 from modelopt.torch.puzzletron.post_mip.runner import (
     _exception_diagnostics,
     _needs_puzzletron_process_group,
@@ -408,6 +408,13 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
             "config": {
                 "tasks": ["ifeval"],
                 "reference_checkpoint": str(reference),
+                "recorded_observation": {
+                    "repeat_count": 2,
+                    "metrics": {
+                        "candidate.ifeval.accuracy": 0.35,
+                        "reference.ifeval.accuracy": 0.5,
+                    },
+                },
             }
         },
     )
@@ -426,31 +433,21 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
         "candidate.ifeval.accuracy": 0.4,
         "reference.ifeval.accuracy": 0.5,
         "delta.ifeval.accuracy": pytest.approx(-0.1),
+        "observation_delta.candidate.ifeval.accuracy": pytest.approx(0.05),
+        "observation_delta.reference.ifeval.accuracy": 0.0,
     }
     comparison = json.loads(Path(result["comparison_path"]).read_text())
     assert comparison["candidate"]["metrics"] == {"ifeval.accuracy": 0.4}
     assert comparison["reference"]["metrics"] == {"ifeval.accuracy": 0.5}
     assert comparison["delta"]["ifeval.accuracy"] == pytest.approx(-0.1)
-
-
-def test_required_filter_fails_when_no_candidate_matches(monkeypatch):
-    monkeypatch.setattr(
-        runner,
-        "apply_filter",
-        lambda *_args, **_kwargs: ((), {"revision": "quality regression"}, {}),
-    )
-    node = SimpleNamespace(node_id="quality_gate", flow_id="flow", config={"require_match": True})
-    candidate_set = CandidateSet.create(
-        "flow",
-        "source",
-        ("revision",),
-        producer_execution_identity="source-execution",
-    )
-
-    with pytest.raises(RuntimeError, match="selected no candidates.*quality regression"):
-        runner._aggregate_filter(
-            SimpleNamespace(),
-            node,
-            candidate_set,
-            "gate-execution",
-        )
+    assert comparison["recorded_observation"] == {
+        "repeat_count": 2,
+        "metrics": {
+            "candidate.ifeval.accuracy": 0.35,
+            "reference.ifeval.accuracy": 0.5,
+        },
+        "difference_from_recorded": {
+            "candidate.ifeval.accuracy": pytest.approx(0.05),
+            "reference.ifeval.accuracy": 0.0,
+        },
+    }

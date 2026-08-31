@@ -86,6 +86,7 @@ _EXECUTION_CONTRACT_FIELDS = {
 }
 _SLURM_FIELDS = {
     "account",
+    "job_name_prefix",
     "partition",
     "partition_interactive",
     "partition_batch",
@@ -521,6 +522,7 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
         )
         slurm = SlurmRunnerConfig(
             account=str(slurm_payload.get("account", "")),
+            job_name_prefix=str(slurm_payload.get("job_name_prefix", "pt")),
             partition=slurm_payload.get("partition"),
             partition_interactive=slurm_payload.get("partition_interactive"),
             partition_batch=slurm_payload.get("partition_batch"),

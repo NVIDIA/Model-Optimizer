@@ -645,6 +645,7 @@ def resolve_campaign_config(state: WizardState) -> ResolvedCampaignConfig:
         runner_kind=str(effective("infrastructure.runner.kind")),
         slurm={
             "account": effective("infrastructure.runner.slurm.account"),
+            "job_name_prefix": effective("infrastructure.runner.slurm.job_name_prefix", "pt"),
             "partition": effective("infrastructure.runner.slurm.partition"),
             "partition_interactive": effective(
                 "infrastructure.runner.slurm.partition_interactive", None

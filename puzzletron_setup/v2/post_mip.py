@@ -15,15 +15,19 @@
 
 """Editable, compiler-validated post-MIP flow DAGs."""
 
+# This module predates repository-wide public-API docstring enforcement.
+# ruff: noqa: D101, D102, D107
+
 from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .resources import StageResources
+if TYPE_CHECKING:
+    from .resources import StageResources
 
 __all__ = [
     "IMPLEMENTED_NODE_TYPES",
@@ -275,9 +279,10 @@ def recommended_flow(
     data: Mapping[str, Any],
     serving: Mapping[str, Any],
     *,
+    quality_comparison: Mapping[str, Any] | None = None,
     node_prefix: str = "",
 ) -> FlowDraft:
-    """Build the eight-node default flow, intentionally without Initial Filter."""
+    """Build the recommended flow, optionally including a downstream comparison."""
     sequence_length = int(data.get("sequence_length", 4096))
     raw_concurrency = serving.get("concurrency", [1])
     if isinstance(raw_concurrency, (int, str)):
@@ -292,6 +297,7 @@ def recommended_flow(
     short_kd = f"{node_prefix}short_kd"
     final_eval = f"{node_prefix}final_eval"
     best = f"{node_prefix}best"
+    quality_benchmarks = f"{node_prefix}quality_benchmarks"
     nodes = OrderedDict(
         (
             (
@@ -395,6 +401,14 @@ def recommended_flow(
             ),
         )
     )
+    if quality_comparison is not None:
+        nodes[quality_benchmarks] = NodeDraft(
+            quality_benchmarks,
+            "downstream_evaluation",
+            input_id=best,
+            failure_policy="strict",
+            config=deepcopy(dict(quality_comparison)),
+        )
     return FlowDraft(
         flow_id=run_id,
         run_id=run_id,

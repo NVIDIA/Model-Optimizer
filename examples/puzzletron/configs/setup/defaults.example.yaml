@@ -19,6 +19,8 @@ infrastructure:
     slurm:
       # Add the required Slurm account for your site before using this file.
       # account: REPLACE_WITH_SLURM_ACCOUNT
+      # Optional prefix used for every generated Slurm job name.
+      # job_name_prefix: puzzletron
       # Optional. Use one partition name or a list of eligible names. When
       # omitted, Slurm uses the site's default partition.
       partition:

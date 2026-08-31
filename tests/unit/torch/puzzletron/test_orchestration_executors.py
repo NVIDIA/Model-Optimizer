@@ -689,7 +689,7 @@ def test_slurm_submit_retries_transient_controller_timeout(tmp_path: Path, monke
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository=str(tmp_path), venv=str(tmp_path / ".venv")),
-        slurm=SlurmRunnerConfig(account="acct", partition="gpu"),
+        slurm=SlurmRunnerConfig(account="acct", partition="gpu", job_name_prefix="acct-puzzletron"),
     )
     attempt = AttemptSpec(
         attempt_id="abcdef12-3456",
@@ -712,7 +712,7 @@ def test_slurm_submit_retries_transient_controller_timeout(tmp_path: Path, monke
             "--user",
             "tester",
             "--name",
-            "pt-width_importance-abcdef12",
+            "acct-puzzletron-width_importance-abcdef12",
             "-o",
             "%A",
         ]

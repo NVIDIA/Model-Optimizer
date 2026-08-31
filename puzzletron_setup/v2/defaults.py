@@ -51,6 +51,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
             "kind": "slurm",
             "slurm": {
                 "account": "",
+                "job_name_prefix": "pt",
                 "partition": None,
                 "time_limit": "4:00:00",
                 "qos": None,
@@ -209,6 +210,7 @@ _SCHEMA = {
             "kind": None,
             "slurm": {
                 "account": None,
+                "job_name_prefix": None,
                 "partition": None,
                 "max_nodes": None,
                 "time_limit": None,

@@ -30,6 +30,7 @@ from puzzletron_orchestrator.compiler import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5"
 FAMILY_PRESETS_PATH = FAMILY_ROOT / "setup_v2_defaults.yaml"
+QUALITY_EVALUATION_PATH = FAMILY_ROOT / "qwen3p5_0p8b/quality_evaluation.yaml"
 EXPLICIT_SETUP_DEFAULTS_PATH = (
     REPOSITORY_ROOT / "tests/_test_utils/torch/puzzletron/tiny_qwen_setup_defaults.yaml"
 )
@@ -37,8 +38,8 @@ RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke.yaml"
 ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
 RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_smoke.yaml"
-QUALITY_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_regression.yaml"
-QUALITY_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_quality_regression.yaml"
+QUALITY_COMPARISON_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_comparison.yaml"
+QUALITY_COMPARISON_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_quality_comparison.yaml"
 CAMPAIGN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/campaign.yaml"
 CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
 
@@ -54,13 +55,13 @@ def _compile_plan(monkeypatch, tmp_path: Path):
     )
 
 
-def _compile_quality_plan(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "quality-results"))
+def _compile_quality_comparison_plan(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "quality-comparison-results"))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     return compile_campaign_plan(
-        experiment_config_path=QUALITY_RUN_PATH,
+        experiment_config_path=QUALITY_COMPARISON_RUN_PATH,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(QUALITY_EXECUTION_PATH),
+        execution=load_execution_config(QUALITY_COMPARISON_EXECUTION_PATH),
         stage_filter="full",
     )
 
@@ -166,23 +167,19 @@ def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
     assert nodes["best"]["top_k"] == 1
 
 
-def test_qwen3p5_0p8b_e2e_quality_regression_is_opt_in_and_compares_teacher(
+def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    plan = _compile_quality_plan(monkeypatch, tmp_path)
+    plan = _compile_quality_comparison_plan(monkeypatch, tmp_path)
     config = plan.experiment_config
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
     benchmark = nodes["quality_benchmarks"]
     stage_ids = tuple(stage.stage_id for stage in plan.stages)
+    stages = {stage.stage_id: stage for stage in plan.stages}
 
     assert "post.params-90.quality_benchmarks" in stage_ids
-    assert stage_ids.index("post.params-90.quality_benchmarks") < stage_ids.index(
-        "post.params-90.ifeval_quality_gate"
-    )
-    assert stage_ids.index("post.params-90.ifeval_quality_gate") < stage_ids.index(
-        "post.params-90.gsm8k_quality_gate"
-    )
+    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_kd",)
     assert benchmark["input"] == "short_kd"
     assert benchmark["failure_policy"] == "strict"
     assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
@@ -198,16 +195,24 @@ def test_qwen3p5_0p8b_e2e_quality_regression_is_opt_in_and_compares_teacher(
         "do_sample": False,
         "temperature": 0,
     }
-    assert nodes["ifeval_quality_gate"]["require_match"] is True
-    assert nodes["ifeval_quality_gate"]["metric"].endswith(
-        "modelopt_ifeval.prompt_level_strict_acc_none"
-    )
-    assert nodes["ifeval_quality_gate"]["min"] == -0.35
-    assert nodes["gsm8k_quality_gate"]["metric"].endswith(
-        "modelopt_gsm8k.exact_match_flexible-extract"
-    )
-    assert nodes["gsm8k_quality_gate"]["min"] == -0.47
-    assert nodes["gsm8k_quality_gate"]["require_match"] is True
+    assert benchmark["config"]["recorded_observation"] == {
+        "repeat_count": 2,
+        "candidate_architecture": {
+            "parameter_pruning_percent": 10.042,
+            "parameter_retention_percent": 89.958,
+            "ffn_layers": 24,
+            "teacher_intermediate_size": 3584,
+            "student_intermediate_size": 2048,
+            "ffn_width_pruning_percent": 42.857,
+        },
+        "metrics": {
+            "candidate.ifeval.prompt_level_strict_acc_none": 0.23,
+            "reference.ifeval.prompt_level_strict_acc_none": 0.55,
+            "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
+            "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
+        },
+    }
+    assert all("quality_gate" not in node_id for node_id in nodes)
     assert all(stage.total_gpus == 1 for stage in plan.stages)
 
 
@@ -216,7 +221,9 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     tmp_path: Path,
 ) -> None:
     campaign = pipeline_config_from_path(CAMPAIGN_PATH)
-    regression = pipeline_config_from_path(QUALITY_RUN_PATH)
+    comparison = pipeline_config_from_path(QUALITY_COMPARISON_RUN_PATH)
+    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
+    quality_evaluation = yaml.safe_load(QUALITY_EVALUATION_PATH.read_text())["quality_evaluation"]
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     plan = compile_campaign_plan(
@@ -252,16 +259,21 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         "quality_benchmarks",
     )
     campaign_quality = nodes["quality_benchmarks"]["config"]
-    regression_quality = regression["post_mip"]["flows"]["params-90"]["nodes"][
+    comparison_quality = comparison["post_mip"]["flows"]["params-90"]["nodes"][
         "quality_benchmarks"
     ]["config"]
+    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
+        "quality_comparison"
+    ]
+    assert wizard_quality.pop("enabled") is True
+    assert wizard_quality == quality_evaluation
     assert campaign_quality == campaign["quality_evaluation"]
-    assert regression_quality == regression["quality_evaluation"]
+    assert comparison_quality == comparison["quality_evaluation"]
     assert campaign_quality["reference_checkpoint"] == campaign["teacher_dir"]
-    assert regression_quality["reference_checkpoint"] == regression["teacher_dir"]
+    assert comparison_quality["reference_checkpoint"] == comparison["teacher_dir"]
     assert {
         key: value for key, value in campaign_quality.items() if key != "reference_checkpoint"
-    } == {key: value for key, value in regression_quality.items() if key != "reference_checkpoint"}
+    } == {key: value for key, value in comparison_quality.items() if key != "reference_checkpoint"}
     stages = {stage.stage_id: stage for stage in plan.stages}
     assert tuple(stages)[-9:] == tuple(f"post.runtime-075.{node_id}" for node_id in nodes)
     assert stages["post.runtime-075.global_kd"].total_gpus == 1

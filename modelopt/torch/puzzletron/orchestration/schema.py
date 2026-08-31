@@ -154,6 +154,7 @@ class SlurmRunnerConfig:
     """Slurm-specific runner facts."""
 
     account: str
+    job_name_prefix: str = "pt"
     partition: str | Sequence[str] | None = None
     partition_interactive: str | Sequence[str] | None = None
     partition_batch: str | Sequence[str] | None = None
@@ -165,6 +166,8 @@ class SlurmRunnerConfig:
     log_dir: str | None = None
 
     def __post_init__(self) -> None:
+        if not self.job_name_prefix.strip():
+            raise ValueError("runner.slurm.job_name_prefix must not be empty")
         for field_name in (
             "partition",
             "partition_interactive",

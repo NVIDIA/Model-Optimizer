@@ -34,7 +34,7 @@ __all__ = ["QUICK_SETUP_PRESETS", "SetupPreset", "get_setup_preset"]
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _FAMILY_DEFAULTS_FILENAME = "setup_v2_defaults.yaml"
 _SUPPORTED_SCHEMA_VERSIONS = {1, 2}
-_MODEL_OVERRIDE_FIELDS = {"match", "profiles"}
+_MODEL_OVERRIDE_FIELDS = {"defaults", "match", "profiles"}
 _MODEL_MATCH_FIELDS = {"facts", "moe", "num_layers", "num_sublayers"}
 
 
@@ -181,6 +181,11 @@ class SetupPreset:
                     f"Unknown match fields for guided setup model override "
                     f"{model_name!r} in {defaults_path}: {fields}"
                 )
+            common_defaults = _validated_profile(
+                model_override.get("defaults", {}),
+                profile=f"{model_name}.defaults",
+                path=defaults_path,
+            )
             override_profiles = model_override.get("profiles")
             if not isinstance(override_profiles, Mapping):
                 raise SetupError(
@@ -199,15 +204,17 @@ class SetupPreset:
                 for profile, profile_defaults in override_profiles.items()
             }
             if model_inventory is not None and _matches_inventory(selector, model_inventory):
-                matches.append((str(model_name), validated_overrides))
+                matches.append((str(model_name), common_defaults, validated_overrides))
 
         if len(matches) > 1:
-            names = ", ".join(name for name, _ in matches)
+            names = ", ".join(name for name, _, _ in matches)
             raise SetupError(
                 f"Model inventory matches multiple guided setup overrides in "
                 f"{defaults_path}: {names}."
             )
-        model_defaults = matches[0][1].get(self.name, {}) if matches else {}
+        model_defaults = (
+            _deep_merge(matches[0][1], matches[0][2].get(self.name, {})) if matches else {}
+        )
         return resolved, model_defaults
 
 

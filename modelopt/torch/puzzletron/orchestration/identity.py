@@ -140,6 +140,7 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
     if runner.slurm is not None:
         payload["slurm"] = {
             "account": runner.slurm.account,
+            "job_name_prefix": runner.slurm.job_name_prefix,
             "partition": runner.slurm.partition,
             "partition_interactive": runner.slurm.partition_interactive,
             "partition_batch": runner.slurm.partition_batch,

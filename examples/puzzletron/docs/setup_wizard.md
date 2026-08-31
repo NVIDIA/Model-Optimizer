@@ -17,6 +17,12 @@ The selected profile supplies pruning and search defaults from the detected
 model family's `setup_v2_defaults.yaml`. The wizard then asks for the model,
 dataset, worker environment, and cluster settings.
 
+Model-specific defaults can also extend the recommended post-MIP flow. For
+Qwen 3.5 0.8B, generated smoke and production bundles finish by evaluating the
+final selected student and the teacher on pinned IFEval and GSM8K subsets. This
+comparison records measurements and samples; it does not enforce a quality
+threshold.
+
 ## Models and datasets
 
 At the **Model** prompt, provide an existing local checkpoint or configuration

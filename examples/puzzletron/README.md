@@ -61,14 +61,16 @@ output directory.
 The wizard reads model configuration, not model weights, and does not submit
 jobs. It writes validated `smoke/` and `production/` bundles plus a generated
 `README.md`. Run any dataset preparation command in that generated README from
-the worker environment before launch. See the
+the worker environment before launch. For Qwen 3.5 0.8B, both bundles include
+a final pinned student-versus-teacher downstream comparison that records
+results without imposing an acceptance threshold. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
 For a substantial text pruning example, see the
 [Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It covers a broader
 multi-axis search and reuses the deterministic downstream evaluation from the
-bounded opt-in GPU regression.
+bounded opt-in GPU comparison.
 
 ### 3. Inspect and launch smoke
 

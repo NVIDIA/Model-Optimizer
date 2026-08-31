@@ -61,6 +61,35 @@ def test_recommended_flow_accepts_a_single_concurrency_value():
     assert flow.nodes["fastest"].selector["best_selection_mode"] == "individual_best"
 
 
+def test_recommended_flow_can_compare_the_final_student_with_the_teacher():
+    comparison = {
+        "reference_checkpoint": "${teacher_dir}",
+        "tasks": ["ifeval", "gsm8k"],
+        "limit": 100,
+        "seed": 42,
+    }
+
+    flow = recommended_flow(
+        "params",
+        ["metrics.lm_loss"],
+        {"sequence_length": 1024},
+        {
+            "input_tokens": 128,
+            "output_tokens": 32,
+            "concurrency": 1,
+            "request_count": 32,
+        },
+        quality_comparison=comparison,
+    )
+
+    quality = flow.nodes["quality_benchmarks"]
+    assert quality.node_type == "downstream_evaluation"
+    assert quality.input_id == "best"
+    assert quality.failure_policy == "strict"
+    assert quality.config == comparison
+    assert not any("gate" in node_id for node_id in flow.nodes)
+
+
 def test_downstream_evaluation_node_is_configurable_after_materialization():
     flow = FlowDraft(
         "runtime",

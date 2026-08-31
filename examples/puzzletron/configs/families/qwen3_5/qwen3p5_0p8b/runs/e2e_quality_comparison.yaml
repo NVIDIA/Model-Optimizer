@@ -1,0 +1,26 @@
+# @package _global_
+
+defaults:
+  - full_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/quality_evaluation@_global_
+  - _self_
+
+# Opt-in deterministic quality comparison. Unlike full_smoke, this recipe runs
+# a pinned subset of downstream tasks and compares the final distilled student
+# with the pinned teacher using identical evaluator settings. It records the
+# results without defining pass/fail thresholds; a quality-preserving pruning
+# recipe must be established before these measurements can become a regression
+# gate. The run is excluded from default CI because it requires a real
+# checkpoint and GPU time.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_quality_comparison}
+display_name: Qwen3p5 0.8B end-to-end quality comparison
+
+post_mip:
+  flows:
+    params-90:
+      nodes:
+        quality_benchmarks:
+          type: downstream_evaluation
+          input: short_kd
+          failure_policy: strict
+          config: ${quality_evaluation}

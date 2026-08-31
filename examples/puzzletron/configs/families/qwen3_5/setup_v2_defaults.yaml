@@ -62,11 +62,61 @@ model_overrides:
         intermediate_size: 3584
         num_attention_heads: 8
         num_key_value_heads: 2
+    defaults:
+      post_mip:
+        quality_comparison:
+          enabled: true
+          reference_checkpoint: ${teacher_dir}
+          model: vllm
+          tasks: [ifeval, gsm8k]
+          compatibility_tasks: [gsm8k]
+          task_dataset_revisions:
+            ifeval: 5a5661c2a35488308556cf4453dc074d1eba91a0
+            gsm8k: 740312add88f781978c0658806c59bc2815b9866
+          limit: 100
+          batch_size: 8
+          log_samples: true
+          seed: 42
+          timeout_seconds: 7200
+          gen_kwargs:
+            do_sample: false
+            temperature: 0
+          recorded_observation:
+            repeat_count: 2
+            candidate_architecture:
+              parameter_pruning_percent: 10.042
+              parameter_retention_percent: 89.958
+              ffn_layers: 24
+              teacher_intermediate_size: 3584
+              student_intermediate_size: 2048
+              ffn_width_pruning_percent: 42.857
+            metrics:
+              candidate.ifeval.prompt_level_strict_acc_none: 0.23
+              reference.ifeval.prompt_level_strict_acc_none: 0.55
+              candidate.modelopt_gsm8k.exact_match_flexible-extract: 0.01
+              reference.modelopt_gsm8k.exact_match_flexible-extract: 0.45
+          topology:
+            tensor_parallel_size: 1
+            pipeline_parallel_size: 1
+            data_parallel_size: 1
+            prefill_context_parallel_size: 1
+            decode_context_parallel_size: 1
+            enable_expert_parallel: false
+            distributed_executor_backend: mp
+            gpu_group_size: 1
+          model_args:
+            dtype: bfloat16
+            gpu_memory_utilization: 0.85
+            max_model_len: 8192
+            reasoning_parser: qwen3
     profiles:
       smoke:
         pruning:
           width_importance_samples: 8
           replacement_samples: 4
+        stages:
+          replacement_scoring:
+            instances: 2
         mip:
           goal_value: 85%
 

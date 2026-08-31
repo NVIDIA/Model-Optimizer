@@ -41,8 +41,11 @@ the first 100 examples of pinned IFEval and GSM8K revisions. Both models use the
 same evaluator version, greedy generation settings, seed, batch size, and task
 definitions. The result contains student, teacher, and student-minus-teacher
 metrics plus generated samples for qualitative inspection.
+The shared configuration also records the repeated bounded observation and
+publishes the difference between a fresh run and those four headline scores.
+That comparison is machine-readable but does not gate the campaign.
 
-The [opt-in quality regression](qwen3p5_0p8b_smoke.md#run-the-opt-in-end-to-end-quality-regression)
-uses smaller search and distillation budgets, reuses the same downstream
-evaluation settings, and adds calibrated acceptance gates. It exercises the
-campaign's final evaluation without repeating the larger search.
+The [opt-in quality comparison](qwen3p5_0p8b_smoke.md#run-the-opt-in-end-to-end-quality-comparison)
+uses smaller search and distillation budgets and reuses the same downstream
+evaluation settings. It exercises the campaign's final evaluation without
+repeating the larger search, but it does not define acceptance thresholds.

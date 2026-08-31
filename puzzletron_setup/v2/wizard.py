@@ -714,6 +714,7 @@ def infrastructure_section(
         ("infrastructure.execution_contract.container_mounts", None),
         ("infrastructure.runner.kind", "slurm"),
         ("infrastructure.runner.slurm.account", ""),
+        ("infrastructure.runner.slurm.job_name_prefix", "pt"),
         ("infrastructure.runner.slurm.partition", None),
         ("infrastructure.runner.slurm.time_limit", "4:00:00"),
         ("infrastructure.runner.slurm.qos", None),
@@ -806,6 +807,11 @@ def infrastructure_section(
             "",
         ),
         ("infrastructure.runner.slurm.account", "Slurm account:", ""),
+        (
+            "infrastructure.runner.slurm.job_name_prefix",
+            "Slurm job-name prefix:",
+            "pt",
+        ),
         (
             "infrastructure.runner.slurm.partition",
             "Eligible Slurm partitions (comma-separated; blank for site default):",
@@ -3489,6 +3495,25 @@ def _post_mip_strategy(node: NodeDraft) -> str:
     )
 
 
+def _quality_comparison_defaults(
+    resolver: DefaultsResolver,
+) -> dict[str, Any] | None:
+    resolved = resolver.resolve_default("post_mip.quality_comparison", {"enabled": False}).value
+    if not isinstance(resolved, Mapping):
+        raise SetupError("post_mip.quality_comparison defaults must be a mapping")
+    enabled = resolved.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise SetupError("post_mip.quality_comparison.enabled must be a boolean")
+    if not enabled:
+        return None
+    comparison = {str(key): deepcopy(value) for key, value in resolved.items() if key != "enabled"}
+    if not comparison.get("reference_checkpoint"):
+        raise SetupError(
+            "enabled post_mip.quality_comparison defaults require reference_checkpoint"
+        )
+    return comparison
+
+
 def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context: dict) -> bool:
     mip = _mapping_copy(session.state.collection("mip_config"))
     runs = _mapping_copy(mip.get("runs"))
@@ -3505,6 +3530,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
         ),
         "best_selection_mode": "individual_best",
     }
+    quality_comparison = _quality_comparison_defaults(resolver)
     preview = {}
     for run_id, run in runs.items():
         objectives = [
@@ -3517,6 +3543,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
             objectives,
             {"sequence_length": sequence},
             serving,
+            quality_comparison=quality_comparison,
             node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
         )
         node_previews = []
@@ -3561,7 +3588,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                 f"post_mip.{run_id}.mode",
                 f"Post-MIP flow for {run_id}:",
                 [
-                    ("Use recommended eight-node flow", "recommended"),
+                    ("Use recommended flow", "recommended"),
                     ("Add nodes one by one", "custom"),
                     ("No post-MIP flow", "none"),
                 ],
@@ -3578,6 +3605,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
         ]
         if flow_mode == "recommended":
             run_serving = deepcopy(serving)
+            run_quality_comparison = deepcopy(quality_comparison)
             if action == "customize":
                 configured = _serving_setting_prompt(
                     session,
@@ -3590,11 +3618,39 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                 if configured is BACK:
                     return False
                 run_serving = configured
+                include_quality_comparison = session.confirm(
+                    f"post_mip.{run_id}.quality_comparison.enabled",
+                    "Compare the final student with the teacher on downstream tasks?",
+                    default=run_quality_comparison is not None,
+                )
+                if include_quality_comparison is BACK:
+                    return False
+                if include_quality_comparison:
+                    configured = _downstream_evaluation_setting_prompt(
+                        session,
+                        f"post_mip.{run_id}.quality_comparison",
+                        run_quality_comparison
+                        or {
+                            "reference_checkpoint": "${teacher_dir}",
+                            "tasks": ["ifeval", "gsm8k"],
+                            "seed": 42,
+                            "gen_kwargs": {"do_sample": False, "temperature": 0},
+                        },
+                        inventory=context["model"].inventory,
+                        pruning=_mapping_copy(_pruning_payload(session.state)),
+                        stage_id=f"post.{run_id}.quality_benchmarks",
+                    )
+                    if configured is BACK:
+                        return False
+                    run_quality_comparison = configured
+                else:
+                    run_quality_comparison = None
             flow = recommended_flow(
                 str(run_id),
                 objectives,
                 {"sequence_length": sequence},
                 run_serving,
+                quality_comparison=run_quality_comparison,
                 node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
             )
             editor.add_flow(flow)
@@ -4049,6 +4105,7 @@ def _downstream_evaluation_setting_prompt(
     if topology is BACK:
         return BACK
     return {
+        **deepcopy(dict(defaults)),
         "model": str(defaults.get("model", "vllm")),
         "tasks": [item.strip() for item in str(tasks).split(",") if item.strip()],
         "limit": int(limit),
