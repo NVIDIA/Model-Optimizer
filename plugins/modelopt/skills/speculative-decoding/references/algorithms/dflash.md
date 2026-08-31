@@ -27,17 +27,40 @@ alongside training:
 
 | Task | Script | Purpose | Output |
 | --- | --- | --- | --- |
-| task_0 | `common/eagle3/dump_offline_data_vllm.sh` | Dump base hidden states via vLLM (TP-sharded) | Hidden-state dump directory |
+| task_0 | `common/eagle3/dump_offline_data_vllm.sh` or `dump_offline_data_hf.sh` | Dump base hidden states | Hidden-state dump directory |
 | task_1 | `common/specdec/dflash_online_training.sh` | Train on the dump, then export | `<output_dir>/exported-checkpoint-*` |
 
-The dump script is shared with EAGLE3 — DFlash selects its own captured layers with
-`--aux-layers dflash`. Two flags matter for the dump:
+### Choosing the dump backend
 
-- `--aux-layers dflash` — **must match the draft's `num_hidden_layers`** (recipe
-  default 5). `build_target_layer_ids(num_target_layers, num_draft_layers)` picks the
-  captured layers, so a mismatch here silently produces the wrong hidden states.
+The dump script is shared with EAGLE3, so the backend choice is the same three-way
+pick described in `eagle3.md` (*Choosing the task_1 dump backend*). Both committed
+offline examples are in play: MiniMax-M2.7 uses `dump_offline_data_vllm.sh`,
+Qwen3-0.6B uses `dump_offline_data_hf.sh`.
+
+For DFlash the choice is **not** cosmetic — it constrains the draft depth you can
+capture. See below.
+
+### Dump flags
+
+- `--aux-layers dflash` selects DFlash's layer-selection **preset**. It is a keyword,
+  not a count: `--aux-layers` accepts only `eagle`, `dflash`, or an explicit
+  comma-separated id list (`collect_hidden_states/common.py`).
+- **Draft depth is a separate flag, and only the vLLM backend exposes it.** The
+  captured ids come from `build_target_layer_ids(num_target_layers, num_draft_layers)`,
+  and `num_draft_layers` must equal the recipe's
+  `dflash.dflash_architecture_config.num_hidden_layers` or the dump silently captures
+  the wrong layers:
+  - **vLLM** — pass `--num-draft-layers <N>` (default 5).
+  - **HF / TRT-LLM** — no override exists; `resolve_aux_layers` hardcodes
+    `_DFLASH_DEFAULT_NUM_DRAFT_LAYERS = 5`. For a draft that is not 5 layers, you must
+    pass an explicit comma-separated id list to `--aux-layers`, or use the vLLM backend.
 - `--answer-only-loss` and `--chat-template` — must agree with the training task's
   `training.answer_only_loss` and `data.chat_template`.
+
+> Both offline example YAMLs comment `--aux-layers dflash` with "Must match the draft
+> model's num_hidden_layers (recipe default: 5)". That comment is misleading — it
+> attaches the constraint to the wrong flag. The constraint is real; the knob is
+> `--num-draft-layers` (vLLM) or an explicit id list (HF / TRT-LLM).
 
 Offline training additionally needs `data.mode=offline`,
 `model.use_fake_base_for_offline=true` (loads only `lm_head` + `embed_tokens` rather
@@ -62,7 +85,7 @@ in `examples/speculative_decoding/README.md#dflash-block-diffusion-for-speculati
 | `dflash.dflash_num_anchors` | 512 | Random anchor positions sampled per sequence |
 | `dflash.dflash_loss_decay_factor` | 4.0 | Exponential decay gamma; 0 disables |
 | `dflash.dflash_self_logit_distillation` | true | Logit distillation from the target |
-| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers — keep in sync with `--aux-layers` |
+| `dflash.dflash_architecture_config.num_hidden_layers` | 5 | Draft decoder layers — must equal the dump's draft depth (`--num-draft-layers` on vLLM; hardcoded 5 on HF / TRT-LLM) |
 | `dflash.dflash_mask_token_id` | auto | See *Per-model adjustments* |
 | `dflash.dflash_swa_window_size` | unset | Sliding-window attention for the draft; must be >= `dflash_block_size` |
 | `dflash.dflash_export_rope_scaling` | `{}` | YaRN config injected at export so a short-window draft can serve long context |
@@ -137,7 +160,7 @@ DFlash-specific:
 | `The base model did not return hidden states required for DFlash training` | Base model's top-level forward ignores `output_hidden_states=True` | Usually a multimodal wrapper — needs a model-side fix |
 | `ERROR: DRAFT_CKPT_DIR=... contains no exported-checkpoint-* directory` | Upstream training produced no draft | Fix training; do not chase the smoke test |
 | vLLM rejects the speculative config / no DFlash method | DFlash landed in vLLM v0.22.0 (`vllm/v1/spec_decode/dflash.py`) | Use `vllm/vllm-openai:v0.22.1` or newer |
-| Draft quality plateaus despite clean training | `--aux-layers` count and `num_hidden_layers` disagree, so the dump captured the wrong layers | Re-dump with matching values |
+| Draft quality plateaus despite clean training | Dump draft depth and `num_hidden_layers` disagree, so the dump captured the wrong layers. Note `--aux-layers dflash` defaults to a 5-layer draft on **every** backend, so a 6-layer draft silently mis-captures unless you override | Re-dump with `--num-draft-layers <N>` (vLLM), or an explicit `--aux-layers` id list (HF / TRT-LLM) |
 | Loss stalls high with `answer_only_loss=true` | Chat template lacks `{% generation %}` tags, so no positions contribute loss | Supply a template with generation tags |
 | `dflash_dpace_alpha must be in (0, 1]` | Invalid D-PACE alpha | Correct the value |
 | Qwen3-VL mRoPE / `mm_token_type_ids` errors | Qwen3-VL DFlash needs Transformers 5.3.0 or >=5.4.0 and the AutoProcessor's `mm_token_type_ids` | Match the version; don't drop processor outputs |
