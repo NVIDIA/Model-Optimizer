@@ -332,6 +332,27 @@ def test_guided_data_rejects_an_explicit_modality_incompatible_with_the_model(
         )
 
 
+@pytest.mark.parametrize("limit", ["not-a-number", -1, 0, True])
+def test_quality_comparison_limit_must_be_a_positive_integer(limit):
+    resolver = DefaultsResolver(
+        file_defaults={
+            "post_mip": {
+                "quality_comparison": {
+                    "enabled": True,
+                    "reference_checkpoint": "/teacher",
+                    "limit": limit,
+                }
+            }
+        }
+    )
+
+    with pytest.raises(
+        SetupError,
+        match=r"post_mip\.quality_comparison\.limit must be a positive integer",
+    ):
+        wizard_module._quality_comparison_defaults(resolver)
+
+
 # Bundle generation and review output
 
 
