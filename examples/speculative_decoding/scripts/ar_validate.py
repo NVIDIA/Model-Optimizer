@@ -123,10 +123,17 @@ def main():
         accelerator.device,
     )
 
+    # validate_ar() clamps to len(ds), so report what was actually attempted rather than the
+    # requested --num_samples, which can be larger than the dataset. A non-positive count means
+    # nothing ran at all -- distinct from "everything ran and failed", so say so separately.
+    attempted = min(args.num_samples, len(ds))
+    if attempted <= 0:
+        raise ValueError(
+            f"No samples to validate: --num_samples={args.num_samples} with a dataset of "
+            f"{len(ds)} prompts. Pass a positive --num_samples."
+        )
+
     if not results:
-        # validate_ar() clamps to len(ds), so report what was actually attempted rather than
-        # the requested --num_samples, which can be larger than the dataset.
-        attempted = min(args.num_samples, len(ds))
         raise RuntimeError(
             f"AR validation produced no results: all {attempted} samples failed. "
             "See the per-sample WARNING lines above for the underlying error. "
