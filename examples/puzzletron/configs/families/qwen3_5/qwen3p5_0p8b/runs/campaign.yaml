@@ -6,9 +6,9 @@ defaults:
   - _self_
 
 # Bounded Qwen 3.5 0.8B campaign using the same FFN-only search that has been
-# exercised by the real-checkpoint smoke. Experimental hidden-width, attention,
-# GDN, depth, and bypass dimensions remain opt-in until they have their own
-# real-checkpoint validation.
+# exercised by the real-checkpoint smoke. Additional hidden-width, attention,
+# GDN, depth, and bypass dimensions remain opt-in and have less real-checkpoint
+# validation.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
 display_name: Qwen3p5 0.8B text pruning campaign
 

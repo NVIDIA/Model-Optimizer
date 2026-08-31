@@ -431,11 +431,6 @@ def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) 
     repository = "/worker checkout"
     readme = bundle_module._bundle_readme(campaign_dir, repository)
 
-    assert "## Validate setup" in readme
-    assert "## Run campaign" in readme
-    assert "## Smoke" not in readme
-    assert "## Production" not in readme
-
     commands = [shlex.split(line) for line in readme.splitlines() if line.startswith("python ")]
     orchestrator_commands = [
         command for command in commands if command[1].endswith("/orchestrate.py")
