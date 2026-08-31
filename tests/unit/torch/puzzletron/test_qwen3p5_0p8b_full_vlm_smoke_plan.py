@@ -40,12 +40,17 @@ PRODUCTION_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
-PRODUCTION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.vlm_campaign.yaml"
 REGRESSION_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_regression.yaml"
 )
-REGRESSION_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_vlm_quality_regression.yaml"
+FAMILY_PRESETS_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/setup_v2_defaults.yaml"
+)
+VLM_EVALUATOR_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator.yaml"
+)
 
 
 def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revision"):
@@ -84,6 +89,20 @@ def test_qwen3p5_0p8b_full_vlm_smoke_defaults_to_the_tested_dataset_snapshot(
 
     assert run_config["defaults"] == ["mip_vlm_smoke", "_self_"]
     assert config["data"]["revision"] == "51f4f4d219315c3283950994d4eb3d7fc30aa87b"
+    assert config["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+    assert config["sort"]["deferred_axes"] == [
+        "kv_groups",
+        "q_heads_per_group",
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+    ]
 
 
 def test_qwen3p5_0p8b_full_vlm_smoke_compiles_the_one_gpu_lifecycle(
@@ -176,13 +195,13 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
         monkeypatch,
         tmp_path,
         run_path=PRODUCTION_RUN_PATH,
-        execution_path=PRODUCTION_EXECUTION_PATH,
+        execution_path=EXECUTION_PATH,
     )
     regression = _compile_campaign(
         monkeypatch,
         tmp_path,
         run_path=REGRESSION_RUN_PATH,
-        execution_path=REGRESSION_EXECUTION_PATH,
+        execution_path=EXECUTION_PATH,
     )
     production_config = production.experiment_config
     config = regression.experiment_config
@@ -190,26 +209,30 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
     nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
     benchmark = nodes["final_vlm_evaluation"]
     stages = {stage.stage_id: stage for stage in regression.stages}
+    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
+    evaluator = yaml.safe_load(VLM_EVALUATOR_PATH.read_text())["post_mip"]["flows"]["params-90"][
+        "nodes"
+    ]["final_vlm_evaluation"]["config"]
 
     production_defaults = yaml.safe_load(PRODUCTION_RUN_PATH.read_text())["defaults"]
     regression_defaults = yaml.safe_load(REGRESSION_RUN_PATH.read_text())["defaults"]
     shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_"
     assert production_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
     assert regression_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
+    assert production_config["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
 
     production_evaluation = dict(production_nodes["final_vlm_evaluation"]["config"])
     regression_evaluation = dict(benchmark["config"])
     assert production_evaluation.pop("reference_checkpoint") == production_config["teacher_dir"]
     assert regression_evaluation.pop("reference_checkpoint") == config["teacher_dir"]
+    recorded_observation = regression_evaluation.pop("recorded_observation")
     assert regression_evaluation == production_evaluation
     assert stages["post.params-90.final_vlm_evaluation"].parents == ("post.params-90.short_vlm_kd",)
-    assert stages["post.params-90.realworldqa_quality_gate"].parents == (
-        "post.params-90.final_vlm_evaluation",
-    )
-    assert set(stages["post.params-90.mmmu_quality_gate"].parents) == {
-        "post.params-90.realworldqa_quality_gate",
-        "post.params-90.final_vlm_evaluation",
-    }
     assert benchmark["input"] == "short_vlm_kd"
     assert benchmark["failure_policy"] == "strict"
     assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
@@ -218,21 +241,30 @@ def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluator_contrac
     assert benchmark["config"]["timeout_seconds"] == 14400
     assert benchmark["config"]["max_model_len"] == 16384
     assert benchmark["config"]["limit_mm_per_prompt"] == {"image": 12}
-    assert nodes["realworldqa_quality_gate"] == {
-        "type": "filter",
-        "input": "final_vlm_evaluation",
-        "mode": "threshold",
-        "metric": (
-            "final_vlm_evaluation.delta."
-            "modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
-        ),
-        "min": -0.38,
-        "require_match": True,
+    assert recorded_observation == {
+        "repeat_count": 2,
+        "candidate_architecture": {
+            "parameter_pruning_percent": 10.042,
+            "parameter_retention_percent": 89.958,
+            "ffn_layers": 24,
+            "teacher_intermediate_size": 3584,
+            "student_intermediate_size": 2048,
+            "ffn_width_pruning_percent": 42.857,
+        },
+        "metrics": {
+            "candidate.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract": 0.24,
+            "reference.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract": 0.60,
+            "candidate.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.25,
+            "reference.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.35,
+        },
     }
-    assert nodes["mmmu_quality_gate"]["input"] == "realworldqa_quality_gate"
-    assert nodes["mmmu_quality_gate"]["metric"].endswith("mmmu_val.mmmu_acc_none")
-    assert nodes["mmmu_quality_gate"]["min"] == -0.12
-    assert nodes["mmmu_quality_gate"]["require_match"] is True
+    assert all("quality_gate" not in node_id for node_id in nodes)
+    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
+        "quality_comparison"
+    ]["by_modality"]["multimodal"]
+    assert wizard_quality.pop("enabled") is True
+    assert "recorded_observation" not in evaluator
+    assert wizard_quality == evaluator
     assert production_config["pruning"]["eval_samples"] == 128
     assert config["pruning"]["eval_samples"] == 8
     assert production_nodes["vlm_serving"]["config"]["request_count"] == 32

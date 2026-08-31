@@ -92,6 +92,15 @@ def _distributed(hydra_cfg: Any) -> Iterator[None]:
             dist.cleanup()
 
 
+@contextmanager
+def _distributed_if_launched(hydra_cfg: Any) -> Iterator[None]:
+    if dist.is_initialized() or "RANK" in os.environ:
+        with _distributed(hydra_cfg):
+            yield
+    else:
+        yield
+
+
 def _runtime_split(config: dict[str, Any]) -> tuple[int, int]:
     runtime = dict(config.get("_runtime") or {})
     requested_nodes = int(runtime.get("num_nodes", 1))
@@ -826,8 +835,9 @@ def _finalize_bypass_sanity_summary(
         records = [row for row in history.get("records", ()) if isinstance(row, dict)]
         steps = [int(row.get("step", -1)) for row in records]
         losses = [row.get("loss") for row in records]
-        valid_losses = all(
-            isinstance(loss, (int, float)) and math.isfinite(float(loss)) for loss in losses
+        numeric_losses = [float(loss) for loss in losses if isinstance(loss, (int, float))]
+        valid_losses = len(numeric_losses) == len(losses) and all(
+            math.isfinite(loss) for loss in numeric_losses
         )
         if (
             len(records) != repetitions
@@ -843,8 +853,8 @@ def _finalize_bypass_sanity_summary(
         mode_summaries[mode] = {
             "history_path": str(history_path),
             "record_count": len(records),
-            "first_loss": float(losses[0]),
-            "last_loss": float(losses[-1]),
+            "first_loss": numeric_losses[0],
+            "last_loss": numeric_losses[-1],
             "finite": True,
             "max_step": steps[-1],
             "history_summary": history_summary,
@@ -978,7 +988,9 @@ def build_library_stage(config: dict[str, Any], manifest: StageManifest):
         "subblock_stats_filename",
         "subblock_stats.json",
     )
-    with _distributed(hydra_cfg):
+    # Guided setup may route this single-writer stage to a CPU process launched
+    # directly, while explicit GPU plans still launch it through torchrun.
+    with _distributed_if_launched(hydra_cfg):
         # The scoring-parent artifact is shared campaign state.  Publish it
         # once, then let every rank validate the same atomic artifact.
         if dist.is_master():

@@ -17,7 +17,6 @@
 
 import json
 import sys
-from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -338,7 +337,7 @@ def test_build_library_propagates_candidate_import_errors_without_success_manife
         "ensure_scoring_parent",
         lambda *_args, **_kwargs: ScoringParent(),
     )
-    monkeypatch.setattr(pipeline_stages, "_distributed", lambda _: nullcontext())
+    monkeypatch.delenv("RANK", raising=False)
     monkeypatch.setattr(pipeline_stages.dist, "is_master", lambda: True)
     monkeypatch.setattr(pipeline_stages.dist, "barrier", lambda: None)
     monkeypatch.setattr(

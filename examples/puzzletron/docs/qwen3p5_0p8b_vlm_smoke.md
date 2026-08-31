@@ -16,6 +16,21 @@ checked-in configuration. This smoke test checks that pruning, evaluation,
 serving, distillation, and resume all work. Its scores and throughput are not
 model-quality or production performance results.
 
+## Generate a complete bundle with the setup wizard
+
+For a new run, start with the [setup wizard](setup_wizard.md), select Qwen 3.5
+0.8B, and choose a multimodal dataset. The generated smoke and production
+bundles cover conversion, multimodal pruning and search, MIP selection,
+materialization, image-aware serving, VLM distillation, final selection, and a
+pinned student-versus-teacher RealWorldQA/MMMU comparison. Inspect the generated
+`dry-run-plan.txt` and materialize the site-specific runner settings before
+launching.
+
+The model-specific defaults are separate from the wizard implementation. The
+same onboarding path can support the 2B and 4B variants by adding their model
+inventory, pruning domains, resource defaults, and pinned evaluation settings.
+The tracked recipes below remain useful for reproducing the bounded 0.8B run.
+
 ## Before you start
 
 Prepare the setup and worker environments described in
@@ -190,29 +205,29 @@ deployment image sizes before drawing throughput conclusions.
 
 ## Choose the production or automated E2E route
 
-Both routes use only the pinned Qwen 3.5 0.8B VLM. The substantial
-`vlm_campaign.yaml` route uses realistic multimodal search, candidate
+Both routes use only the pinned Qwen 3.5 0.8B VLM and the checked-in
+`ffn_intermediate` search axis. The `vlm_campaign.yaml` route raises candidate
 evaluation, MIP selection, serving measurement, distillation, and final
-evaluation budgets. The opt-in `e2e_vlm_quality_regression.yaml` route
-runs the same complete lifecycle with reduced search, serving, and training
-budgets so it is suitable for automated regression.
+evaluation budgets. The opt-in `e2e_vlm_quality_regression.yaml` route runs the
+same lifecycle with reduced search, serving, and training budgets so it is
+suitable for automated regression.
 
 The campaign and regression independently inherit their bounded lifecycle and
-consume one shared pinned final-evaluator spec. A plan test checks that both
-resolve the same contract. That contract evaluates the final student and pinned
+consume one shared pinned final-evaluator specification. A plan test checks
+that both resolve the same settings. The evaluator measures the final student and pinned
 teacher on the first 100 rows of the pinned RealWorldQA and MMMU task revisions,
 twice. It pins the evaluator revision, generated task definitions, selection
 rule, seed, batch size, frame policy, and greedy generation settings. Per-sample
 outputs, student metrics, teacher metrics, and student-minus-teacher deltas are
 retained.
 
-Repeated bounded GPU runs produced identical student-minus-teacher deltas of
--0.36 on RealWorldQA and -0.10 on MMMU. The regression filters allow two
-percentage points of explicit headroom beyond those measurements: -0.38 and
--0.12, respectively. This margin covers small GPU variation without requiring
-bit-for-bit reproducibility. The regression validates the shared pipeline and
-evaluation machinery; its reduced-budget checkpoint is not evidence for the
-production campaign's final numerical quality.
+Repeated bounded GPU runs produced the same measurements. With 10.04% overall
+parameter pruning, the student scored 0.24 on RealWorldQA and 0.25 on MMMU; the
+teacher scored 0.60 and 0.35, respectively. Fresh runs retain these observations
+and report their differences, but do not use the smoke scores as acceptance
+thresholds. The regression validates the shared pipeline and evaluation
+machinery; its reduced-budget checkpoint is not evidence for the campaign's
+final numerical quality.
 
 Run the automated route with a site-specific runner. A completed evaluation
 repetition is identity-bound and resumable, so a later allocation can continue
@@ -222,7 +237,7 @@ CI:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_regression.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.e2e_vlm_quality_regression.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality_regression
 
@@ -256,13 +271,13 @@ If preflight succeeds, run the same command without `--preflight-only`. The
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 
-## Run the production campaign
+## Configure a larger campaign
 
 Use `vlm_campaign.yaml` with `execution.single_gpu.yaml`. It keeps the same
-final evaluation contract but expands the search measurements, MIP solution
-set, serving requests and concurrency, and VLM distillation budget. Tune site
-resources and the pinned training dataset for the intended campaign; do not
-substitute a tiny model as a quality oracle.
+FFN-only search and final evaluation contract while raising the search
+measurements, MIP solution set, serving requests and concurrency, and VLM
+distillation budget. Tune site resources and the pinned training dataset for
+the intended campaign; do not substitute a tiny model as a quality oracle.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:
@@ -286,7 +301,14 @@ Choose larger-run settings deliberately:
 - distillation steps, batch sizes, validation, and checkpoint frequency;
 - worker resources for every changed or added stage.
 
-Keep this route FFN-only unless another pruning axis has its own correctness
-evidence. Inspect the complete plan with `--dry-run` before launch. See
+The maintained campaign enables only FFN width by default. This does not limit
+experimentation: guided setup discovers the legal hidden-width, attention, FFN,
+GDN, and depth domains from the model descriptor, and **Customize** lets you
+select their candidate values. The opt-in `advanced.yaml` overlay is also a
+configuration reference for additional 0.8B axes.
+
+Before promoting another axis into the maintained campaign, add a focused
+real-checkpoint smoke covering scoring, slicing, materialization, and reload.
+Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

@@ -63,38 +63,82 @@ model_overrides:
         num_attention_heads: 8
         num_key_value_heads: 2
     defaults:
+      pruning:
+        # The maintained 0.8B examples exercise FFN width. Other descriptor-
+        # supported axes remain available when the wizard is customized.
+        depth_remove: 0
+        axes:
+          hidden_width:
+            values: [1024]
+          kv_groups:
+            values: [2]
+          q_heads_per_group:
+            values: [4]
+          ffn_intermediate:
+            values: [3584, 3072, 2048]
+          gdn_key_groups:
+            values: [16]
+          gdn_value_heads_per_group:
+            values: [1]
+          gdn_key_head_dim:
+            values: [128]
+          gdn_value_head_dim:
+            values: [128]
+        bypass:
+          enabled: false
       post_mip:
         quality_comparison:
-          enabled: true
-          reference_checkpoint: ${teacher_dir}
-          model: vllm
-          tasks: [ifeval, gsm8k]
-          compatibility_tasks: [gsm8k]
-          task_dataset_revisions:
-            ifeval: 5a5661c2a35488308556cf4453dc074d1eba91a0
-            gsm8k: 740312add88f781978c0658806c59bc2815b9866
-          limit: 100
-          batch_size: 8
-          log_samples: true
-          seed: 42
-          timeout_seconds: 7200
-          gen_kwargs:
-            do_sample: false
-            temperature: 0
-          topology:
-            tensor_parallel_size: 1
-            pipeline_parallel_size: 1
-            data_parallel_size: 1
-            prefill_context_parallel_size: 1
-            decode_context_parallel_size: 1
-            enable_expert_parallel: false
-            distributed_executor_backend: mp
-            gpu_group_size: 1
-          model_args:
-            dtype: bfloat16
-            gpu_memory_utilization: 0.85
-            max_model_len: 8192
-            reasoning_parser: qwen3
+          by_modality:
+            text:
+              enabled: true
+              reference_checkpoint: ${teacher_dir}
+              model: vllm
+              tasks: [ifeval, gsm8k]
+              compatibility_tasks: [gsm8k]
+              task_dataset_revisions:
+                ifeval: 5a5661c2a35488308556cf4453dc074d1eba91a0
+                gsm8k: 740312add88f781978c0658806c59bc2815b9866
+              limit: 100
+              batch_size: 8
+              log_samples: true
+              seed: 42
+              timeout_seconds: 7200
+              gen_kwargs:
+                do_sample: false
+                temperature: 0
+              topology:
+                tensor_parallel_size: 1
+                pipeline_parallel_size: 1
+                data_parallel_size: 1
+                prefill_context_parallel_size: 1
+                decode_context_parallel_size: 1
+                enable_expert_parallel: false
+                distributed_executor_backend: mp
+                gpu_group_size: 1
+              model_args:
+                dtype: bfloat16
+                gpu_memory_utilization: 0.85
+                max_model_len: 8192
+                reasoning_parser: qwen3
+            multimodal:
+              enabled: true
+              profile: qwen35_vlm_e2e_full_eval
+              reference_checkpoint: ${teacher_dir}
+              batch_size: 1
+              timeout_seconds: 14400
+              dtype: bfloat16
+              gpu_memory_utilization: 0.5
+              max_model_len: 16384
+              limit_mm_per_prompt: {image: 12}
+              topology:
+                tensor_parallel_size: 1
+                pipeline_parallel_size: 1
+                data_parallel_size: 1
+                prefill_context_parallel_size: 1
+                decode_context_parallel_size: 1
+                enable_expert_parallel: false
+                distributed_executor_backend: mp
+                gpu_group_size: 1
     profiles:
       smoke:
         pruning:
@@ -102,9 +146,9 @@ model_overrides:
           replacement_samples: 4
         stages:
           replacement_scoring:
-            instances: 2
+            instances: 1
         mip:
-          goal_value: 85%
+          goal_value: 90%
 
   qwen3p5_9b:
     match:

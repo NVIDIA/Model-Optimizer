@@ -3507,10 +3507,31 @@ def _post_mip_strategy(node: NodeDraft) -> str:
 
 def _quality_comparison_defaults(
     resolver: DefaultsResolver,
+    *,
+    modality: str,
 ) -> dict[str, Any] | None:
     resolved = resolver.resolve_default("post_mip.quality_comparison", {"enabled": False}).value
     if not isinstance(resolved, Mapping):
         raise SetupError("post_mip.quality_comparison defaults must be a mapping")
+    by_modality = resolved.get("by_modality")
+    if by_modality is not None:
+        if set(resolved) != {"by_modality"}:
+            raise SetupError(
+                "post_mip.quality_comparison cannot mix by_modality with direct settings"
+            )
+        if not isinstance(by_modality, Mapping):
+            raise SetupError("post_mip.quality_comparison.by_modality must be a mapping")
+        unknown_modalities = set(by_modality) - {"text", "multimodal"}
+        if unknown_modalities:
+            raise SetupError(
+                "unsupported post_mip.quality_comparison modalities: "
+                f"{sorted(str(value) for value in unknown_modalities)}"
+            )
+        resolved = by_modality.get(modality, {"enabled": False})
+        if not isinstance(resolved, Mapping):
+            raise SetupError(
+                f"post_mip.quality_comparison.by_modality.{modality} must be a mapping"
+            )
     enabled = resolved.get("enabled", False)
     if not isinstance(enabled, bool):
         raise SetupError("post_mip.quality_comparison.enabled must be a boolean")
@@ -3545,7 +3566,8 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
         ),
         "best_selection_mode": "individual_best",
     }
-    quality_comparison = _quality_comparison_defaults(resolver)
+    modality = str(session.state.get_field("data.modality", "text"))
+    quality_comparison = _quality_comparison_defaults(resolver, modality=modality)
     preview = {}
     for run_id, run in runs.items():
         objectives = [
@@ -3558,6 +3580,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
             objectives,
             {"sequence_length": sequence},
             serving,
+            modality=modality,
             quality_comparison=quality_comparison,
             node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
         )
@@ -3665,6 +3688,7 @@ def post_mip_section(session: WizardSession, resolver: DefaultsResolver, context
                 objectives,
                 {"sequence_length": sequence},
                 run_serving,
+                modality=modality,
                 quality_comparison=run_quality_comparison,
                 node_prefix=(f"{run_id}_" if len(runs) > 1 else ""),
             )

@@ -256,7 +256,7 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     ]["config"]
     wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
         "quality_comparison"
-    ]
+    ]["by_modality"]["text"]
     assert wizard_quality["enabled"] is True
     assert {key: value for key, value in wizard_quality.items() if key != "enabled"} == (
         quality_evaluation

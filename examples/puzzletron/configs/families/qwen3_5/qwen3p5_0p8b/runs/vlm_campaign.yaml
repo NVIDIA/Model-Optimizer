@@ -5,9 +5,9 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluator@_global_
   - _self_
 
-# Substantial one-model VLM campaign for Qwen 3.5 0.8B. This route expands the
-# real multimodal search, candidate selection, serving measurement, and
-# distillation budgets before applying the shared bounded final evaluation.
+# Qwen 3.5 0.8B VLM campaign using the same FFN-only search as the bounded
+# smoke. This route raises the candidate, serving, and distillation budgets and
+# applies the shared pinned final evaluation.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B VLM pruning campaign
 

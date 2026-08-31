@@ -1,6 +1,6 @@
 # @package _global_
 
-# One pinned final-evaluation contract shared by the substantial VLM campaign
+# One pinned final-evaluation contract shared by the larger VLM campaign
 # and the independent bounded quality regression.
 post_mip:
   flows:
