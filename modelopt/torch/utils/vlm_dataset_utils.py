@@ -23,6 +23,7 @@ This module supports both:
 import contextlib
 import copy
 import itertools
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,16 @@ SUPPORTED_VLM_DATASET_CONFIG: dict[str, dict[str, Any]] = {
         "default_subsets": ["sparsetables", "plotqa_cot", "wiki_en"],
         # Cap tar shards per subset so the default download stays bounded (~9.5GB vs ~49GB for all).
         "max_shards": 1,
+    },
+    # A pre-built manifest over a Megatron-Energon MetadatasetV2 blend (e.g. the Nemotron 3.5
+    # Super SFT recipe). Unlike the entries above this is a LOCAL path, not an HF repo id: the
+    # blend's leaf/dss/tar heterogeneity is normalised into uniform rows at manifest-build time
+    # (see energon_metadataset_utils.build_manifest), so each row already carries an absolute
+    # image path. Pass the manifest via `dataset_name="<path>.jsonl"` or this key plus
+    # `manifest_path=`.
+    "energon_manifest": {
+        "config": {"manifest_path": None},
+        "local": True,
     },
 }
 
@@ -242,6 +253,18 @@ def _get_vlm_dataset(
         A hugging face Dataset.
     """
     from datasets import interleave_datasets, load_dataset
+
+    # A manifest is already normalised (uniform rows, absolute image paths), so it bypasses the
+    # HF streaming path completely -- no repo id, no media-shard join, no single image root.
+    manifest_path = None
+    if dataset_name == "energon_manifest":
+        manifest_path = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"].get("manifest_path")
+    elif dataset_name.endswith(".jsonl") and os.path.isfile(dataset_name):
+        manifest_path = dataset_name
+    if manifest_path:
+        from .energon_metadataset_utils import ManifestIterable
+
+        return ManifestIterable(manifest_path, num_samples=num_samples, seed=seed)
 
     # Load the dataset
     if dataset_name in SUPPORTED_VLM_DATASET_CONFIG:

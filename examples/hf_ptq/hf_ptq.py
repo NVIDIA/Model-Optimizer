@@ -221,8 +221,20 @@ def make_calib_dataloader(
             "Image calibration currently supports a single dataset. "
             "Please pass --calib_size with one value (e.g., --calib_size 256)."
         )
+        # MODELOPT_VLM_CALIB_MANIFEST points at a pre-built manifest (see
+        # modelopt/torch/utils/energon_metadataset_utils.py) so calibration can be drawn from a
+        # training blend instead of the default generic VLM dataset. Rows already carry absolute
+        # image paths, so the loader short-circuits the HF streaming path; `subsets`/`max_shards`
+        # are inert for that source.
+        _vlm_manifest = os.environ.get("MODELOPT_VLM_CALIB_MANIFEST", "").strip()
+        if _vlm_manifest:
+            if not os.path.isfile(_vlm_manifest):
+                raise FileNotFoundError(
+                    f"MODELOPT_VLM_CALIB_MANIFEST={_vlm_manifest} is not a file"
+                )
+            print(f"VLM calibration from manifest: {_vlm_manifest}")
         calib_dataloader = get_vlm_dataset_dataloader(
-            dataset_name="nemotron_vlm_dataset_v2",
+            dataset_name=_vlm_manifest or "nemotron_vlm_dataset_v2",
             processor=processor,
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
