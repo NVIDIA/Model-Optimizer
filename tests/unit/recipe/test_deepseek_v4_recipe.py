@@ -18,7 +18,9 @@
 
 ``examples/deepseek/deepseek_v4/ptq.py`` keeps ``_build_nvfp4_experts_cfg()`` as its
 default, so the recipe and that builder can drift apart without anything failing --
-the symptom would only show up as a difference between two amax dumps.
+the symptom would only show up as a difference between two amax dumps. Kept beside
+the other recipe tests rather than under ``tests/examples/``: CI runs ``tests/unit``
+on every change, while the example lanes cover an allowlist that excludes deepseek.
 """
 
 import copy
@@ -117,6 +119,16 @@ def _entry(name, **cfg_overrides):
             ),
             "block-16 NVFP4",
         ),
+        (
+            lambda c: c["quant_cfg"].append(
+                {
+                    "quantizer_name": "*ffn.experts.*.w*_weight_quantizer",
+                    "enable": True,
+                    "cfg": [_NVFP4],
+                }
+            ),
+            "non-dict 'cfg'",
+        ),
     ],
     ids=[
         "wrong-algorithm",
@@ -124,6 +136,7 @@ def _entry(name, **cfg_overrides):
         "wrong-num-bits",
         "static-block-quantization",
         "wrong-scale-bits",
+        "list-valued-cfg",
     ],
 )
 def test_guard_rejects_recipes_the_export_path_cannot_represent(monkeypatch, mutate, match):
@@ -137,3 +150,9 @@ def test_guard_rejects_recipes_the_export_path_cannot_represent(monkeypatch, mut
     monkeypatch.setattr(dsv4_ptq, "load_recipe", lambda _path: _Stub())
     with pytest.raises(ValueError, match=match):
         dsv4_ptq._quant_cfg_from_recipe("ignored")
+
+
+def test_guard_rejects_a_non_ptq_recipe():
+    """``--recipe`` takes any path; a speculative-decoding recipe has no ``quantize``."""
+    with pytest.raises(ValueError, match="no 'quantize' section"):
+        dsv4_ptq._quant_cfg_from_recipe("general/speculative_decoding/eagle3")

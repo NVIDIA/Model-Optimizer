@@ -293,7 +293,11 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
     the result with a manifest that does not match the amax it ships beside.
     Mirrors the guard in ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
     """
-    cfg = load_recipe(recipe_path).quantize.model_dump()
+    recipe = load_recipe(recipe_path)
+    quantize = getattr(recipe, "quantize", None)
+    if quantize is None:
+        raise ValueError(f"recipe {recipe_path!r} has no 'quantize' section; expected a PTQ recipe")
+    cfg = quantize.model_dump()
 
     algo = cfg.get("algorithm")
     method = algo.get("method") if isinstance(algo, dict) else algo
@@ -312,6 +316,11 @@ def _quant_cfg_from_recipe(recipe_path: str) -> dict:
                 "and the manifest without any error"
             )
         qcfg = entry.get("cfg") or {}
+        if not isinstance(qcfg, dict):
+            raise ValueError(
+                f"recipe entry {name!r} has a non-dict 'cfg' ({type(qcfg).__name__}); "
+                "this pipeline supports only a single NVFP4 config per quantizer"
+            )
         block_sizes = qcfg.get("block_sizes") or {}
         if (
             tuple(qcfg.get("num_bits") or ()) != (2, 1)
@@ -436,9 +445,9 @@ def save_amax_and_quant_config(model, output_path: str):
     *not* rely on ``modelopt.torch.export.quant_utils.get_quant_config``
     because its introspection doesn't see weights stored on nested
     submodules — ``QuantExpert``'s ``w{1,2,3}`` are submodules of the
-    container, not direct parameters. The downstream export script
-    (``quantize_to_nvfp4.py``) uses this manifest as ground truth for which
-    tensor paths to replace with NVFP4 packed weight + scales.
+    container, not direct parameters. The manifest is a descriptive record of
+    what was calibrated: ``quantize_to_nvfp4.py`` does not read it, it
+    re-derives the expert tensor paths from the source checkpoint itself.
     """
 
     def _trace(msg):
