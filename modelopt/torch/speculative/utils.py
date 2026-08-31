@@ -610,7 +610,19 @@ def load_vlm_or_llm(
             its ``text_config`` before instantiation (e.g. to correct dims that don't
             propagate from a checkpoint's nested text config).
     """
+
+    def _reject_overrides_on_fake_base():
+        # FakeBaseModel.from_source re-reads the checkpoint config itself, so overrides applied
+        # here never reach it. Refuse rather than hand back a model built from the uncorrected
+        # dims the caller explicitly asked to fix.
+        if config_overrides:
+            raise NotImplementedError(
+                "config_overrides is not supported on the FakeBaseModel path: from_source "
+                "rebuilds the config from the checkpoint and would silently ignore them."
+            )
+
     if use_offline_training and use_fake_base:
+        _reject_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -628,12 +640,24 @@ def load_vlm_or_llm(
     # Apply caller-supplied config corrections to both the parent config and its
     # nested text_config (some checkpoints don't propagate text_config dims).
     if config_overrides:
-        for cfg_obj in (model_config, getattr(model_config, "text_config", None)):
-            if cfg_obj is None:
-                continue
-            for key, value in config_overrides.items():
+        targets = [cfg for cfg in (model_config, getattr(model_config, "text_config", None)) if cfg]
+        unmatched = []
+        for key, value in config_overrides.items():
+            applied = False
+            for cfg_obj in targets:
                 if hasattr(cfg_obj, key):
                     setattr(cfg_obj, key, value)
+                    applied = True
+            if not applied:
+                unmatched.append(key)
+        if unmatched:
+            # Silently skipping a key would hand back a wrong-shaped model while appearing to
+            # have applied the override -- the exact failure this option exists to correct.
+            raise ValueError(
+                f"config_overrides key(s) {sorted(unmatched)} matched no field on the model "
+                f"config (model_type={getattr(model_config, 'model_type', None)!r}) or its "
+                "text_config. Check for typos."
+            )
 
     # Detect VLMs: either "vl" in model_type (e.g. "llava") or has a nested text config
     # (e.g. Mistral3Config with model_type="mistral3" and text_config attribute).
@@ -644,6 +668,7 @@ def load_vlm_or_llm(
     if _is_vlm and use_offline_training:
         # For VLMs in offline training, FakeBaseModel loads only embed_tokens + lm_head
         # and auto-detects VLM weight key layouts (e.g. "language_model.model.embed_tokens").
+        _reject_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -660,36 +685,41 @@ def load_vlm_or_llm(
         model_cls = transformers.AutoModelForCausalLM
 
     extra = {}
-    if use_offline_training:
-        extra["num_hidden_layers"] = 0
-        if hasattr(model_config, "layer_types"):
-            extra["layer_types"] = []
 
     # Cosmos3 omni checkpoints: the transformers-cosmos3 plugin registers only the config
-    # (cosmos3_omni) with AutoConfig, not a model under the Auto* maps, so use its
+    # (cosmos3_omni) with AutoConfig, never a model under the Auto* maps, so dispatch to its
     # Cosmos3ForConditionalGeneration (a Qwen3-VL subclass) directly. The unused vision
     # tower has mismatched dims vs the text-only use, so ignore those on load.
     if getattr(model_config, "model_type", None) == "cosmos3_omni":
         from transformers_cosmos3 import Cosmos3ForConditionalGeneration
 
-        return Cosmos3ForConditionalGeneration.from_pretrained(
-            model_name_or_path,
-            config=model_config,
-            trust_remote_code=trust_remote_code,
-            torch_dtype=dtype,
-            device_map=device_map,
-            ignore_mismatched_sizes=True,
-            **extra,
-        )
+        model_cls = Cosmos3ForConditionalGeneration
+        extra["ignore_mismatched_sizes"] = True
 
-    if _is_vlm:
-        model_cls = transformers.AutoModelForVision2Seq
-    else:
-        model_cls = transformers.AutoModelForCausalLM
+    # Pass our config object only when we had to modify it (overrides) or when the model class
+    # needs the plugin-built config; otherwise let from_pretrained build its own, exactly as before.
+    pass_config = bool(config_overrides) or "ignore_mismatched_sizes" in extra
+
+    # Capture the true depth before any zeroing below, since it is restored after load.
+    orig_num_hidden_layers = getattr(model_config, "num_hidden_layers", None)
+
+    if use_offline_training:
+        if pass_config:
+            # from_pretrained only forwards unrecognized kwargs into the config when it builds
+            # that config itself. Given a PretrainedConfig instance it deep-copies it and leaves
+            # the rest in model_kwargs, so num_hidden_layers=0 would never reach the config and
+            # the full model would be materialized. Set the fields on the config directly.
+            model_config.num_hidden_layers = 0
+            if hasattr(model_config, "layer_types"):
+                model_config.layer_types = []
+        else:
+            extra["num_hidden_layers"] = 0
+            if hasattr(model_config, "layer_types"):
+                extra["layer_types"] = []
 
     model = model_cls.from_pretrained(
         model_name_or_path,
-        config=model_config if config_overrides else None,
+        config=model_config if pass_config else None,
         trust_remote_code=trust_remote_code,
         torch_dtype=dtype,
         device_map=device_map,
@@ -698,7 +728,7 @@ def load_vlm_or_llm(
 
     if use_offline_training:
         # Preserve the original layer count since we loaded with num_hidden_layers=0
-        model.config.num_orig_hidden_layers = model_config.num_hidden_layers
+        model.config.num_orig_hidden_layers = orig_num_hidden_layers
 
     return model
 
