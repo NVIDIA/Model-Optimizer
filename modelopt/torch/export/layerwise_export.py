@@ -83,8 +83,8 @@ def _module_formats(model: nn.Module) -> set:
     }
 
 
-def _tied_quantized_modules(model: nn.Module) -> list[str]:
-    """Quantized modules sharing a weight with another.
+def _tied_weight_modules(model: nn.Module) -> list[str]:
+    """Modules sharing a weight with another, quantized or not.
 
     Grouped by name, which survives offload: a ``data_ptr`` grouping sees nothing when the
     weights are on meta and would pass vacuously. Falls back to ``data_ptr`` when the model
@@ -95,7 +95,7 @@ def _tied_quantized_modules(model: nn.Module) -> list[str]:
     by_ptr: dict[int, list[str]] = {}
     for name, module in model.named_modules():
         weight = getattr(module, "weight", None)
-        if weight is None or not _is_quantized_module(module):
+        if weight is None:
             continue
         key = tied_map.group_key(f"{name}.weight")
         if key is not None:
@@ -128,16 +128,15 @@ def assert_layerwise_export_supported(model: nn.Module) -> None:
     """Raise unless per-layer export is valid for this model."""
     assert_formats_supported(model, "before calibration")
 
-    tied = _tied_quantized_modules(model)
+    tied = _tied_weight_modules(model)
     if tied:
         raise NotImplementedError(
-            f"layerwise export does not support weight-tied quantized modules {tied[:6]}: "
-            "the whole-model path merges their input_quantizer amaxes via "
-            "sync_tied_input_amax so both sides share one input_scale, which a per-layer "
-            "pass cannot do because a tie partner may be uncalibrated or already written. "
-            "Conversion quantizes every nn.Linear and nn.Embedding, so disabling their "
-            "quantizers does not lift this -- tie_word_embeddings models need "
-            "export_hf_checkpoint()."
+            f"layerwise export does not support weight-tied modules {tied[:6]}: quantized, "
+            "the whole-model path merges their input_quantizer amaxes via sync_tied_input_amax "
+            "so both sides share one input_scale, which a per-layer pass cannot do because a "
+            "tie partner may be uncalibrated or already written; unquantized, save_pretrained "
+            "drops the duplicate key and writing shards directly does not. "
+            "tie_word_embeddings models need export_hf_checkpoint()."
         )
 
     if dist.is_initialized() and dist.size() > 1:

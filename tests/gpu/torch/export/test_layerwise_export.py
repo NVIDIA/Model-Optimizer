@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn as nn
 from _test_utils.torch.transformers_models import (
     get_tiny_gemma3vl,
     get_tiny_llama,
@@ -418,7 +419,7 @@ def test_tied_embeddings_are_refused(tmp_path, make_cfg):
     model.config.architectures = ["LlamaForCausalLM"]
 
     cfg = _layerwise_cfg(tmp_path / "fused", tmp_path / "ckpt", base=make_cfg())
-    with pytest.raises(NotImplementedError, match="weight-tied quantized modules"):
+    with pytest.raises(NotImplementedError, match="weight-tied modules"):
         mtq.quantize(model, cfg, _calib)
 
 
@@ -490,9 +491,14 @@ def test_awq_is_refused(tmp_path, make_cfg, method, match):
 
 def _build_vlm():
     torch.manual_seed(0)
-    # tie_word_embeddings=False: per-layer export does not dedup tied weights, and K3 does
-    # not tie -- keep this test on the namespace/towers/config behaviour it exists for.
     model = get_tiny_gemma3vl(tie_word_embeddings=False).cuda().eval()
+    # The kwarg only reaches text_config; the outer config still ties lm_head to the
+    # embedding, and tied weights are refused. Untie for real so this test stays on the
+    # namespace/towers/config behaviour it exists for.
+    model.config.tie_word_embeddings = False
+    model._tied_weights_keys = {}
+    model.all_tied_weights_keys = {}
+    model.lm_head.weight = nn.Parameter(model.lm_head.weight.detach().clone())
     # is_multimodal_model reads this, and the tiny fixtures leave it unset.
     model.config.architectures = ["Gemma3ForConditionalGeneration"]
     return model
