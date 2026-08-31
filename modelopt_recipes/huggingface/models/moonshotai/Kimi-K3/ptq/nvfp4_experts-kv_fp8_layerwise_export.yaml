@@ -25,10 +25,10 @@ metadata:
     NVFP4 W4A4 on routed experts only, FP8 KV cache, max layerwise calibration, with each
     decoder layer exported to its own shard as soon as it is calibrated.
 
-    The only functional difference from nvfp4_experts_only-kv_fp8_layerwise_export is the
-    narrower expert scope below; nothing here configures offload, which comes from
-    --offload_folder and the per-device memory budgets. The suffix records the pairing this
-    recipe was validated in -- a model too large to hold resident -- not a setting it sets.
+    Kimi-K3's counterpart to general/ptq/nvfp4_experts_only-kv_fp8_layerwise_export, from
+    which it differs only in the narrower expert scope below -- the reason it does not live
+    in the general tier. It was validated on a model too large to hold resident, but nothing
+    here configures offload: that comes from --offload_folder and the memory budgets.
 
     Expert scoping is '*.experts.*' rather than '*block_sparse_moe*'. On fine-grained MoE
     models the broader glob also matches shared_experts.*, routed_expert_{up,down}_proj and
