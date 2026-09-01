@@ -29,14 +29,14 @@ from examples.onnx_ptq.quantization_utils import (
 )
 
 
-def make_calibration_model(tmp_path):
+def make_calibration_model(tmp_path, image_shape=(1, 2)):
     model_path = tmp_path / "model.onnx"
     inputs = [
-        helper.make_tensor_value_info("image", TensorProto.FLOAT, (1, 2)),
+        helper.make_tensor_value_info("image", TensorProto.FLOAT, image_shape),
         helper.make_tensor_value_info("index", TensorProto.INT64, (1,)),
     ]
     outputs = [
-        helper.make_tensor_value_info("image_out", TensorProto.FLOAT, (1, 2)),
+        helper.make_tensor_value_info("image_out", TensorProto.FLOAT, image_shape),
         helper.make_tensor_value_info("index_out", TensorProto.INT64, (1,)),
     ]
     graph = helper.make_graph(
@@ -103,6 +103,38 @@ def test_npz_writer_rejects_wrong_input_names(tmp_path, values):
 
     with pytest.raises(ValueError, match="Calibration input mismatch"):
         writer.write(values)
+
+
+@pytest.mark.parametrize(
+    "image_shape",
+    [(2,), (1, 3)],
+    ids=("wrong-rank", "wrong-static-dimension"),
+)
+def test_npz_writer_rejects_wrong_input_shape(tmp_path, image_shape):
+    writer = NpzCalibrationWriter(tmp_path / "batches", make_calibration_model(tmp_path))
+
+    with pytest.raises(ValueError, match="Calibration input 'image' has shape"):
+        writer.write(
+            {
+                "image": np.ones(image_shape),
+                "index": np.ones((1,)),
+            }
+        )
+
+
+def test_npz_writer_accepts_dynamic_input_shape(tmp_path):
+    writer = NpzCalibrationWriter(
+        tmp_path / "batches", make_calibration_model(tmp_path, image_shape=("batch", 2))
+    )
+
+    writer.write(
+        {
+            "image": np.ones((3, 2)),
+            "index": np.ones((1,)),
+        }
+    )
+
+    assert NpzCalibrationReader(tmp_path / "batches").get_first()["image"].shape == (3, 2)
 
 
 def test_find_vovnet_nodes_to_exclude(tmp_path):

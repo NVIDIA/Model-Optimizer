@@ -27,18 +27,16 @@ RUN env -u PIP_CONSTRAINT PIP_CONFIG_FILE=/dev/null python -m pip install --no-c
         torch==1.13.1+cu117 \
         torchvision==0.14.1+cu117
 
-COPY examples/onnx_ptq/requirements-evaluator.txt /tmp/requirements-evaluator.txt
-# Avoid the training and development dependencies declared by the legacy projects.
+COPY examples/onnx_ptq/requirements-evaluator*.txt /tmp/
+# These legacy projects rely on runtime packages supplied by the digest-pinned evaluator base.
+# lyft-dataset-sdk only satisfies mmdet3d's eager dataset import;
+# neither example uses Lyft data.
 RUN env -u PIP_CONSTRAINT PIP_CONFIG_FILE=/dev/null FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=8 \
         python -m pip install --no-cache-dir --no-build-isolation \
         -r /tmp/requirements-evaluator.txt && \
     env -u PIP_CONSTRAINT PIP_CONFIG_FILE=/dev/null python -m pip install \
         --no-cache-dir --no-build-isolation --no-deps \
-        av2==0.2.1 \
-        lyft-dataset-sdk==0.0.8 \
-        mmdet3d==1.0.0rc6 \
-        nuscenes-devkit==1.1.11 \
-        refile==0.4.1
+        -r /tmp/requirements-evaluator-nodeps.txt
 
 # Both TensorRT packages own the Python namespace, so install the CUDA wrapper last.
 RUN env -u PIP_CONSTRAINT PIP_CONFIG_FILE=/dev/null python -m pip uninstall -y tensorrt && \

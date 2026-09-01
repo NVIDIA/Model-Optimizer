@@ -23,14 +23,25 @@ from onnxruntime.quantization.calibrate import CalibrationDataReader
 __all__ = ["NpzCalibrationReader", "NpzCalibrationWriter", "find_vovnet_nodes_to_exclude"]
 
 
-def _onnx_input_dtypes(onnx_path):
+def _onnx_input_specs(onnx_path):
     graph = onnx.load(onnx_path, load_external_data=False).graph
     initializer_names = {initializer.name for initializer in graph.initializer}
-    return {
-        value.name: np.dtype(onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type))
-        for value in graph.input
-        if value.name not in initializer_names
-    }
+    input_specs = {}
+    for value in graph.input:
+        if value.name in initializer_names:
+            continue
+        tensor_type = value.type.tensor_type
+        shape = None
+        if tensor_type.HasField("shape"):
+            shape = tuple(
+                dimension.dim_value if dimension.HasField("dim_value") else None
+                for dimension in tensor_type.shape.dim
+            )
+        input_specs[value.name] = (
+            np.dtype(onnx.helper.tensor_dtype_to_np_dtype(tensor_type.elem_type)),
+            shape,
+        )
+    return input_specs
 
 
 class NpzCalibrationWriter:
@@ -41,12 +52,12 @@ class NpzCalibrationWriter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         if any(self.output_dir.glob("batch_*.npz")):
             raise FileExistsError(f"{self.output_dir} already contains calibration batches")
-        self.input_dtypes = _onnx_input_dtypes(onnx_path)
+        self.input_specs = _onnx_input_specs(onnx_path)
         self.count = 0
 
     def write(self, values):
-        missing = self.input_dtypes.keys() - values.keys()
-        unexpected = values.keys() - self.input_dtypes.keys()
+        missing = self.input_specs.keys() - values.keys()
+        unexpected = values.keys() - self.input_specs.keys()
         if missing or unexpected:
             raise ValueError(
                 f"Calibration input mismatch; missing={sorted(missing)}, "
@@ -54,11 +65,22 @@ class NpzCalibrationWriter:
             )
 
         batch = {}
-        for name, dtype in self.input_dtypes.items():
+        for name, (dtype, expected_shape) in self.input_specs.items():
             value = values[name]
             if hasattr(value, "detach"):
                 value = value.detach().cpu().numpy()
-            batch[name] = np.asarray(value).astype(dtype, copy=False)
+            value = np.asarray(value)
+            if expected_shape is not None and (
+                value.ndim != len(expected_shape)
+                or any(
+                    expected is not None and actual != expected
+                    for actual, expected in zip(value.shape, expected_shape)
+                )
+            ):
+                raise ValueError(
+                    f"Calibration input {name!r} has shape {value.shape}; expected {expected_shape}"
+                )
+            batch[name] = value.astype(dtype, copy=False)
         np.savez(self.output_dir / f"batch_{self.count:04d}.npz", **batch)
         self.count += 1
 

@@ -6,7 +6,7 @@ Build the shared `evaluator` and `modelopt` images as described in the [parent g
 
 ## 1. Prepare PETR and nuScenes
 
-Place the nuScenes data and pre-generated `nuscenes_infos_val.pkl` and `mmdet3d_nuscenes_30f_infos_val.pkl` metadata files in the host dataset directory. Then start the evaluator with the workspace and dataset mounted:
+Place the nuScenes data in the host dataset directory. Then start the evaluator with the workspace and raw dataset mounted:
 
 ```bash
 docker run --rm -it --gpus=all --ipc=host \
@@ -22,10 +22,13 @@ The final workspace layout is:
 ```text
 /workspace/
 ├── DL4AGX/
-└── PETR/
-    ├── ckpts/
-    │   ├── PETR-vov-p4-800x320_e24.pth
-    │   └── PETRv2-vov-p4-800x320_e24.pth
+├── PETR/
+│   └── ckpts/
+│       ├── PETR-vov-p4-800x320_e24.pth
+│       └── PETRv2-vov-p4-800x320_e24.pth
+└── nuscenes/
+    ├── nuscenes_infos_val.pkl
+    └── mmdet3d_nuscenes_30f_infos_val.pkl
 ```
 
 Pin the source repositories. PETR does not need a patch; dataset paths are passed through its existing configuration overrides.
@@ -44,36 +47,63 @@ mkdir -p /workspace/PETR/ckpts
 
 Download the checkpoints linked from the DL4AGX guide. Use nuScenes only under its [terms of use](https://www.nuscenes.org/terms-of-use).
 
+Create a writable view of the read-only dataset, then generate the standard nuScenes metadata with the pinned [mmdetection3d data converter](https://github.com/open-mmlab/mmdetection3d/blob/f1107977dfd26155fc1f83779ee6535d2468f449/tools/data_converter/nuscenes_converter.py). Run it from `/tmp` so the converter keeps the `/workspace/nuscenes` paths absolute.
+
+```bash
+mkdir -p /workspace/nuscenes
+for name in lidarseg maps panoptic samples sweeps v1.0-trainval; do
+  ln -sfn "/data/nuscenes/$name" "/workspace/nuscenes/$name"
+done
+
+(
+  cd /tmp
+  PYTHONPATH=/workspace/PETR/mmdetection3d/tools python -c \
+    'from data_converter.nuscenes_converter import create_nuscenes_infos; create_nuscenes_infos("/workspace/nuscenes", "nuscenes", version="v1.0-trainval", max_sweeps=10)'
+)
+```
+
+The pinned [PETR sweep generator](https://github.com/megvii-research/PETR/blob/f7525f93467a33707ef401c587a52d5e7b34de74/tools/generate_sweep_pkl.py) uses fixed training paths. Run a temporary validation configuration without modifying the PETR checkout:
+
+```bash
+sed \
+  -e "s/^info_prefix = 'train'$/info_prefix = 'val'/" \
+  -e 's#^data_root = "/data/Dataset/nuScenes/"$#data_root = "/workspace/nuscenes/"#' \
+  /workspace/PETR/tools/generate_sweep_pkl.py \
+  > /tmp/generate_sweep_pkl_val.py
+python /tmp/generate_sweep_pkl_val.py
+
+test -s /workspace/nuscenes/nuscenes_infos_val.pkl
+test -s /workspace/nuscenes/mmdet3d_nuscenes_30f_infos_val.pkl
+```
+
 ## 2. Export and calibrate in the evaluator
 
 ```bash
 cd /workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
 export PYTHONPATH=/workspace/PETR:$PWD
-mkdir -p onnx_files engines calibration data
-ln -s /data/nuscenes data/nuscenes
+mkdir -p onnx_files engines calibration
 
+DATA_ROOT=/workspace/nuscenes
 V1_CONFIG=/workspace/PETR/projects/configs/petr/petr_vovnet_gridmask_p4_800x320.py
 V2_CONFIG=/workspace/PETR/projects/configs/petrv2/petrv2_vovnet_gridmask_p4_800x320.py
 V1_CHECKPOINT=/workspace/PETR/ckpts/PETR-vov-p4-800x320_e24.pth
 V2_CHECKPOINT=/workspace/PETR/ckpts/PETRv2-vov-p4-800x320_e24.pth
-V1_INFO=/data/nuscenes/nuscenes_infos_val.pkl
-V2_INFO=/data/nuscenes/mmdet3d_nuscenes_30f_infos_val.pkl
+V1_INFO="$DATA_ROOT/nuscenes_infos_val.pkl"
+V2_INFO="$DATA_ROOT/mmdet3d_nuscenes_30f_infos_val.pkl"
 ```
-
-The dataset symlink resolves the `data/nuscenes/...` camera paths stored in the metadata files.
 
 Export both models without modifying the PETR checkout:
 
 ```bash
 python v1/v1_export_to_onnx.py "$V1_CONFIG" "$V1_CHECKPOINT" --eval bbox \
   --cfg-options \
-  data.val.data_root=/data/nuscenes/ data.val.ann_file="$V1_INFO" \
-  data.test.data_root=/data/nuscenes/ data.test.ann_file="$V1_INFO"
+  data.val.data_root="$DATA_ROOT/" data.val.ann_file="$V1_INFO" \
+  data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V1_INFO"
 
 python v2/v2_export_to_onnx.py "$V2_CONFIG" "$V2_CHECKPOINT" --eval bbox \
   --cfg-options \
-  data.val.data_root=/data/nuscenes/ data.val.ann_file="$V2_INFO" \
-  data.test.data_root=/data/nuscenes/ data.test.ann_file="$V2_INFO"
+  data.val.data_root="$DATA_ROOT/" data.val.ann_file="$V2_INFO" \
+  data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V2_INFO"
 
 for model in PETRv1 PETRv2; do
   python -m onnxsim "onnx_files/${model}.extract_feat.onnx" \
@@ -90,13 +120,13 @@ python /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_calibration.py \
   v1 "$V1_CONFIG" "$V1_CHECKPOINT" \
   onnx_files/PETRv1.backbone.onnx onnx_files/PETRv1.head.onnx calibration/PETRv1 \
   --cfg-options \
-  data.test.data_root=/data/nuscenes/ data.test.ann_file="$V1_INFO"
+  data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V1_INFO"
 
 python /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_calibration.py \
   v2 "$V2_CONFIG" "$V2_CHECKPOINT" \
   onnx_files/PETRv2.backbone.onnx onnx_files/PETRv2.head.onnx calibration/PETRv2 \
   --cfg-options \
-  data.test.data_root=/data/nuscenes/ data.test.ann_file="$V2_INFO"
+  data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V2_INFO"
 ```
 
 ## 3. Optimize and build in the ModelOpt container
@@ -149,13 +179,13 @@ for precision in fp16 int8 fp8; do
     v1 "$V1_CONFIG" "$V1_CHECKPOINT" \
     "engines/PETRv1.backbone.${precision}.engine" engines/PETRv1.head.fp16.engine \
     --cfg-options \
-    data.test.data_root=/data/nuscenes/ data.test.ann_file="$V1_INFO"
+    data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V1_INFO"
 
   python /opt/Model-Optimizer/examples/onnx_ptq/petr/evaluate.py \
     v2 "$V2_CONFIG" "$V2_CHECKPOINT" \
     "engines/PETRv2.backbone.${precision}.engine" engines/PETRv2.head.fp16.engine \
     --cfg-options \
-    data.test.data_root=/data/nuscenes/ data.test.ann_file="$V2_INFO"
+    data.test.data_root="$DATA_ROOT/" data.test.ann_file="$V2_INFO"
 done
 ```
 

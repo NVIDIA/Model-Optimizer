@@ -134,8 +134,9 @@ def parse_args():
 
 
 def import_plugin(cfg):
-    plugin_dir = os.path.dirname(cfg.plugin_dir).split("/")
-    importlib.import_module(".".join(plugin_dir))
+    plugin_dir = cfg.get("plugin_dir")
+    if cfg.get("plugin") and plugin_dir:
+        importlib.import_module(".".join(os.path.dirname(plugin_dir).split("/")))
 
 
 def main():
