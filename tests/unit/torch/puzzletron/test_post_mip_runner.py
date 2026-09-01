@@ -192,10 +192,16 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
     observed = {}
     checkpoint = tmp_path / "checkpoint"
     teacher = tmp_path / "teacher"
+    legacy_teacher = tmp_path / "legacy-teacher"
     node = SimpleNamespace(
         node_id="evaluation",
         stage_id="post.params.evaluation",
-        config={"config": {"tasks": ["candidate-task"]}},
+        config={
+            "config": {
+                "tasks": ["candidate-task"],
+                "reference_checkpoint": str(teacher),
+            }
+        },
     )
     source = SimpleNamespace(
         architecture_id="architecture",
@@ -203,7 +209,7 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
     )
     config = {
         "puzzle_dir": str(tmp_path),
-        "convert": {"teacher_dir": str(teacher)},
+        "convert": {"teacher_dir": str(legacy_teacher)},
         "zero_shot_evaluation": {"enabled": False},
         "_runtime": {
             "authored_config": {
