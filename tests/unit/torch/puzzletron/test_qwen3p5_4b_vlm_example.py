@@ -38,6 +38,10 @@ RUNNER_PATH = (
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
+FULL_EXECUTION_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.full_vlm_smoke.yaml"
+)
 CAMPAIGN_EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.campaign.yaml"
 )
@@ -179,7 +183,12 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    plan = _compile_plan(monkeypatch, tmp_path, FULL_RUN_PATH)
+    plan = _compile_plan(
+        monkeypatch,
+        tmp_path,
+        FULL_RUN_PATH,
+        execution_path=FULL_EXECUTION_PATH,
+    )
     config = plan.experiment_config
     post_stages = tuple(stage for stage in plan.stages if stage.stage_id.startswith("post."))
     nodes = config["post_mip"]["flows"]["params-80"]["nodes"]
@@ -208,6 +217,26 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
         "type": "global_kd",
         "input": "checkpoint_eval",
         "config": {
+            "freeze_policy": "vision_frozen",
+            "activation_checkpointing": True,
+            "automodel": {
+                "parallel": {
+                    "tp": 2,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                    "sequence_parallel": False,
+                    "pipeline_schedule": "1f1b",
+                }
+            },
+            "objective": {
+                "main_ce": {"weight": 1.0},
+                "main_kd": {"weight": 1.0, "chunk_size": 64},
+                "mtp_ce": {"weight": 1.0},
+                "mtp_kd": {"weight": 1.0, "chunk_size": 64},
+            },
             "max_steps": 2,
             "global_batch_size": 1,
             "local_batch_size": 1,
@@ -216,7 +245,15 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
     }
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_image_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
+    assert (
+        next(stage for stage in plan.stages if stage.stage_id.endswith("short_vlm_kd")).total_gpus
+        == 2
+    )
+    assert all(
+        stage.total_gpus == 1
+        for stage in plan.stages
+        if not stage.stage_id.endswith("short_vlm_kd")
+    )
 
 
 def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp_path) -> None:

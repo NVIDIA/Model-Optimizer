@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Two-GPU execution profile for the opt-in 4B lifecycle. The bounded MIP and
+# evaluation stages use one GPU; the global-KD node derives its TP2 request
+# from the experiment configuration.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 2
+  stages:
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}

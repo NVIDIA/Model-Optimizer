@@ -13,16 +13,18 @@ data:
 
 global_distillation:
   domain: vlm
+  automodel:
+    activation_checkpointing: true
   force_hf: false
   teacher_force_hf: false
   student_force_hf: false
-  freeze_policy: train_all
+  freeze_policy: vision_frozen
   validation_enabled: false
-  objective:
+  objective: &memory_safe_kd_objective
     main_ce: {weight: 1.0}
-    main_kd: {weight: 1.0}
+    main_kd: {weight: 1.0, chunk_size: 64}
     mtp_ce: {weight: 1.0}
-    mtp_kd: {weight: 1.0, chunk_size: 512}
+    mtp_kd: {weight: 1.0, chunk_size: 64}
 
 post_mip:
   flows:
@@ -70,6 +72,22 @@ post_mip:
           type: global_kd
           input: checkpoint_eval
           config:
+            freeze_policy: vision_frozen
+            activation_checkpointing: true
+            # A complete 4B teacher/student pair exceeds one 80 GB GPU on
+            # multimodal samples. This matches the campaign's validated TP2
+            # memory-safe KD recipe.
+            automodel:
+              parallel:
+                tp: 2
+                cp: 1
+                pp: 1
+                ep: 1
+                dp_shard: 1
+                dp_replicate: 1
+                sequence_parallel: false
+                pipeline_schedule: 1f1b
+            objective: *memory_safe_kd_objective
             max_steps: 2
             global_batch_size: 1
             local_batch_size: 1

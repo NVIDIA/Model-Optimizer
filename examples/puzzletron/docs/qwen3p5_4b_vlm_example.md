@@ -9,7 +9,7 @@ The default `mip_vlm_smoke.yaml` route:
 - compiles the complete teacher-plus-seven-width FFN candidate grid and searches both an approximately 20%-pruned parameter target and an analytical weight-plus-KV serving-memory target;
 - stops at MIP without materializing checkpoints, running benchmark evaluation, or starting KD.
 
-The opt-in `full_vlm_smoke.yaml` route continues the selected candidate through image-text evaluation, physical checkpoint materialization, a fresh-process RealWorldQA smoke evaluation, two VLM KD steps, checkpoint reload, and final image-text evaluation. These limits check integration behavior; they do not establish model quality or performance.
+The opt-in `full_vlm_smoke.yaml` route continues the selected candidate through image-text evaluation, physical checkpoint materialization, a fresh-process RealWorldQA smoke evaluation, two TP2 VLM KD steps, checkpoint reload, and final image-text evaluation. These limits check integration behavior; they do not establish model quality or performance.
 
 The extended `vlm_campaign.yaml` route compares roughly 10%, 15%, and 20% FFN-pruning bands. It evaluates the heterogeneous and homogeneous MIP candidates with the same image-text loss, serving, 64-step screening KD, and repeated RealWorldQA/MMMU contract. Aggregate ranking selects one student for 256-step KD and a final matched comparison with the teacher.
 
@@ -57,10 +57,12 @@ The compiled default plan should end at `mip` and request one GPU for every enab
 
 ## Compile the opt-in lifecycle
 
-Use the same dataset, runner, and execution files with the full experiment:
+Use the same dataset and runner with the full experiment. Switch to the 4B
+execution profile because the KD stage needs two colocated GPUs:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/full_vlm_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.full_vlm_smoke.yaml
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -69,7 +71,7 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Confirm that the post-MIP order is `image_eval`, `best_vlm_loss`, `materialized`, `checkpoint_eval`, `short_vlm_kd`, `post_kd_checkpoint_eval`, `final_image_eval`, and `best`. `checkpoint_eval` verifies that the physically sliced Hugging Face checkpoint can be loaded by the bounded RealWorldQA evaluator. `post_kd_checkpoint_eval` performs the same reload check on the consolidated KD checkpoint.
+Confirm that the post-MIP order is `image_eval`, `best_vlm_loss`, `materialized`, `checkpoint_eval`, `short_vlm_kd`, `post_kd_checkpoint_eval`, `final_image_eval`, and `best`. `short_vlm_kd` requests two GPUs and uses activation checkpointing, a frozen vision tower, and 64-token KD chunks. `checkpoint_eval` verifies that the physically sliced Hugging Face checkpoint can be loaded by the bounded RealWorldQA evaluator. `post_kd_checkpoint_eval` performs the same reload check on the consolidated KD checkpoint.
 
 The checked-in CPU tests validate configuration resolution, the full FFN candidate grid, resource counts, and the compiled DAGs. A real run is still required to establish checkpoint compatibility, memory use, finite metrics, and end-to-end behavior on the target GPU and worker image.
 
