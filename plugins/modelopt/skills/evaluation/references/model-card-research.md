@@ -3,6 +3,17 @@
 Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it carefully, the FULL text, the devil is in the details. Extract ALL relevant configurations:
 
 - Sampling params (`temperature`, `top_p`)
+  - **Only trust a sentence that ties the values to the benchmarks** ("Benchmarked
+    with…", "…were evaluated with…", "We evaluate the model using…") or a
+    "Recommended Sampling" row. The `SamplingParams(temperature=0.8, top_p=0.95)`
+    in a card's TensorRT-LLM/vLLM quickstart snippet is boilerplate copied
+    verbatim across unrelated models — **never** read eval settings out of it.
+  - **Then cross-check `nvfp4-modelcard-sampling.md`** — published
+    `temperature` / `top_p` / `max_num_tokens` for the 2026 NVFP4 checkpoints
+    under `huggingface.co/nvidia` that disclose them, grouped by family.
+    Required for any NVFP4 checkpoint or same-family sibling; it is also the
+    best source of a default when the card is silent. Pre-2026 releases are out
+    of scope there — read their cards.
 - Context length (`deployment.extra_args: "--max-model-len <value>"`)
 - **Output length (`max_new_tokens`) — mandatory extraction.** Scan the
   card for any `max_tokens` / `max_new_tokens` / "output length"
@@ -11,7 +22,9 @@ Use WebSearch to find the model card (HuggingFace, build.nvidia.com). Read it ca
   apply at the top level (no per-task overrides). If the card is genuinely
   silent on output length, note that explicitly and fall back to the
   generic default (64K reasoning / 16K non-reasoning) — never write a
-  config with "card not yet checked" + generic default. See SKILL.md
+  config with "card not yet checked" + generic default. Check
+  `nvfp4-modelcard-sampling.md` for the model or its family before falling
+  back; a same-family published cap beats the generic default. See SKILL.md
   Step 3 "`max_new_tokens` — pick a single top-level value" for the full
   rule.
 - TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)

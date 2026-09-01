@@ -63,6 +63,19 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        hf_ptq.parse_args()
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "weight AutoQuantize recipes use their kv_cache setting" in help_text
+    assert "KV-cache AutoQuantize recipes select per-layer K/V formats" in help_text
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
@@ -196,22 +209,32 @@ def test_hf_ptq_runs_weight_then_kv_autoquantize_stages(monkeypatch):
     )
 
     hf_ptq._run_auto_quantize_recipe(
-        SimpleNamespace(), recipe, torch.nn.Module(), torch.nn.Module(), None, False, [], False
+        SimpleNamespace(
+            auto_quantize_checkpoint="weight-search.pth",
+            kv_auto_quantize_checkpoint="kv-search.pth",
+        ),
+        recipe,
+        torch.nn.Module(),
+        torch.nn.Module(),
+        None,
+        False,
+        [],
+        False,
     )
 
     assert [call["aq_config"] for call in calls] == [weight_aq, kv_aq]
     assert calls[0]["allow_uniform_kv"] is False
-    assert calls[0]["checkpoint_attr"] == "auto_quantize_checkpoint"
-    assert calls[1]["checkpoint_attr"] == "kv_auto_quantize_checkpoint"
+    assert calls[0]["checkpoint"] == "weight-search.pth"
+    assert calls[1]["checkpoint"] == "kv-search.pth"
 
 
 def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     original_auto_quantize = hf_ptq.auto_quantize
-    checkpoint_attrs = []
+    checkpoints = []
 
     def recording_auto_quantize(*args, **kwargs):
-        checkpoint_attrs.append(kwargs["checkpoint_attr"])
+        checkpoints.append(kwargs["checkpoint"])
         return original_auto_quantize(*args, **kwargs)
 
     monkeypatch.setattr(hf_ptq, "auto_quantize", recording_auto_quantize)
@@ -255,6 +278,7 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
         kv_auto_quantize_checkpoint=None,
         pyt_ckpt_path="dummy",
         cast_mxfp4_to_nvfp4=False,
+        layerwise_export=False,
     )
 
     hf_ptq._run_auto_quantize_recipe(args, recipe, model, model, None, False, data, False)
@@ -264,7 +288,69 @@ def test_hf_ptq_runs_fixed_ptq_before_kv_autoquantize(monkeypatch):
     assert attention.q_proj.weight_quantizer.num_bits == (4, 3)
     assert attention.k_bmm_quantizer.is_enabled
     assert attention.v_bmm_quantizer.is_enabled
-    assert checkpoint_attrs == ["kv_auto_quantize_checkpoint"]
+    assert checkpoints == [None]
+
+
+def test_kv_autoquantize_checkpoint_uses_dedicated_flag_with_legacy_fallback(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    args = SimpleNamespace(
+        auto_quantize_checkpoint="legacy.pth",
+        kv_auto_quantize_checkpoint="kv.pth",
+    )
+    assert hf_ptq._resolve_kv_auto_quantize_checkpoint(args) == "kv.pth"
+
+    args.kv_auto_quantize_checkpoint = None
+    with pytest.warns(FutureWarning, match="deprecated"):
+        assert hf_ptq._resolve_kv_auto_quantize_checkpoint(args) == "legacy.pth"
+
+
+def test_fixed_ptq_then_kv_autoquantize_rejects_explicit_kv_before_calibration(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "model.layers.*.self_attn.*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            },
+        ],
+        algorithm="max",
+    )
+    kv_aq = load_recipe("general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits").auto_quantize
+    recipe = ModelOptAutoQuantizeRecipe(quantize=fixed, auto_quantize=kv_aq)
+    args = SimpleNamespace(
+        auto_quantize_checkpoint=None,
+        kv_auto_quantize_checkpoint=None,
+        pyt_ckpt_path="dummy",
+        cast_mxfp4_to_nvfp4=False,
+        layerwise_export=False,
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "mono_quantize",
+        lambda *_args, **_kwargs: pytest.fail("fixed PTQ must not start"),
+    )
+
+    with pytest.raises(ValueError, match="fixed quantize stage explicitly enables K/V"):
+        hf_ptq._run_auto_quantize_recipe(
+            args, recipe, torch.nn.Module(), torch.nn.Module(), None, False, [], False
+        )
+
+
+def test_fixed_ptq_kv_precheck_does_not_widen_scoped_gemm_rule(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    fixed = QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "model.layers.*.mlp.*",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+        algorithm="max",
+    )
+
+    assert not hf_ptq._quantize_config_explicitly_enables_kv(fixed.model_dump())
 
 
 def test_composed_kv_autoquantize_rejects_enabled_actual_kv_quantizers(monkeypatch):
@@ -329,29 +415,75 @@ def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
         hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
 
 
-def test_autoquant_rejects_fsdp2(monkeypatch):
+def test_kv_autoquant_rejects_fsdp2(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        hf_ptq,
+        "_mtq_inputs_from_auto_quantize_config",
+        lambda *_args, **_kwargs: {"search_domain": "kv_cache"},
+    )
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
         use_fsdp2=True,
     )
 
-    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
         hf_ptq.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
 
 
-def test_fsdp2_autoquant_rejected_before_model_load(monkeypatch):
+def test_weight_autoquant_retains_fsdp2_warning(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(hf_ptq, "_recipe_is_auto_quantize", lambda _: True)
+    model = torch.nn.Module()
+    inputs = {
+        "search_domain": "weight",
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [],
+        "fixed_quantization_config": None,
+        "module_search_spaces": [],
+        "disabled_layers": [],
+        "kv_cache_quant_cfg": None,
+        "method": "gradient",
+        "score_size": 1,
+    }
+    monkeypatch.setattr(
+        hf_ptq, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
+    )
+    monkeypatch.setattr(
+        hf_ptq.mtq, "auto_quantize", lambda search_model, **_kwargs: (search_model, {})
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+
+    with pytest.warns(UserWarning, match="use at your own risk"):
+        assert hf_ptq.auto_quantize(args, model, [], SimpleNamespace()) is model
+
+
+def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
     monkeypatch.setattr(
         hf_ptq.AutoConfig,
         "from_pretrained",
         lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
     )
 
-    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
         hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+
+
+def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    assert hf_ptq._recipe_is_kv_auto_quantize(
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+    )
+    assert not hf_ptq._recipe_is_kv_auto_quantize("general/auto_quantize/nvfp4_fp8_at_5p4bits")
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):

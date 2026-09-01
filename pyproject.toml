@@ -70,7 +70,7 @@ onnx = [
     "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
     "onnxscript",
     "onnxslim>=0.1.76",
-    "polygraphy>=0.49.22",
+    "polygraphy>=0.53.4",
 ]
 hf = [
     "accelerate>=1.0.0",
@@ -108,7 +108,7 @@ dev-docs = [
     "sphinx-autobuild==2025.8.25; python_version >= '3.12'",
     "sphinx-copybutton~=0.5.2; python_version >= '3.12'",
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
-    "sphinx-rtd-theme~=3.1.0; python_version >= '3.12'",
+    "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
 ]
 dev-test = [

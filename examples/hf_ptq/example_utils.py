@@ -1134,12 +1134,90 @@ def copy_custom_model_files(
         print("No checkpoint sidecar files found to copy")
 
 
+def _layerwise_blocks(algorithm) -> list[dict]:
+    """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [
+        e["layerwise"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("layerwise"), dict)
+    ]
+
+
+def recipe_layerwise_blocks(recipe) -> list[dict]:
+    """Every ``layerwise`` block in a recipe's algorithm(s), in order, normalized to dicts.
+
+    Reads the parsed *recipe*, where YAML gives plain dicts and the deprecated
+    ``--auto_quantize_*`` path gives config objects; :func:`_layerwise_blocks` reads the
+    resolved ``quant_cfg``, which is always dicts.
+    """
+    quantize = getattr(recipe, "quantize", None)
+    algorithm = getattr(quantize, "algorithm", None)
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    blocks = []
+    for entry in entries:
+        block = (
+            entry.get("layerwise") if isinstance(entry, dict) else getattr(entry, "layerwise", None)
+        )
+        if block is not None:
+            blocks.append(block if isinstance(block, dict) else block.model_dump())
+    return blocks
+
+
 def _layerwise_checkpoint_dir(algorithm) -> str | None:
-    """Return the nested ``layerwise.checkpoint_dir``, or None."""
-    if not isinstance(algorithm, dict):
+    """First ``layerwise.checkpoint_dir`` across the algorithm entries, or None."""
+    return next(
+        (b["checkpoint_dir"] for b in _layerwise_blocks(algorithm) if b.get("checkpoint_dir")),
+        None,
+    )
+
+
+def layerwise_export_block(algorithm) -> dict | None:
+    """The one ``layerwise`` block that owns per-layer export, or None.
+
+    Export finalizes each layer's shard during calibration, so a later pass would change
+    the model after its checkpoint was written: exactly one entry may set ``export_dir``,
+    and it must be the last.
+    """
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    exporting = [
+        (i, e["layerwise"])
+        for i, e in enumerate(entries)
+        if isinstance(e, dict)
+        and isinstance(e.get("layerwise"), dict)
+        and e["layerwise"].get("export_dir") is not None
+    ]
+    if not exporting:
         return None
-    nested = algorithm.get("layerwise") or {}
-    return nested.get("checkpoint_dir") if isinstance(nested, dict) else None
+    if len(exporting) > 1:
+        raise ValueError(
+            f"{len(exporting)} algorithm entries set layerwise.export_dir; only one "
+            "calibration pass can own the exported checkpoint."
+        )
+    index, block = exporting[0]
+    if index != len(entries) - 1:
+        raise ValueError(
+            f"layerwise.export_dir is set on algorithm entry {index} of {len(entries)}; it "
+            "must be the last, since a later pass would change the model after its shards "
+            "were written."
+        )
+    return block
+
+
+def default_layerwise_resume_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
+    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset.
+
+    A sibling, not a child: nothing deletes the resume state, so inside ``export_path`` it
+    would ship in the checkpoint. An explicit path is left alone.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    # The exporting block specifically: another pass's explicit checkpoint_dir says nothing
+    # about where this one resumes from.
+    block = layerwise_export_block(quant_cfg.get("algorithm"))
+    if block is None or block.get("checkpoint_dir") is not None:
+        return quant_cfg, False
+    block["checkpoint_dir"] = export_path.rstrip("/") + ".layerwise_resume"
+    return quant_cfg, True
 
 
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
@@ -1156,8 +1234,7 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
     Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
     reference the resolved path without re-deriving the dict shape.
     """
-    base_dir = _layerwise_checkpoint_dir(quant_cfg["algorithm"])
-    assert base_dir is not None  # guaranteed by needs_checkpoint_path_update
+    assert needs_checkpoint_path_update(quant_cfg), "no layerwise.checkpoint_dir to resolve"
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -1166,11 +1243,41 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
         name = Path(name).name
 
     config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
-    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
+    suffix = f"{name}_{config_hash}"
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"]["layerwise"]["checkpoint_dir"] = resolved
+    # Each pass keeps its own base, so two layerwise passes cannot resolve onto one manifest.
+    exporting = layerwise_export_block(quant_cfg.get("algorithm"))
+    resolved = None
+    for block in _layerwise_blocks(quant_cfg.get("algorithm")):
+        if block.get("checkpoint_dir") is None:
+            continue
+        block["checkpoint_dir"] = os.path.join(block["checkpoint_dir"], suffix)
+        if resolved is None or block is exporting:
+            resolved = block["checkpoint_dir"]
+    assert resolved is not None  # needs_checkpoint_path_update found one above
     return quant_cfg, resolved
+
+
+def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
+    """Retarget layerwise per-layer export at ``export_path``.
+
+    The recipe opts in via ``layerwise.export_dir``; its value is a placeholder, since the
+    destination is per-run. Raises when nothing was retargeted: the caller decides to skip
+    the real export from a separately parsed recipe, so a silent no-op would leave
+    ``--export_path`` empty on a run reporting success.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    algorithm = quant_cfg.get("algorithm")
+    block = layerwise_export_block(algorithm)
+    if block is None:
+        raise ValueError(
+            "layerwise export is enabled but no layerwise.export_dir was found to retarget "
+            f"in algorithm={algorithm!r}. The exported shards would go to the recipe's "
+            "placeholder path instead of --export_path."
+        )
+    block["export_dir"] = export_path
+    return quant_cfg
 
 
 def add_mlflow_args(parser: argparse.ArgumentParser) -> None:

@@ -1779,6 +1779,14 @@ def get_quant_config(
             quant_config["quantization"]["quantized_layers"] = {}
         elif weight_quant_algo == "MIXED_PRECISION":
             quant_config["quantization"].setdefault("quantized_layers", {})
+        else:
+            warn(
+                "The exported checkpoint combines uniform quantized weights with a mixed-precision "
+                "KV-cache layer map. Released runtimes do not yet consume "
+                "kv_cache_quantized_layers for uniform-weight ModelOpt checkpoints; deployment "
+                "remains unsupported until the runtime adds that metadata path.",
+                stacklevel=2,
+            )
         quant_config["quantization"]["kv_cache_quant_algo"] = "MIXED_PRECISION"
         quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
         quant_config["quantization"]["kv_cache_schema_version"] = 1

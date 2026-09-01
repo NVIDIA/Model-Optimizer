@@ -21,10 +21,8 @@ being offload-aware: the only edge between them is the dispatch in
 lazily to keep the dependency acyclic.
 """
 
-import contextlib
 import itertools
 import json
-import shutil
 import warnings
 from pathlib import Path
 from typing import Any
@@ -43,13 +41,11 @@ from .registry import ExportContext
 from .unified_export_hf import (
     _add_mtp_exclusions,
     _dispatch_export_handler,
-    _patch_revert_weight_conversion,
     _prepare_moe_inputs,
     _resolve_export_dtype,
-    _sanitize_generation_config_for_save,
-    _unpatch_revert_weight_conversion,
     _warn_on_unsynced_moe_gate_up,
     requantize_resmooth_fused_llm_layers,
+    save_non_weight_artifacts,
 )
 
 __all__ = ["_export_transformers_checkpoint_streaming"]
@@ -426,28 +422,6 @@ def _export_transformers_checkpoint_streaming(
 
     writer.finalize()
 
-    # Write non-weight artifacts: config.json, generation_config.json, and the custom
-    # modeling *.py files that trust_remote_code models (e.g. NemotronH) need.
-    # We avoid model.save_pretrained(state_dict={}) here because MoE models (e.g. DSR1)
-    # have expert weights that share underlying storage across layers; safetensors' shared-
-    # tensor check fires even when saving an empty state dict, crashing the export after
-    # all shards are already written correctly.
-    _sanitize_generation_config_for_save(model)
-    _patches = _patch_revert_weight_conversion()
-    try:
-        model.config.save_pretrained(str(export_dir))
-    finally:
-        _unpatch_revert_weight_conversion(_patches)
-    if hasattr(model, "generation_config") and model.generation_config is not None:
-        with contextlib.suppress(Exception):
-            model.generation_config.save_pretrained(str(export_dir))
-
-    # Copy custom modeling *.py files for trust_remote_code checkpoints.
-    _src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
-    if _src_dir.is_dir():
-        for _py in _src_dir.glob("*.py"):
-            _dst = export_dir / _py.name
-            if not _dst.exists():
-                shutil.copy2(_py, _dst)
+    save_non_weight_artifacts(model, export_dir)
 
     return None, quant_config

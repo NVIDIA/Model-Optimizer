@@ -53,12 +53,32 @@ Usage (single node, 4 GPUs, MP=4):
 
 For MP=8 across two nodes use torchrun's ``--nnodes=2 --node_rank=<i>
 --master_addr=<ip>`` flags.
+
+Calibration settings
+--------------------
+
+When the amax dumped here is later consumed by ``quantize_to_nvfp4.py
+--cast_mxfp4_to_nvfp4``, the expert weights are a lossless bit-cast, so the
+activation amax (``input_scale``) is the only calibrated quantity that survives:
+
+  * ``--calib_seq`` sets the tokenizer truncation cap, which decides how much of a
+    long document survives. Raising it is **not** free on this path: the whole
+    corpus is tokenized in one ``padding=True`` call, so every row is padded to
+    the longest surviving sample, and ``calibrate_loop`` passes only ``input_ids``
+    -- so those pad tokens participate in calibration. Choose it from the context
+    length the activations must cover, and re-validate rather than assuming
+    higher is better.
+
+  * ModelOpt's ``mse_calibrate`` has no effect on this path — it tunes weight
+    quantizers only, and the MXFP4->NVFP4 cast overwrites ``weight_scale``
+    afterwards.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import json
 import os
 import re
@@ -74,6 +94,7 @@ from safetensors.torch import load_model
 from transformers import AutoTokenizer
 
 import modelopt.torch.quantization as mtq
+from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.qtensor.mxfp4_tensor import MXFP4QTensor
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
@@ -254,6 +275,96 @@ def load_deepseek_v4(
     return model
 
 
+_PUBLISHED_RECIPE = "huggingface/models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
+
+
+_MTP_PROBE = "mtp.0.ffn.experts.0.w1_weight_quantizer"
+
+
+def _effective_enable(quant_cfg, name: str) -> bool:
+    """Whether ``name`` ends up enabled; mtq applies rules in order, so later ones win."""
+    enabled = False
+    for entry in quant_cfg:
+        if isinstance(entry, dict) and "quantizer_name" in entry:
+            if fnmatch.fnmatch(name, entry["quantizer_name"]):
+                enabled = entry.get("enable", True) is True
+    return enabled
+
+
+def _quant_cfg_from_recipe(recipe_path: str) -> dict:
+    """Load a ModelOpt recipe and return an ``mtq.quantize`` config.
+
+    ``mtq.quantize`` accepts ``algorithm`` as a string or as a dict keyed on
+    ``method``, which is the shape a recipe yields, so no translation is needed.
+
+    The recipe is validated against what the rest of this pipeline can actually
+    export. ``save_amax_and_quant_config`` persists only routed-expert quantizer
+    state and writes ``quantized_layers_manifest.json`` hardcoded to
+    ``NVFP4_W4A4``/``num_bits [2, 1]``/``block_size 16``/``scale_bits [4, 3]``,
+    and ``quantize_to_nvfp4.py`` re-derives expert paths itself and emits E4M3
+    block scales unconditionally. A recipe that enables anything else, or asks
+    for a different numeric format, would silently drop quantizers and describe
+    the result with a manifest that does not match the amax it ships beside.
+    Mirrors the guard in ``examples/kimi/kimi_k3/quantize_to_nvfp4.py``.
+    """
+    recipe = load_recipe(recipe_path)
+    quantize = getattr(recipe, "quantize", None)
+    if quantize is None:
+        raise ValueError(f"recipe {recipe_path!r} has no 'quantize' section; expected a PTQ recipe")
+    cfg = quantize.model_dump()
+
+    algo = cfg.get("algorithm")
+    method = algo.get("method") if isinstance(algo, dict) else algo
+    if method != "max":
+        raise ValueError(f"recipe must use the 'max' calibration algorithm, got {method!r}")
+
+    enabled_experts = False
+    for entry in cfg.get("quant_cfg", []):
+        if not isinstance(entry, dict) or entry.get("enable") is not True:
+            continue
+        name = entry.get("quantizer_name", "")
+        if "ffn.experts." not in name:
+            raise ValueError(
+                f"recipe enables {name!r}, but this pipeline exports only routed-expert "
+                "quantizers (*ffn.experts.*); it would be dropped from the amax dump "
+                "and the manifest without any error"
+            )
+        qcfg = entry.get("cfg") or {}
+        if not isinstance(qcfg, dict):
+            raise ValueError(
+                f"recipe entry {name!r} has a non-dict 'cfg' ({type(qcfg).__name__}); "
+                "this pipeline supports only a single NVFP4 config per quantizer"
+            )
+        block_sizes = qcfg.get("block_sizes") or {}
+        if (
+            tuple(qcfg.get("num_bits") or ()) != (2, 1)
+            or block_sizes.get(-1) != 16
+            or block_sizes.get("type") != "dynamic"
+            or tuple(block_sizes.get("scale_bits") or ()) != (4, 3)
+        ):
+            raise ValueError(
+                f"recipe entry {name!r} must be block-16 NVFP4 (num_bits (2, 1), "
+                f"block_sizes[-1] 16, type 'dynamic', scale_bits (4, 3)) to match "
+                f"the exported manifest, got num_bits={qcfg.get('num_bits')!r} "
+                f"block_sizes={block_sizes!r}"
+            )
+        enabled_experts = True
+
+    if not enabled_experts:
+        raise ValueError("recipe enables no routed-expert quantizers (*ffn.experts.*)")
+
+    # The scope check above is a substring test, so a pattern such as
+    # *mtp.*ffn.experts.* satisfies it. MTP experts match save_amax's
+    # \.experts\.\d+\.w[123]_ regex too, so resolve the rules the way mtq applies
+    # them (in order, last match wins) and reject a recipe that leaves them on.
+    if _effective_enable(cfg.get("quant_cfg", []), _MTP_PROBE):
+        raise ValueError(
+            f"recipe enables MTP quantizers (matched {_MTP_PROBE!r}); this pipeline "
+            "leaves the MTP/DSpark block in its source format"
+        )
+    return cfg
+
+
 def _build_nvfp4_experts_cfg() -> dict:
     """Quant config: NVFP4 weight + NVFP4 input, routed experts only.
 
@@ -296,7 +407,15 @@ def _build_nvfp4_experts_cfg() -> dict:
     }
 
 
-def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list[str]):
+def ptq(
+    model,
+    tokenizer,
+    batch_size: int,
+    calib_size: int,
+    calib_datasets: list[str],
+    calib_seq: int = 512,
+    recipe: str | None = None,
+):
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
 
@@ -311,6 +430,7 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         tokenizer=tokenizer,
         batch_size=batch_size,
         num_samples=[calib_size] * len(calib_datasets),
+        max_sample_length=calib_seq,
         device=device,
     )
     _trace("calib dataloader ready")
@@ -330,7 +450,8 @@ def ptq(model, tokenizer, batch_size: int, calib_size: int, calib_datasets: list
         dist.barrier()
         _trace("pre-calib barrier done")
 
-    mtq_cfg = _build_nvfp4_experts_cfg()
+    mtq_cfg = _quant_cfg_from_recipe(recipe) if recipe else _build_nvfp4_experts_cfg()
+    _trace(f"quant config from {'recipe' if recipe else 'built-in default'}")
     _trace("calling mtq.quantize")
     model = mtq.quantize(model, mtq_cfg, calibrate_loop)
     _trace("mtq.quantize returned")
@@ -348,9 +469,9 @@ def save_amax_and_quant_config(model, output_path: str):
     *not* rely on ``modelopt.torch.export.quant_utils.get_quant_config``
     because its introspection doesn't see weights stored on nested
     submodules — ``QuantExpert``'s ``w{1,2,3}`` are submodules of the
-    container, not direct parameters. The downstream export script
-    (``quantize_to_nvfp4.py``) uses this manifest as ground truth for which
-    tensor paths to replace with NVFP4 packed weight + scales.
+    container, not direct parameters. The manifest is a descriptive record of
+    what was calibrated: ``quantize_to_nvfp4.py`` does not read it, it
+    re-derives the expert tensor paths from the source checkpoint itself.
     """
 
     def _trace(msg):
@@ -435,7 +556,26 @@ def main():
         help="where to dump amax files and quantized_layers_manifest.json",
     )
     p.add_argument("--batch_size", type=int, default=4)
+    p.add_argument(
+        "--recipe",
+        default=None,
+        help=(
+            "ModelOpt recipe describing the quant config, loaded by path relative to "
+            f"modelopt_recipes/ (published: {_PUBLISHED_RECIPE}). Defaults to the "
+            "built-in routed-experts-only NVFP4 config, which this recipe mirrors."
+        ),
+    )
     p.add_argument("--calib_size", type=int, default=64)
+    p.add_argument(
+        "--calib_seq",
+        type=int,
+        default=512,
+        help=(
+            "calibration sequence truncation cap (max_sample_length). Longer documents are "
+            "truncated to this; because the corpus is tokenized in one padded call, shorter "
+            "ones are padded up to it. Re-validate when changing it."
+        ),
+    )
     p.add_argument(
         "--calib_dataset",
         dest="calib_datasets",
@@ -471,7 +611,15 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.batch_size, args.calib_size, args.calib_datasets)
+    model = ptq(
+        model,
+        tokenizer,
+        args.batch_size,
+        args.calib_size,
+        args.calib_datasets,
+        args.calib_seq,
+        args.recipe,
+    )
     save_amax_and_quant_config(model, args.output_path)
 
     if args.run_generate is not None:

@@ -19,6 +19,7 @@ import os
 import random
 import time
 import warnings
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from example_utils import (
     cleanup_distributed,
     copy_custom_model_files,
     create_vlm_calibration_loop,
+    default_layerwise_resume_dir,
     get_model,
     get_processor,
     get_tokenizer,
@@ -43,9 +45,11 @@ from example_utils import (
     mlflow_run,
     mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
+    recipe_layerwise_blocks,
     resolve_checkpoint_dir,
     resolve_mlflow_args,
     run_nemotron_vl_preview,
+    set_layerwise_export_dir,
     setup_distributed_args,
     validate_fsdp2_supported,
 )
@@ -96,9 +100,14 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
-_FSDP2_AUTOQUANT_ERROR = (
-    "AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
+_FSDP2_KV_AUTOQUANT_ERROR = (
+    "KV-cache AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
     "selection, and checkpoint writes are synchronized across ranks."
+)
+_FSDP2_AUTOQUANT_WARNING = (
+    "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
+    "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
+    "synchronization across ranks); use at your own risk."
 )
 
 
@@ -470,6 +479,39 @@ def _assert_kv_autoquantize_input_is_clean(model: torch.nn.Module) -> None:
         )
 
 
+def _quantize_config_explicitly_enables_kv(quant_cfg: dict[str, Any]) -> bool:
+    """Detect explicit K/V rules without treating arbitrary scoped patterns as global.
+
+    This deliberately catches only global rules and rules that name a BMM quantizer. More general
+    path-scoped rules are checked against the converted model by
+    :func:`_assert_kv_autoquantize_input_is_clean`.
+    """
+    enabled = dict.fromkeys(("k_bmm_quantizer", "v_bmm_quantizer"), False)
+    for entry in quant_cfg["quant_cfg"]:
+        pattern = entry["quantizer_name"]
+        if pattern != "*" and "bmm_quantizer" not in pattern:
+            continue
+        suffix = pattern.rsplit(".", 1)[-1]
+        for name in enabled:
+            if fnmatch(name, suffix):
+                enabled[name] = entry.get("enable", entry.get("cfg") is not None)
+    return any(enabled.values())
+
+
+def _resolve_kv_auto_quantize_checkpoint(args: argparse.Namespace) -> str | None:
+    """Resolve the dedicated KV checkpoint flag with a one-release legacy fallback."""
+    if args.kv_auto_quantize_checkpoint is not None:
+        return args.kv_auto_quantize_checkpoint
+    if args.auto_quantize_checkpoint is not None:
+        warnings.warn(
+            "Using --auto_quantize_checkpoint for a KV-cache search is deprecated; use "
+            "--kv_auto_quantize_checkpoint instead.",
+            FutureWarning,
+        )
+        return args.auto_quantize_checkpoint
+    return None
+
+
 def auto_quantize(
     args: argparse.Namespace,
     language_model: torch.nn.Module,
@@ -478,7 +520,7 @@ def auto_quantize(
     full_model: torch.nn.Module | None = None,
     fixed_quantize_config=None,
     allow_uniform_kv: bool = True,
-    checkpoint_attr: str = "auto_quantize_checkpoint",
+    checkpoint: str | None = None,
 ):
     """Recipe-driven auto_quantize, organized around an AutoQuantizeConfig.
 
@@ -494,18 +536,18 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
-    if args.use_fsdp2:
-        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
-
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config,
         args,
         fixed_quantize_config=fixed_quantize_config,
         allow_uniform_kv=allow_uniform_kv,
     )
+    if args.use_fsdp2:
+        if inputs["search_domain"] == "kv_cache":
+            raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
+        warnings.warn(_FSDP2_AUTOQUANT_WARNING)
     if inputs["search_domain"] == "kv_cache":
         _assert_kv_autoquantize_input_is_clean(language_model)
-    checkpoint = getattr(args, checkpoint_attr, None)
 
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -611,11 +653,22 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
     return recipe is not None and isinstance(load_recipe(recipe), ModelOptAutoQuantizeRecipe)
 
 
+def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
+    """True if ``recipe`` resolves to a KV AutoQuantize recipe (peeked before model load)."""
+    if recipe is None:
+        return False
+    loaded_recipe = load_recipe(recipe)
+    return (
+        isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe)
+        and loaded_recipe.auto_quantize.constraints.kv_effective_bits is not None
+    )
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
-        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
+    if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
@@ -877,12 +930,25 @@ def _prepare_quant_cfg(
 ) -> dict[str, Any]:
     """Apply shared checkpoint-local adjustments to a PTQ configuration."""
     mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
+    if args.layerwise_export and not mtp_layer_prefixes:
+        mtp_layer_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
     if mtp_layer_prefixes:
         quant_cfg = copy.deepcopy(quant_cfg)
         for prefix in mtp_layer_prefixes:
             pattern = f"*{prefix}*"
             quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
             print(f"Excluding MTP layer from quantization: {pattern}")
+
+    if args.layerwise_export:
+        assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
+        quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
+        print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+        quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
+        if moved:
+            print(
+                "Layerwise checkpoint_dir co-located with the export path so a resumed run "
+                "finds its manifest next to the shards it must not overwrite."
+            )
 
     if needs_checkpoint_path_update(quant_cfg):
         quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)
@@ -909,10 +975,14 @@ def _run_auto_quantize_recipe(
     followup_kv = recipe.kv_auto_quantize
     primary_is_kv = primary.constraints.kv_effective_bits is not None
     fixed_quantize_config = recipe.quantize
-    primary_uses_kv_checkpoint = primary_is_kv and fixed_quantize_config is not None
 
     if primary_is_kv and fixed_quantize_config is not None:
         quant_cfg = _prepare_quant_cfg(args, fixed_quantize_config.model_dump(), full_model)
+        if _quantize_config_explicitly_enables_kv(quant_cfg):
+            raise ValueError(
+                "The fixed quantize stage explicitly enables K/V quantizers before KV-cache "
+                "AutoQuantize. Disable them in the fixed stage."
+            )
         mono_quantize(
             args,
             quant_cfg,
@@ -933,10 +1003,10 @@ def _run_auto_quantize_recipe(
         full_model=full_model,
         fixed_quantize_config=fixed_quantize_config,
         allow_uniform_kv=followup_kv is None,
-        checkpoint_attr=(
-            "kv_auto_quantize_checkpoint"
-            if primary_uses_kv_checkpoint
-            else "auto_quantize_checkpoint"
+        checkpoint=(
+            _resolve_kv_auto_quantize_checkpoint(args)
+            if primary_is_kv
+            else args.auto_quantize_checkpoint
         ),
     )
 
@@ -948,8 +1018,67 @@ def _run_auto_quantize_recipe(
             aq_config=followup_kv,
             full_model=full_model,
             allow_uniform_kv=False,
-            checkpoint_attr="kv_auto_quantize_checkpoint",
+            checkpoint=args.kv_auto_quantize_checkpoint,
         )
+
+
+def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> None:
+    """Refuse layerwise export before calibration starts, not after it writes a checkpoint.
+
+    Layerwise export writes the finished checkpoint during calibration, so anything that
+    would rewrite or contradict that checkpoint afterwards has to be caught here -- once
+    calibration begins, the user has already paid for the whole run.
+    """
+    if is_multimodal_model(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support multimodal models: calibration runs on the "
+            "extracted language model, so the shards and config.json would describe that "
+            "submodel rather than the full VLM, and the VLM export path would then "
+            "overwrite config.json with the unquantized source config."
+        )
+
+    if mtp_layer_prefixes:
+        raise NotImplementedError(
+            f"layerwise.export_dir does not support models with MTP layers {mtp_layer_prefixes}: "
+            "their exclusions and any orphaned MTP weights are applied after calibration, by "
+            "which point every shard and the quant config are already written."
+        )
+
+    if has_spec_opt(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support speculative-decoding models: "
+            "export_speculative_decoding() would write a second checkpoint over the same "
+            "--export_path."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        raise NotImplementedError(
+            "layerwise.export_dir is not compatible with --cast_mxfp4_to_nvfp4: the cast "
+            "rewrites weights after calibration, by which point every shard is written."
+        )
+
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
+    for flag, value, exporter in (
+        ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
+        ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+        (
+            "an encoder-decoder model_type (t5/bart/whisper)",
+            getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+    ):
+        if value:
+            raise NotImplementedError(
+                f"layerwise.export_dir is not compatible with {flag}: {exporter} would write a "
+                "second checkpoint over the same --export_path that layerwise calibration "
+                "already populated."
+            )
 
 
 def export_quantized(
@@ -1054,11 +1183,22 @@ def export_quantized(
                 if mtp_layer_prefixes:
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
-                export_hf_checkpoint(
-                    full_model,
-                    export_dir=export_path,
-                    extra_state_dict=mtp_state_dict,
-                )
+                if args.layerwise_export:
+                    if mtp_state_dict:
+                        raise NotImplementedError(
+                            "layerwise.export_dir does not support models with MTP weights: "
+                            "they are loaded after calibration has already written every "
+                            "shard, so they would be missing from the checkpoint. Export "
+                            "without layerwise.export_dir."
+                        )
+                    # Calibration already wrote every shard, the index and the configs.
+                    print(f"Layerwise export already wrote the checkpoint to {export_path}")
+                else:
+                    export_hf_checkpoint(
+                        full_model,
+                        export_dir=export_path,
+                        extra_state_dict=mtp_state_dict,
+                    )
 
                 if args.qformat == "w4a16_nvfp4":
                     warnings.warn(
@@ -1310,17 +1450,22 @@ def quantize_main(
     else:
         aq_config = None
 
-    def _is_layerwise(obj):
-        if isinstance(obj, ModelOptPTQRecipe):
-            return _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, ModelOptAutoQuantizeRecipe):
-            return obj.quantize is not None and _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, list):
-            return any(_is_layerwise(a) for a in obj)
-        layerwise = getattr(obj, "layerwise", None)
-        return bool(getattr(layerwise, "enable", False))
+    layerwise_cfgs = recipe_layerwise_blocks(recipe)
+    is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
 
-    is_layerwise = _is_layerwise(recipe)
+    # The value is a placeholder, replaced with --export_path below; presence is the switch.
+    args.layerwise_export = any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs)
+    if args.layerwise_export:
+        if isinstance(recipe, ModelOptAutoQuantizeRecipe):
+            # Only the mono-quantize path retargets export_dir and runs the refusals;
+            # auto_quantize would export to the placeholder and skip the real export.
+            raise NotImplementedError(
+                "layerwise.export_dir is not supported with an AutoQuantize recipe; "
+                "use a PTQ recipe, or drop export_dir and export afterwards."
+            )
+        if not args.skip_generate:
+            print("Layerwise export: forcing --skip_generate, the model is left in export form.")
+        args.skip_generate = True
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
@@ -1508,9 +1653,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "PTQ or AutoQuantize recipe YAML file or name without suffix (e.g. "
             "general/ptq/nvfp4_default-kv_fp8_cast, general/auto_quantize/nvfp4_fp8_at_4p8bits). "
-            "KV cache source depends on the recipe type: PTQ recipes bake KV cache into quant_cfg "
-            "and --kv_cache_qformat is ignored; AutoQuantize recipes fall back to --kv_cache_qformat "
-            "unless the recipe sets an explicit kv_cache or kv_auto_quantize field."
+            "KV cache behavior depends on the recipe type: PTQ recipes configure it in quant_cfg "
+            "and ignore --kv_cache_qformat; weight AutoQuantize recipes use their kv_cache setting "
+            "or fall back to --kv_cache_qformat; KV-cache AutoQuantize recipes select per-layer K/V "
+            "formats from candidate_formats and ignore --kv_cache_qformat."
         ),
         default=None,
     )
@@ -1689,8 +1835,9 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path for saving/restoring the KV-cache search checkpoint in a composed recipe. "
-            "Use a new path whenever the preceding weight/activation quantization stage changes."
+            "Path for saving/restoring any KV-cache AutoQuantize search checkpoint. Use a new "
+            "path whenever the preceding weight/activation quantization stage changes. Standalone "
+            "KV recipes temporarily accept --auto_quantize_checkpoint as a deprecated fallback."
         ),
     )
     parser.add_argument(

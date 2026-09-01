@@ -367,6 +367,11 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
                 )
         has_fixed_baseline = self.quantize is not None
         has_global_search = bool(self.auto_quantize.candidate_formats)
+        if primary_is_kv and has_fixed_baseline and self.auto_quantize.module_search_spaces:
+            raise ValueError(
+                "A KV-cache AutoQuantize stage with a fixed quantize baseline must not define "
+                "auto_quantize.module_search_spaces."
+            )
         if not primary_is_kv and has_fixed_baseline and has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "

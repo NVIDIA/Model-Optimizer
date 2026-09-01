@@ -105,9 +105,12 @@ suppress_warnings = ["ref.python"]
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = "sphinx_rtd_theme"
+html_theme = "shibuya"
 html_theme_options = {
-    "style_external_links": True,
+    "accent_color": "green",
+    "color_mode": "auto",
+    "dark_code": True,
+    "globaltoc_expand_depth": 1,
 }
 
 # Add any paths that contain custom static files (such as style sheets) here,

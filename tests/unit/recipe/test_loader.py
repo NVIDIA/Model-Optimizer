@@ -25,11 +25,13 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 import modelopt.torch.quantization.config as qcfg
 from modelopt.recipe.config import (
     AutoQuantizeConfig,
     AutoQuantizeConstraints,
+    AutoQuantizeModuleSearchSpace,
     ModelOptAutoQuantizeRecipe,
     ModelOptDFlashRecipe,
     ModelOptEagleRecipe,
@@ -2028,6 +2030,83 @@ def test_load_recipe_weight_autoquantize_then_kv_autoquantize(tmp_path):
     assert recipe.kv_auto_quantize is not None
     assert recipe.kv_auto_quantize.auto_quantize_method == "kl_div"
     assert recipe.kv_auto_quantize.constraints.kv_effective_bits == 8.0
+
+
+def _weight_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(effective_bits=8.0),
+        candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], algorithm="max")],
+    )
+    return config.model_copy(update=updates)
+
+
+def _kv_autoquantize_test_config(**updates):
+    config = AutoQuantizeConfig(
+        constraints=AutoQuantizeConstraints(kv_effective_bits=8.0),
+        candidate_formats=[
+            qcfg.QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_name": "*[kv]_bmm_quantizer",
+                        "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    }
+                ],
+                algorithm=None,
+                effective_bits=8.0,
+            )
+        ],
+        auto_quantize_method="kl_div",
+    )
+    return config.model_copy(update=updates)
+
+
+def test_autoquantize_recipe_rejects_second_kv_search():
+    with pytest.raises(ValidationError, match=r"cannot follow.*already searches the KV cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_kv_autoquantize_test_config(),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_non_kv_followup():
+    with pytest.raises(ValidationError, match="must use a kv_effective_bits constraint"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(),
+            kv_auto_quantize=_weight_autoquantize_test_config(),
+        )
+
+
+def test_autoquantize_recipe_rejects_uniform_and_searched_kv():
+    uniform_kv = qcfg.QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+            }
+        ],
+        algorithm=None,
+    )
+    with pytest.raises(ValidationError, match=r"must omit.*uniform auto_quantize.kv_cache"):
+        ModelOptAutoQuantizeRecipe(
+            auto_quantize=_weight_autoquantize_test_config(kv_cache=uniform_kv),
+            kv_auto_quantize=_kv_autoquantize_test_config(),
+        )
+
+
+def test_kv_autoquantize_fixed_baseline_rejects_module_search_spaces():
+    search_space = AutoQuantizeModuleSearchSpace(
+        module_name_patterns=["*mlp*"],
+        candidate_formats=[qcfg.QuantizeConfig(quant_cfg=[], algorithm="max")],
+    )
+    # Bypass the nested config's own KV-domain check so the recipe's composition contract is
+    # covered independently and cannot regress if the nested validation changes.
+    kv_primary = _kv_autoquantize_test_config(module_search_spaces=[search_space])
+
+    with pytest.raises(ValidationError, match=r"must not define.*module_search_spaces"):
+        ModelOptAutoQuantizeRecipe(
+            quantize=qcfg.QuantizeConfig(quant_cfg=[], algorithm="max"),
+            auto_quantize=kv_primary,
+        )
 
 
 def test_composed_kv_autoquantize_accepts_scoped_gemm_rule(tmp_path):

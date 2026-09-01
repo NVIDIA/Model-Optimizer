@@ -146,9 +146,12 @@ def quant_module_get_extra_state(self) -> dict:
     # output_layer with nothing quantized must contribute none. Scoped to output_layer: for every
     # other module this quantizer_state is the only record that its quantizers were disabled (e.g.
     # by auto_quantize or disable_quantizer), and dropping it would restore them enabled.
+    # A disabled output_layer is still converted to RealQuantLinear by ``mtq.compress``, but its
+    # weight is left uncompressed (pack_real_quantize_weight skips disabled quantizers), so there is
+    # likewise no real-quant state to keep.
     if (
         getattr(self, "_modelopt_output_layer", False)
-        and not isinstance(self, RealQuantLinear)
+        and not isinstance(getattr(self, "weight", None), QTensorWrapper)
         and not any(isinstance(m, TensorQuantizer) and m.is_enabled for m in self.modules())
     ):
         return {}

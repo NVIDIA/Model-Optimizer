@@ -7,7 +7,7 @@
 ## Params
 
 Tau2 uses the evaluated model as the agent plus a separate user-simulator endpoint;
-keep both fixed across runs. The judger (**gpt-oss-120B**) and user-simulator
+keep both fixed across runs. The judge (**gpt-oss-120B**) and user-simulator
 (**Qwen3 235B**) `model_id`s are hardcoded in the fragment below — swap them for
 equivalents on your own endpoint if needed. Only the shared `url`
 (`TAU2_ENDPOINT_URL`) comes from `.env` (see `recipes/env.example`) — config, not a
@@ -16,12 +16,12 @@ tau2-bench needs the full `/v1/chat/completions` URL (nemo-skills judges use the
 `/v1` base).
 
 For parallelism, we have to throttle to a smaller cap due to the test may be throttled by
-user and judger API rate limit. If frequent 429 errors are hit, the reported scores could be much lower.
+user and judge API rate limit. If frequent 429 errors are hit, the reported scores could be much lower.
 
 The `parallelism:` field is left as `???` — the right value depends on the
 judge and user-simulator endpoints' rate limits, which vary per deployment.
 Start with a conservative canary value (e.g. 32–128), watch the logs for 429
-errors from the judger/user endpoints, and ramp up if stable. The hard
+errors from the judge/user endpoints, and ramp up if stable. The hard
 upper bound is 512. After choosing a value, recompute the deployment's
 `--max-num-seqs` per the rule in SKILL.md Step 3.
 
@@ -60,7 +60,7 @@ Use this inside the top-level `evaluation.tasks` list:
             model_id: nvidia/qwen/qwen-235b    # Qwen3 235B; use an equivalent on your own endpoint if needed
             url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness
-          judger:
+          judge:
             model_id: nvidia/openai/gpt-oss-120b   # gpt-oss-120B; use an equivalent on your own endpoint if needed
             url: <TAU2_ENDPOINT_URL>           # from .env (full /v1/chat/completions)
             api_key: INFERENCE_API_KEY         # env-var name; exported, read by harness

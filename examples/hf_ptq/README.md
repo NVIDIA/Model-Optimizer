@@ -111,6 +111,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3, 3.5 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| Kimi K3<sup>14</sup> | - | - | - | - | ✅ |
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | MiniMax M2.1 | - | - | - | - | ✅ |
@@ -137,7 +138,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
 > *<sup>11.</sup>Vision-language model (VLM): only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
 > *<sup>12.</sup>For VLMs, `int8_smoothquant` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
+> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
+> *<sup>14.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
@@ -198,7 +200,7 @@ python hf_ptq.py \
 
 Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
-> *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field.*
+> *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field or `kv_auto_quantize` follow-up.*
 
 #### KV Cache Quantization
 
@@ -255,6 +257,12 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 #### Deepseek R1
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
+
+#### Kimi K3
+
+[PTQ for Kimi K3](../kimi/README.md) shows how to cast the source MXFP4 routed
+experts to NVFP4 and quantize KDA/MLA attention weights to 128x128 block FP8
+without loading the full model or running calibration.
 
 #### VLM quantization
 
@@ -442,7 +450,7 @@ KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
 packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
 preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.
-The shipped canary recipe searches calibrated FP8 K/V (8.0 bits/scalar) and packed NVFP4 K/V
+The shipped canary recipe searches FP8-cast K/V (8.0 bits/scalar) and NVFP4-cast K/V
 (4.5 bits/scalar) at 5.4 bits/scalar. It intentionally excludes FP8-K/NVFP4-V because the
 companion vLLM implementation does not support that asymmetric per-layer format:
 
@@ -450,26 +458,28 @@ companion vLLM implementation does not support that asymmetric per-layer format:
 python hf_ptq.py \
   --pyt_ckpt_path Qwen/Qwen3-1.7B \
   --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
-  --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
+  --kv_auto_quantize_checkpoint /path/to/kv_autoquant.pth \
   --export_path /path/to/qwen3-1.7b-mixed-kv
 ```
 
-Each candidate uses max calibration so its persistent K/V scales are present in the unified HF
-checkpoint. Unified export records the selected formats in `kv_cache_quantized_layers` and writes
-the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
-`--auto_quantize_checkpoint` stores the resumable raw search state.
+Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
+keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
+formats in `kv_cache_quantized_layers` and writes the JSON-safe sensitivity report to
+`kv_cache_auto_quantize_report.json`; `--kv_auto_quantize_checkpoint` stores the resumable raw KV
+search state.
 
 > [!NOTE]
 > Layer-wise KV checkpoints require the companion
 > [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
 > vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
 > `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
-> Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
-> kernels once the layer-wise metadata consumer is available.
+> The companion consumer also does not yet apply the layer map when uniform FP8/NVFP4 weights are
+> present; export warns for that composed combination. Do not deploy either unsupported case. Full
+> FP8 K/V and full NVFP4 K/V use existing vLLM kernels once the relevant metadata path is available.
 
-For a single-stage search, `--auto_quantize_checkpoint` saves/restores the search state to resume an
-interrupted search (skips re-scoring). Composed weight-plus-KV recipes additionally use
-`--kv_auto_quantize_checkpoint` for the independent KV search state:
+`--auto_quantize_checkpoint` saves/restores weight-search state. Every KV-domain search uses
+`--kv_auto_quantize_checkpoint`; a standalone KV recipe temporarily accepts the former flag as a
+deprecated fallback. Composed recipes therefore keep the weight and KV search states separate:
 
 ```bash
 scripts/huggingface_example.sh --model $HF_PATH --recipe general/auto_quantize/nvfp4_fp8_at_5p4bits \
@@ -503,7 +513,7 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
 
-> *AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Use a PTQ recipe with FSDP2.*
+> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
 
 ### Usage
 
