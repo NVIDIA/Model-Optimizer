@@ -378,6 +378,7 @@ def prepare(
     *,
     suite: str,
     source_tasks: tuple[str, ...] | None = None,
+    profile_task_leaves: tuple[str, ...] | None = None,
     dataset_snapshots: dict[str, Path],
     quick_manifest: dict[str, object] | None,
 ) -> tuple[Path, tuple[str, ...]]:
@@ -402,7 +403,7 @@ def prepare(
                 _write_task_group(
                     tasks_root,
                     task=task,
-                    leaves=suites.MVBENCH_LEAF_TASKS,
+                    leaves=profile_task_leaves or suites.MVBENCH_LEAF_TASKS,
                     include_root="tasks/mvbench/mvbench_{}.yaml",
                     dataset_path=dataset_snapshots[task],
                     quick_manifest=quick_manifest,
@@ -414,7 +415,7 @@ def prepare(
                 _write_task_group(
                     tasks_root,
                     task=task,
-                    leaves=suites.VIDEO_MMMU_LEAF_TASKS,
+                    leaves=profile_task_leaves or suites.VIDEO_MMMU_LEAF_TASKS,
                     include_root="tasks/videommmu/{}.yaml",
                     dataset_path=dataset_snapshots[task],
                     quick_manifest=None,

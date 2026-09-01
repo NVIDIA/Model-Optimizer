@@ -40,6 +40,20 @@ def _checkpoint_directory(value: str) -> Path:
     return checkpoint_path
 
 
+def _profile_task_shard(value: str) -> tuple[int, int]:
+    """Parse a zero-based INDEX/COUNT task-group shard."""
+    try:
+        index_text, count_text = value.split("/", maxsplit=1)
+        index, count = int(index_text), int(count_text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("profile task shard must be INDEX/COUNT") from error
+    if count <= 0 or index < 0 or index >= count:
+        raise argparse.ArgumentTypeError(
+            "profile task shard requires COUNT > 0 and 0 <= INDEX < COUNT"
+        )
+    return index, count
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -84,6 +98,13 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=profile.VLM_BENCHMARK_TASKS,
         default=None,
         help="Run one task from a versioned profile for scheduler-safe sharding.",
+    )
+    parser.add_argument(
+        "--profile-task-shard",
+        type=_profile_task_shard,
+        default=None,
+        metavar="INDEX/COUNT",
+        help="Run one zero-based leaf shard of a grouped full-profile task.",
     )
     parser.add_argument("--batch-size", type=checkpoint.positive_int, default=1)
     parser.add_argument("--seed", type=int, default=42)

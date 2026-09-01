@@ -39,6 +39,7 @@ class PreparedSuite:
 
     suite: str
     source_tasks: tuple[str, ...]
+    profile_task_leaves: tuple[str, ...] | None
     dataset_snapshots: dict[str, Path]
     quick_manifest: dict[str, object] | None
     hf_home: Path
@@ -65,11 +66,14 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     if profile_contract is not None and args.batch_size != profile_contract.manifest["batch_size"]:
         raise ValueError("--batch-size cannot override a versioned evaluation profile")
     profile_task = getattr(args, "profile_task", None)
+    profile_task_shard = getattr(args, "profile_task_shard", None)
     if profile_task is not None:
         if profile_contract is None:
             raise ValueError("--profile-task requires a versioned evaluation profile")
         if profile_contract.name != "full-v1":
             raise ValueError("--profile-task is supported only for full-v1")
+    if profile_task_shard is not None and profile_task is None:
+        raise ValueError("--profile-task-shard requires --profile-task")
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
@@ -77,6 +81,7 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         if profile_task not in source_tasks:
             raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
         source_tasks = (profile_task,)
+    profile_task_leaves = _profile_task_leaves(profile_task, profile_task_shard)
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
     if profile_contract is not None and profile_contract.exact_rows is not None:
@@ -113,10 +118,12 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         lmms_eval_revision=lmms_eval_revision,
         execution_policy=execution_policy,
         profile_contract=profile_contract,
+        profile_task_leaves=profile_task_leaves,
     )
     return PreparedSuite(
         suite=suite,
         source_tasks=source_tasks,
+        profile_task_leaves=profile_task_leaves,
         dataset_snapshots=dataset_snapshots,
         quick_manifest=quick_manifest,
         hf_home=hf_home,
@@ -125,6 +132,27 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         profile_contract=profile_contract,
         report=report,
     )
+
+
+def _profile_task_leaves(
+    profile_task: str | None, shard: tuple[int, int] | None
+) -> tuple[str, ...] | None:
+    """Resolve a grouped profile task's deterministic leaf partition."""
+    if shard is None:
+        return None
+    if profile_task is None:
+        raise ValueError("--profile-task-shard requires --profile-task")
+    leaves = {
+        "mvbench": suites.MVBENCH_LEAF_TASKS,
+        "video_mmmu": suites.VIDEO_MMMU_LEAF_TASKS,
+    }.get(profile_task)
+    if leaves is None:
+        raise ValueError("--profile-task-shard supports only mvbench and video_mmmu")
+    index, count = shard
+    selected = leaves[index::count]
+    if not selected:
+        raise ValueError("--profile-task-shard selects no task leaves")
+    return selected
 
 
 def _hf_home(configured: Path | None) -> Path:
@@ -205,7 +233,9 @@ def _report(
     lmms_eval_revision: str,
     execution_policy: suites.ExecutionPolicy,
     profile_contract: contracts.ProfileContract | None,
+    profile_task_leaves: tuple[str, ...] | None,
 ) -> dict[str, object]:
+    profile_task_shard = getattr(args, "profile_task_shard", None)
     return {
         "schema": "modelopt.vlm-evaluation-preflight/v1",
         "profile": suites.EVALUATION_PROFILE,
@@ -225,6 +255,15 @@ def _report(
         ],
         "source_tasks": list(source_tasks),
         "profile_task": getattr(args, "profile_task", None),
+        "profile_task_shard": (
+            {
+                "index": profile_task_shard[0],
+                "count": profile_task_shard[1],
+                "leaves": list(profile_task_leaves or ()),
+            }
+            if profile_task_shard is not None
+            else None
+        ),
         "dataset_revisions": revisions,
         "dataset_snapshots": {task: str(snapshot) for task, snapshot in dataset_snapshots.items()},
         "hf_home": str(hf_home),

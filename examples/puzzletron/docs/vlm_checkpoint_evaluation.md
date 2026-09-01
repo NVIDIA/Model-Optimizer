@@ -147,6 +147,13 @@ retains the full profile fingerprint while recording its selected source task in
 the preflight and resumable identity. A complete full-v1 result requires exactly
 one successful shard for each of the eight tasks declared in the manifest.
 
+Grouped tasks can use multiple batch-1 workers without changing inference
+batching. Add `--profile-task-shard INDEX/COUNT` to `mvbench` or `video_mmmu`,
+where `INDEX` is zero-based. For example, shard MVBench as `0/8` through `7/8`
+on an eight-GPU node and combine all leaf-task metrics. Every leaf appears in
+exactly one shard and each result records the selected leaves in its resumable
+identity.
+
 ## Run the default smoke evaluation
 
 ```bash

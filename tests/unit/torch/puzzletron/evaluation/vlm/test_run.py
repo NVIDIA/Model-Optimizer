@@ -632,11 +632,64 @@ def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_pa
     assert configured_tasks == ("modelopt_vlm_benchmark_realworldqa",)
 
 
+def test_full_profile_group_shard_partitions_leaves(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "full-v1",
+            "--profile-task",
+            "mvbench",
+            "--profile-task-shard",
+            "3/8",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+
+    expected_leaves = ("episodic_reasoning", "moving_direction", "egocentric_navigation")
+    assert prepared.profile_task_leaves == expected_leaves
+    assert prepared.report["profile_task_shard"] == {
+        "index": 3,
+        "count": 8,
+        "leaves": list(expected_leaves),
+    }
+    tasks_root, configured_tasks = tasks.prepare(
+        tmp_path / "results",
+        suite=prepared.suite,
+        source_tasks=prepared.source_tasks,
+        profile_task_leaves=prepared.profile_task_leaves,
+        dataset_snapshots=prepared.dataset_snapshots,
+        quick_manifest=prepared.quick_manifest,
+    )
+    assert configured_tasks == ("modelopt_vlm_benchmark_mvbench",)
+    group = json.loads((tasks_root / "modelopt_vlm_benchmark_mvbench.yaml").read_text())
+    assert group["task"] == [f"modelopt_vlm_benchmark_mvbench_{leaf}" for leaf in expected_leaves]
+
+
 @pytest.mark.parametrize(
     ("selection", "message"),
     [
         (("--suite", "short", "--profile-task", "realworldqa"), "requires"),
         (("--profile", "short-v1", "--profile-task", "realworldqa"), "supported only"),
+        (("--profile", "full-v1", "--profile-task-shard", "0/8"), "requires"),
+        (
+            (
+                "--profile",
+                "full-v1",
+                "--profile-task",
+                "realworldqa",
+                "--profile-task-shard",
+                "0/8",
+            ),
+            "supports only",
+        ),
     ],
 )
 def test_profile_task_rejects_invalid_parent(monkeypatch, tmp_path, selection, message):

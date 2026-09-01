@@ -199,6 +199,7 @@ def evaluate(
         args.output_dir,
         suite=prepared.suite,
         source_tasks=prepared.source_tasks,
+        profile_task_leaves=prepared.profile_task_leaves,
         dataset_snapshots=prepared.dataset_snapshots,
         quick_manifest=prepared.quick_manifest,
     )
@@ -238,6 +239,7 @@ def evaluate(
         "lmms_eval_revision": report["lmms_eval_revision"],
         "quick_manifest_sha256": report.get("quick_manifest_sha256"),
         "profile_task": report.get("profile_task"),
+        "profile_task_shard": report.get("profile_task_shard"),
         "source_tasks": report["source_tasks"],
         "suite": prepared.suite,
         "profile_fingerprint": report.get("profile_fingerprint"),
