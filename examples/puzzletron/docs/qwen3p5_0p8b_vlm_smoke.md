@@ -76,6 +76,11 @@ print(f"prepared {manifest['sample_count']} samples with {manifest['image_count'
 PY
 ```
 
+The smoke intentionally cycles eight rows. Before running the production
+campaign, materialize at least 1,024 rows so its 256 optimizer steps at global
+batch size 4 can consume one full training horizon without recycling this tiny
+smoke sample. Keep the same immutable revision and representative subsets.
+
 ## Configure the runner
 
 The example provides the experiment and execution settings. Copy the runner
@@ -188,6 +193,36 @@ multimodal API and provides a value for candidate selection, but it is not a
 performance benchmark. Use more requests, realistic concurrency, and your
 deployment image sizes before drawing throughput conclusions.
 
+## Run the bounded quality comparison
+
+`e2e_vlm_quality_comparison.yaml` adds a pinned student-versus-teacher
+measurement to the two-step lifecycle smoke. It evaluates the first 100 rows of
+the pinned RealWorldQA and MMMU revisions twice with deterministic generation.
+The result retains per-sample outputs, student and teacher metrics, and their
+deltas. It deliberately defines no acceptance threshold: a two-step smoke
+checkpoint validates the machinery, not production model quality.
+
+Use the shared one-GPU execution profile. Completed evaluation repetitions are
+identity-bound and resumable, so a later allocation can continue without
+rerunning them. This opt-in route requires the pinned RealWorldQA and MMMU
+caches and is excluded from default CI:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+Inspect the compiled stage order and one-GPU allocation before launch. Then
+omit `--dry-run` to launch or resume the exact same three-input campaign.
+
 ## Evaluate a saved checkpoint separately
 
 The campaign evaluates saved checkpoints automatically and records the results
@@ -208,13 +243,31 @@ If preflight succeeds, run the same command without `--preflight-only`. The
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 
-## Plan a larger run
+## Run the production campaign
 
-Start from `full_vlm_smoke.yaml` and `execution.single_gpu.yaml`. Copy the run
-config, keep the VLM-specific order of evaluation, materialization, image
-serving, selection, and distillation, then change each small smoke limit for
-your use case. Keep the shared execution profile for a one-GPU run or select a
-profile that matches the intended resources.
+The maintained campaign compares FFN widths 2816 and 2048, approximately 5%
+and 10% whole-model pruning. It gives both candidates 64 KD steps and the same
+bounded RealWorldQA/MMMU evaluation, selects one candidate by image-text loss
+and benchmark rank, then trains that winner cleanly for 256 steps from its
+pre-KD materialized checkpoint. Use the shared one-GPU execution profile:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_production_vlm
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+Inspect the resolved candidates, stage order, worker source revision, and every
+one-GPU scheduler request before omitting `--dry-run`. Treat the checked-in
+sample counts as a reproducible starting point, not a universal production
+budget.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:

@@ -36,6 +36,14 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
+PRODUCTION_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml"
+)
+COMPARISON_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml"
+)
 
 
 def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revision"):
@@ -47,6 +55,18 @@ def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revi
         monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", dataset_revision)
     return compile_campaign_plan(
         experiment_config_path=RUN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=load_execution_config(EXECUTION_PATH),
+        stage_filter="full",
+    )
+
+
+def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
+    return compile_campaign_plan(
+        experiment_config_path=run_path,
         runner=load_runner_config(RUNNER_PATH),
         execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
@@ -144,3 +164,106 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert nodes["vlm_serving"]["config"]["topology"]["server_context_overhead_tokens"] == 16384
     assert config["global_distillation"]["domain"] == "vlm"
     assert config["global_distillation"]["freeze_policy"] == "train_all"
+
+
+def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    production = _compile_campaign(
+        monkeypatch,
+        tmp_path,
+        run_path=PRODUCTION_RUN_PATH,
+    )
+    comparison = _compile_campaign(
+        monkeypatch,
+        tmp_path,
+        run_path=COMPARISON_RUN_PATH,
+    )
+    config = production.experiment_config
+    comparison_config = comparison.experiment_config
+    nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
+    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
+
+    assert config["search_space"]["axes"] == {
+        "ffn_intermediate": {
+            "enabled": True,
+            "teacher_value": 3584,
+            "values": [2816, 2048],
+        }
+    }
+    assert config["mip"]["runs"]["params-90"] is False
+    assert config["global_distillation"]["domain"] == "vlm"
+    assert config["global_distillation"]["freeze_policy"] == "train_all"
+    conservative = config["mip"]["runs"]["conservative-vlm"]
+    assert conservative["variants"] == {
+        "width-2816": {
+            "constraints": {"params": {"max": "95%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [2816]}},
+        },
+        "width-2048": {
+            "constraints": {"params": {"max": "90%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [2048]}},
+        },
+    }
+    assert nodes["screening_kd"] == {
+        "type": "global_kd",
+        "input": "serving",
+        "config": {
+            "seed": 1111,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "max_steps": 64,
+            "global_batch_size": 4,
+            "local_batch_size": 1,
+            "checkpoint_every_steps": 32,
+        },
+    }
+    bounded = nodes["quality_screen"]["config"]
+    assert bounded == nodes["quality_benchmarks"]["config"]
+    assert bounded["profile"] == "qwen35_vlm_quality_comparison"
+    assert bounded["reference_checkpoint"] == config["teacher_dir"]
+    assert bounded["limit_mm_per_prompt"] == {"image": 12}
+    assert nodes["winner"] == {
+        "type": "filter",
+        "input": "quality_screen",
+        "mode": "aggregate_rank",
+        "metrics": [
+            {"metric": "screening_eval.lm_loss", "direction": "minimize"},
+            {
+                "metric": (
+                    "quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
+                ),
+                "direction": "maximize",
+            },
+            {
+                "metric": "quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+                "direction": "maximize",
+            },
+        ],
+        "top_k": 1,
+    }
+    assert nodes["global_kd"] == {
+        "type": "global_kd",
+        "input": "winner",
+        "model_source": "materialized",
+        "config": {
+            "seed": 1111,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "max_steps": 256,
+            "global_batch_size": 4,
+            "local_batch_size": 1,
+            "checkpoint_every_steps": 32,
+        },
+    }
+    comparison_benchmark = comparison_nodes["quality_benchmarks"]
+    assert comparison_benchmark["input"] == "short_vlm_kd"
+    assert comparison_benchmark["failure_policy"] == "strict"
+    comparable_production = dict(bounded)
+    comparable_comparison = dict(comparison_benchmark["config"])
+    assert comparable_production.pop("reference_checkpoint") == config["teacher_dir"]
+    assert comparable_comparison.pop("reference_checkpoint") == comparison_config["teacher_dir"]
+    assert comparable_comparison == comparable_production
+    assert not any("quality_gate" in stage.stage_id for stage in comparison.stages)
+    assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))

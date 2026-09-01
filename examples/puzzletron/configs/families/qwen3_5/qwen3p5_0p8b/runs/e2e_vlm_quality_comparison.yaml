@@ -1,0 +1,38 @@
+# @package _global_
+
+defaults:
+  - full_vlm_smoke
+  - _self_
+
+# Opt-in bounded student-versus-teacher measurement. This keeps the smoke
+# lifecycle small and adds the same pinned RealWorldQA/MMMU contract used by
+# the production campaign. It records evidence without claiming a quality gate.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality}
+display_name: Qwen3p5 0.8B VLM quality comparison
+
+post_mip:
+  flows:
+    params-90:
+      nodes:
+        quality_benchmarks:
+          type: downstream_evaluation
+          input: short_vlm_kd
+          failure_policy: strict
+          config:
+            profile: qwen35_vlm_quality_comparison
+            reference_checkpoint: ${teacher_dir}
+            batch_size: 1
+            timeout_seconds: 14400
+            dtype: bfloat16
+            gpu_memory_utilization: 0.5
+            max_model_len: 16384
+            limit_mm_per_prompt: {image: 12}
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
