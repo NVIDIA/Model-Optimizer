@@ -21,14 +21,14 @@ import math
 import shutil
 
 import pytest
-
-from modelopt.onnx.quantization.sensitivity import score
 from _test_utils.onnx.quantization.sensitivity.models import (
     SYNTHETIC_OP_SCOPE,
     build_conv_mm_ln_onnx,
     deterministic_calibration,
     get_coatnet_paths,
 )
+
+from modelopt.onnx.quantization.sensitivity import score
 
 
 @pytest.fixture(scope="module")
