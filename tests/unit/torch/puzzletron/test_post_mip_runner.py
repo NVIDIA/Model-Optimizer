@@ -25,7 +25,14 @@ from omegaconf import OmegaConf
 import modelopt.torch.puzzletron.stages.future as future_stages
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
-from modelopt.torch.puzzletron.post_mip.records import ArtifactKind
+from modelopt.torch.puzzletron.post_mip.records import (
+    ArchitectureCandidate,
+    ArtifactKind,
+    CandidateLedger,
+    CandidateRevision,
+    CandidateSet,
+    NodeObservation,
+)
 from modelopt.torch.puzzletron.post_mip.runner import (
     _exception_diagnostics,
     _needs_puzzletron_process_group,
@@ -83,7 +90,7 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
 
 @pytest.mark.parametrize(
     "profile",
-    ["qwen35_vlm_realworldqa", "qwen35_vlm_e2e_full_eval"],
+    ["qwen35_vlm_realworldqa", "qwen35_vlm_e2e_full_eval", "qwen35_vlm_short_v1"],
 )
 def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch, profile):
     # Keep the examples-layer VLM dependencies out of core test collection.
@@ -476,6 +483,49 @@ def test_downstream_evaluation_routes_the_pinned_vlm_profile(monkeypatch, tmp_pa
     assert captured["settings"] == {"batch_size": 1, "timeout_seconds": 600}
 
 
+def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_path):
+    from examples.puzzletron.evaluation.vlm import post_mip
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    manifest = tmp_path / "short-v1.json"
+    manifest.write_text("{}")
+    captured = {}
+    monkeypatch.setattr(post_mip.suites, "load_quick_manifest", lambda path: {"path": str(path)})
+    monkeypatch.setattr(post_mip.suites, "manifest_sha256", lambda _manifest: "a" * 64)
+
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        captured.update(args=args, settings=settings_overrides)
+        preflight_callback({"status": "ready"})
+        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": "result.json"}]}
+
+    monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
+    result = post_mip.evaluate_short_v1_checkpoint(
+        checkpoint,
+        output_root=tmp_path / "output",
+        settings={
+            "row_manifest": str(manifest),
+            "row_manifest_sha256": "a" * 64,
+            "batch_size": 1,
+        },
+    )
+
+    assert captured["args"].suite == "quick"
+    assert captured["args"].quick_manifest == manifest
+    assert captured["settings"] == {}
+    assert result["checkpoint"] == str(checkpoint)
+
+    with pytest.raises(ValueError, match="differs from the campaign identity"):
+        post_mip.evaluate_short_v1_checkpoint(
+            checkpoint,
+            output_root=tmp_path / "mismatch",
+            settings={
+                "row_manifest": str(manifest),
+                "row_manifest_sha256": "b" * 64,
+            },
+        )
+
+
 def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tmp_path):
     candidate = tmp_path / "candidate"
     reference = tmp_path / "teacher"
@@ -488,17 +538,62 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
         score = 0.4 if Path(checkpoint_path) == candidate else 0.5
         result_path = tmp_path / f"{Path(checkpoint_path).name}.json"
         result_path.write_text("{}")
-        return {"metrics": {"ifeval.accuracy": score}, "result_path": str(result_path)}
+        profile_path = tmp_path / f"{Path(checkpoint_path).name}-profile.json"
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "profile": "fixture",
+                    "suite": "fixture",
+                    "lmms_eval_revision": "lmms-revision",
+                    "source_tasks": ["ifeval"],
+                    "dataset_revisions": {"ifeval": "dataset-revision"},
+                    "frame_policy": None,
+                    "generation_policy": {"temperature": 0, "do_sample": False},
+                    "sample_limit": 8,
+                    "quick_manifest_sha256": "a" * 64,
+                    "repetitions": 1,
+                }
+            )
+        )
+        return {
+            "metrics": {"ifeval.accuracy": score},
+            "result_path": str(result_path),
+            "profile_path": str(profile_path),
+        }
 
     monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
+    source = CandidateRevision(
+        revision_id="revision",
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(candidate)},
+        producer_node="kd_256",
+    )
+    identity = runner._downstream_evaluation_identity(
+        source=source,
+        reference_checkpoint=reference,
+        profile=None,
+        evaluator_revision="source-revision",
+        settings={"tasks": ["ifeval"]},
+        candidate=fake_evaluate(candidate, output_root=tmp_path, settings={"tasks": ["ifeval"]}),
+    )
+    assert identity["architecture_id"] == "architecture"
+    assert identity["kd"] == {"producer_node": "kd_256", "exposure": None}
+    assert identity["evaluator"]["revision"] == "source-revision"
+    assert identity["evaluator"]["resolved_profile"]["dataset_revisions"] == {
+        "ifeval": "dataset-revision"
+    }
+    calls.clear()
     node = SimpleNamespace(
         node_id="full_benchmarks",
         config={
             "config": {
                 "tasks": ["ifeval"],
+                "evaluator_revision": "source-revision",
                 "reference_checkpoint": str(reference),
                 "recorded_observation": {
                     "repeat_count": 2,
+                    "identity": identity,
                     "metrics": {
                         "candidate.ifeval.accuracy": 0.35,
                         "reference.ifeval.accuracy": 0.5,
@@ -507,12 +602,6 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
             }
         },
     )
-    source = SimpleNamespace(
-        architecture_id="architecture",
-        artifact_kind=ArtifactKind.CHECKPOINT,
-        artifact={"checkpoint": str(candidate)},
-    )
-
     result = runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
 
     assert [call[0] for call in calls] == [candidate, reference]
@@ -531,6 +620,8 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
     assert comparison["delta"]["ifeval.accuracy"] == pytest.approx(-0.1)
     assert comparison["recorded_observation"] == {
         "repeat_count": 2,
+        "status": "matched",
+        "identity": identity,
         "metrics": {
             "candidate.ifeval.accuracy": 0.35,
             "reference.ifeval.accuracy": 0.5,
@@ -540,3 +631,164 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
             "reference.ifeval.accuracy": 0.0,
         },
     }
+    assert comparison["identity"] == identity
+    assert comparison["evidence"] == {
+        "candidate_result_path": str(tmp_path / "candidate.json"),
+        "reference_result_path": str(tmp_path / "teacher.json"),
+    }
+
+
+def test_recorded_observation_differences_are_suppressed_on_identity_mismatch():
+    comparison, metrics = runner._compare_recorded_observation(
+        {"identity": {"manifest": "old"}, "metrics": {"candidate.accuracy": 0.4}},
+        {"candidate.accuracy": 0.5},
+        {"manifest": "current"},
+    )
+
+    assert comparison == {
+        "status": "identity_mismatch",
+        "identity": {"manifest": "old"},
+        "actual_identity": {"manifest": "current"},
+    }
+    assert metrics == {}
+
+
+def test_downstream_evaluation_reuses_one_identity_bound_reference(monkeypatch, tmp_path):
+    reference = tmp_path / "teacher"
+    reference.mkdir()
+    candidates = [tmp_path / "candidate-a", tmp_path / "candidate-b"]
+    for candidate in candidates:
+        candidate.mkdir()
+    calls = []
+
+    def fake_evaluate(checkpoint_path, *, output_root, settings):
+        calls.append(Path(checkpoint_path))
+        return {
+            "metrics": {"accuracy": 0.5 if Path(checkpoint_path) == reference else 0.4},
+            "result_path": str(Path(output_root) / "result.json"),
+        }
+
+    monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
+    node = SimpleNamespace(
+        node_id="short_v1",
+        config={
+            "config": {
+                "reference_checkpoint": str(reference),
+                "reference_once": True,
+                "reference_cache_id": "short-v1-teacher",
+                "tasks": ["fixture"],
+            }
+        },
+    )
+    config = {"puzzle_dir": str(tmp_path)}
+    for index, candidate in enumerate(candidates):
+        source = SimpleNamespace(
+            architecture_id=f"architecture-{index}",
+            artifact_kind=ArtifactKind.CHECKPOINT,
+            artifact={"checkpoint": str(candidate)},
+            producer_node="kd_64",
+        )
+        runner._downstream_evaluation(config, node, source, f"execution-{index}")
+
+    assert calls.count(reference) == 1
+    assert calls == [candidates[0], reference, candidates[1]]
+
+
+def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
+    ledger = CandidateLedger(tmp_path / "ledger")
+    architecture_id = "architecture"
+    ledger.architectures[architecture_id] = ArchitectureCandidate(
+        architecture_id=architecture_id,
+        block_configs=[],
+        mip_metrics={"parameter_ratio": 0.9},
+    )
+    parent = None
+    revisions = {}
+    for node_id, checkpoint in (
+        ("materialized", "pre-kd"),
+        ("kd_64", "step-64"),
+        ("kd_128", "step-128"),
+        ("kd_256", "step-256"),
+    ):
+        revision_id = f"revision-{node_id}"
+        ledger.revisions[revision_id] = CandidateRevision(
+            revision_id=revision_id,
+            architecture_id=architecture_id,
+            artifact_kind=ArtifactKind.CHECKPOINT,
+            artifact={"checkpoint": str(tmp_path / checkpoint)},
+            parent_revision_id=parent,
+            producer_node=node_id,
+        )
+        revisions[node_id] = revision_id
+        parent = revision_id
+    for steps in (64, 128, 256):
+        kd_node = f"kd_{steps}"
+        eval_node = f"short_v1_{steps}"
+        kd_input = revisions["materialized"] if steps == 64 else revisions[f"kd_{steps // 2}"]
+        ledger.observations[kd_node] = {
+            kd_input: NodeObservation(
+                node_id=kd_node,
+                input_revision_id=kd_input,
+                source_revision_id=revisions["materialized"],
+                output_revision_id=revisions[kd_node],
+                status="success",
+                metrics={"exposure.effective_tokens": float(steps * 100)},
+            )
+        }
+        ledger.observations[eval_node] = {
+            revisions[kd_node]: NodeObservation(
+                node_id=eval_node,
+                input_revision_id=revisions[kd_node],
+                source_revision_id=revisions[kd_node],
+                output_revision_id=revisions[kd_node],
+                status="success",
+                metrics={"accuracy": steps / 1000},
+                artifacts={"comparison_path": str(tmp_path / f"comparison-{steps}.json")},
+            )
+        }
+        (tmp_path / f"comparison-{steps}.json").write_text(
+            json.dumps({"identity": {"kd_steps": steps}})
+        )
+    node = SimpleNamespace(
+        node_id="bounded_result",
+        flow_id="campaign",
+        config={
+            "config": {
+                "pre_kd_source": "materialized",
+                "profile": "qwen35_vlm_short_v1",
+                "row_manifest": "/frozen/short-v1.json",
+                "row_manifest_sha256": "a" * 64,
+                "reference_checkpoint": "/teacher",
+                "reference_cache_id": "teacher",
+                "milestones": [
+                    {
+                        "steps": steps,
+                        "kd": f"kd_{steps}",
+                        "evaluation": f"short_v1_{steps}",
+                    }
+                    for steps in (64, 128, 256)
+                ],
+            }
+        },
+    )
+    input_set = CandidateSet.create(
+        "campaign",
+        "selected",
+        [revisions["kd_256"]],
+        producer_execution_identity="selected-execution",
+    )
+
+    observations, output_set = runner._aggregate_result_manifest(
+        {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "manifest-execution"
+    )
+
+    manifest = json.loads(Path(observations[0].artifacts["result_manifest_path"]).read_text())
+    assert output_set.revision_ids == (revisions["kd_256"],)
+    assert manifest["pre_kd"]["checkpoint"] == str(tmp_path / "pre-kd")
+    assert [row["steps"] for row in manifest["milestones"]] == [64, 128, 256]
+    assert manifest["evaluation_identity"]["row_manifest_sha256"] == "a" * 64
+    assert [row["evaluation_identity"] for row in manifest["milestones"]] == [
+        {"kd_steps": 64},
+        {"kd_steps": 128},
+        {"kd_steps": 256},
+    ]

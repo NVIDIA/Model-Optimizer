@@ -264,6 +264,80 @@ def _controller_identity(config: dict, stage_id: str) -> str:
     return CampaignController(plan, executor=object())._stage_execution_identity(node)
 
 
+def _trajectory_config() -> dict:
+    kd = {
+        "type": "global_kd",
+        "model_source": "materialize",
+        "trajectory": "curve",
+        "config": {
+            "resume": True,
+            "max_steps": 64,
+            "global_batch_size": 4,
+        },
+        "exposure": {
+            "cumulative_steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "max_sample_length": 512,
+            "estimated_cumulative_gpu_hours": 0.25,
+        },
+    }
+    return {
+        "mip": {"runs": {"tiny": {}}},
+        "post_mip": {
+            "flows": {
+                "params": {
+                    "source": {"run": "tiny"},
+                    "nodes": {
+                        "materialize": {"type": "materialize"},
+                        "kd_64": kd,
+                        "eval_64": {"type": "downstream_evaluation", "input": "kd_64"},
+                        "kd_128": {
+                            **copy.deepcopy(kd),
+                            "input": "eval_64",
+                            "config": {**kd["config"], "max_steps": 128},
+                            "exposure": {
+                                **kd["exposure"],
+                                "cumulative_steps": 128,
+                                "cumulative_examples": 512,
+                                "estimated_cumulative_gpu_hours": 0.5,
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
+def test_post_mip_kd_trajectory_requires_one_resumable_monotonic_chain():
+    config = _trajectory_config()
+
+    compiled = compile_post_mip_flows(config)
+
+    assert [node.node_id for node in compiled] == ["materialize", "kd_64", "eval_64", "kd_128"]
+
+    config["post_mip"]["flows"]["params"]["nodes"]["kd_128"]["config"]["resume"] = False
+    with pytest.raises(ValueError, match="require config.resume=true"):
+        compile_post_mip_flows(config)
+
+
+def test_post_mip_kd_trajectory_rejects_restart_or_contract_drift():
+    config = _trajectory_config()
+    nodes = config["post_mip"]["flows"]["params"]["nodes"]
+    nodes["kd_128"]["input"] = "materialize"
+    with pytest.raises(ValueError, match="does not depend on 'kd_64'"):
+        compile_post_mip_flows(config)
+
+    config = _trajectory_config()
+    kd_128 = config["post_mip"]["flows"]["params"]["nodes"]["kd_128"]
+    kd_128["config"]["global_batch_size"] = 8
+    kd_128["exposure"]["global_batch_size"] = 8
+    kd_128["exposure"]["cumulative_examples"] = 1024
+    with pytest.raises(ValueError, match="changes its resume contract"):
+        compile_post_mip_flows(config)
+
+
 def test_post_mip_currentness_does_not_initialize_the_candidate_registry(tmp_path: Path):
     config, _ledger, _roots = _identity_fixture(tmp_path)
     config["post_mip"]["flows"]["params"]["nodes"]["root_select"] = {

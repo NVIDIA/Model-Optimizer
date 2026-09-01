@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import math
 import os
 import sys
+import time
 import traceback
 import uuid
 from contextlib import contextmanager
@@ -39,7 +41,7 @@ from .identity import (
     post_mip_execution_contract,
     post_mip_execution_contract_identity,
 )
-from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservation
+from .records import ArtifactKind, CandidateLedger, CandidateRevision, CandidateSet, NodeObservation
 
 __all__ = [
     "aggregate_post_mip_node",
@@ -163,7 +165,10 @@ def _materialize(
     execution_identity: str,
 ) -> dict[str, Any]:
     if source.artifact_kind is ArtifactKind.CHECKPOINT:
-        return {"artifact_kind": "checkpoint", "checkpoint": source.artifact["checkpoint"]}
+        return {
+            "artifact_kind": "checkpoint",
+            "checkpoint": source.artifact["checkpoint"],
+        }
     from ..anymodel.registry import resolve_descriptor_from_pretrained
     from ..replacement_library.library import ReplacementLibrary
     from ..replacement_library.replacement_utils import parse_layer_replacement
@@ -566,7 +571,10 @@ def _downstream_evaluation(
     )
     settings = copy.deepcopy(dict(node.config.get("config") or {}))
     reference_checkpoint = settings.pop("reference_checkpoint", None)
+    reference_once = bool(settings.pop("reference_once", False))
+    reference_cache_id = settings.pop("reference_cache_id", None)
     recorded_observation = settings.pop("recorded_observation", None)
+    evaluator_revision = settings.pop("evaluator_revision", None)
     profile = settings.pop("profile", None)
     evaluator = run_lmms_eval_checkpoint
     if profile is not None:
@@ -583,11 +591,45 @@ def _downstream_evaluation(
     if reference_checkpoint is None:
         return candidate
 
-    reference = evaluator(
-        reference_checkpoint,
-        output_root=output_root.parent / "reference",
-        settings=settings,
-    )
+    if reference_once:
+        if not reference_cache_id:
+            raise ValueError("reference_once requires reference_cache_id")
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        if any(character not in allowed for character in str(reference_cache_id)):
+            raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
+        cache_identity = stable_hash(
+            {
+                "checkpoint": str(reference_checkpoint),
+                "profile": profile,
+                "settings": settings,
+            },
+            prefix="post_mip_reference_evaluation",
+        )
+        cache_root = (
+            _puzzle_dir(config)
+            / "artifacts/post_mip/reference_evaluations"
+            / str(reference_cache_id)
+            / cache_identity
+        )
+        result_path = cache_root / "result.json"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with (cache_root / "evaluation.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if result_path.is_file():
+                reference = json.loads(result_path.read_text())
+            else:
+                reference = evaluator(
+                    reference_checkpoint,
+                    output_root=cache_root / "raw",
+                    settings=settings,
+                )
+                _atomic_json(result_path, reference)
+    else:
+        reference = evaluator(
+            reference_checkpoint,
+            output_root=output_root.parent / "reference",
+            settings=settings,
+        )
     candidate_metrics = dict(candidate["metrics"])
     reference_metrics = dict(reference["metrics"])
     if candidate_metrics.keys() != reference_metrics.keys():
@@ -605,9 +647,18 @@ def _downstream_evaluation(
             for name, value in candidate_metrics.items()
         },
     }
+    evaluation_identity = _downstream_evaluation_identity(
+        source=source,
+        reference_checkpoint=reference_checkpoint,
+        profile=profile,
+        evaluator_revision=evaluator_revision,
+        settings=settings,
+        candidate=candidate,
+    )
     observation_comparison, observation_metrics = _compare_recorded_observation(
         recorded_observation,
         comparison_metrics,
+        evaluation_identity,
     )
     comparison_metrics.update(observation_metrics)
     comparison_path = _atomic_json(
@@ -627,6 +678,11 @@ def _downstream_evaluation(
                 name: candidate_metrics[name] - reference_metrics[name]
                 for name in candidate_metrics
             },
+            "identity": evaluation_identity,
+            "evidence": {
+                "candidate_result_path": candidate["result_path"],
+                "reference_result_path": reference["result_path"],
+            },
             **(
                 {"recorded_observation": observation_comparison}
                 if observation_comparison is not None
@@ -645,12 +701,25 @@ def _downstream_evaluation(
 def _compare_recorded_observation(
     observation: Any,
     actual_metrics: Mapping[str, float],
+    actual_identity: Mapping[str, Any],
 ) -> tuple[dict[str, Any] | None, dict[str, float]]:
     """Compare with a historical observation without creating an acceptance gate."""
     if observation is None:
         return None, {}
     if not isinstance(observation, Mapping):
         raise TypeError("recorded_observation must be a mapping")
+    expected_identity = observation.get("identity")
+    if not isinstance(expected_identity, Mapping) or not expected_identity:
+        raise ValueError("recorded_observation.identity must be a non-empty mapping")
+    if canonicalize(expected_identity) != canonicalize(actual_identity):
+        return (
+            {
+                "status": "identity_mismatch",
+                "identity": canonicalize(expected_identity),
+                "actual_identity": canonicalize(actual_identity),
+            },
+            {},
+        )
     raw_metrics = observation.get("metrics")
     if not isinstance(raw_metrics, Mapping) or not raw_metrics:
         raise ValueError("recorded_observation.metrics must be a non-empty mapping")
@@ -668,11 +737,95 @@ def _compare_recorded_observation(
     differences = {name: actual_metrics[name] - value for name, value in recorded.items()}
     return (
         {
-            **{key: copy.deepcopy(value) for key, value in observation.items() if key != "metrics"},
+            **{
+                key: copy.deepcopy(value)
+                for key, value in observation.items()
+                if key not in {"identity", "metrics"}
+            },
+            "status": "matched",
+            "identity": canonicalize(expected_identity),
             "metrics": recorded,
             "difference_from_recorded": differences,
         },
         {f"observation_delta.{name}": value for name, value in differences.items()},
+    )
+
+
+def _downstream_evaluation_identity(
+    *,
+    source: CandidateRevision,
+    reference_checkpoint: str | Path,
+    profile: Any,
+    evaluator_revision: Any,
+    settings: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind one comparison to its checkpoint, KD, data, and evaluator contract."""
+
+    # Import lazily because the dependency-light orchestration controller must
+    # not load the full runtime configuration stack on a login node.
+    from ..distributed_eval.config import checkpoint_identity
+
+    profile_identity = None
+    profile_path = candidate.get("profile_path")
+    if profile_path:
+        report = json.loads(Path(str(profile_path)).read_text())
+        profile_identity = {
+            key: report.get(key)
+            for key in (
+                "profile",
+                "suite",
+                "lmms_eval_revision",
+                "source_tasks",
+                "dataset_revisions",
+                "frame_policy",
+                "generation_policy",
+                "sample_limit",
+                "quick_manifest_sha256",
+                "repetitions",
+            )
+        }
+    exposure = None
+    exposure_path = source.artifact.get("exposure_path")
+    if exposure_path:
+        raw_exposure = json.loads(Path(str(exposure_path)).read_text())
+        exposure = {
+            key: raw_exposure.get(key)
+            for key in (
+                "cumulative_steps",
+                "global_batch_size",
+                "cumulative_examples",
+                "max_sample_length",
+                "effective_tokens",
+                "effective_tokens_source",
+                "token_upper_bound",
+            )
+        }
+    evaluator_settings = {
+        key: copy.deepcopy(value)
+        for key, value in settings.items()
+        if key not in {"row_manifest", "timeout_seconds"}
+    }
+    return canonicalize(
+        {
+            "candidate_checkpoint_fingerprint": checkpoint_identity(source.artifact["checkpoint"])[
+                "fingerprint"
+            ],
+            "reference_checkpoint_fingerprint": checkpoint_identity(reference_checkpoint)[
+                "fingerprint"
+            ],
+            "architecture_id": source.architecture_id,
+            "kd": {
+                "producer_node": source.producer_node,
+                "exposure": exposure,
+            },
+            "evaluator": {
+                "profile": profile,
+                "revision": evaluator_revision,
+                "settings": evaluator_settings,
+                "resolved_profile": profile_identity,
+            },
+        }
     )
 
 
@@ -701,23 +854,101 @@ def _global_kd(
 
     candidate = copy.deepcopy(config)
     settings = _post_mip_kd_settings(config, node.config.get("config") or {})
-    output = (
-        _execution_root(config, node, execution_identity) / "checkpoints" / source.architecture_id
-    )
+    trajectory = node.config.get("trajectory")
+    if trajectory is None:
+        output = (
+            _execution_root(config, node, execution_identity)
+            / "checkpoints"
+            / source.architecture_id
+        )
+    else:
+        resume_contract = {
+            key: value
+            for key, value in settings.items()
+            if key not in {"max_steps", "checkpoint_every_steps"}
+        }
+        trajectory_identity = stable_hash(
+            {
+                "trajectory": trajectory,
+                "source_revision": source.revision_id,
+                "student_checkpoint": source.artifact["checkpoint"],
+                "resume_contract": resume_contract,
+            },
+            prefix="post_mip_kd_trajectory",
+        )
+        output = (
+            _puzzle_dir(config)
+            / "artifacts/post_mip/kd_trajectories"
+            / str(trajectory)
+            / trajectory_identity
+            / source.architecture_id
+        )
     settings.update(student_dir=source.artifact["checkpoint"], output_dir=str(output))
     candidate["distillation"] = settings
     kd_config = build_global_kd_config(candidate)
+    started = time.monotonic()
     result = run_global_kd(kd_config)
+    elapsed_gpu_hours = (
+        (time.monotonic() - started) * max(1, int(os.environ.get("WORLD_SIZE", "1"))) / 3600
+    )
     summary_path = _write_global_distillation_summary(kd_config, result)
     summary = json.loads(summary_path.read_text())
     checkpoint = summary.get("post_kd_checkpoint")
     if not checkpoint:
         raise RuntimeError("global KD produced no consolidated checkpoint")
+    metrics = dict(result.metrics)
+    exposure = copy.deepcopy(dict(node.config.get("exposure") or {}))
+    exposure_path = None
+    if exposure:
+        training_records = []
+        training_log = output / "checkpoints" / "training.jsonl"
+        if training_log.is_file():
+            training_records = [
+                json.loads(line) for line in training_log.read_text().splitlines() if line.strip()
+            ]
+        effective_tokens = sum(
+            int(record.get("num_label_tokens", 0)) for record in training_records
+        )
+        if effective_tokens <= 0:
+            raise RuntimeError("global KD produced no non-padding token accounting")
+        exposure_root = output / "exposure"
+        milestone_path = exposure_root / f"step_{kd_config.max_steps:06d}.json"
+        prior_gpu_hours = 0.0
+        for path in exposure_root.glob("step_*.json"):
+            if path != milestone_path:
+                prior_gpu_hours += float(
+                    json.loads(path.read_text()).get("actual_incremental_gpu_hours", 0.0)
+                )
+        exposure.update(
+            effective_tokens=effective_tokens,
+            effective_tokens_source="training.jsonl:num_label_tokens",
+            token_upper_bound=(
+                int(exposure["cumulative_examples"]) * int(exposure["max_sample_length"])
+            ),
+            actual_incremental_gpu_hours=elapsed_gpu_hours,
+            actual_cumulative_gpu_hours=prior_gpu_hours + elapsed_gpu_hours,
+        )
+        exposure_path = _atomic_json(milestone_path, exposure)
+        metrics.update(
+            {
+                "exposure.global_batch_size": float(exposure["global_batch_size"]),
+                "exposure.cumulative_examples": float(exposure["cumulative_examples"]),
+                "exposure.effective_tokens": float(effective_tokens),
+                "exposure.estimated_cumulative_gpu_hours": float(
+                    exposure["estimated_cumulative_gpu_hours"]
+                ),
+                "exposure.actual_incremental_gpu_hours": elapsed_gpu_hours,
+                "exposure.actual_cumulative_gpu_hours": float(
+                    exposure["actual_cumulative_gpu_hours"]
+                ),
+            }
+        )
     return {
         "artifact_kind": "checkpoint",
         "checkpoint": str(checkpoint),
-        "metrics": dict(result.metrics),
+        "metrics": metrics,
         "summary_path": str(summary_path),
+        **({"exposure_path": str(exposure_path)} if exposure_path is not None else {}),
     }
 
 
@@ -873,6 +1104,98 @@ def _aggregate_filter(
     )
 
 
+def _aggregate_result_manifest(
+    config: Mapping[str, Any],
+    ledger: CandidateLedger,
+    node: CompiledPostMIPNode,
+    input_set: CandidateSet,
+    execution_identity: str,
+) -> tuple[list[NodeObservation], CandidateSet]:
+    """Freeze pre-KD lineage, learning-curve metrics, and exposure in one artifact."""
+
+    settings = dict(node.config.get("config") or {})
+    pre_kd_source = str(settings["pre_kd_source"])
+    observations = []
+    for revision_id in input_set.revision_ids:
+        revision = ledger.revisions[revision_id]
+        pre_kd = ledger.source_revision(revision_id, pre_kd_source)
+        milestones = []
+        for milestone in settings["milestones"]:
+            kd_observation = ledger._observation_for_revision(str(milestone["kd"]), revision_id)
+            evaluation_observation = ledger._observation_for_revision(
+                str(milestone["evaluation"]), revision_id
+            )
+            if kd_observation is None or kd_observation.output_revision_id is None:
+                raise RuntimeError(
+                    f"missing KD milestone {milestone['kd']!r} for {revision.architecture_id}"
+                )
+            if evaluation_observation is None:
+                raise RuntimeError(
+                    "missing evaluation milestone "
+                    f"{milestone['evaluation']!r} for {revision.architecture_id}"
+                )
+            kd_revision = ledger.revisions[kd_observation.output_revision_id]
+            milestones.append(
+                {
+                    "steps": int(milestone["steps"]),
+                    "kd_node": str(milestone["kd"]),
+                    "evaluation_node": str(milestone["evaluation"]),
+                    "checkpoint": kd_revision.artifact["checkpoint"],
+                    "kd_metrics": kd_observation.metrics,
+                    "evaluation_metrics": evaluation_observation.metrics,
+                    "kd_artifacts": kd_observation.artifacts,
+                    "evaluation_artifacts": evaluation_observation.artifacts,
+                    "evaluation_identity": json.loads(
+                        Path(evaluation_observation.artifacts["comparison_path"]).read_text()
+                    )["identity"],
+                }
+            )
+        payload = {
+            "schema": "modelopt.puzzletron.vlm-kd-learning-curve/v1",
+            "execution_identity": execution_identity,
+            "architecture_id": revision.architecture_id,
+            "architecture": canonicalize(asdict(ledger.architectures[revision.architecture_id])),
+            "pre_kd": {
+                "revision_id": pre_kd.revision_id,
+                "checkpoint": pre_kd.artifact["checkpoint"],
+            },
+            "evaluation_identity": {
+                "profile": settings.get("profile"),
+                "row_manifest": settings.get("row_manifest"),
+                "row_manifest_sha256": settings.get("row_manifest_sha256"),
+                "reference_checkpoint": settings.get("reference_checkpoint"),
+                "reference_cache_id": settings.get("reference_cache_id"),
+            },
+            "milestones": milestones,
+        }
+        manifest_path = (
+            _execution_root(config, node, execution_identity)
+            / "results"
+            / f"{revision.architecture_id}.json"
+        )
+        canonical_payload = canonicalize(payload)
+        if manifest_path.is_file() and json.loads(manifest_path.read_text()) != canonical_payload:
+            raise RuntimeError(f"immutable learning-curve result changed: {manifest_path}")
+        if not manifest_path.is_file():
+            _atomic_json(manifest_path, payload)
+        observations.append(
+            NodeObservation(
+                node_id=node.node_id,
+                input_revision_id=revision_id,
+                source_revision_id=revision_id,
+                output_revision_id=revision_id,
+                status="selected",
+                artifacts={"result_manifest_path": str(manifest_path)},
+            )
+        )
+    return observations, CandidateSet.create(
+        node.flow_id,
+        node.node_id,
+        input_set.revision_ids,
+        producer_execution_identity=execution_identity,
+    )
+
+
 def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, Any]:
     node = _compiled_node(config, stage_id)
     ledger = _ledger(config)
@@ -883,6 +1206,10 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
     timed_out_candidates = []
     if node.node_type == "filter":
         observations, output_set = _aggregate_filter(ledger, node, input_set, execution_identity)
+    elif node.node_type == "result_manifest":
+        observations, output_set = _aggregate_result_manifest(
+            config, ledger, node, input_set, execution_identity
+        )
     elif node.node_type == "manual_filter":
         decision_path = _node_root(config, node) / "manual_decision.json"
         decision = json.loads(decision_path.read_text()) if decision_path.is_file() else {}
@@ -956,7 +1283,7 @@ def aggregate_post_mip_node(config: dict[str, Any], stage_id: str) -> dict[str, 
                     artifact={
                         key: value
                         for key, value in row.items()
-                        if key in {"checkpoint", "summary_path", "result_path"}
+                        if key in {"checkpoint", "exposure_path", "summary_path", "result_path"}
                     },
                     parent_revision_id=row["source_revision_id"],
                     producer_node=node.node_id,

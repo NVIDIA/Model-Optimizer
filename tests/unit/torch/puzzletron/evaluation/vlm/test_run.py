@@ -86,6 +86,47 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
+def test_checkpoint_contract_accepts_aligned_realized_hidden_width_reduction(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        architectures=["AnyModel"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config["text_config"]["hidden_size"] = 960
+    config_path.write_text(json.dumps(config) + "\n")
+
+    vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
+@pytest.mark.parametrize("hidden_size", [0, 1000, 1088, True])
+def test_checkpoint_contract_rejects_invalid_realized_hidden_width(tmp_path, hidden_size):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        architectures=["AnyModel"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+    )
+    config["text_config"]["hidden_size"] = hidden_size
+    config_path.write_text(json.dumps(config) + "\n")
+
+    with pytest.raises(ValueError, match="positive 64-aligned reduction"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
+def test_checkpoint_contract_keeps_native_hidden_width_exact(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config["text_config"]["hidden_size"] = 960
+    config_path.write_text(json.dumps(config) + "\n")
+
+    with pytest.raises(ValueError, match="checkpoint geometry differs"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
 @pytest.mark.parametrize("processor_content", [None, "", "[]\n", "{\n", b"\xff"])
 def test_checkpoint_contract_requires_valid_local_processor_assets(tmp_path, processor_content):
     checkpoint_path = _write_checkpoint(tmp_path)

@@ -36,6 +36,7 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
+CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
 CAMPAIGN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
@@ -43,6 +44,14 @@ CAMPAIGN_PATH = (
 COMPARISON_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml"
+)
+EXTENDED_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke_extended.yaml"
+)
+EXTENDED_COMPARISON_RUN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison_extended.yaml"
 )
 FAMILY_PRESETS_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/setup_v2_defaults.yaml"
@@ -72,6 +81,8 @@ def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path):
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
+    monkeypatch.setenv("PUZZLETRON_VLM_SHORT_V1_MANIFEST", str(tmp_path / "short-v1.json"))
+    monkeypatch.setenv("PUZZLETRON_VLM_SHORT_V1_SHA256", "a" * 64)
     return compile_campaign_plan(
         experiment_config_path=run_path,
         runner=load_runner_config(RUNNER_PATH),
@@ -224,7 +235,55 @@ def test_qwen3p5_0p8b_vlm_comparison_uses_the_shared_evaluator(
     assert all(stage.total_gpus == 1 for stage in comparison.stages)
 
 
-def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
+def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    smoke = _compile_campaign(monkeypatch, tmp_path, run_path=EXTENDED_RUN_PATH)
+    regression = _compile_campaign(
+        monkeypatch,
+        tmp_path,
+        run_path=EXTENDED_COMPARISON_RUN_PATH,
+    )
+    config = smoke.experiment_config
+    profile = config["mip"]["runs"]["params-90"]
+    stages = {stage.stage_id: stage for stage in smoke.stages}
+    regression_stages = {stage.stage_id: stage for stage in regression.stages}
+
+    assert yaml.safe_load(EXTENDED_RUN_PATH.read_text())["defaults"] == [
+        "full_vlm_smoke",
+        "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_",
+        "_self_",
+    ]
+    assert config["sort"]["deferred_axes"] == []
+    assert config["width_sanity"]["axes"] == [
+        "hidden_width",
+        "ffn_intermediate",
+    ]
+    assert config["depth_importance"]["max_removals"] == 1
+    assert profile["constraints"] == {"params": {"min": "85%", "max": "95%"}}
+    assert profile["search_space"] == {
+        "depth": [1],
+        "embedding": [960],
+        "axes_default": "teacher",
+        "axes": {
+            "ffn.intermediate_size": [2816],
+        },
+    }
+    assert profile["solver"]["num_solutions"] == 1
+    assert profile["homogeneous"]["enabled"] is False
+    assert "depth_importance" in stages
+    assert stages["post.params-90.materialized"].parents == ("post.params-90.best_vlm_loss",)
+    assert stages["post.params-90.post_kd_checkpoint_eval"].parents == (
+        "post.params-90.short_vlm_kd",
+    )
+    assert regression_stages["post.params-90.quality_benchmarks"].parents == (
+        "post.params-90.short_vlm_kd",
+    )
+    assert all(stage.total_gpus == 1 for stage in (*smoke.stages, *regression.stages))
+
+
+def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -243,90 +302,199 @@ def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
     comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
 
-    assert yaml.safe_load(CAMPAIGN_PATH.read_text())["defaults"] == ["mip_vlm_smoke", "_self_"]
-    assert config["search_space"]["axes"] == {
-        "ffn_intermediate": {
-            "enabled": True,
-            "teacher_value": 3584,
-            "values": [2816, 2048],
-        }
-    }
+    assert yaml.safe_load(CAMPAIGN_PATH.read_text())["defaults"] == [
+        "mip_vlm_smoke",
+        "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_",
+        "_self_",
+    ]
     assert config["mip"]["runs"]["params-90"] is False
     assert config["global_distillation"]["domain"] == "vlm"
     assert config["global_distillation"]["freeze_policy"] == "train_all"
-    ffn_candidates = config["mip"]["runs"]["ffn-candidates"]
-    assert ffn_candidates["variants"] == {
-        "width-2816": {
-            "constraints": {"params": {"max": "95%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [2816]}},
+    controls = config["mip"]["runs"]["calibration-controls"]
+    assert controls["variants"] == {
+        "width-3328": {
+            "constraints": {"params": {"min": "95%", "max": "100%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [3328]}},
         },
-        "width-2048": {
-            "constraints": {"params": {"max": "90%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [2048]}},
-        },
-    }
-    assert nodes["screening_kd"] == {
-        "type": "global_kd",
-        "input": "serving",
-        "config": {
-            "seed": 1111,
-            "validation_seed": 445,
-            "shuffle_training_data": True,
-            "max_steps": 64,
-            "global_batch_size": 4,
-            "local_batch_size": 1,
-            "checkpoint_every_steps": 32,
+        "width-3072": {
+            "constraints": {"params": {"min": "95%", "max": "100%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [3072]}},
         },
     }
-    screening = nodes["quality_screen"]["config"]
-    final = nodes["quality_benchmarks"]["config"]
-    assert screening["profile"] == "qwen35_vlm_e2e_full_eval"
-    assert "reference_checkpoint" not in screening
-    assert final["reference_checkpoint"] == config["teacher_dir"]
-    assert screening["limit_mm_per_prompt"] == {"image": 12}
-    assert {
-        key: value for key, value in final.items() if key != "reference_checkpoint"
-    } == screening
-    assert nodes["selected"] == {
+    candidates = config["mip"]["runs"]["multi-axis-candidates"]
+    assert candidates["constraints"] == {"params": {"min": "85%", "max": "95%"}}
+    assert candidates["variants"] == {
+        "retained-95": {"constraints": {"params": {"min": "92.5%", "max": "95%"}}},
+        "retained-90": {"constraints": {"params": {"min": "87.5%", "max": "92.5%"}}},
+        "retained-85": {"constraints": {"params": {"min": "85%", "max": "87.5%"}}},
+    }
+    assert candidates["solver"]["num_solutions"] == 8
+    assert candidates["homogeneous"]["enabled"] is False
+    assert config["post_mip"]["flows"]["candidate-evaluation"]["source"]["run"] == (
+        "multi-axis-candidates"
+    )
+    assert nodes["legal_candidates"] == {
         "type": "filter",
-        "input": "quality_screen",
+        "mode": "top_k",
+        "metric": "mip.score",
+        "direction": "minimize",
+        "top_k": 24,
+    }
+    assert nodes["online_eval"]["input"] == "legal_candidates"
+    assert nodes["best_lm"]["top_k"] == 8
+    assert nodes["kd_shortlist"] == {
+        "type": "filter",
+        "input": "serving",
         "mode": "aggregate_rank",
         "metrics": [
-            {"metric": "screening_eval.lm_loss", "direction": "minimize"},
+            {"metric": "online_eval.lm_loss", "direction": "minimize"},
             {
-                "metric": (
-                    "quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
-                ),
-                "direction": "maximize",
-            },
-            {
-                "metric": "quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+                "metric": "serving.images_12.concurrency_4.image_throughput",
                 "direction": "maximize",
             },
         ],
-        "top_k": 1,
+        "top_k": 4,
     }
-    assert nodes["global_kd"] == {
-        "type": "global_kd",
-        "input": "selected",
-        "model_source": "materialized",
-        "config": {
-            "seed": 1111,
-            "validation_seed": 445,
-            "shuffle_training_data": True,
-            "max_steps": 256,
-            "global_batch_size": 4,
-            "local_batch_size": 1,
-            "checkpoint_every_steps": 32,
-        },
+    trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
+    assert [node["config"]["max_steps"] for node in trajectory_nodes] == [
+        64,
+        128,
+        256,
+        512,
+        1024,
+    ]
+    assert {node["trajectory"] for node in trajectory_nodes} == {
+        "retained-candidate-learning-curve"
     }
+    assert {node["model_source"] for node in trajectory_nodes} == {"materialized"}
+    assert all(node["config"]["resume"] is True for node in trajectory_nodes)
+    assert all(node["config"]["global_batch_size"] == 4 for node in trajectory_nodes)
+    assert [node["exposure"]["cumulative_examples"] for node in trajectory_nodes] == [
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+    ]
+    assert [node["exposure"]["estimated_cumulative_gpu_hours"] for node in trajectory_nodes] == [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        4.0,
+    ]
+    milestone_evaluations = [nodes[f"short_v1_{steps}"]["config"] for steps in (64, 128, 256)]
+    assert all(settings["profile"] == "qwen35_vlm_short_v1" for settings in milestone_evaluations)
+    assert {settings["row_manifest"] for settings in milestone_evaluations} == {
+        str(tmp_path / "short-v1.json")
+    }
+    assert {settings["row_manifest_sha256"] for settings in milestone_evaluations} == {"a" * 64}
+    assert {settings["reference_checkpoint"] for settings in milestone_evaluations} == {
+        config["teacher_dir"]
+    }
+    assert all(settings["reference_once"] is True for settings in milestone_evaluations)
+    assert {settings["reference_cache_id"] for settings in milestone_evaluations} == {
+        "qwen35-0p8b-short-v1-teacher"
+    }
+    assert nodes["selected"]["type"] == "manual_filter"
+    assert nodes["selected"]["input"] == "short_v1_256"
+    assert nodes["approve_512"]["type"] == "manual_filter"
+    assert nodes["approve_512"]["input"] == "bounded_result"
+    assert nodes["approve_1024"]["type"] == "manual_filter"
+    assert nodes["approve_1024"]["input"] == "short_v1_512"
+    assert nodes["bounded_result"]["config"] == {
+        "pre_kd_source": "materialized",
+        "profile": "qwen35_vlm_short_v1",
+        "row_manifest": str(tmp_path / "short-v1.json"),
+        "row_manifest_sha256": "a" * 64,
+        "reference_checkpoint": config["teacher_dir"],
+        "reference_cache_id": "qwen35-0p8b-short-v1-teacher",
+        "milestones": [
+            {"steps": 64, "kd": "kd_64", "evaluation": "short_v1_64"},
+            {"steps": 128, "kd": "kd_128", "evaluation": "short_v1_128"},
+            {"steps": 256, "kd": "kd_256", "evaluation": "short_v1_256"},
+        ],
+    }
+    control_nodes = config["post_mip"]["flows"]["control-learning-curve"]["nodes"]
+    assert config["post_mip"]["flows"]["control-learning-curve"]["source"]["run"] == (
+        "calibration-controls"
+    )
+    assert [
+        control_nodes[f"control_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
+    ] == [
+        64,
+        128,
+        256,
+    ]
+    assert {control_nodes[f"control_kd_{steps}"]["trajectory"] for steps in (64, 128, 256)} == {
+        "conservative-control-learning-curve"
+    }
+    assert control_nodes["control_result"]["config"]["milestones"] == [
+        {"steps": 64, "kd": "control_kd_64", "evaluation": "control_short_v1_64"},
+        {"steps": 128, "kd": "control_kd_128", "evaluation": "control_short_v1_128"},
+        {"steps": 256, "kd": "control_kd_256", "evaluation": "control_short_v1_256"},
+    ]
     comparison_benchmark = comparison_nodes["quality_benchmarks"]
     assert comparison_benchmark["input"] == "short_vlm_kd"
     assert comparison_benchmark["failure_policy"] == "strict"
-    comparable_campaign = dict(final)
-    comparable_comparison = dict(comparison_benchmark["config"])
-    assert comparable_campaign.pop("reference_checkpoint") == config["teacher_dir"]
-    assert comparable_comparison.pop("reference_checkpoint") == comparison_config["teacher_dir"]
-    assert comparable_comparison == comparable_campaign
-    assert "recorded_observation" not in comparison_benchmark["config"]
+    assert (
+        comparison_benchmark["config"]["reference_checkpoint"] == comparison_config["teacher_dir"]
+    )
+    campaign_post_stages = tuple(
+        stage.stage_id for stage in campaign.stages if stage.stage_id.startswith("post.")
+    )
+    assert campaign_post_stages[:7] == (
+        "post.candidate-evaluation.legal_candidates",
+        "post.candidate-evaluation.online_eval",
+        "post.candidate-evaluation.best_lm",
+        "post.candidate-evaluation.materialized",
+        "post.candidate-evaluation.serving",
+        "post.candidate-evaluation.kd_shortlist",
+        "post.candidate-evaluation.kd_64",
+    )
+    assert campaign_post_stages[7:13] == (
+        "post.candidate-evaluation.short_v1_64",
+        "post.candidate-evaluation.kd_128",
+        "post.candidate-evaluation.short_v1_128",
+        "post.candidate-evaluation.kd_256",
+        "post.candidate-evaluation.short_v1_256",
+        "post.candidate-evaluation.selected",
+    )
     assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))
+
+
+def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
+    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
+    monkeypatch.setenv("PUZZLETRON_VLM_SHORT_V1_MANIFEST", str(tmp_path / "short-v1.json"))
+    monkeypatch.setenv("PUZZLETRON_VLM_SHORT_V1_SHA256", "a" * 64)
+    execution = load_execution_config(CAMPAIGN_EXECUTION_PATH)
+    campaign = compile_campaign_plan(
+        experiment_config_path=CAMPAIGN_PATH,
+        runner=load_runner_config(RUNNER_PATH),
+        execution=execution,
+        stage_filter="full",
+    )
+    stages = {stage.stage_id: stage for stage in campaign.stages}
+    configured = set(execution["stages"])
+    compiled = set(stages)
+
+    assert configured <= compiled
+    assert not any(
+        stale in stage_id
+        for stage_id in configured
+        for stale in ("screening_kd", "screening_eval", "quality_screen")
+    )
+    for prefix in ("post.candidate-evaluation", "post.control-learning-curve"):
+        for steps in (64, 128, 256):
+            kd = stages[f"{prefix}.{'control_' if 'control' in prefix else ''}kd_{steps}"]
+            evaluation = stages[
+                f"{prefix}.{'control_' if 'control' in prefix else ''}short_v1_{steps}"
+            ]
+            assert kd.total_gpus == 2
+            assert evaluation.total_gpus == 2
+            assert kd.gpus_per_instance == evaluation.gpus_per_instance == 1

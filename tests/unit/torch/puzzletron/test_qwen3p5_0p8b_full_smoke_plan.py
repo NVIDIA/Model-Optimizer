@@ -230,15 +230,15 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
     regression = pipeline_config_from_path(EXTENDED_QUALITY_COMPARISON_PATH)
     campaign = pipeline_config_from_path(EXTENDED_CAMPAIGN_PATH)
     expected_axes = {
-        "hidden_width": {"enabled": True, "teacher_value": 1024, "values": [768]},
-        "kv_groups": {"enabled": True, "teacher_value": 2, "values": [1]},
-        "q_heads_per_group": {"enabled": True, "teacher_value": 4, "values": [2]},
+        "hidden_width": {"enabled": True, "teacher_value": 1024, "values": [960, 896]},
+        "kv_groups": {"enabled": False, "teacher_value": 2, "values": []},
+        "q_heads_per_group": {"enabled": False, "teacher_value": 4, "values": []},
         "ffn_intermediate": {
             "enabled": True,
             "teacher_value": 3584,
-            "values": [3072, 2560, 2048, 1792, 1536],
+            "values": [3328, 3072, 2816, 2432, 2048, 1664, 1408],
         },
-        "gdn_key_groups": {"enabled": True, "teacher_value": 16, "values": [12, 8]},
+        "gdn_key_groups": {"enabled": False, "teacher_value": 16, "values": []},
         "gdn_value_heads_per_group": {
             "enabled": False,
             "teacher_value": 1,
@@ -249,15 +249,11 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
             "teacher_value": 128,
             "values": [],
         },
-        "gdn_value_head_dim": {
-            "enabled": True,
-            "teacher_value": 128,
-            "values": [96],
-        },
+        "gdn_value_head_dim": {"enabled": False, "teacher_value": 128, "values": []},
     }
     expected_mip_grid = {
         "depth": [0, 1, 2],
-        "embedding": [1024, 768],
+        "embedding": [1024, 960, 896],
         "axes_default": "all",
         "axes": {"ffn.intermediate_size": "all"},
     }
@@ -265,18 +261,15 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
     assert smoke["search_space"]["axes"] == expected_axes
     assert regression["search_space"]["axes"] == expected_axes
     assert campaign["search_space"]["axes"] == expected_axes
-    assert smoke["embedding_pruning"]["widths"] == [1024, 768]
-    assert smoke["pruning"]["attention_scored_axes"] == ["kv_groups", "q_heads_per_group"]
-    assert smoke["pruning"]["gdn_scored_axes"] == ["gdn_key_groups", "gdn_value_head_dim"]
+    assert smoke["embedding_pruning"]["widths"] == [1024, 960, 896]
+    assert smoke["vllm_stats"]["model_hidden_sizes"] == [1024, 960, 896]
+    assert smoke["pruning"]["attention_scored_axes"] == []
+    assert smoke["pruning"]["gdn_scored_axes"] == []
     assert smoke["sort"]["deferred_axes"] == []
     assert smoke["width_sanity"]["hidden_width_diagnostic"] is True
     assert smoke["width_sanity"]["axes"] == [
         "hidden_width",
         "ffn_intermediate",
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_value_head_dim",
     ]
     assert smoke["depth_importance"]["enabled"] is True
     assert smoke["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid

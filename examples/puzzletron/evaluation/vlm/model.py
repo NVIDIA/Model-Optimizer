@@ -36,6 +36,7 @@ _TEXT_GEOMETRY = {
     "num_key_value_heads": 2,
     "vocab_size": 248320,
 }
+_REALIZED_HIDDEN_WIDTH_ALIGNMENT = 64
 
 
 def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
@@ -56,13 +57,29 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     text_config = config.get("text_config")
     if not isinstance(text_config, dict) or text_config.get("model_type") != "qwen3_5_text":
         raise ValueError(f"{profile} checkpoint text_config.model_type must be qwen3_5_text")
+    expected_geometry = dict(_TEXT_GEOMETRY)
+    if realized_checkpoint:
+        expected_geometry.pop("hidden_size")
     mismatches = {
         key: (text_config.get(key), expected)
-        for key, expected in _TEXT_GEOMETRY.items()
+        for key, expected in expected_geometry.items()
         if text_config.get(key) != expected
     }
     if mismatches:
         raise ValueError(f"checkpoint geometry differs from Qwen 3.5 0.8B: {mismatches}")
+    if realized_checkpoint:
+        hidden_size = text_config.get("hidden_size")
+        teacher_hidden_size = _TEXT_GEOMETRY["hidden_size"]
+        if (
+            not isinstance(hidden_size, int)
+            or isinstance(hidden_size, bool)
+            or not 0 < hidden_size <= teacher_hidden_size
+            or hidden_size % _REALIZED_HIDDEN_WIDTH_ALIGNMENT != 0
+        ):
+            raise ValueError(
+                "realized checkpoint hidden_size must be a positive 64-aligned reduction "
+                f"of {teacher_hidden_size}: {hidden_size!r}"
+            )
     processor_assets = []
     for name in _PROCESSOR_ASSETS:
         path = checkpoint / name

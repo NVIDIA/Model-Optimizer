@@ -177,6 +177,9 @@ def test_render_sbatch_script_requests_gpus_per_node():
     assert "#SBATCH --no-requeue" in script
     assert "source /site/setup-envs.sh" in script
     assert script.startswith("#!/bin/bash\n")
+    srun = next(line for line in script.splitlines() if line.startswith("srun "))
+    assert "--account=acct" in srun
+    assert "--job-name=pt-vllm" in srun
 
 
 def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():

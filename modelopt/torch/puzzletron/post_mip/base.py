@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Registered post-MIP node contracts and campaign flow compilation."""
 
@@ -92,9 +104,7 @@ class PostMIPNode(ABC):
         return ()
 
     @classmethod
-    def render_report(
-        cls, node: CompiledPostMIPNode, payload: Mapping[str, Any]
-    ) -> str | None:
+    def render_report(cls, node: CompiledPostMIPNode, payload: Mapping[str, Any]) -> str | None:
         """Return a report fragment, or ``None`` for DAG-only node types."""
 
         return None
@@ -143,14 +153,12 @@ def compile_post_mip_flows(config: Mapping[str, Any]) -> tuple[CompiledPostMIPNo
         mip_runs = (config.get("mip") or {}).get("runs") or {}
         if source["run"] not in mip_runs or mip_runs[source["run"]] is False:
             raise ValueError(
-                f"post-MIP flow {flow_id!r} selects unknown or disabled MIP run "
-                f"{source['run']!r}"
+                f"post-MIP flow {flow_id!r} selects unknown or disabled MIP run {source['run']!r}"
             )
         unknown_source = set(source) - {"run", "variants", "objectives"}
         if unknown_source:
             raise ValueError(
-                f"unknown source fields in post-MIP flow {flow_id!r}: "
-                f"{sorted(unknown_source)}"
+                f"unknown source fields in post-MIP flow {flow_id!r}: {sorted(unknown_source)}"
             )
         nodes = flow.get("nodes") or {}
         if not isinstance(nodes, Mapping) or not nodes:
@@ -266,7 +274,59 @@ def compile_post_mip_flows(config: Mapping[str, Any]) -> tuple[CompiledPostMIPNo
             artifact_by_node[str(node_id)] = output_artifacts
             parent_by_node[str(node_id)] = stage_id
             kind_by_node[str(node_id)] = capabilities.kind
+    _validate_kd_trajectories(compiled)
     return tuple(compiled)
+
+
+def _validate_kd_trajectories(nodes: list[CompiledPostMIPNode]) -> None:
+    """Require one compatible, monotonically resumed chain per named KD trajectory."""
+
+    by_trajectory: dict[tuple[str, str], list[CompiledPostMIPNode]] = {}
+    for node in nodes:
+        trajectory = node.config.get("trajectory")
+        if trajectory is not None:
+            by_trajectory.setdefault((node.flow_id, str(trajectory)), []).append(node)
+    node_by_id = {node.node_id: node for node in nodes}
+    for (flow_id, trajectory), members in by_trajectory.items():
+        previous_steps = 0
+        shared_contract = None
+        previous_node = None
+        for node in members:
+            if node.node_type != "global_kd":
+                raise ValueError(f"KD trajectory {flow_id}.{trajectory} contains a non-KD node")
+            settings = dict(node.config.get("config") or {})
+            steps = int(settings.get("max_steps", 0))
+            if steps <= previous_steps:
+                raise ValueError(
+                    f"KD trajectory {flow_id}.{trajectory} max_steps must increase strictly"
+                )
+            contract = {
+                key: value
+                for key, value in settings.items()
+                if key not in {"max_steps", "checkpoint_every_steps"}
+            }
+            contract["model_source"] = node.model_source
+            if shared_contract is None:
+                shared_contract = contract
+            elif contract != shared_contract:
+                raise ValueError(
+                    f"KD trajectory {flow_id}.{trajectory} changes its resume contract"
+                )
+            if previous_node is not None:
+                cursor = node_by_id.get(node.input_id)
+                visited = set()
+                while cursor is not None and cursor.node_id not in visited:
+                    if cursor.node_id == previous_node.node_id:
+                        break
+                    visited.add(cursor.node_id)
+                    cursor = node_by_id.get(cursor.input_id)
+                else:
+                    raise ValueError(
+                        f"KD trajectory {flow_id}.{trajectory} milestone {node.node_id!r} "
+                        f"does not depend on {previous_node.node_id!r}"
+                    )
+            previous_steps = steps
+            previous_node = node
 
 
 def render_post_mip_node_report(

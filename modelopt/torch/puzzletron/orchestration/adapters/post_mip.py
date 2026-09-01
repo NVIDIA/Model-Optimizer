@@ -174,7 +174,7 @@ class PostMIPAdapter(WorkAdapter):
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
         config = _node_config(plan, node.stage_id)
         node_type = str(config.get("type"))
-        count = 1 if node_type in {"filter", "manual_filter"} else node.instances
+        count = 1 if node_type in {"filter", "manual_filter", "result_manifest"} else node.instances
         if node_type in {"evaluation", "downstream_evaluation"}:
             available = _available_evaluation_candidates(plan, node.stage_id)
             if available is not None:
@@ -231,7 +231,7 @@ class PostMIPAdapter(WorkAdapter):
             "--stage-id",
             node.stage_id,
         ]
-        if node_type in {"filter", "manual_filter"}:
+        if node_type in {"filter", "manual_filter", "result_manifest"}:
             argv.append("--aggregate")
         else:
             argv.extend(
