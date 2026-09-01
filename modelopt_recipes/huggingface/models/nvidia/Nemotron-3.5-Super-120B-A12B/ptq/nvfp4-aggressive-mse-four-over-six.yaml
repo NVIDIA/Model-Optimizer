@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
+# Nemotron Super 3.5 VL -- **Aggressive** tier (plan doc section 4.2). Attention ladder L1
+# (identical to L0: Conservative and Aggressive share the attention rung; they differ in WEIGHT breadth).
+#   MoE experts + shared GEMM  NVFP4
+#   QKV/Out proj  FP8    |  Latent MoE  BF16 (still)   |  Mamba Linear  FP8   |  lm_head  FP8
+#   KV cache FP8 | BMM1 FP8 | BMM2 FP8 | embedding BF16 | router FP32 | vision BF16
+# Serves on Hopper + Blackwell. Recovery: PTQ + QAD.
+#
+# As nvfp4-aggressive-mse, plus NVFP4 4-over-6 on the expert WEIGHTS: the e4m3 block-scale range is
+# capped at 256 (E4M3_MAX_46) instead of 448, and MSE selects M=4 or M=6 per block. 4/6 REQUIRES MSE
+# -- the per-block choice is baked into the quantizer amax during MSE calibration, so it cannot ride
+# on `method: max`. Note mtq.compress() rejects 4/6 (the per-block choice is not preserved by real
+# quantization); this recipe is fine because the hf_ptq export path uses mtq.quantize + export.
+#
+# Style: per-model recipe with INLINE rules, matching the other
+# huggingface/models/nvidia/*/ptq recipes. Only configs/numerics/* is imported; no
+# configs/ptq/units/* composition, so every rule that applies to this model is visible
+# in this one file. quant_cfg is ORDERED and the LAST match wins, which is why the
+# blanket disable comes first and the vision / MTP guards come last.
+
+imports:
+  nvfp4: configs/numerics/nvfp4
+  nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
+  fp8: configs/numerics/fp8
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    Nemotron 3.5 VL Aggressive tier, weight-MSE calibration with NVFP4 4-over-6: NVFP4 MoE routed +
+    shared experts (STATIC weight block scales, per-block M=4/M=6 selected by MSE, FP8 scale sweep,
+    e4m3 scale max 256 instead of 448); FP8 QKV/Out projections, FP8 Mamba in/out projections and
+    FP8 lm_head; latent MoE stays BF16; FP8 attention BMM1/BMM2 + FP8 KV cache; C-RADIO vision BF16.
+quantize:
+  algorithm:
+    method: mse
+    # Sweep all 128 e4m3 scale values instead of amax multipliers. Requires the WEIGHT
+    # quantizers to be `type: static` (below); dynamic weight quantizers ignore it.
+    fp8_scale_sweep: true
+    # layerwise.enable=false is required for VLMs: the decoder layers sit under
+    # `model.language_model.layers`, where layerwise_calibrate cannot find them.
+    # This also rules out GPTQ for this model, which requires layerwise calibration.
+    layerwise:
+      enable: false
+  quant_cfg:
+    - quantizer_name: '*'
+      enable: false
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4_four_over_six
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*shared_experts*weight_quantizer'
+      cfg:
+        $import: nvfp4_four_over_six
+    - quantizer_name: '*shared_experts*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*[qkvo]_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*[qkvo]_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.in_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.in_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.out_proj.weight_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*mixer.out_proj.input_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*[qkv]_bmm_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*softmax_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*p_bmm_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: '*[kv]_bmm_quantizer'
+      cfg:
+        $import: fp8
+    - quantizer_name: 'mtp.*'
+      enable: false
+    - quantizer_name: '*mtp.*'
+      enable: false
+    - quantizer_name: '*embed_vision*'
+      enable: false
+    - quantizer_name: '*lm_head*weight_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
+    - quantizer_name: '*lm_head*input_quantizer'
+      enable: true
+      cfg:
+        $import: fp8
+    - quantizer_name: '*vision_model*'
+      enable: false
+    - quantizer_name: '*vision_projector*'
+      enable: false
+    - quantizer_name: '*radio_model*'
+      enable: false
+    - quantizer_name: '*vision_tower*'
+      enable: false
+    - quantizer_name: '*visual*'
+      enable: false
+    - quantizer_name: '*multi_modal_projector*'
+      enable: false
+    - quantizer_name: 'mlp1.*'
+      enable: false
+    - quantizer_name: '*.mlp1.*'
+      enable: false
