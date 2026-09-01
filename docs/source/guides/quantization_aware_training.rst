@@ -93,25 +93,6 @@ prerequisites, commands, data preparation, distributed topology, and export opti
   <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_:
   run ``quantize.sh``, then ``finetune.sh`` for QAT or QAD, and ``export.sh``.
 
-Megatron container setup
-------------------------
-
-Megatron-Bridge and Megatron-LM need Megatron-Core, and their framework
-dependencies. Run them in an NVIDIA GPU Docker environment such as a current
-`NeMo container <https://catalog.ngc.nvidia.com/orgs/nvidia/-/containers/nemo/-/tags>`_,
-and bind-mount a workspace for checkpoints and the Hugging Face cache so artifacts
-survive the container.
-
-Megatron-Bridge entry points live in the Model Optimizer checkout, so mount that
-checkout into the container. See the
-`Megatron-Bridge prerequisites
-<https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#pre-requisites>`_.
-
-For Megatron-LM, use the bundled ModelOpt post-training scripts at
-``/opt/Megatron-Bridge/3rdparty/Megatron-LM/examples/post_training/modelopt``,
-or install Megatron-LM separately. Retain the container's ModelOpt installation
-unless you explicitly need a newer version.
-
 QAD launcher examples
 ===================================
 
