@@ -5,9 +5,7 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/quality_evaluation@_global_
   - _self_
 
-# Opt-in regression measurement for the extended text search grid. This keeps
-# the established FFN-only observation in e2e_quality_comparison.yaml intact;
-# record extended-grid observations only after a reproducible finalist exists.
+# Quality comparison for the extended text search grid.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_quality_comparison_extended}
 display_name: Qwen3p5 0.8B extended-grid quality comparison
 
@@ -19,4 +17,4 @@ post_mip:
           type: downstream_evaluation
           input: short_kd
           failure_policy: strict
-          config: ${quality_evaluation}
+          config: ${quality_evaluation_reference}

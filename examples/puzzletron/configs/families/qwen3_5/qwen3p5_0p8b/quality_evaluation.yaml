@@ -1,11 +1,9 @@
 # @package _global_
 
-# Reproducible single-run text evaluation. The screen uses the same pinned
-# task revisions, deterministic prefix, decoding settings, and seed for every
-# student and the teacher. Only the selected student, plus the reference
-# teacher, receive the full unbounded run.
+# Single-run text evaluation with pinned task revisions, a fixed prefix,
+# fixed decoding settings, and one seed for each student. The full config
+# evaluates the selected student and teacher without a sample limit.
 quality_evaluation_common: &quality_evaluation_common
-  reference_checkpoint: ${teacher_dir}
   model: vllm
   tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
   compatibility_tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
@@ -37,14 +35,21 @@ quality_evaluation_common: &quality_evaluation_common
     max_model_len: 8192
     reasoning_parser: qwen3
 
-# A 256-example fixed prefix per task is large enough to reject clear
-# regressions while keeping the all-candidate screen practical.
+# The candidate screen evaluates a fixed 256-example prefix from each task.
 quality_evaluation:
   <<: *quality_evaluation_common
+  limit: 256
+
+# The opt-in single-student comparison evaluates the same bounded prefix for
+# the student and teacher.
+quality_evaluation_reference:
+  <<: *quality_evaluation_common
+  reference_checkpoint: ${teacher_dir}
   limit: 256
 
 # Omitting the limit runs each complete benchmark for the final student and
 # teacher with exactly the same evaluator contract used by the screen.
 quality_evaluation_full:
   <<: *quality_evaluation_common
+  reference_checkpoint: ${teacher_dir}
   limit:

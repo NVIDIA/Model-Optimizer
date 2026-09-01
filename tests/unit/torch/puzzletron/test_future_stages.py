@@ -52,6 +52,31 @@ def test_evaluation_stage_rejects_scalar_checkpoints():
         future.evaluation_stage(config, object())
 
 
+def test_evaluation_stage_keeps_configured_checkpoints_authoritative(monkeypatch, tmp_path):
+    class DescriptorReachedError(RuntimeError):
+        pass
+
+    def reject_implicit_teacher(*args, **kwargs):
+        pytest.fail("configured checkpoints must not add the teacher")
+
+    def stop_at_descriptor(*args, **kwargs):
+        raise DescriptorReachedError
+
+    monkeypatch.setattr(future, "_with_teacher_checkpoint", reject_implicit_teacher)
+    monkeypatch.setattr(future, "_resolve_evaluation_descriptor", stop_at_descriptor)
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "convert": {"teacher_dir": str(tmp_path / "teacher")},
+        "zero_shot_evaluation": {
+            "enabled": True,
+            "checkpoints": [str(tmp_path / "student")],
+        },
+    }
+
+    with pytest.raises(DescriptorReachedError):
+        future.evaluation_stage(config, object())
+
+
 def test_evaluation_descriptor_is_inferred_from_checkpoint(monkeypatch, tmp_path):
     sentinel = object()
     calls = []
