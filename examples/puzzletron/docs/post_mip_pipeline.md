@@ -201,10 +201,15 @@ downstream evaluation node after KD therefore uses the same checkpoint contract
 as one after materialization. The Qwen 3.5 text and VLM smoke flows evaluate the
 selected checkpoint both before and after their short KD stage.
 
-The post-MIP graph does not treat the teacher as a candidate revision. To compare
-a distilled student with its teacher, evaluate the teacher separately with the
+The post-MIP graph does not treat the teacher as a candidate revision. An
+evaluation node can set `reference_checkpoint` to evaluate the teacher with the
 same task, evaluator version, dataset revision, prompt settings, and sample
-limit, then compare those metrics with the post-KD node's metrics.
+limit. Its summary then publishes `candidate.*`, `reference.*`, and `delta.*`
+metrics together. Reference evaluation runs once for each candidate revision
+handled by that node. Place the reference comparison after filtering when only
+the selected candidates need teacher-relative metrics. Without
+`reference_checkpoint`, evaluate the teacher separately under the same contract
+before comparing results.
 
 ## Filters
 

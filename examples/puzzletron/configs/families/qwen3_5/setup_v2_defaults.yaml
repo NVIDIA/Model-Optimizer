@@ -93,13 +93,16 @@ model_overrides:
               enabled: true
               reference_checkpoint: ${teacher_dir}
               model: vllm
-              tasks: [ifeval, gsm8k]
-              compatibility_tasks: [gsm8k]
+              tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
+              compatibility_tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
               task_dataset_revisions:
                 ifeval: 5a5661c2a35488308556cf4453dc074d1eba91a0
                 gsm8k: 740312add88f781978c0658806c59bc2815b9866
-              limit: 100
+                mmlu_pro_computer_science: b189ec765aa7ed75c8acfea42df31fdae71f97be
+                mmlu_pro_history: b189ec765aa7ed75c8acfea42df31fdae71f97be
+              limit: 256
               batch_size: 8
+              num_fewshot: 0
               log_samples: true
               seed: 42
               timeout_seconds: 7200

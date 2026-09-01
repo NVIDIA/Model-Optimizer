@@ -5,18 +5,23 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/quality_evaluation@_global_
   - _self_
 
-# Bounded Qwen 3.5 0.8B campaign using the same FFN-only search that has been
-# exercised by the real-checkpoint smoke. Additional hidden-width, attention,
-# GDN, depth, and bypass dimensions remain opt-in and have less real-checkpoint
-# validation. The pruning and distillation values below are starting points for
-# exercising the route, not settings optimized for downstream quality.
+# Bounded Qwen 3.5 0.8B campaign for FFN-only pruning. Both candidates receive
+# the same screening KD and fixed four-task evaluation contract. Aggregate
+# ranking selects one candidate, which receives a second KD run from its
+# materialized pre-KD checkpoint and a full evaluation.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
 display_name: Qwen3p5 0.8B text pruning campaign
 
 data:
   max_sample_length: 2048
+  calibration:
+    num_samples: 4096
+  replacement_scoring:
+    num_samples: 32
 
-train_token_cache_path: ${puzzle_dir}/dataset_cache/train_512x2048.tokens
+# At global batch 16, 256 optimizer steps consume 4096 sequences. The training
+# cache therefore materializes 4096 unique rows.
+train_token_cache_path: ${puzzle_dir}/dataset_cache/train_4096x2048.tokens
 validation_token_cache_path: ${puzzle_dir}/dataset_cache/validation_32x2048.tokens
 
 tokenize_data:
@@ -25,7 +30,7 @@ tokenize_data:
   caches:
     - output: ${train_token_cache_path}
       split: train
-      num_samples: 512
+      num_samples: 4096
       seq_length: 2048
       shuffle_seed: 444
     - output: ${validation_token_cache_path}
@@ -40,7 +45,8 @@ embedding_pruning:
   alignment: 256
 
 pruning:
-  experiment_id: qwen35_0p8b_ffn_campaign_2048
+  experiment_id: qwen35_0p8b_ffn_campaign
+  intermediate_size_list: [3328, 3072]
   eval_samples: 512
   block_size: 2048
   seed: 42
@@ -101,6 +107,13 @@ replacement_scoring:
   block_size: 2048
   packed_token_cache_path: ${validation_token_cache_path}
 
+search_space:
+  axes:
+    ffn_intermediate:
+      enabled: true
+      teacher_value: 3584
+      values: [3328, 3072]
+
 mip:
   enabled: true
   depth_scenario_count: 1
@@ -111,27 +124,36 @@ mip:
       batch_size: 1
       concurrency: 1
   runs:
-    params-90:
-      constraints:
-        params: {max: 90%}
+    params-90: false
+    ffn-candidates:
       search_space:
         depth: [0]
         embedding: [1024]
         axes_default: teacher
-        axes:
-          ffn.intermediate_size: all
+        axes: {ffn.intermediate_size: all}
+      variants:
+        width-3328:
+          constraints:
+            params: {max: 99%}
+          search_space:
+            axes: {ffn.intermediate_size: [3328]}
+        width-3072:
+          constraints:
+            params: {max: 97%}
+          search_space:
+            axes: {ffn.intermediate_size: [3072]}
       solver:
         backend: auto
-        num_solutions: 4
+        num_solutions: 1
         min_hamming_distance: 2
         max_seconds_per_solution: 300
-      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+      homogeneous: {enabled: true, keep: 1, rank_by: objective}
 
 post_mip:
   flows:
-    params-90:
+    candidate-evaluation:
       source:
-        run: params-90
+        run: ffn-candidates
         variants: all
         objectives: all
       nodes:
@@ -174,44 +196,100 @@ post_mip:
               distributed_executor_backend: mp
               gpu_group_size: 1
 
-        fastest:
-          type: filter
+        screening_kd:
+          type: global_kd
           input: serving
-          mode: top_k
-          metric: serving.output_token_throughput
-          direction: maximize
+          config:
+            seed: 1111
+            validation_seed: 445
+            shuffle_training_data: true
+            max_steps: 128
+            global_batch_size: 16
+            local_batch_size: 4
+            checkpoint_every_steps: 32
+            automodel:
+              parallel:
+                tp: 1
+                cp: 1
+                pp: 1
+                ep: 1
+                dp_shard: 1
+                dp_replicate: 2
+                sequence_parallel: false
+
+        screening_eval:
+          type: evaluation
+          input: screening_kd
+          config:
+            eval_samples: 32
+            block_size: 2048
+
+        quality_screen:
+          type: downstream_evaluation
+          input: screening_eval
+          failure_policy: strict
+          config: ${quality_evaluation}
+
+        selected:
+          type: filter
+          input: quality_screen
+          mode: aggregate_rank
+          metrics:
+            - metric: screening_eval.lm_loss
+              direction: minimize
+            - metric: quality_screen.modelopt_ifeval.prompt_level_strict_acc_none
+              direction: maximize
+            - metric: quality_screen.modelopt_gsm8k.exact_match_flexible-extract
+              direction: maximize
+            - metric: quality_screen.modelopt_mmlu_pro_computer_science.exact_match_flexible-extract
+              direction: maximize
+            - metric: quality_screen.modelopt_mmlu_pro_history.exact_match_flexible-extract
+              direction: maximize
           top_k: 1
-          best_selection_mode: individual_best
 
         global_kd:
           type: global_kd
-          input: fastest
+          input: selected
+          model_source: materialized
           config:
-            max_steps: 128
-            global_batch_size: 4
-            local_batch_size: 1
+            seed: 1111
+            validation_seed: 445
+            shuffle_training_data: true
+            max_steps: 256
+            global_batch_size: 16
+            local_batch_size: 4
             checkpoint_every_steps: 32
+            automodel:
+              parallel:
+                tp: 1
+                cp: 1
+                pp: 1
+                ep: 1
+                dp_shard: 1
+                dp_replicate: 2
+                sequence_parallel: false
 
         final_eval:
           type: evaluation
           input: global_kd
           config:
+            reference_checkpoint: ${teacher_dir}
             eval_samples: 32
             block_size: 2048
 
+        quality_benchmarks:
+          type: downstream_evaluation
+          input: final_eval
+          failure_policy: strict
+          config: ${quality_evaluation_full}
+
         best:
           type: filter
-          input: final_eval
+          input: quality_benchmarks
           mode: top_k
           metric: final_eval.lm_loss
           direction: minimize
           top_k: 1
-
-        quality_benchmarks:
-          type: downstream_evaluation
-          input: best
-          failure_policy: strict
-          config: ${quality_evaluation}
 
 zero_shot_evaluation:
   enabled: false

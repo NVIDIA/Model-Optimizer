@@ -1,6 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 
 import numpy as np
+import torch
 
 from modelopt.torch.puzzletron.distillation.dataset import make_puzzletron_llm_dataset
 from modelopt.torch.puzzletron.utils.data.dataloaders import create_train_dataloader
@@ -71,3 +87,92 @@ def test_global_kd_dataset_applies_sequence_length_to_packed_cache(tmp_path):
     sample = next(iter(dataset))
     assert sample["input_ids"].shape == (4,)
     assert sample["labels"].shape == (4,)
+
+
+def test_global_kd_packed_dataset_shuffle_is_seeded(tmp_path):
+    path = tmp_path / "tokens.bin"
+    _write_cache(path, samples=8)
+
+    def order(seed, *, shuffle=True):
+        dataset = make_puzzletron_llm_dataset(
+            tokenizer=None,
+            dataset_path="unused",
+            num_samples=8,
+            seq_length=8,
+            seed=seed,
+            shuffle=shuffle,
+            packed_token_cache_path=str(path),
+        )
+        return torch.stack([sample["input_ids"][0] for sample in dataset])
+
+    ordered = order(2222, shuffle=False)
+    assert torch.equal(ordered, torch.sort(ordered).values)
+    assert torch.equal(order(2222), order(2222))
+    assert not torch.equal(order(2222), order(3333))
+    assert torch.equal(order(2222, shuffle=True), order(2222))
+
+
+def test_global_kd_packed_dataset_shards_seeded_order_without_overlap(tmp_path):
+    path = tmp_path / "tokens.bin"
+    _write_cache(path, samples=8)
+    dataset = make_puzzletron_llm_dataset(
+        tokenizer=None,
+        dataset_path="unused",
+        num_samples=8,
+        seq_length=8,
+        seed=2222,
+        shuffle=True,
+        packed_token_cache_path=str(path),
+    )
+
+    global_order = torch.stack([sample["input_ids"][0] for sample in dataset])
+    shard_orders = [
+        torch.stack([sample["input_ids"][0] for sample in dataset.shard(2, index)])
+        for index in range(2)
+    ]
+
+    assert torch.equal(
+        torch.isin(shard_orders[0], shard_orders[1]),
+        torch.zeros_like(shard_orders[0], dtype=torch.bool),
+    )
+    assert torch.equal(torch.stack(shard_orders, dim=1).flatten(), global_order)
+
+
+def test_global_kd_non_cache_dataset_respects_shuffle(monkeypatch):
+    class FakeDataset:
+        def __init__(self):
+            self.shuffle_seeds = []
+
+        def shuffle(self, *, seed):
+            self.shuffle_seeds.append(seed)
+            return self
+
+    loaded = FakeDataset()
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.dataset.load_from_disk",
+        lambda _: loaded,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.dataset.ConstantLengthDataset",
+        lambda **_: [],
+    )
+
+    make_puzzletron_llm_dataset(
+        tokenizer=None,
+        dataset_path="unused",
+        num_samples=2,
+        seq_length=4,
+        seed=2222,
+        shuffle=False,
+    )
+    assert loaded.shuffle_seeds == []
+
+    make_puzzletron_llm_dataset(
+        tokenizer=None,
+        dataset_path="unused",
+        num_samples=2,
+        seq_length=4,
+        seed=2222,
+        shuffle=True,
+    )
+    assert loaded.shuffle_seeds == [2222]

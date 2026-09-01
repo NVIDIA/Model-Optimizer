@@ -101,6 +101,16 @@ _COMPATIBILITY_TASKS: dict[str, dict[str, Any]] = {
         "config": "tasks/ifeval/ifeval.yaml",
         "overrides": {},
     },
+    "mmlu_pro_computer_science": {
+        "alias": "modelopt_mmlu_pro_computer_science",
+        "config": "tasks/mmlu_pro/mmlu_pro_computer_science.yaml",
+        "overrides": {},
+    },
+    "mmlu_pro_history": {
+        "alias": "modelopt_mmlu_pro_history",
+        "config": "tasks/mmlu_pro/mmlu_pro_history.yaml",
+        "overrides": {},
+    },
 }
 
 
@@ -445,7 +455,9 @@ def _prepare_compatibility_tasks(output: Path, settings: Mapping[str, Any]) -> d
             **dict(task_spec["overrides"]),
         }
         if task in revisions:
-            task_config["dataset_kwargs"] = {"revision": revisions[task]}
+            dataset_kwargs = dict(task_config.get("dataset_kwargs") or {})
+            dataset_kwargs["revision"] = revisions[task]
+            task_config["dataset_kwargs"] = dataset_kwargs
         _atomic_json(task_root / f"{task_spec['alias']}.yaml", task_config)
     prepared["tasks"] = tasks
     prepared["extra_args"] = [*_extra_args(prepared), "--include_path", str(task_root)]

@@ -5,50 +5,35 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - _self_
 
-# Opt-in campaign with additional Qwen 3.5 pruning dimensions. These
-# dimensions have less real-checkpoint coverage than the default FFN-only
-# campaign. Keep the sanity stages enabled and inspect their results before
-# increasing data, search, or training budgets.
+# Campaign using the additional axes from the shared Qwen 3.5 0.8B search
+# overlay after their smoke, measurement, and checkpoint-slicing checks pass.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_extended}
 display_name: Qwen3p5 0.8B extended pruning campaign
 
-embedding_pruning:
-  widths: [1024, 768]
-
 pruning:
   experiment_id: qwen35_0p8b_extended_2048
-  attention_scored_axes: [kv_groups, q_heads_per_group]
-  gdn_scored_axes:
-    - gdn_key_groups
-    - gdn_value_head_dim
-
-sort:
-  deferred_axes: []
-
-width_sanity:
-  hidden_width_diagnostic: true
-  axes:
-    - hidden_width
-    - ffn_intermediate
-    - kv_groups
-    - q_heads_per_group
-    - gdn_key_groups
-    - gdn_value_head_dim
 
 depth_importance:
-  enabled: true
   expected_initial_sublayers: 48
-  max_removals: 2
-  max_subblocks_to_remove: 2
   eval_samples: 32
   block_size: 2048
   packed_token_cache_path: ${validation_token_cache_path}
 
 mip:
-  depth_scenario_count: 3
   runs:
+    ffn-candidates: false
     params-90:
-      search_space:
-        depth: [0, 1, 2]
-        embedding: [1024, 768]
-        axes_default: all
+      constraints:
+        params: {max: 90%}
+      solver:
+        backend: auto
+        num_solutions: 4
+        min_hamming_distance: 2
+        max_seconds_per_solution: 300
+      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+
+post_mip:
+  flows:
+    candidate-evaluation:
+      source:
+        run: params-90

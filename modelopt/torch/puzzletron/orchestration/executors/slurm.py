@@ -183,6 +183,7 @@ def render_sbatch_script(
         header_lines.append(f"#SBATCH --qos={qos}")
     header_lines.extend(
         [
+            "#SBATCH --no-requeue",
             f"#SBATCH --nodes={step_nodes}",
             f"#SBATCH --ntasks={topology.task_count}",
             f"#SBATCH --ntasks-per-node={step_tasks_per_node}",

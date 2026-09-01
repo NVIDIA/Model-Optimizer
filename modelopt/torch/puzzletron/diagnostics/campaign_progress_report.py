@@ -2692,7 +2692,7 @@ def _live_kd_metadata(solution_dir: Path) -> dict[str, Any]:
     dataset = dict(recipe.get("dataset") or {})
     scheduler_steps = scheduler.get("max_steps")
     return {
-        "max_steps": max(0, int(scheduler_steps) - 1) if scheduler_steps is not None else None,
+        "max_steps": int(scheduler_steps) if scheduler_steps is not None else None,
         "global_batch_size": scheduler.get("global_batch_size"),
         "local_batch_size": scheduler.get("local_batch_size"),
         "sample_count": dataset.get("num_samples"),

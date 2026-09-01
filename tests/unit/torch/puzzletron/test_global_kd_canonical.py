@@ -220,6 +220,7 @@ def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(tmp_p
         "pp": 8,
         "global_batch_size": 8,
         "local_batch_size": 8,
+        "max_steps": 128,
     }
 
     default_recipe = build_automodel_global_kd_recipe(GlobalKDConfig(**common))
@@ -231,6 +232,8 @@ def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(tmp_p
     assert default_recipe["distributed"]["pipeline"]["pp_microbatch_size"] == 1
     assert default_recipe["distributed"]["pipeline"]["pp_batch_size"] == 8
     assert default_recipe["dataloader"]["batch_size"] == 8
+    assert default_recipe["step_scheduler"]["max_steps"] == 128
+    assert default_recipe["step_scheduler"]["num_epochs"] == 128
     assert override_recipe["distributed"]["pipeline"]["pp_schedule"] == "interleaved1f1b"
 
 
@@ -282,11 +285,147 @@ def test_global_kd_auto_domain_uses_canonical_text_dataset(tmp_path, monkeypatch
         "num_samples": 4096,
         "seq_length": 1024,
         "seed": 1111,
+        "shuffle": True,
         "packed_token_cache_path": str(tmp_path / "train.tokens"),
     }
+    assert recipe["dataloader"]["shuffle"] is False
+    assert recipe["validation_dataloader"]["shuffle"] is False
     assert recipe["validation_dataset"]["packed_token_cache_path"] == str(
         tmp_path / "validation.tokens"
     )
+
+
+def test_global_kd_training_data_shuffle_uses_recipe_seed_and_keeps_validation_order(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
+        lambda *args, teacher=False, **kwargs: {"teacher": teacher},
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "qwen3_5"},
+        "data": {
+            "path": str(tmp_path / "dataset"),
+            "modality": "text",
+            "layout": "fixed",
+            "max_sample_length": 128,
+        },
+        "distillation": {
+            "domain": "llm",
+            "seed": 2222,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    kd_config = build_global_kd_config(config)
+    recipe = build_automodel_global_kd_recipe(kd_config)
+
+    assert kd_config.shuffle_training_data is True
+    assert recipe["dataset"]["shuffle"] is True
+    assert recipe["validation_dataset"]["shuffle"] is False
+    assert recipe["dataloader"]["shuffle"] is False
+    assert recipe["validation_dataloader"]["shuffle"] is False
+    assert recipe["rng"]["seed"] == 2222
+    assert recipe["seed"] == 2222
+    assert recipe["dataset"]["seed"] == 2222
+    assert recipe["validation_dataset"]["seed"] == 445
+
+
+def test_global_kd_requires_explicit_remote_code_trust(tmp_path):
+    assert (
+        GlobalKDConfig(
+            teacher_dir=tmp_path / "teacher",
+            student_dir=tmp_path / "student",
+            output_dir=tmp_path / "output",
+            descriptor="qwen3_5",
+        ).trust_remote_code
+        is False
+    )
+
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "qwen3_5"},
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    assert build_global_kd_config(config).trust_remote_code is False
+
+    config["model"]["trust_remote_code"] = True
+    assert build_global_kd_config(config).trust_remote_code is True
+
+    config["distillation"]["trust_remote_code"] = False
+    assert build_global_kd_config(config).trust_remote_code is False
+
+
+def test_global_kd_chat_dataset_keeps_validation_seed_and_order_fixed(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.distillation.global_automodel._model_recipe",
+        lambda *args, teacher=False, **kwargs: {"teacher": teacher},
+    )
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "qwen3_5"},
+        "data": {
+            "path": str(tmp_path / "dataset"),
+            "modality": "text",
+            "layout": "padded_varlen",
+            "max_sample_length": 128,
+        },
+        "distillation": {
+            "domain": "llm",
+            "seed": 2222,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            },
+        },
+    }
+
+    recipe = build_automodel_global_kd_recipe(build_global_kd_config(config))
+
+    assert recipe["dataset"]["seed"] == 2222
+    assert recipe["dataset"]["shuffle"] is True
+    assert recipe["validation_dataset"]["seed"] == 445
+    assert recipe["validation_dataset"]["shuffle"] is False
 
 
 def test_global_kd_recipe_publishes_explicit_resume_policy(tmp_path, monkeypatch):

@@ -69,6 +69,51 @@ def test_compatibility_tasks_pin_text_regression_datasets(monkeypatch, tmp_path)
     }
 
 
+def test_compatibility_tasks_pin_mmlu_pro_categories(
+    monkeypatch,
+    tmp_path,
+):
+    package = tmp_path / "lmms_eval"
+    computer_science = package / "tasks/mmlu_pro/mmlu_pro_computer_science.yaml"
+    history = package / "tasks/mmlu_pro/mmlu_pro_history.yaml"
+    for upstream in (computer_science, history):
+        upstream.parent.mkdir(parents=True, exist_ok=True)
+        upstream.write_text(f"task: {upstream.stem}\n")
+    monkeypatch.setattr(
+        lmms.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(submodule_search_locations=[str(package)]),
+    )
+
+    settings = lmms._prepare_compatibility_tasks(
+        tmp_path / "attempt",
+        {
+            "tasks": ["mmlu_pro_computer_science", "mmlu_pro_history"],
+            "compatibility_tasks": ["mmlu_pro_computer_science", "mmlu_pro_history"],
+            "task_dataset_revisions": {
+                "mmlu_pro_computer_science": "mmlu-pro-revision",
+                "mmlu_pro_history": "mmlu-pro-revision",
+            },
+        },
+    )
+
+    assert settings["tasks"] == [
+        "modelopt_mmlu_pro_computer_science",
+        "modelopt_mmlu_pro_history",
+    ]
+    task_root = Path(settings["extra_args"][-1])
+    assert json.loads((task_root / "modelopt_mmlu_pro_computer_science.yaml").read_text()) == {
+        "dataset_kwargs": {"revision": "mmlu-pro-revision"},
+        "include": str(computer_science),
+        "task": "modelopt_mmlu_pro_computer_science",
+    }
+    assert json.loads((task_root / "modelopt_mmlu_pro_history.yaml").read_text()) == {
+        "dataset_kwargs": {"revision": "mmlu-pro-revision"},
+        "include": str(history),
+        "task": "modelopt_mmlu_pro_history",
+    }
+
+
 def test_dataset_revision_must_target_a_configured_task(tmp_path):
     with pytest.raises(ValueError, match="unconfigured tasks: \\['gsm8k'\\]"):
         lmms._prepare_compatibility_tasks(

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Real Puzzle-KD text dataset adapter for native AutoModel global KD."""
 
@@ -49,9 +61,7 @@ def collate_puzzletron_llm_batch(
             raise TypeError(f"Puzzletron LLM field {key!r} must contain tensors")
         shapes = {tuple(value.shape) for value in values}
         if len(shapes) != 1:
-            raise ValueError(
-                f"Puzzletron LLM field {key!r} is not fixed-length: {sorted(shapes)}"
-            )
+            raise ValueError(f"Puzzletron LLM field {key!r} is not fixed-length: {sorted(shapes)}")
         result[key] = torch.stack(values, dim=0)
     if "attention_mask" in result:
         result["padding_mask"] = ~result["attention_mask"].bool()
@@ -65,6 +75,7 @@ def make_puzzletron_chat_dataset(
     num_samples: int | None = None,
     seq_length: int = 4096,
     seed: int = 444,
+    shuffle: bool = True,
     **_: object,
 ):
     """Load saved, Hub, JSON, or Parquet messages through AutoModel chat formatting."""
@@ -84,9 +95,9 @@ def make_puzzletron_chat_dataset(
             seq_length=int(seq_length),
             padding="do_not_pad",
             truncation=True,
-            shuffle_seed=int(seed),
+            shuffle_seed=int(seed) if shuffle else None,
         )
-        if isinstance(dataset.dataset, list):
+        if shuffle and isinstance(dataset.dataset, list):
             random.Random(int(seed)).shuffle(dataset.dataset)
         if num_samples is not None:
             count = min(int(num_samples), len(dataset.dataset))
@@ -103,7 +114,8 @@ def make_puzzletron_chat_dataset(
         if split not in loaded:
             raise KeyError(f"dataset {dataset_path} has no split {split!r}: {list(loaded)}")
         loaded = loaded[split]
-    loaded = loaded.shuffle(seed=int(seed))
+    if shuffle:
+        loaded = loaded.shuffle(seed=int(seed))
     if num_samples is not None:
         loaded = loaded.select(range(min(int(num_samples), len(loaded))))
 
@@ -172,6 +184,7 @@ def make_puzzletron_llm_dataset(
     num_samples: int = 2048,
     seq_length: int = 131072,
     seed: int = 444,
+    shuffle: bool = True,
     packed_token_cache_path: str | None = None,
     **_: object,
 ) -> IterableDataset:
@@ -182,7 +195,9 @@ def make_puzzletron_llm_dataset(
                 packed_token_cache_path,
                 limit=int(num_samples),
                 sequence_length=int(seq_length),
-            )
+            ),
+            seed=int(seed),
+            shuffle=bool(shuffle),
         )
 
     loaded = load_from_disk(dataset_path)
@@ -190,7 +205,8 @@ def make_puzzletron_llm_dataset(
         if split not in loaded:
             raise KeyError(f"dataset {dataset_path} has no split {split!r}: {list(loaded)}")
         loaded = loaded[split]
-    loaded = loaded.shuffle(seed=int(seed))
+    if shuffle:
+        loaded = loaded.shuffle(seed=int(seed))
     packed = ConstantLengthDataset(
         tokenizer=tokenizer,
         dataset=loaded,
@@ -212,10 +228,14 @@ class _PackedAutoModelDataset(IterableDataset):
         self,
         source: PackedTokenMemmapDataset,
         *,
+        seed: int = 444,
+        shuffle: bool = True,
         num_shards: int = 1,
         shard_index: int = 0,
     ):
         self.source = source
+        self.seed = int(seed)
+        self.shuffle = bool(shuffle)
         self.num_shards = int(num_shards)
         self.shard_index = int(shard_index)
 
@@ -225,12 +245,18 @@ class _PackedAutoModelDataset(IterableDataset):
             raise ValueError(f"invalid dataset shard {index}/{num_shards}")
         return type(self)(
             self.source,
+            seed=self.seed,
+            shuffle=self.shuffle,
             num_shards=int(num_shards),
             shard_index=int(index),
         )
 
     def __iter__(self):
-        for index in range(self.shard_index, len(self.source), self.num_shards):
+        indices = list(range(len(self.source)))
+        if self.shuffle:
+            random.Random(self.seed).shuffle(indices)
+        for offset in range(self.shard_index, len(indices), self.num_shards):
+            index = indices[offset]
             sample = self.source[index]
             input_ids = sample["input_ids"]
             yield {
@@ -273,6 +299,7 @@ def make_puzzletron_llm_overfit_dataset(
     num_samples: int = 128,
     seq_length: int = 128,
     seed: int = 444,
+    shuffle: bool = True,
     packed_token_cache_path: str | None = None,
     **kwargs: object,
 ) -> IterableDataset:
@@ -284,6 +311,7 @@ def make_puzzletron_llm_overfit_dataset(
         num_samples=int(num_samples),
         seq_length=int(seq_length),
         seed=int(seed),
+        shuffle=bool(shuffle),
         packed_token_cache_path=packed_token_cache_path,
         **kwargs,
     )

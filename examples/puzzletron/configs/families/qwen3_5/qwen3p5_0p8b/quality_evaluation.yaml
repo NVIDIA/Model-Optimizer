@@ -1,17 +1,19 @@
 # @package _global_
 
-# Bounded student-versus-teacher evaluation shared by the campaign example and
-# the opt-in comparison.
-quality_evaluation:
-  reference_checkpoint: ${teacher_dir}
+# Single-run text evaluation with pinned task revisions, a fixed prefix,
+# fixed decoding settings, and one seed for each student. The full config
+# evaluates the selected student and teacher without a sample limit.
+quality_evaluation_common: &quality_evaluation_common
   model: vllm
-  tasks: [ifeval, gsm8k]
-  compatibility_tasks: [gsm8k]
+  tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
+  compatibility_tasks: [ifeval, gsm8k, mmlu_pro_computer_science, mmlu_pro_history]
   task_dataset_revisions:
     ifeval: 5a5661c2a35488308556cf4453dc074d1eba91a0
     gsm8k: 740312add88f781978c0658806c59bc2815b9866
-  limit: 100
+    mmlu_pro_computer_science: b189ec765aa7ed75c8acfea42df31fdae71f97be
+    mmlu_pro_history: b189ec765aa7ed75c8acfea42df31fdae71f97be
   batch_size: 8
+  num_fewshot: 0
   log_samples: true
   seed: 42
   timeout_seconds: 7200
@@ -32,3 +34,22 @@ quality_evaluation:
     gpu_memory_utilization: 0.85
     max_model_len: 8192
     reasoning_parser: qwen3
+
+# The candidate screen evaluates a fixed 256-example prefix from each task.
+quality_evaluation:
+  <<: *quality_evaluation_common
+  limit: 256
+
+# The opt-in single-student comparison evaluates the same bounded prefix for
+# the student and teacher.
+quality_evaluation_reference:
+  <<: *quality_evaluation_common
+  reference_checkpoint: ${teacher_dir}
+  limit: 256
+
+# Omitting the limit runs each complete benchmark for the final student and
+# teacher with exactly the same evaluator contract used by the screen.
+quality_evaluation_full:
+  <<: *quality_evaluation_common
+  reference_checkpoint: ${teacher_dir}
+  limit:

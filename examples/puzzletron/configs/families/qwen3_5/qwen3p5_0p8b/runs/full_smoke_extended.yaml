@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - full_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - _self_
+
+# Multi-axis text smoke using the shared Qwen 3.5 0.8B search overlay.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_full_smoke_extended}
+display_name: Qwen3p5 0.8B extended text smoke
