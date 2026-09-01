@@ -141,6 +141,12 @@ python -m examples.puzzletron.evaluation.vlm.run \
 Replace `short-v1` with `full-v1` after every full-profile dataset and video
 asset has been cached. Use `--preflight-only` before consuming GPU time.
 
+For a scheduler with a shorter walltime than the complete full profile, run one
+contract task per job with `--profile full-v1 --profile-task TASK`. Every shard
+retains the full profile fingerprint while recording its selected source task in
+the preflight and resumable identity. A complete full-v1 result requires exactly
+one successful shard for each of the eight tasks declared in the manifest.
+
 ## Run the default smoke evaluation
 
 ```bash

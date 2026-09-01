@@ -377,13 +377,15 @@ def prepare(
     output_root: Path,
     *,
     suite: str,
+    source_tasks: tuple[str, ...] | None = None,
     dataset_snapshots: dict[str, Path],
     quick_manifest: dict[str, object] | None,
 ) -> tuple[Path, tuple[str, ...]]:
     """Generate the exact local task set selected by a VLM suite."""
     tasks_root = output_root.expanduser().absolute() / "task_configs"
     tasks_root.mkdir(parents=True, exist_ok=True)
-    source_tasks = suites.source_tasks(suite)
+    if source_tasks is None:
+        source_tasks = suites.source_tasks(suite)
     if quick_manifest is not None:
         _write_quick_selection_module(tasks_root, quick_manifest)
     if suite == "mmvu-smoke":

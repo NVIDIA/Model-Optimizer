@@ -29,7 +29,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.puzzletron.evaluation import checkpoint  # noqa: E402
-from examples.puzzletron.evaluation.vlm import contracts, suites  # noqa: E402
+from examples.puzzletron.evaluation.vlm import contracts, profile, suites  # noqa: E402
 from examples.puzzletron.evaluation.vlm.evaluator import evaluate  # noqa: E402
 
 
@@ -78,6 +78,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
         default="short",
         help="Pinned Qwen 3.5 VLM benchmark suite.",
+    )
+    parser.add_argument(
+        "--profile-task",
+        choices=profile.VLM_BENCHMARK_TASKS,
+        default=None,
+        help="Run one task from a versioned profile for scheduler-safe sharding.",
     )
     parser.add_argument("--batch-size", type=checkpoint.positive_int, default=1)
     parser.add_argument("--seed", type=int, default=42)

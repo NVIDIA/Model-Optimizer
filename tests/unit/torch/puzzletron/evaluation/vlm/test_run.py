@@ -598,6 +598,65 @@ def test_versioned_profile_rejects_batch_size_override(monkeypatch, tmp_path):
         preflight.prepare(args)
 
 
+def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "full-v1",
+            "--profile-task",
+            "realworldqa",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+
+    assert prepared.source_tasks == ("realworldqa",)
+    assert tuple(prepared.dataset_snapshots) == ("realworldqa",)
+    assert prepared.report["profile_task"] == "realworldqa"
+    assert prepared.report["source_tasks"] == ["realworldqa"]
+    assert prepared.report["profile_fingerprint"] == contracts.load_profile("full-v1").fingerprint
+    _, configured_tasks = tasks.prepare(
+        tmp_path / "results",
+        suite=prepared.suite,
+        source_tasks=prepared.source_tasks,
+        dataset_snapshots=prepared.dataset_snapshots,
+        quick_manifest=prepared.quick_manifest,
+    )
+    assert configured_tasks == ("modelopt_vlm_benchmark_realworldqa",)
+
+
+@pytest.mark.parametrize(
+    ("selection", "message"),
+    [
+        (("--suite", "short", "--profile-task", "realworldqa"), "requires"),
+        (("--profile", "short-v1", "--profile-task", "realworldqa"), "supported only"),
+    ],
+)
+def test_profile_task_rejects_invalid_parent(monkeypatch, tmp_path, selection, message):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            *selection,
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    with pytest.raises(ValueError, match=message):
+        preflight.prepare(args)
+
+
 def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):
     model = _write_checkpoint(tmp_path)
     lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
@@ -969,9 +1028,9 @@ def test_profile_contract_pins_every_task_and_revision():
 def test_video_reader_validation_is_limited_to_video_suites(monkeypatch):
     monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda _name: None)
 
-    preflight._verify_video_reader("short")
+    preflight._verify_video_reader(("realworldqa", "mmmu_val"))
     with pytest.raises(RuntimeError, match="decord-compatible reader"):
-        preflight._verify_video_reader("quick")
+        preflight._verify_video_reader(("mvbench",))
 
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():

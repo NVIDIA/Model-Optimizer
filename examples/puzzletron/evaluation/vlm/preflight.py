@@ -38,6 +38,7 @@ class PreparedSuite:
     """Validated local inputs and policy for one VLM suite execution."""
 
     suite: str
+    source_tasks: tuple[str, ...]
     dataset_snapshots: dict[str, Path]
     quick_manifest: dict[str, object] | None
     hf_home: Path
@@ -63,9 +64,19 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         raise ValueError("--seed cannot override a versioned evaluation profile")
     if profile_contract is not None and args.batch_size != profile_contract.manifest["batch_size"]:
         raise ValueError("--batch-size cannot override a versioned evaluation profile")
+    profile_task = getattr(args, "profile_task", None)
+    if profile_task is not None:
+        if profile_contract is None:
+            raise ValueError("--profile-task requires a versioned evaluation profile")
+        if profile_contract.name != "full-v1":
+            raise ValueError("--profile-task is supported only for full-v1")
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
+    if profile_task is not None:
+        if profile_task not in source_tasks:
+            raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
+        source_tasks = (profile_task,)
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
     if profile_contract is not None and profile_contract.exact_rows is not None:
@@ -105,6 +116,7 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     )
     return PreparedSuite(
         suite=suite,
+        source_tasks=source_tasks,
         dataset_snapshots=dataset_snapshots,
         quick_manifest=quick_manifest,
         hf_home=hf_home,
@@ -212,6 +224,7 @@ def _report(
             "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
         ],
         "source_tasks": list(source_tasks),
+        "profile_task": getattr(args, "profile_task", None),
         "dataset_revisions": revisions,
         "dataset_snapshots": {task: str(snapshot) for task, snapshot in dataset_snapshots.items()},
         "hf_home": str(hf_home),
@@ -244,7 +257,7 @@ def settings(
     prepared: PreparedSuite,
 ) -> dict[str, object]:
     """Build shared runner settings for a validated VLM suite."""
-    _verify_video_reader(prepared.suite)
+    _verify_video_reader(prepared.source_tasks)
     execution_policy = prepared.execution_policy
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
@@ -278,11 +291,10 @@ def settings(
     }
 
 
-def _verify_video_reader(suite: str) -> None:
+def _verify_video_reader(source_tasks: tuple[str, ...]) -> None:
     """Fail before evaluation when a selected video task has no decord reader."""
     video_selected = any(
-        profile.VLM_BENCHMARK_DATASETS[task].media_dir is not None
-        for task in suites.source_tasks(suite)
+        profile.VLM_BENCHMARK_DATASETS[task].media_dir is not None for task in source_tasks
     )
     if video_selected and importlib.util.find_spec("decord") is None:
         raise RuntimeError(
