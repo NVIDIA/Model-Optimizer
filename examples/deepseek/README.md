@@ -129,7 +129,7 @@ python ${DS_V4}/inference/convert.py \
 ### Calibrate routed experts
 
 The quantization config defaults to the built-in routed-expert NVFP4 setup. Pass
-`--recipe huggingface/models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`
+`--recipe models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only`
 to load the same config from [modelopt_recipes](../../modelopt_recipes/ptq.md) instead.
 
 Single node:

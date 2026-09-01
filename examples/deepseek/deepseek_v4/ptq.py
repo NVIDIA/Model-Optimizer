@@ -275,7 +275,7 @@ def load_deepseek_v4(
     return model
 
 
-_PUBLISHED_RECIPE = "huggingface/models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
+_PUBLISHED_RECIPE = "models/deepseek-ai/DeepSeek-V4-Pro-0813/ptq/nvfp4_experts_only"
 
 
 _MTP_PROBE = "mtp.0.ffn.experts.0.w1_weight_quantizer"
