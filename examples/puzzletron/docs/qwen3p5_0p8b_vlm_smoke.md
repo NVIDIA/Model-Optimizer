@@ -243,7 +243,7 @@ Run the campaign with the same execution profile and a distinct output root:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
 
