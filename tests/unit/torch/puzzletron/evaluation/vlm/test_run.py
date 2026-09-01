@@ -49,6 +49,7 @@ def _write_checkpoint(root: Path) -> Path:
     model = root / "model"
     model.mkdir()
     (model / "config.json").write_text(json.dumps(_QWEN_CONFIG) + "\n")
+    (model / "preprocessor_config.json").write_text("{}\n")
     return model
 
 
@@ -75,6 +76,14 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
     )
     config_path.write_text(json.dumps(config) + "\n")
     with pytest.raises(ValueError, match="AnyModel base_architecture"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
+def test_checkpoint_contract_requires_local_processor_assets(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    (checkpoint_path / "preprocessor_config.json").unlink()
+
+    with pytest.raises(ValueError, match="multimodal processor assets"):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
@@ -185,6 +194,9 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     calls = []
 
     def fake_runner(checkpoint_path, *, output_root, settings):
+        result_path = output_root / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         calls.append(
             {
                 "checkpoint": checkpoint_path,
@@ -195,7 +207,11 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
                 "settings": settings,
             }
         )
-        return {"attempt": len(calls), "output_root": str(output_root)}
+        return {
+            "attempt": len(calls),
+            "metrics": {"accuracy": len(calls) / 10},
+            "result_path": str(result_path),
+        }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
     argv = [
@@ -233,14 +249,12 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     ]
     assert all(not any(call["credentials"].values()) for call in calls)
     assert all(call["settings"]["tasks"] == ",".join(expected_tasks) for call in calls)
-    assert result["runs"] == [
-        {"attempt": 1, "output_root": str(output / "short-repetition-1")},
-        {"attempt": 2, "output_root": str(output / "short-repetition-2")},
-    ]
+    assert [run["attempt"] for run in result["runs"]] == [1, 2]
     for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
     assert settings["model"] == "vllm"
+    assert settings["log_samples"] is False
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings
@@ -263,6 +277,75 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert report["generation_policy"] == settings["gen_kwargs"]
 
 
+def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, tmp_path):
+    model = _write_checkpoint(tmp_path)
+    source_tasks = ("realworldqa", "mmmu_val")
+    lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
+    _use_offline_fakes(monkeypatch, lmms_root)
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    output = tmp_path / "results"
+    calls = []
+
+    def fake_runner(checkpoint_path, *, output_root, settings):
+        calls.append(output_root)
+        result_path = output_root / "attempt" / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
+        return {
+            "metrics": {"accuracy": len(calls) / 10},
+            "result_path": str(result_path),
+        }
+
+    monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(output),
+            "--suite",
+            "short",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    first = evaluation.evaluate(args)
+    second = evaluation.evaluate(args)
+
+    assert len(calls) == 2
+    assert second["runs"] == first["runs"]
+    for repetition in (1, 2):
+        completed = json.loads(
+            (output / f"short-repetition-{repetition}" / "completed_run.json").read_text()
+        )
+        assert completed["schema"] == "modelopt.vlm-evaluation-completed-run/v1"
+        assert completed["identity"]["repetition"] == repetition
+        assert completed["identity"]["checkpoint"]["fingerprint"]
+
+    state_path = model / "modelopt_state.json"
+    state_path.write_text("{}\n")
+    changed_checkpoint = evaluation.evaluate(args)
+    assert len(calls) == 4
+    assert changed_checkpoint["runs"] != first["runs"]
+
+    state_path.unlink()
+    restored_checkpoint = evaluation.evaluate(args)
+    assert len(calls) == 6
+    Path(restored_checkpoint["runs"][0]["result_path"]).unlink()
+    with pytest.raises(RuntimeError, match="result artifact is missing"):
+        evaluation.evaluate(args)
+
+
+def test_e2e_full_eval_policy_is_repeated_and_bounded_to_100_rows_per_task():
+    assert suites.source_tasks("e2e-full-eval") == ("realworldqa", "mmmu_val")
+    policy = suites.execution_policy("e2e-full-eval", timeout_seconds=14400)
+    assert policy["limit"] == 100
+    assert policy["repetitions"] == 2
+    assert policy["generation"] == {"temperature": 0, "do_sample": False}
+
+
 def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):
     model = _write_checkpoint(tmp_path)
     lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
@@ -274,6 +357,9 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     captured = {}
 
     def fake_runner(checkpoint_path, *, output_root, settings):
+        result_path = output_root / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         report = json.loads((output / "profile.json").read_text())
         assert report["configured_tasks"] == ["modelopt_vlm_benchmark_realworldqa"]
         assert report["sample_limit"] == 2
@@ -284,6 +370,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
         )
         return {
             "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
+            "result_path": str(result_path),
         }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
@@ -307,6 +394,62 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     assert captured["settings"]["topology"] == {"tensor_parallel_size": 1}
     assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
     assert result["profile_path"] == str(output / "profile.json")
+
+
+def test_post_mip_e2e_full_eval_adapter_averages_repeated_bounded_tasks(
+    monkeypatch,
+    tmp_path,
+):
+    model = tmp_path / "model"
+    model.mkdir()
+    output = tmp_path / "output"
+    captured = {}
+
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        captured.update(args=args, settings_overrides=settings_overrides)
+        preflight_callback({"profile": suites.EVALUATION_PROFILE, "sample_limit": None})
+        runs = []
+        for index, realworldqa_score in enumerate((0.4, 0.6), start=1):
+            result_path = tmp_path / f"run-{index}.json"
+            result_path.write_text("{}")
+            runs.append(
+                {
+                    "metrics": {
+                        "modelopt_vlm_benchmark_realworldqa.exact_match_none": (realworldqa_score),
+                        "modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.3,
+                    },
+                    "result_path": str(result_path),
+                }
+            )
+        return {"runs": runs}
+
+    monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
+    result = post_mip.evaluate_e2e_full_eval_checkpoint(
+        model,
+        output_root=output,
+        settings={
+            "batch_size": 1,
+            "timeout_seconds": 14400,
+            "dtype": "bfloat16",
+            "topology": {"tensor_parallel_size": 1},
+        },
+    )
+
+    assert captured["args"].suite == "e2e-full-eval"
+    assert captured["args"].batch_size == 1
+    assert captured["args"].seed == 42
+    assert captured["settings_overrides"] == {
+        "dtype": "bfloat16",
+        "topology": {"tensor_parallel_size": 1},
+    }
+    assert result["metrics"] == {
+        "modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none": 0.3,
+        "modelopt_vlm_benchmark_realworldqa.exact_match_none": 0.5,
+    }
+    summary = json.loads(Path(result["result_path"]).read_text())
+    assert summary["suite"] == "e2e-full-eval"
+    assert summary["metrics"] == result["metrics"]
+    assert summary["result_paths"] == result["run_result_paths"]
 
 
 def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):

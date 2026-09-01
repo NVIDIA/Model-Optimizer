@@ -51,10 +51,10 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 
 Choose **Balanced pruning** for a first-generated text campaign. For the
 maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the recommended
-Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM, use
-the VLM pruning smoke linked below. Guided setup can resolve the
-same model, the recommended Nemotron-VLM v2 image-text dataset, and site
-settings, but its generic pruning profile is not the VLM example used here.
+Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM,
+select the same model and the recommended Nemotron-VLM v2 image-text dataset.
+The generated post-MIP flow follows the detected modality, including image
+serving, VLM distillation, and the pinned RealWorldQA/MMMU comparison.
 Review the detected model, data modality, worker and scheduler settings, and
 output directory.
 

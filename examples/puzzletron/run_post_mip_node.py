@@ -45,7 +45,7 @@ def _register_evaluation_profiles(config: dict) -> None:
                 profile = node_config.get("profile")
                 if isinstance(profile, str):
                     profiles.add(profile)
-    if "qwen35_vlm_realworldqa" in profiles:
+    if profiles & {"qwen35_vlm_realworldqa", "qwen35_vlm_e2e_full_eval"}:
         from examples.puzzletron.evaluation.vlm.post_mip import register_profiles
 
         register_profiles()

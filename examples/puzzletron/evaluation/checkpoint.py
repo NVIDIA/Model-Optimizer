@@ -149,15 +149,21 @@ def verify_lmms_eval_revision() -> str:
     """Return the installed VCS revision after matching the shared evaluator pin."""
     try:
         direct_url = importlib.metadata.distribution("lmms-eval").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        direct_url = None
+    try:
         provenance = json.loads(direct_url) if direct_url is not None else None
-    except (importlib.metadata.PackageNotFoundError, json.JSONDecodeError) as error:
+    except json.JSONDecodeError as error:
         raise RuntimeError("installed lmms-eval revision provenance is unavailable") from error
-    if not isinstance(provenance, dict):
-        raise RuntimeError("installed lmms-eval revision provenance is unavailable")
-    vcs_info = provenance.get("vcs_info")
-    revision = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
-    if revision is None:
-        revision = _editable_lmms_eval_revision(provenance)
+    if provenance is None:
+        revision = _imported_lmms_eval_revision()
+    elif isinstance(provenance, dict):
+        vcs_info = provenance.get("vcs_info")
+        revision = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
+        if revision is None:
+            revision = _editable_lmms_eval_revision(provenance)
+    else:
+        revision = None
     if revision != LMMS_EVAL_REVISION:
         raise RuntimeError(
             "installed lmms-eval revision differs from the pinned profile: "
@@ -178,6 +184,20 @@ def _editable_lmms_eval_revision(provenance: dict[str, object]) -> str | None:
     if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
         return None
     checkout = Path(url2pathname(unquote(parsed.path))).resolve()
+    return _clean_checkout_revision(checkout)
+
+
+def _imported_lmms_eval_revision() -> str | None:
+    """Verify a source checkout imported directly through ``PYTHONPATH``."""
+    spec = importlib.util.find_spec("lmms_eval")
+    locations = tuple(spec.submodule_search_locations or ()) if spec is not None else ()
+    if len(locations) != 1:
+        return None
+    return _clean_checkout_revision(Path(locations[0]).resolve().parent)
+
+
+def _clean_checkout_revision(checkout: Path) -> str | None:
+    """Return the revision of one clean Git checkout, if it can be verified."""
     try:
         revision = subprocess.run(
             ["git", "-C", str(checkout), "rev-parse", "HEAD"],
@@ -196,7 +216,7 @@ def _editable_lmms_eval_revision(provenance: dict[str, object]) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     if status:
-        raise RuntimeError("installed lmms-eval editable checkout contains local changes")
+        raise RuntimeError("installed lmms-eval checkout contains local changes")
     return revision or None
 
 

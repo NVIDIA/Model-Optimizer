@@ -15,6 +15,8 @@
 
 from collections import OrderedDict
 
+import pytest
+
 from puzzletron_setup.v2.post_mip import FlowDraft, NodeDraft, PostMIPFlowEditor, recommended_flow
 
 
@@ -59,6 +61,65 @@ def test_recommended_flow_accepts_a_single_concurrency_value():
 
     assert flow.nodes["serving"].config["concurrency"] == [2]
     assert flow.nodes["fastest"].selector["best_selection_mode"] == "individual_best"
+
+
+def test_recommended_multimodal_flow_uses_image_serving_and_vlm_selection():
+    comparison = {
+        "profile": "qwen35_vlm_e2e_full_eval",
+        "reference_checkpoint": "${teacher_dir}",
+    }
+
+    flow = recommended_flow(
+        "params",
+        ["metrics.lm_loss"],
+        {"sequence_length": 1024},
+        {
+            "input_tokens": 128,
+            "output_tokens": 32,
+            "concurrency": [1, 4],
+            "request_count": 32,
+            "image_batch_sizes": [1, 6, 12],
+        },
+        modality="multimodal",
+        quality_comparison=comparison,
+    )
+
+    assert tuple(flow.nodes) == (
+        "image_eval",
+        "best_vlm_loss",
+        "materialized",
+        "vlm_serving",
+        "fastest_vlm",
+        "short_kd",
+        "final_image_eval",
+        "best",
+        "quality_benchmarks",
+    )
+    assert flow.nodes["vlm_serving"].config["endpoint_type"] == "chat"
+    assert flow.nodes["vlm_serving"].config["image_batch_sizes"] == [1, 6, 12]
+    assert flow.nodes["fastest_vlm"].selector["metric"] == (
+        "vlm_serving.images_12.concurrency_1.image_throughput"
+    )
+    assert flow.nodes["quality_benchmarks"].input_id == "best"
+    assert flow.nodes["quality_benchmarks"].config == comparison
+
+
+@pytest.mark.parametrize(
+    ("serving", "message"),
+    [
+        ({"concurrency": []}, "concurrency"),
+        ({"concurrency": 1, "image_batch_sizes": []}, "image_batch_sizes"),
+    ],
+)
+def test_recommended_multimodal_flow_rejects_empty_serving_sweeps(serving, message):
+    with pytest.raises(ValueError, match=message):
+        recommended_flow(
+            "params",
+            ["metrics.lm_loss"],
+            {"sequence_length": 1024},
+            serving,
+            modality="multimodal",
+        )
 
 
 def test_downstream_evaluation_node_is_configurable_after_materialization():
