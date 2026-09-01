@@ -1530,9 +1530,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "PTQ or AutoQuantize recipe YAML file or name without suffix (e.g. "
             "general/ptq/nvfp4_default-kv_fp8_cast, general/auto_quantize/nvfp4_fp8_at_4p8bits). "
-            "KV cache source depends on the recipe type: PTQ recipes bake KV cache into quant_cfg "
-            "and --kv_cache_qformat is ignored; AutoQuantize recipes fall back to --kv_cache_qformat "
-            "unless the recipe sets an explicit kv_cache field."
+            "KV cache behavior depends on the recipe type: PTQ recipes configure it in quant_cfg "
+            "and ignore --kv_cache_qformat; weight AutoQuantize recipes use their kv_cache setting "
+            "or fall back to --kv_cache_qformat; KV-cache AutoQuantize recipes select per-layer K/V "
+            "formats from candidate_formats and ignore --kv_cache_qformat."
         ),
         default=None,
     )

@@ -59,6 +59,19 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+def test_recipe_help_distinguishes_weight_and_kv_autoquant(monkeypatch, capsys):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["hf_ptq.py", "--help"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        hf_ptq.parse_args()
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "weight AutoQuantize recipes use their kv_cache setting" in help_text
+    assert "KV-cache AutoQuantize recipes select per-layer K/V formats" in help_text
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
