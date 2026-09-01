@@ -516,8 +516,8 @@ def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     short = contracts.load_profile("short-v1")
     full = contracts.load_profile("full-v1")
 
-    assert short.fingerprint == "8fa76716683022bd791a5ae2e0c0e00de7998db31b725084a04222458fa32287"
-    assert full.fingerprint == "480bc83cd374718815c32f645fb6f333793f895d7a4b30aae63a727579670a96"
+    assert short.fingerprint == "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177"
+    assert full.fingerprint == "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a"
     assert short.source_tasks == suites.QUICK_TASKS
     assert full.source_tasks == tuple(
         task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
