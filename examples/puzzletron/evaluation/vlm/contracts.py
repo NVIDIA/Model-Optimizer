@@ -107,7 +107,11 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
         "model_type": "qwen3_5",
     }:
         raise RuntimeError(f"{name} profile model family is unsupported")
-    if manifest.get("backend") != {"name": "vllm", "reasoning_parser": "qwen3"}:
+    if manifest.get("backend") != {
+        "enable_thinking": False,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    }:
         raise RuntimeError(f"{name} profile backend differs from the runtime policy")
     if manifest.get("preprocessing") != {
         "fps": 2,

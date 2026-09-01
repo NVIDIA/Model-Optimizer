@@ -59,7 +59,25 @@ def _write_checkpoint(root: Path) -> Path:
     model.mkdir()
     (model / "config.json").write_text(json.dumps(_QWEN_CONFIG) + "\n")
     (model / "preprocessor_config.json").write_text("{}\n")
+    (model / "chat_template.jinja").write_text(
+        "{% if enable_thinking is defined and enable_thinking is false %}"
+        "no-think{% else %}think{% endif %}\n"
+    )
     return model
+
+
+def test_no_think_template_is_local_and_requires_checkpoint_switch(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+
+    generated = preflight._no_think_chat_template(checkpoint_path, tasks_root)
+
+    assert generated.parent == tasks_root
+    assert generated.read_text().startswith("{%- set enable_thinking = false %}\n")
+    (checkpoint_path / "chat_template.jinja").write_text("unsupported\n")
+    with pytest.raises(ValueError, match="cannot disable thinking"):
+        preflight._no_think_chat_template(checkpoint_path, tasks_root)
 
 
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
@@ -304,6 +322,8 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert settings["log_samples"] is True
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"
+    chat_template = Path(settings["model_args"]["chat_template"])
+    assert chat_template.read_text().startswith("{%- set enable_thinking = false %}\n")
     assert "topology" not in settings
     assert settings["env"]["HF_HUB_OFFLINE"] == "1"
     assert settings["env"]["API_TYPE"] == "openai"

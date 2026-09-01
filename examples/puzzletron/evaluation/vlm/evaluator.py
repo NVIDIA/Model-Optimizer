@@ -217,6 +217,13 @@ def evaluate(
             "task_config_root": str(task_root),
         }
     )
+    settings = preflight.settings(
+        args,
+        tasks_root=task_root,
+        configured_tasks=configured_tasks,
+        prepared=prepared,
+    )
+    settings.update(settings_overrides or {})
     if preflight_callback is not None:
         preflight_callback(report)
     if args.preflight_only:
@@ -225,13 +232,6 @@ def evaluate(
             "preflight": report,
             "runs": [],
         }
-    settings = preflight.settings(
-        args,
-        tasks_root=task_root,
-        configured_tasks=configured_tasks,
-        prepared=prepared,
-    )
-    settings.update(settings_overrides or {})
     repetitions = prepared.execution_policy["repetitions"]
     checkpoint_identity = _checkpoint_identity(args.checkpoint)
     profile_identity = {

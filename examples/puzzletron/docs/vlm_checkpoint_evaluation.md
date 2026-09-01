@@ -46,7 +46,9 @@ Use a versioned profile when scores will be compared across checkpoints:
 Both profiles pin the evaluator revision, model family, dataset revisions,
 task scoring configurations, preprocessing, generation, and sample selection.
 They also pin batch size 1 because changing VLM batching can change deterministic
-outputs with the maintained backend.
+outputs with the maintained backend. Qwen thinking is disabled by a local,
+evaluation-owned copy of the checkpoint chat template. This ensures short-answer
+tasks spend their token budget on the scored answer instead of hidden reasoning.
 Preflight reports the profile schema and SHA-256 contract fingerprint. The
 fingerprint is also part of the resumable run identity, so results from a
 different contract are not reused.
@@ -165,7 +167,8 @@ python -m examples.puzzletron.evaluation.vlm.run \
 ```
 
 The checkpoint must contain a readable `config.json` matching the supported
-Qwen 3.5 VLM family and local multimodal processor assets. Use
+Qwen 3.5 VLM family, local multimodal processor assets, and a Qwen chat template
+with the standard `enable_thinking` switch. Use
 `--preflight-only` first to validate the
 checkpoint, evaluator revision, task definitions, cached datasets, media, and
 credentials without starting model evaluation.

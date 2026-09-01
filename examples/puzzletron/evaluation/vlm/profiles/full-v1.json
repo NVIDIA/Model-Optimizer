@@ -7,6 +7,7 @@
     "model_type": "qwen3_5"
   },
   "backend": {
+    "enable_thinking": false,
     "name": "vllm",
     "reasoning_parser": "qwen3"
   },

@@ -32,6 +32,9 @@ from examples.puzzletron.evaluation.vlm import contracts, model, profile, suites
 
 __all__ = ["PreparedSuite", "prepare", "settings"]
 
+_NO_THINK_TEMPLATE_PREFIX = "{%- set enable_thinking = false %}\n"
+_NO_THINK_TEMPLATE_MARKER = "enable_thinking is defined and enable_thinking is false"
+
 
 @dataclass(frozen=True)
 class PreparedSuite:
@@ -300,6 +303,7 @@ def settings(
     execution_policy = prepared.execution_policy
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
+    chat_template = _no_think_chat_template(args.checkpoint, tasks_root)
     return {
         "model": "vllm",
         "checkpoint_arg": "model",
@@ -311,6 +315,7 @@ def settings(
         "reasoning_parser": "qwen3",
         "log_samples": prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE},
         "model_args": {
+            "chat_template": str(chat_template),
             "fps": frame_policy["fps"],
             "max_frame_num": frame_policy["max_frames"],
         },
@@ -328,6 +333,20 @@ def settings(
         },
         "extra_args": ["--include_path", str(tasks_root)],
     }
+
+
+def _no_think_chat_template(checkpoint_path: Path, tasks_root: Path) -> Path:
+    """Materialize the checkpoint template with Qwen thinking disabled."""
+    source = checkpoint_path / "chat_template.jinja"
+    try:
+        content = source.read_text()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"Qwen 3.5 chat template is unreadable: {source}") from error
+    if _NO_THINK_TEMPLATE_MARKER not in content:
+        raise ValueError(f"Qwen 3.5 chat template cannot disable thinking: {source}")
+    target = tasks_root / "modelopt_qwen35_no_think.jinja"
+    target.write_text(_NO_THINK_TEMPLATE_PREFIX + content)
+    return target
 
 
 def _verify_video_reader(source_tasks: tuple[str, ...]) -> None:
