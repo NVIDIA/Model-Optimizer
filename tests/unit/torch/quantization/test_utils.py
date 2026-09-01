@@ -13,14 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+from unittest import mock
+
 import pytest
 import torch
+from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_amax,
     reduce_block_amax,
 )
+from modelopt.torch.quantization.utils import core_utils
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
 
@@ -59,40 +64,44 @@ def test_reduce_block_amax(block_sizes, test_input, expected_scales):
     torch.allclose(scales, expected_scales)
 
 
-def test_fsdp2_aware_weight_update_preserves_setup_error(monkeypatch):
+@pytest.mark.parametrize("failure_point", ["module_discovery", "unshard"])
+def test_fsdp2_aware_weight_update_preserves_setup_error(monkeypatch, failure_point):
     """A failure during setup (e.g. a CUDA OOM raised by ``unshard()``) must
     propagate to the caller, not be replaced by an ``UnboundLocalError`` from
     the ``finally`` block referencing variables that were never assigned.
 
     Regression test for https://github.com/NVIDIA/Model-Optimizer/issues/1859.
     """
-    from unittest import mock
-
-    from torch.distributed.fsdp import FSDPModule
-
-    from modelopt.torch.quantization.utils import core_utils
-
     root_model = mock.MagicMock(spec=FSDPModule)
     module = torch.nn.Linear(4, 4)
 
     def _raise_oom(*args, **kwargs):
         raise RuntimeError("CUDA out of memory (simulated)")
 
-    monkeypatch.setattr(core_utils, "_get_enclosing_fsdp_module", _raise_oom)
+    if failure_point == "module_discovery":
+        monkeypatch.setattr(core_utils, "_get_enclosing_fsdp_module", _raise_oom)
+    else:  # the reported scenario: discovery succeeds, unshard() OOMs
+        monkeypatch.setattr(core_utils, "_get_enclosing_fsdp_module", lambda m, r: root_model)
+        fake_fully_shard = mock.MagicMock()
+        fake_fully_shard.state.return_value._fsdp_param_group.is_sharded = True
+        monkeypatch.setattr(core_utils, "fully_shard", fake_fully_shard)
+        monkeypatch.setattr(core_utils, "enable_fake_quant", lambda m: nullcontext())
+        root_model.unshard.side_effect = _raise_oom
 
     with pytest.raises(RuntimeError, match="out of memory"):
         with core_utils.fsdp2_aware_weight_update(root_model, module):
             pass  # setup fails before the body runs
 
+    if failure_point == "unshard":
+        root_model.unshard.assert_called_once()
+
 
 def test_fsdp2_aware_weight_update_non_fsdp_body_error_passthrough():
     """For a non-FSDP root model the context manager is a no-op wrapper and
     must transparently propagate errors raised in the body."""
-    from modelopt.torch.quantization.utils.core_utils import fsdp2_aware_weight_update
-
     module = torch.nn.Linear(4, 4)
     with pytest.raises(ValueError, match="body failure"):
-        with fsdp2_aware_weight_update(module, module):
+        with core_utils.fsdp2_aware_weight_update(module, module):
             raise ValueError("body failure")
 
 
