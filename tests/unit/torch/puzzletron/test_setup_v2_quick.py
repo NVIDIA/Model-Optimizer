@@ -456,8 +456,13 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert comparison["type"] == "downstream_evaluation"
     assert comparison["input"] == "best"
     assert comparison["failure_policy"] == "strict"
-    assert comparison["config"]["tasks"] == ["ifeval", "gsm8k"]
-    assert comparison["config"]["limit"] == 100
+    assert comparison["config"]["tasks"] == [
+        "ifeval",
+        "gsm8k",
+        "mmlu_pro_computer_science",
+        "mmlu_pro_history",
+    ]
+    assert comparison["config"]["limit"] == 256
     assert "recorded_observation" not in comparison["config"]
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {

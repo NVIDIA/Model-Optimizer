@@ -71,7 +71,7 @@ class GlobalKDConfig:
     teacher_model_kwargs: dict[str, Any] = field(default_factory=dict)
     student_model_kwargs: dict[str, Any] = field(default_factory=dict)
     domain: Literal["auto", "llm", "vlm"] = "auto"
-    trust_remote_code: bool = True
+    trust_remote_code: bool = False
     torch_dtype: str = "bf16"
     attn_implementation: str | None = None
     tp: int = 1
@@ -309,7 +309,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         },
         domain=str(kd_cfg.get("domain", "auto")).lower(),
         trust_remote_code=bool(
-            kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", True))
+            kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False))
         ),
         torch_dtype=str(kd_cfg.get("torch_dtype") or model_cfg.get("torch_dtype") or "bf16"),
         attn_implementation=kd_cfg.get("attn_implementation")
