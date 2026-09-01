@@ -382,7 +382,8 @@ def _prepare_ep_list(
                 logger.debug(f"Added TensorRT-RTX ABI EP: {ep_name}")
                 continue
             if trt_rtx_backend != "legacy":
-                continue
+                logger.error(f"Unrecognized trt-rtx backend: {trt_rtx_backend}")
+                raise NotImplementedError(f"Trt-rtx backend {trt_rtx_backend} not recognized!")
             try:
                 _check_for_nv_tensorrt_rtx_libs()
                 _append_provider(providers, i, "NvTensorRTRTXExecutionProvider")
@@ -455,25 +456,15 @@ def update_trt_ep_support(
                     "flag to simplify your model, as it may be able to remove some problematic ops."
                 )
                 trt_plugins = _make_trt_ep_first_choice(calibration_eps, trt_plugins)
-            elif "NvTensorRtRtx" in calibration_eps and not trt_plugins:
-                logger.info(
-                    "Custom ops detected; keeping NvTensorRtRtx as the selected execution provider"
-                )
             else:
-                logger.error("DDS and custom ops require TensorRT or TensorRT-RTX EP")
+                logger.error("DDS and custom ops require TensorRT EP")
                 raise Exception(
-                    "This model contains DDS and custom ops. Select either the TensorRT EP or "
-                    "NvTensorRtRtx. TensorRT plugin library paths are only supported by the "
-                    "classic TensorRT EP."
+                    "This model contains DDS and custom ops. Custom ops are only supported with the TensorRT EP, but "
+                    "that has been disabled. Please update your TRT and/or ORT version."
                 )
     elif has_custom_op:
-        if "NvTensorRtRtx" in calibration_eps and not trt_plugins:
-            logger.info(
-                "Custom ops detected; keeping NvTensorRtRtx as the selected execution provider"
-            )
-        else:
-            logger.info("Custom op detected, enabling TensorRT EP")
-            trt_plugins = _make_trt_ep_first_choice(calibration_eps, trt_plugins)
+        logger.info("Custom op detected, enabling TensorRT EP")
+        trt_plugins = _make_trt_ep_first_choice(calibration_eps, trt_plugins)
 
     return trt_plugins
 

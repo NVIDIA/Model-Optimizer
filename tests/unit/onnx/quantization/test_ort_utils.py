@@ -223,26 +223,6 @@ def test_prepare_ep_list_reuses_registered_trt_rtx_abi_provider(monkeypatch):
     ]
 
 
-def test_trt_rtx_backend_validation_is_deferred_until_session_creation(monkeypatch):
-    monkeypatch.setattr(
-        ort_utils,
-        "_check_for_nv_tensorrt_rtx_libs",
-        lambda: pytest.fail("Legacy TensorRT-RTX setup should not run for an invalid backend"),
-    )
-
-    assert ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="invalid") == []
-    with pytest.raises(ValueError, match="trt_rtx_backend must be 'legacy' or 'abi'"):
-        ort_utils.create_inference_session(
-            "model.onnx", ["NvTensorRtRtx"], trt_rtx_backend="invalid"
-        )
-
-
-def test_custom_ops_do_not_force_classic_tensorrt_when_trt_rtx_is_selected():
-    calibration_eps = ["NvTensorRtRtx", "cpu"]
-
-    plugins = ort_utils.update_trt_ep_support(
-        calibration_eps, has_dds_op=False, has_custom_op=True, trt_plugins=[]
-    )
-
-    assert calibration_eps == ["NvTensorRtRtx", "cpu"]
-    assert plugins == []
+def test_prepare_ep_list_rejects_unrecognized_trt_rtx_backend():
+    with pytest.raises(NotImplementedError, match="Trt-rtx backend invalid not recognized!"):
+        ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="invalid")

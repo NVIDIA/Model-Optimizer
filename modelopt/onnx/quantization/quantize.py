@@ -574,6 +574,14 @@ def quantize(
         None, writes the quantized onnx model in the supplied output_path
         or writes to the same directory with filename like "<model_name>.quant.onnx".
     """
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
+    if trt_plugins and "NvTensorRtRtx" in calibration_eps:
+        raise ValueError(
+            "TensorRT plugin paths are not supported with the TensorRT-RTX backend. "
+            "Remove --trt_plugins or select the classic TensorRT EP."
+        )
+
     configure_logging(log_level.upper(), log_file)
     logger.info(f"Starting quantization process for model: {onnx_path}")
     logger.info(f"Quantization mode: {quantize_mode}")

@@ -306,7 +306,7 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
 
     # Note. This path can be an empty string, which denotes that the model has custom ops and TRT EP is needed.
     calibrator.trt_extra_plugin_lib_paths = kwargs.get("trt_extra_plugin_lib_paths")
-    if trt_rtx_backend != "abi" and calibrator.trt_extra_plugin_lib_paths is not None:
+    if calibrator.trt_extra_plugin_lib_paths is not None:
         logger.debug(f"TRT extra plugin paths: {calibrator.trt_extra_plugin_lib_paths}")
         if "TensorrtExecutionProvider" not in ort.get_available_providers():
             raise RuntimeError(
