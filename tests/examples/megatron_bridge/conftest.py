@@ -12,13 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Run example steps without a ``torchrun`` launch; see ``_test_utils.torch.megatron.example_runner``."""
+"""Run example steps without a ``torchrun`` launch; see ``_test_utils.examples.megatron_example_runner``."""
 
 import os
 
 import pytest
+from _test_utils.examples.megatron_example_runner import (
+    reset_megatron_global_state,
+    run_example_step,
+)
 from _test_utils.examples.run_command import set_in_process_runner
-from _test_utils.torch.megatron.example_runner import reset_megatron_global_state, run_example_step
 
 
 @pytest.fixture(scope="session", autouse=True)

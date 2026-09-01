@@ -137,7 +137,7 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
 
 
 # Set by a suite's conftest to run a command without spawning a subprocess (see
-# ``_test_utils.torch.megatron.example_runner``). ``None`` means always use a subprocess.
+# ``_test_utils.examples.megatron_example_runner``). ``None`` means always use a subprocess.
 _in_process_runner = None
 
 

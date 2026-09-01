@@ -255,8 +255,6 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
 
 def run_example_step(cmd_parts: list[str], example_path: str) -> str | None:
     """Run an example step without shelling out. ``None`` falls back to a subprocess."""
-    if os.environ.get("MODELOPT_NO_INPROCESS_EXAMPLES"):
-        return None
     script = next((str(p) for p in cmd_parts if str(p).endswith(".py")), None)
     if script is None:
         return None
