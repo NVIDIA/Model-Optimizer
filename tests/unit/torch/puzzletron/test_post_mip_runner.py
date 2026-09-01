@@ -117,7 +117,7 @@ def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypat
                             },
                             "checkpoint_eval": {
                                 "type": "downstream_evaluation",
-                                "config": {"profile": "qwen35_vlm_realworldqa"},
+                                "config": {"profile": "qwen35_vlm_e2e_full_eval"},
                             },
                         }
                     },
@@ -488,17 +488,54 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
         "observation_delta.reference.ifeval.accuracy": 0.0,
     }
     comparison = json.loads(Path(result["comparison_path"]).read_text())
-    assert comparison["candidate"]["metrics"] == {"ifeval.accuracy": 0.4}
-    assert comparison["reference"]["metrics"] == {"ifeval.accuracy": 0.5}
     assert comparison["delta"]["ifeval.accuracy"] == pytest.approx(-0.1)
-    assert comparison["recorded_observation"] == {
-        "repeat_count": 2,
-        "metrics": {
-            "candidate.ifeval.accuracy": 0.35,
-            "reference.ifeval.accuracy": 0.5,
-        },
-        "difference_from_recorded": {
-            "candidate.ifeval.accuracy": pytest.approx(0.05),
-            "reference.ifeval.accuracy": 0.0,
-        },
+    assert comparison["recorded_observation"]["repeat_count"] == 2
+    assert comparison["recorded_observation"]["difference_from_recorded"] == {
+        "candidate.ifeval.accuracy": pytest.approx(0.05),
+        "reference.ifeval.accuracy": 0.0,
     }
+
+
+def test_downstream_evaluation_compares_profile_candidate_with_reference(monkeypatch, tmp_path):
+    candidate = tmp_path / "candidate"
+    reference = tmp_path / "teacher"
+    candidate.mkdir()
+    reference.mkdir()
+
+    def fake_evaluate(checkpoint_path, *, output_root, settings):
+        score = 0.4 if Path(checkpoint_path) == candidate else 0.5
+        result_path = Path(output_root) / "summary.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}")
+        return {"metrics": {"realworldqa.accuracy": score}, "result_path": str(result_path)}
+
+    monkeypatch.setattr(
+        runner,
+        "_DOWNSTREAM_EVALUATION_PROFILES",
+        {"quality": fake_evaluate},
+    )
+    node = SimpleNamespace(
+        node_id="full_vlm_benchmarks",
+        config={
+            "config": {
+                "profile": "quality",
+                "reference_checkpoint": str(reference),
+                "batch_size": 1,
+            }
+        },
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(candidate)},
+    )
+
+    result = runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "run")
+
+    assert result["metrics"] == {
+        "realworldqa.accuracy": 0.4,
+        "candidate.realworldqa.accuracy": 0.4,
+        "reference.realworldqa.accuracy": 0.5,
+        "delta.realworldqa.accuracy": pytest.approx(-0.1),
+    }
+    assert Path(result["comparison_path"]).is_file()

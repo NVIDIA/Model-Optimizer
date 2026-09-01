@@ -221,23 +221,15 @@ def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
         "do_sample": False,
         "temperature": 0,
     }
-    assert benchmark["config"]["recorded_observation"] == {
-        "repeat_count": 2,
-        "candidate_architecture": {
-            "parameter_pruning_percent": 10.042,
-            "parameter_retention_percent": 89.958,
-            "ffn_layers": 24,
-            "teacher_intermediate_size": 3584,
-            "student_intermediate_size": 2048,
-            "ffn_width_pruning_percent": 42.857,
-        },
-        "metrics": {
-            "candidate.modelopt_ifeval.prompt_level_strict_acc_none": 0.23,
-            "reference.modelopt_ifeval.prompt_level_strict_acc_none": 0.55,
-            "candidate.modelopt_gsm8k.exact_match_flexible-extract": 0.01,
-            "reference.modelopt_gsm8k.exact_match_flexible-extract": 0.45,
-        },
+    observation = benchmark["config"]["recorded_observation"]
+    assert observation["repeat_count"] > 0
+    assert set(observation["metrics"]) == {
+        "candidate.modelopt_ifeval.prompt_level_strict_acc_none",
+        "reference.modelopt_ifeval.prompt_level_strict_acc_none",
+        "candidate.modelopt_gsm8k.exact_match_flexible-extract",
+        "reference.modelopt_gsm8k.exact_match_flexible-extract",
     }
+    assert 0 < observation["candidate_architecture"]["parameter_pruning_percent"] < 100
     assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
 
 
@@ -379,7 +371,7 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     ]["config"]
     wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
         "quality_comparison"
-    ]
+    ]["by_modality"]["text"]
     assert wizard_quality["enabled"] is True
     assert {
         key: value

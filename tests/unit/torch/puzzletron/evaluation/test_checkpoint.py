@@ -68,6 +68,32 @@ def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkey
     assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
 
 
+def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(monkeypatch, tmp_path):
+    package = tmp_path / "lmms_eval"
+    package.mkdir()
+    responses = [
+        SimpleNamespace(stdout=f"{checkpoint.LMMS_EVAL_REVISION}\n"),
+        SimpleNamespace(stdout=""),
+    ]
+
+    def missing_distribution(_name):
+        raise checkpoint.importlib.metadata.PackageNotFoundError("lmms-eval")
+
+    monkeypatch.setattr(
+        checkpoint.importlib.metadata,
+        "distribution",
+        missing_distribution,
+    )
+    monkeypatch.setattr(
+        checkpoint.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(submodule_search_locations=[str(package)]),
+    )
+    monkeypatch.setattr(checkpoint.subprocess, "run", lambda *_args, **_kwargs: responses.pop(0))
+
+    assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
+
+
 def test_verify_lmms_eval_revision_rejects_dirty_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
     responses = [

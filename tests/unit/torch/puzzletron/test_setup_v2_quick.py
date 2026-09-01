@@ -24,6 +24,11 @@ import yaml
 
 import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
+from puzzletron_orchestrator.compiler import (
+    compile_campaign_plan,
+    load_execution_config,
+    load_runner_config,
+)
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
@@ -350,7 +355,7 @@ def test_quality_comparison_limit_must_be_a_positive_integer(limit):
         SetupError,
         match=r"post_mip\.quality_comparison\.limit must be a positive integer",
     ):
-        wizard_module._quality_comparison_defaults(resolver)
+        wizard_module._quality_comparison_defaults(resolver, modality="text")
 
 
 # Bundle generation and review output
@@ -428,12 +433,12 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     assert (campaign / "production" / "experiment.yaml").is_file()
     assert (campaign / "resolved_defaults.yaml").is_file()
     generated = WizardState.resume(campaign)
-    assert generated.collection("pruning")["depth_remove"] == 1
+    assert generated.collection("pruning")["depth_remove"] == 0
     assert generated.collection("pruning")["width_importance_samples"] == 8
     assert generated.collection("pruning")["replacement_samples"] == 4
     assert generated.collection("default_resolutions")["pruning.depth_remove"] == {
-        "value": 1,
-        "source": "preset",
+        "value": 0,
+        "source": "model_profile",
     }
     assert generated.collection("default_resolutions")["pruning.width_importance_samples"] == {
         "value": 8,
@@ -446,7 +451,6 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
     smoke_comparison = smoke_flow["nodes"]["quality_benchmarks"]
-    assert smoke_comparison["config"]["limit"] == 8
     assert "recorded_observation" not in smoke_comparison["config"]
     smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
     assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
@@ -463,16 +467,17 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
         "mmlu_pro_history",
     ]
     assert comparison["config"]["limit"] == 256
+    assert smoke_comparison["config"]["limit"] < comparison["config"]["limit"]
     assert "recorded_observation" not in comparison["config"]
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {
-        "value": 1,
+        "value": 0,
         "requested": None,
-        "effective": 1,
-        "source": "preset",
+        "effective": 0,
+        "source": "model_profile",
     }
     pruning = generated.collection("pruning")
-    pruning["depth_remove"] = 0
+    pruning["depth_remove"] = 1
     generated.set_collection("pruning", pruning)
     profiles = generated.collection("parallel_profiles")
     first_profile = next(iter(profiles.values()))
@@ -483,12 +488,93 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
 
     resolved_defaults = yaml.safe_load((campaign / "resolved_defaults.yaml").read_text())
     assert resolved_defaults["pruning.depth_remove"] == {
-        "value": 1,
+        "value": 0,
         "requested": None,
-        "effective": 0,
-        "source": "preset",
+        "effective": 1,
+        "source": "model_profile",
     }
     assert resolved_defaults["profiles"]["effective"] == profiles
+
+
+def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatch):
+    campaign = tmp_path / "campaign"
+    model_path = tmp_path / "model"
+    dataset = tmp_path / "dataset"
+    model_path.mkdir()
+    dataset.mkdir()
+    inspected = _qwen_inspected_model(model_path, multimodal=True)
+    monkeypatch.setattr(wizard_module, "inspect_model", lambda source: inspected)
+    monkeypatch.setattr(
+        wizard_module,
+        "infer_dataset_modality",
+        lambda source: SimpleNamespace(modality="multimodal", evidence="local fixture"),
+    )
+    defaults = tmp_path / "defaults.yaml"
+    defaults.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "model": {"source": str(model_path)},
+                "data": {
+                    "source": str(dataset),
+                    "modality": "multimodal",
+                    "layout": "padded_varlen",
+                    "sequence_length": 512,
+                },
+                "infrastructure": {
+                    "gpus_per_node": 1,
+                    "execution_contract": {
+                        "repository": "/worker/modelopt",
+                        "venv": "/worker/venv",
+                    },
+                },
+            },
+            sort_keys=False,
+        )
+    )
+
+    result = wizard_module.run_wizard_v2(
+        resume=None,
+        defaults_path=defaults,
+        backend=NonInteractiveBackend(),
+        campaign_dir=campaign,
+        setup_profile="smoke",
+    )
+
+    assert result == campaign.resolve()
+    smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
+    smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
+    smoke_quality = smoke_flow["nodes"]["quality_benchmarks"]["config"]
+    assert smoke_quality["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert smoke_quality["limit"] == 8
+    assert "recorded_observation" not in smoke_quality
+    production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    flow_id, flow = next(iter(production["post_mip"]["flows"].items()))
+    assert flow_id == "params-90"
+    nodes = flow["nodes"]
+    quality = nodes["quality_benchmarks"]
+    assert quality["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert "model" not in quality["config"]
+    assert "log_samples" not in quality["config"]
+    assert "recorded_observation" not in quality["config"]
+    assert production["global_distillation"]["domain"] == "vlm"
+    assert production["global_distillation"]["freeze_policy"] == "train_all"
+    assert production["tokenize_data"]["enabled"] is False
+    assert production["depth_importance"]["enabled"] is False
+    assert production["bypass"]["enabled"] is False
+    axes = production["search_space"]["axes"]
+    assert {axis_id for axis_id, axis in axes.items() if axis["enabled"]} == {"ffn_intermediate"}
+    plan = compile_campaign_plan(
+        experiment_config_path=campaign / "production" / "experiment.yaml",
+        runner=load_runner_config(campaign / "production" / "runner.yaml"),
+        execution=load_execution_config(campaign / "production" / "execution.yaml"),
+        stage_filter="full",
+    )
+    stage_ids = tuple(stage.stage_id for stage in plan.stages)
+    assert f"post.{flow_id}.vlm_serving" in stage_ids
+    assert f"post.{flow_id}.short_kd" in stage_ids
+    assert stage_ids[-1] == f"post.{flow_id}.quality_benchmarks"
+    assert all(stage.total_gpus <= 1 for stage in plan.stages)
 
 
 # Interactive prompt navigation
@@ -598,14 +684,16 @@ def test_resume_preserves_legacy_partition_fields(tmp_path):
         assert resumed.get_field(f"infrastructure.runner.slurm.{field}") == value
 
 
-def _qwen_inspected_model(model_path) -> InspectedModel:
+def _qwen_inspected_model(model_path, *, multimodal: bool = False) -> InspectedModel:
     inventory = ModelInventory(
         family="qwen3_5",
-        descriptor="qwen3_5_text",
+        descriptor="qwen3_5" if multimodal else "qwen3_5_text",
         family_config=_QWEN_FAMILY_CONFIG,
-        model_type="qwen3_5_text",
-        architectures=("Qwen3_5ForCausalLM",),
-        multimodal=False,
+        model_type="qwen3_5" if multimodal else "qwen3_5_text",
+        architectures=(
+            ("Qwen3_5ForConditionalGeneration",) if multimodal else ("Qwen3_5ForCausalLM",)
+        ),
+        multimodal=multimodal,
         moe=False,
         num_layers=24,
         num_sublayers=48,
@@ -624,6 +712,55 @@ def _qwen_inspected_model(model_path) -> InspectedModel:
                 values=(1024, 768),
                 alignment=256,
             ),
+            AxisInventory(
+                axis_id="kv_groups",
+                label="KV groups",
+                teacher_value=2,
+                values=(2, 1),
+                alignment=1,
+            ),
+            AxisInventory(
+                axis_id="q_heads_per_group",
+                label="Query heads per KV group",
+                teacher_value=4,
+                values=(4, 2),
+                alignment=1,
+            ),
+            AxisInventory(
+                axis_id="ffn_intermediate",
+                label="FFN intermediate width",
+                teacher_value=3584,
+                values=(3584, 3072, 2048),
+                alignment=256,
+            ),
+            AxisInventory(
+                axis_id="gdn_key_groups",
+                label="Gated-delta key groups",
+                teacher_value=16,
+                values=(16, 12, 8),
+                alignment=1,
+            ),
+            AxisInventory(
+                axis_id="gdn_value_heads_per_group",
+                label="Gated-delta value heads per group",
+                teacher_value=1,
+                values=(1,),
+                alignment=1,
+            ),
+            AxisInventory(
+                axis_id="gdn_key_head_dim",
+                label="Gated-delta key head dimension",
+                teacher_value=128,
+                values=(128, 96),
+                alignment=32,
+            ),
+            AxisInventory(
+                axis_id="gdn_value_head_dim",
+                label="Gated-delta value head dimension",
+                teacher_value=128,
+                values=(128, 96),
+                alignment=32,
+            ),
         ),
     )
     return InspectedModel(
@@ -632,11 +769,12 @@ def _qwen_inspected_model(model_path) -> InspectedModel:
         resolved_revision=None,
         is_local=True,
         config={
-            "model_type": "qwen3_5_text",
+            "model_type": "qwen3_5" if multimodal else "qwen3_5_text",
             "text_config": {
                 "num_hidden_layers": 24,
                 "layer_types": ["linear_attention"] * 18 + ["full_attention"] * 6,
             },
+            **({"vision_config": {"model_type": "qwen3_5_vision_encoder"}} if multimodal else {}),
         },
         inventory=inventory,
     )

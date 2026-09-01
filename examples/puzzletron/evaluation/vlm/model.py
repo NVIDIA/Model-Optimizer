@@ -27,6 +27,7 @@ __all__ = ["verify_checkpoint"]
 
 _MODEL_TYPE = "qwen3_5"
 _ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
+_PROCESSOR_ASSETS = ("preprocessor_config.json", "video_preprocessor_config.json")
 _TEXT_GEOMETRY = {
     "hidden_size": 1024,
     "intermediate_size": 3584,
@@ -38,7 +39,7 @@ _TEXT_GEOMETRY = {
 
 
 def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
-    """Verify the exact Qwen 3.5 0.8B VLM architecture and text geometry."""
+    """Verify the Qwen 3.5 0.8B VLM geometry and local processor assets."""
     config = _checkpoint_config(checkpoint)
     if config.get("model_type") != _MODEL_TYPE:
         raise ValueError(f"{profile} checkpoint model_type must be qwen3_5")
@@ -62,6 +63,8 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     }
     if mismatches:
         raise ValueError(f"checkpoint geometry differs from Qwen 3.5 0.8B: {mismatches}")
+    if not any((checkpoint / name).is_file() for name in _PROCESSOR_ASSETS):
+        raise ValueError(f"{profile} checkpoint requires local multimodal processor assets")
 
 
 def _checkpoint_config(checkpoint: Path) -> dict[str, object]:

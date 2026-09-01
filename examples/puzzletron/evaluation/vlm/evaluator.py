@@ -17,16 +17,116 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import argparse
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import preflight, tasks
 
 __all__ = ["evaluate"]
+
+_COMPLETED_RUN_SCHEMA = "modelopt.vlm-evaluation-completed-run/v1"
+_COMPLETED_RUN_FILENAME = "completed_run.json"
+
+
+def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
+    """Return the canonical checkpoint fingerprint without loading it."""
+    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+
+    return checkpoint_identity(checkpoint_path)
+
+
+def _completion_identity(
+    checkpoint_path: Path,
+    settings: Mapping[str, object],
+    *,
+    profile_identity: Mapping[str, object],
+    repetition: int,
+) -> dict[str, object]:
+    """Describe the immutable inputs for one resumable evaluation repetition."""
+    return {
+        "checkpoint": _checkpoint_identity(checkpoint_path),
+        "profile": dict(profile_identity),
+        "repetition": repetition,
+        "settings": dict(settings),
+    }
+
+
+def _validated_run_result(result: object, *, label: str) -> dict[str, object]:
+    if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
+        raise RuntimeError(f"invalid {label} result")
+    result_path = result.get("result_path")
+    if not isinstance(result_path, str) or not Path(result_path).is_file():
+        raise RuntimeError(f"{label} result artifact is missing: {result_path}")
+    return dict(result)
+
+
+def _load_completed_run(
+    output_root: Path,
+    *,
+    identity: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Load a completed repetition only when its inputs and artifacts still match."""
+    completion_path = output_root / _COMPLETED_RUN_FILENAME
+    if not completion_path.exists():
+        return None
+    try:
+        payload = json.loads(completion_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"invalid completed VLM evaluation record: {completion_path}") from error
+    if not isinstance(payload, Mapping) or payload.get("schema") != _COMPLETED_RUN_SCHEMA:
+        raise RuntimeError(f"invalid completed VLM evaluation record: {completion_path}")
+    if payload.get("identity") != dict(identity):
+        return None
+    return _validated_run_result(payload.get("result"), label="completed VLM evaluation")
+
+
+def _write_completed_run(
+    output_root: Path,
+    *,
+    identity: Mapping[str, object],
+    result: Mapping[str, object],
+) -> None:
+    """Atomically mark one repetition complete after its result artifact exists."""
+    completion_path = output_root / _COMPLETED_RUN_FILENAME
+    output_root.mkdir(parents=True, exist_ok=True)
+    result = _validated_run_result(result, label="VLM evaluation")
+    content = (
+        json.dumps(
+            {
+                "identity": dict(identity),
+                "result": dict(result),
+                "schema": _COMPLETED_RUN_SCHEMA,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=output_root,
+            prefix=f".{_COMPLETED_RUN_FILENAME}.",
+            delete=False,
+        ) as temporary:
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, completion_path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def evaluate(
@@ -70,17 +170,32 @@ def evaluate(
     )
     settings.update(settings_overrides or {})
     repetitions = prepared.execution_policy["repetitions"]
+    profile_identity = {
+        "dataset_revisions": report["dataset_revisions"],
+        "lmms_eval_revision": report["lmms_eval_revision"],
+        "quick_manifest_sha256": report.get("quick_manifest_sha256"),
+        "source_tasks": report["source_tasks"],
+        "suite": prepared.suite,
+    }
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
             output_root = args.output_dir
             if repetitions > 1:
                 output_root = output_root / f"short-repetition-{repetition}"
-            runs.append(
-                checkpoint.run_lmms_eval_checkpoint(
+            identity = _completion_identity(
+                args.checkpoint,
+                settings,
+                profile_identity=profile_identity,
+                repetition=repetition,
+            )
+            run_result = _load_completed_run(output_root, identity=identity)
+            if run_result is None:
+                run_result = checkpoint.run_lmms_eval_checkpoint(
                     args.checkpoint,
                     output_root=output_root,
                     settings=settings,
                 )
-            )
+                _write_completed_run(output_root, identity=identity, result=run_result)
+            runs.append(run_result)
     return {"preflight": report, "runs": runs}

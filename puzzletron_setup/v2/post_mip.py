@@ -279,25 +279,66 @@ def recommended_flow(
     data: Mapping[str, Any],
     serving: Mapping[str, Any],
     *,
+    modality: str = "text",
     quality_comparison: Mapping[str, Any] | None = None,
     node_prefix: str = "",
 ) -> FlowDraft:
     """Build the recommended flow, optionally including a downstream comparison."""
+    if modality not in {"text", "multimodal"}:
+        raise ValueError(f"unsupported post-MIP modality: {modality}")
+    multimodal = modality == "multimodal"
     sequence_length = int(data.get("sequence_length", 4096))
     raw_concurrency = serving.get("concurrency", [1])
     if isinstance(raw_concurrency, (int, str)):
         concurrency = [int(raw_concurrency)]
     else:
         concurrency = [int(item) for item in raw_concurrency]
-    online_eval = f"{node_prefix}online_eval"
-    best_lm = f"{node_prefix}best_lm"
+    if not concurrency or any(value <= 0 for value in concurrency):
+        raise ValueError("post-MIP serving concurrency must contain positive values")
+    online_eval = f"{node_prefix}{'image_eval' if multimodal else 'online_eval'}"
+    best_lm = f"{node_prefix}{'best_vlm_loss' if multimodal else 'best_lm'}"
     materialized = f"{node_prefix}materialized"
-    serving_id = f"{node_prefix}serving"
-    fastest = f"{node_prefix}fastest"
+    serving_id = f"{node_prefix}{'vlm_serving' if multimodal else 'serving'}"
+    fastest = f"{node_prefix}{'fastest_vlm' if multimodal else 'fastest'}"
     short_kd = f"{node_prefix}short_kd"
-    final_eval = f"{node_prefix}final_eval"
+    final_eval = f"{node_prefix}{'final_image_eval' if multimodal else 'final_eval'}"
     best = f"{node_prefix}best"
     quality_benchmarks = f"{node_prefix}quality_benchmarks"
+    image_batch_sizes: list[int] = []
+    if multimodal:
+        image_batch_sizes = [int(value) for value in serving.get("image_batch_sizes", [1, 6, 12])]
+        if not image_batch_sizes or any(value <= 0 for value in image_batch_sizes):
+            raise ValueError(
+                "multimodal post-MIP serving image_batch_sizes must contain positive values"
+            )
+    serving_config = {
+        "input_tokens": int(serving.get("input_tokens", 4096)),
+        "output_tokens": int(serving.get("output_tokens", 1024)),
+        "concurrency": concurrency,
+        "request_count": int(serving.get("request_count", 32)),
+        "use_server_token_count": True,
+        "benchmark_timeout": 900,
+        **(
+            {
+                "endpoint_type": "chat",
+                "image_batch_sizes": image_batch_sizes,
+                "image_width_mean": int(serving.get("image_width_mean", 1280)),
+                "image_height_mean": int(serving.get("image_height_mean", 720)),
+                "extra_inputs": {
+                    "min_tokens": int(serving.get("output_tokens", 1024)),
+                },
+            }
+            if multimodal
+            else {}
+        ),
+        **({"topology": deepcopy(serving["topology"])} if serving.get("topology") else {}),
+    }
+    serving_metric = (
+        f"{serving_id}.images_{max(image_batch_sizes)}.concurrency_{concurrency[0]}."
+        "image_throughput"
+        if multimodal
+        else f"{serving_id}.output_token_throughput"
+    )
     nodes = OrderedDict(
         (
             (
@@ -332,19 +373,7 @@ def recommended_flow(
                     serving_id,
                     "aiperf",
                     input_id=materialized,
-                    config={
-                        "input_tokens": int(serving.get("input_tokens", 4096)),
-                        "output_tokens": int(serving.get("output_tokens", 1024)),
-                        "concurrency": concurrency,
-                        "request_count": int(serving.get("request_count", 32)),
-                        "use_server_token_count": True,
-                        "benchmark_timeout": 900,
-                        **(
-                            {"topology": deepcopy(serving["topology"])}
-                            if serving.get("topology")
-                            else {}
-                        ),
-                    },
+                    config=serving_config,
                 ),
             ),
             (
@@ -355,7 +384,7 @@ def recommended_flow(
                     input_id=serving_id,
                     selector={
                         "mode": "top_k",
-                        "metric": f"{serving_id}.output_token_throughput",
+                        "metric": serving_metric,
                         "direction": "maximize",
                         "top_k": 4,
                         "best_selection_mode": str(
