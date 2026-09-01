@@ -161,13 +161,14 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     """Resolve the provenance and runtime execution fields for one suite."""
     suite = canonical_suite(suite)
     source_tasks(suite)
-    is_smoke = suite in SMOKE_SUITES or suite == "short-v1"
+    is_versioned_short = suite in {"short-v1", "short-native-v1"}
+    is_smoke = suite in SMOKE_SUITES or is_versioned_short
     default_timeout_seconds = (
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
     )
     if suite == "realworldqa-smoke":
         limit = 2
-    elif is_smoke and suite != "short-v1":
+    elif is_smoke and not is_versioned_short:
         limit = 8
     elif suite == TASK_PREFIX100_REPEAT2_SUITE:
         limit = 100
@@ -207,13 +208,15 @@ def load_quick_manifest(path: Path | None) -> dict[str, object]:
     return validate_quick_manifest(manifest)
 
 
-def validate_quick_manifest(manifest: object) -> dict[str, object]:
+def validate_quick_manifest(
+    manifest: object, *, expected_revision: str = checkpoint.LMMS_EVAL_REVISION
+) -> dict[str, object]:
     """Validate an exact-row quick-suite manifest already loaded in memory."""
     if not isinstance(manifest, dict):
         raise ValueError("quick manifest must contain an object")
     if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
         raise ValueError("quick manifest schema must be modelopt.vlm-benchmark-quick/v1")
-    if manifest.get("lmms_eval_revision") != checkpoint.LMMS_EVAL_REVISION:
+    if manifest.get("lmms_eval_revision") != expected_revision:
         raise ValueError("quick manifest lmms_eval_revision differs from the pinned profile")
     manifest_tasks = manifest.get("tasks")
     if not isinstance(manifest_tasks, dict) or set(manifest_tasks) != set(QUICK_TASKS):

@@ -54,6 +54,16 @@ def test_verify_lmms_eval_revision_accepts_pinned_vcs_install(monkeypatch):
     assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
 
 
+def test_verify_lmms_eval_revision_accepts_explicit_profile_pin(monkeypatch):
+    expected = checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
+    provenance = {"vcs_info": {"commit_id": expected}}
+    monkeypatch.setattr(
+        checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
+    )
+
+    assert checkpoint.verify_lmms_eval_revision(expected) == expected
+
+
 def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
     responses = [

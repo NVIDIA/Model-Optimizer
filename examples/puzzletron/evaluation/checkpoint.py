@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_PREFLIGHT_TIMEOUT_SECONDS",
     "HUGGINGFACE_CREDENTIAL_NAMES",
+    "LMMS_EVAL_QWEN35_NATIVE_REVISION",
     "LMMS_EVAL_REVISION",
     "credential_free_environment",
     "lmms_eval_disabled_judge_environment",
@@ -50,6 +51,7 @@ __all__ = [
 
 REPOSITORY_ROOT = Path(__file__).absolute().parents[3]
 LMMS_EVAL_REVISION = "15c32bfec165df13c269ddd3cda03b2ed9137825"
+LMMS_EVAL_QWEN35_NATIVE_REVISION = "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56"
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 15 * 60.0
 HUGGINGFACE_CREDENTIAL_NAMES = (
     "HF_TOKEN",
@@ -145,8 +147,8 @@ def positive_float(value: str) -> float:
     return parsed
 
 
-def verify_lmms_eval_revision() -> str:
-    """Return the installed VCS revision after matching the shared evaluator pin."""
+def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> str:
+    """Return the installed VCS revision after matching the requested evaluator pin."""
     try:
         direct_url = importlib.metadata.distribution("lmms-eval").read_text("direct_url.json")
     except importlib.metadata.PackageNotFoundError:
@@ -164,10 +166,10 @@ def verify_lmms_eval_revision() -> str:
             revision = _editable_lmms_eval_revision(provenance)
     else:
         revision = None
-    if revision != LMMS_EVAL_REVISION:
+    if revision != expected_revision:
         raise RuntimeError(
             "installed lmms-eval revision differs from the pinned profile: "
-            f"expected {LMMS_EVAL_REVISION}, found {revision or 'unknown'}"
+            f"expected {expected_revision}, found {revision or 'unknown'}"
         )
     return revision
 

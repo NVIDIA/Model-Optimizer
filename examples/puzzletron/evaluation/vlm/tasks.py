@@ -269,6 +269,7 @@ def verify_offline(
     *,
     hf_home: Path,
     timeout_seconds: float,
+    model_name: str = "vllm",
 ) -> dict[str, object]:
     """Instantiate every generated task with network access disabled."""
     script = """
@@ -279,11 +280,11 @@ from pathlib import Path
 
 from lmms_eval.tasks import TaskManager
 
-root, *tasks = sys.argv[1:]
+model_name, root, *tasks = sys.argv[1:]
 credential_names = ("HF_TOKEN", "HUGGINGFACEHUB_API_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 if inherited := [name for name in credential_names if name in os.environ]:
     raise RuntimeError(f"offline task preflight inherited Hub credentials: {inherited}")
-manager = TaskManager(include_path=root, model_name="vllm")
+manager = TaskManager(include_path=root, model_name=model_name)
 loaded = manager.load_task_or_group(tasks)
 loaded_names = {getattr(key, "group_name", key) for key in loaded}
 if loaded_names != set(tasks):
@@ -355,7 +356,7 @@ print(
     # A child interpreter is required to import lmms-eval in a clean offline environment. The
     # fixed interpreter/script and argument-vector invocation avoid shell parsing or interpolation.
     completed = subprocess.run(
-        [sys.executable, "-c", script, str(tasks_root), *configured_tasks],
+        [sys.executable, "-c", script, model_name, str(tasks_root), *configured_tasks],
         check=False,
         capture_output=True,
         env=env,

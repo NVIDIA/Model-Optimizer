@@ -34,12 +34,35 @@ __all__ = [
 
 _PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v1"
 _PROFILE_ROOT = Path(__file__).with_name("profiles")
-PROFILE_NAMES = ("short-v1", "full-v1")
+PROFILE_NAMES = ("short-v1", "short-native-v1", "full-v1")
 _PROFILE_TASKS = {
     "short-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "short-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
     "full-v1": tuple(task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"),
 }
-_PROFILE_SELECTIONS = {"short-v1": "exact-rows", "full-v1": "all"}
+_PROFILE_SELECTIONS = {"short-v1": "exact-rows", "short-native-v1": "exact-rows", "full-v1": "all"}
+_PROFILE_BACKENDS = {
+    "short-v1": {
+        "enable_thinking": False,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    },
+    "short-native-v1": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "full-v1": {
+        "enable_thinking": False,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    },
+}
+_PROFILE_REVISIONS = {
+    "short-v1": checkpoint.LMMS_EVAL_REVISION,
+    "short-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "full-v1": checkpoint.LMMS_EVAL_REVISION,
+}
 
 
 @dataclass(frozen=True)
@@ -81,7 +104,7 @@ def load_profile(name: str) -> ProfileContract:
         raise ValueError(f"unsupported VLM evaluation profile: {name}")
     path = _PROFILE_ROOT / f"{name}.json"
     try:
-        manifest = json.loads(path.read_text())
+        manifest = _resolve_manifest(name, json.loads(path.read_text()))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"VLM evaluation profile is unreadable: {path}") from error
     if not isinstance(manifest, dict):
@@ -95,23 +118,37 @@ def load_profile(name: str) -> ProfileContract:
     )
 
 
+def _resolve_manifest(name: str, manifest: object) -> object:
+    """Resolve one shallow profile inheritance declaration."""
+    if not isinstance(manifest, dict) or "extends" not in manifest:
+        return manifest
+    base_name = manifest.get("extends")
+    if not isinstance(base_name, str) or base_name not in PROFILE_NAMES or base_name == name:
+        raise RuntimeError(f"{name} profile extends an unsupported base profile")
+    base_path = _PROFILE_ROOT / f"{base_name}.json"
+    try:
+        base = json.loads(base_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"VLM evaluation base profile is unreadable: {base_path}") from error
+    if not isinstance(base, dict) or "extends" in base:
+        raise RuntimeError(f"{name} profile base must be a concrete profile")
+    overrides = {key: value for key, value in manifest.items() if key != "extends"}
+    return {**base, **overrides}
+
+
 def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
     if manifest.get("schema") != _PROFILE_SCHEMA:
         raise RuntimeError(f"{name} profile schema must be {_PROFILE_SCHEMA}")
     if manifest.get("name") != name:
         raise RuntimeError(f"{name} profile name does not match its filename")
-    if manifest.get("lmms_eval_revision") != checkpoint.LMMS_EVAL_REVISION:
+    if manifest.get("lmms_eval_revision") != _PROFILE_REVISIONS[name]:
         raise RuntimeError(f"{name} profile lmms_eval_revision differs from the runtime pin")
     if manifest.get("model_family") != {
         "architecture": "Qwen3_5ForConditionalGeneration",
         "model_type": "qwen3_5",
     }:
         raise RuntimeError(f"{name} profile model family is unsupported")
-    if manifest.get("backend") != {
-        "enable_thinking": False,
-        "name": "vllm",
-        "reasoning_parser": "qwen3",
-    }:
+    if manifest.get("backend") != _PROFILE_BACKENDS[name]:
         raise RuntimeError(f"{name} profile backend differs from the runtime policy")
     if manifest.get("preprocessing") != {
         "fps": 2,

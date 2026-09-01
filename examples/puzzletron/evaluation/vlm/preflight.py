@@ -22,7 +22,7 @@ import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from jinja2 import Environment, TemplateError
 
@@ -52,6 +52,15 @@ class PreparedSuite:
     execution_policy: suites.ExecutionPolicy
     profile_contract: contracts.ProfileContract | None
     report: dict[str, object]
+
+
+def _backend_policy(
+    profile_contract: contracts.ProfileContract | None,
+) -> dict[str, object]:
+    """Return the selected profile's backend contract or the legacy default."""
+    if profile_contract is None:
+        return {"name": "vllm"}
+    return cast("dict[str, object]", profile_contract.manifest["backend"])
 
 
 def prepare(args: argparse.Namespace) -> PreparedSuite:
@@ -90,7 +99,10 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
     if profile_contract is not None and profile_contract.exact_rows is not None:
-        quick_manifest = suites.validate_quick_manifest(profile_contract.exact_rows)
+        quick_manifest = suites.validate_quick_manifest(
+            profile_contract.exact_rows,
+            expected_revision=str(profile_contract.manifest["lmms_eval_revision"]),
+        )
     elif suite == "quick":
         quick_manifest = suites.load_quick_manifest(args.quick_manifest)
     else:
@@ -100,7 +112,12 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     if profile_contract is not None and args.quick_manifest is not None:
         raise ValueError("--quick-manifest cannot override a versioned evaluation profile")
 
-    lmms_eval_revision = checkpoint.verify_lmms_eval_revision()
+    expected_lmms_eval_revision = (
+        str(profile_contract.manifest["lmms_eval_revision"])
+        if profile_contract is not None
+        else checkpoint.LMMS_EVAL_REVISION
+    )
+    lmms_eval_revision = checkpoint.verify_lmms_eval_revision(expected_lmms_eval_revision)
     for task in source_tasks:
         tasks.task_config(profile.VLM_BENCHMARK_DATASETS[task].task_config)
 
@@ -241,6 +258,8 @@ def _report(
     profile_task_leaves: tuple[str, ...] | None,
 ) -> dict[str, object]:
     profile_task_shard = getattr(args, "profile_task_shard", None)
+    backend = _backend_policy(profile_contract)
+    model_backend = str(backend["name"])
     return {
         "schema": "modelopt.vlm-evaluation-preflight/v1",
         "profile": suites.EVALUATION_PROFILE,
@@ -254,10 +273,12 @@ def _report(
         "suite": suite,
         "checkpoint": str(args.checkpoint),
         "lmms_eval_revision": lmms_eval_revision,
-        "model_backend": "vllm",
-        "backend_limitations": [
-            "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
-        ],
+        "model_backend": model_backend,
+        "backend_limitations": (
+            ["generic vLLM video messages do not preserve native Qwen 3.5 timestamps"]
+            if model_backend == "vllm"
+            else []
+        ),
         "source_tasks": list(source_tasks),
         "profile_task": getattr(args, "profile_task", None),
         "profile_task_shard": (
@@ -278,7 +299,9 @@ def _report(
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
         "quick_selected_rows": (
-            suites.QUICK_SELECTED_ROWS if suite in {"quick", "short-v1"} else None
+            suites.QUICK_SELECTED_ROWS
+            if suite in {"quick", "short-v1", "short-native-v1"}
+            else None
         ),
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
@@ -305,22 +328,16 @@ def settings(
     execution_policy = prepared.execution_policy
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
-    chat_template = _no_think_chat_template(args.checkpoint, tasks_root)
-    return {
-        "model": "vllm",
-        "checkpoint_arg": "model",
+    backend = _backend_policy(prepared.profile_contract)
+    model_backend = str(backend["name"])
+    common = {
+        "model": model_backend,
         "tasks": ",".join(configured_tasks),
         "limit": execution_policy["limit"],
         "batch_size": args.batch_size,
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "reasoning_parser": "qwen3",
         "log_samples": prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE},
-        "model_args": {
-            "chat_template": str(chat_template),
-            "fps": frame_policy["fps"],
-            "max_frame_num": frame_policy["max_frames"],
-        },
         "gen_kwargs": {
             "temperature": generation_policy["temperature"],
             "do_sample": generation_policy["do_sample"],
@@ -334,6 +351,30 @@ def settings(
             **prepared.judge_env,
         },
         "extra_args": ["--include_path", str(tasks_root)],
+    }
+    if model_backend == "qwen3_5":
+        return {
+            **common,
+            "checkpoint_arg": "pretrained",
+            "model_args": {
+                "attn_implementation": backend["attention_implementation"],
+                "device": "cuda",
+                "device_map": "cuda",
+                "enable_thinking": backend["enable_thinking"],
+                "fps": frame_policy["fps"],
+                "max_frames": frame_policy["max_frames"],
+            },
+        }
+    chat_template = _no_think_chat_template(args.checkpoint, tasks_root)
+    return {
+        **common,
+        "checkpoint_arg": "model",
+        "reasoning_parser": backend.get("reasoning_parser", "qwen3"),
+        "model_args": {
+            "chat_template": str(chat_template),
+            "fps": frame_policy["fps"],
+            "max_frame_num": frame_policy["max_frames"],
+        },
     }
 
 

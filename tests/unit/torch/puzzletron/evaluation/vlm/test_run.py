@@ -177,7 +177,9 @@ def _write_lmms_tasks(root: Path, tasks: tuple[str, ...]) -> Path:
 def _use_offline_fakes(monkeypatch, lmms_root: Path) -> None:
     monkeypatch.setattr(tasks, "_lmms_eval_root", lambda: lmms_root)
     monkeypatch.setattr(
-        checkpoint, "verify_lmms_eval_revision", lambda: checkpoint.LMMS_EVAL_REVISION
+        checkpoint,
+        "verify_lmms_eval_revision",
+        lambda expected=checkpoint.LMMS_EVAL_REVISION: expected,
     )
     monkeypatch.setattr(
         suites,
@@ -519,11 +521,24 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
 
 def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     short = contracts.load_profile("short-v1")
+    short_native = contracts.load_profile("short-native-v1")
     full = contracts.load_profile("full-v1")
 
     assert short.fingerprint == "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177"
+    assert short_native.fingerprint == (
+        "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35"
+    )
     assert full.fingerprint == "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a"
     assert short.source_tasks == suites.QUICK_TASKS
+    assert short_native.source_tasks == short.source_tasks
+    assert short_native.manifest["lmms_eval_revision"] == (
+        checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
+    )
+    assert short_native.manifest["backend"] == {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    }
     assert full.source_tasks == tuple(
         task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
     )
@@ -569,7 +584,7 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     assert prepared.report["batch_size"] == contract.manifest["batch_size"] == 1
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
     assert prepared.report["judge_policy"] is None
-    assert (prepared.quick_manifest is not None) == (name == "short-v1")
+    assert (prepared.quick_manifest is not None) == name.startswith("short-")
 
     task_root, configured_tasks = tasks.prepare(
         tmp_path / "results",
@@ -578,7 +593,48 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
         quick_manifest=prepared.quick_manifest,
     )
     assert configured_tasks == tuple(suites.task_name(task) for task in contract.source_tasks)
-    assert (task_root / "modelopt_quick_selection.py").exists() == (name == "short-v1")
+    assert (task_root / "modelopt_quick_selection.py").exists() == name.startswith("short-")
+
+
+def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda _name: object())
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "short-native-v1",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    settings = preflight.settings(
+        args,
+        tasks_root=tmp_path / "tasks",
+        configured_tasks=("modelopt_vlm_benchmark_mvbench",),
+        prepared=prepared,
+    )
+
+    assert prepared.report["model_backend"] == "qwen3_5"
+    assert prepared.report["backend_limitations"] == []
+    assert prepared.report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
+    assert settings["model"] == "qwen3_5"
+    assert settings["checkpoint_arg"] == "pretrained"
+    assert settings["model_args"] == {
+        "attn_implementation": "sdpa",
+        "device": "cuda",
+        "device_map": "cuda",
+        "enable_thinking": False,
+        "fps": 2,
+        "max_frames": 32,
+    }
+    assert "reasoning_parser" not in settings
+    assert not (tmp_path / "tasks/modelopt_qwen35_no_think.jinja").exists()
 
 
 def test_versioned_profile_rejects_seed_override(monkeypatch, tmp_path):
@@ -1014,6 +1070,7 @@ class Task:
 class Group: group_name = "modelopt_vlm_benchmark_mvbench"
 class TaskManager:
     def __init__(self, include_path, model_name):
+        assert model_name == "qwen3_5"
         assert os.environ["HF_DATASETS_OFFLINE"] == "1"
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["API_TYPE"] == "openai"
@@ -1039,6 +1096,7 @@ class TaskManager:
         ("modelopt_vlm_benchmark_mvbench",),
         hf_home=hf_home,
         timeout_seconds=123,
+        model_name="qwen3_5",
     )
 
     assert report["media_documents"] == 1

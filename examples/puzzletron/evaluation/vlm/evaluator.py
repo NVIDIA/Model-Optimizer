@@ -208,6 +208,7 @@ def evaluate(
         configured_tasks,
         hf_home=prepared.hf_home,
         timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+        model_name=str(prepared.report["model_backend"]),
     )
     report = dict(prepared.report)
     report.update(
