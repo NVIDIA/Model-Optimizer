@@ -157,6 +157,28 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
+def test_load_recipe_huggingface_models_backward_compat_alias():
+    """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
+    top-level ``models/`` tier.
+
+    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
+    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
+    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
+    pip-installed users, not just source checkouts.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("models/*/*/ptq/*.yaml"))
+    new_path = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
+    old_path = "huggingface/" + new_path  # huggingface/models/<org>/<model>/ptq/<file>
+
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    recipe = load_recipe(old_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
 def _all_shipped_ptq_recipe_paths():
     """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
     root = files("modelopt_recipes")
