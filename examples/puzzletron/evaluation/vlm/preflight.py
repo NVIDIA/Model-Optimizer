@@ -330,6 +330,7 @@ def settings(
     generation_policy = execution_policy["generation"]
     backend = _backend_policy(prepared.profile_contract)
     model_backend = str(backend["name"])
+    _verify_backend_dependencies(model_backend)
     common = {
         "model": model_backend,
         "tasks": ",".join(configured_tasks),
@@ -416,4 +417,13 @@ def _verify_video_reader(source_tasks: tuple[str, ...]) -> None:
         raise RuntimeError(
             "video evaluation requires an installed decord-compatible reader; install one "
             "supported by this Python and platform, or use the supported Puzzletron environment"
+        )
+
+
+def _verify_backend_dependencies(model_backend: str) -> None:
+    """Fail before native Qwen evaluation when its vision utilities are unavailable."""
+    if model_backend == "qwen3_5" and importlib.util.find_spec("qwen_vl_utils") is None:
+        raise RuntimeError(
+            "native Qwen 3.5 evaluation requires qwen-vl-utils; install the native VLM "
+            "requirements or use the supported Puzzletron environment"
         )

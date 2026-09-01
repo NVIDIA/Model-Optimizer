@@ -1190,6 +1190,14 @@ def test_video_reader_validation_is_limited_to_video_suites(monkeypatch):
         preflight._verify_video_reader(("mvbench",))
 
 
+def test_native_backend_validation_requires_qwen_vision_utilities(monkeypatch):
+    monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda _name: None)
+
+    preflight._verify_backend_dependencies("vllm")
+    with pytest.raises(RuntimeError, match="qwen-vl-utils"):
+        preflight._verify_backend_dependencies("qwen3_5")
+
+
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
     requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
     assert (
