@@ -407,5 +407,4 @@ def get_activation_ops():
         "Softsign",
         "Swish",
         "HardSwish",
-        "Gelu",
     }

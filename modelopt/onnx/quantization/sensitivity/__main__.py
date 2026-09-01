@@ -226,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
             from tests and other callers.
 
     Returns:
-        Process exit code: 0 on success, non-zero if :func:`score` raises.
+        ``0`` on success. Uncaught exceptions from :func:`score` (or from path validation)
+        propagate to the caller; Python's default non-zero exit code applies at the process
+        boundary.
     """
     args = get_parser().parse_args(argv)
 

@@ -252,11 +252,7 @@ result = score(
     target_precision="int8",
 )
 
-# 2. Turn the ranking into an exclusion list. Coverage mode (default) leaves the
-#    walks targets in descending score order and accumulates them until the next one
-#    would push cumulative sensitivity above `coverage * total_mass` (rank-prefix).
-#    Threshold mode (`threshold=<value>`) excludes every target whose individual
-#    score exceeds an absolute cutoff.
+# 2. Turn the ranking into an exclusion list. Modes: coverage (default) or threshold.
 excluded = suggest_exclusion(result["scores"], coverage=0.90)
 print(summarize_exclusion(result["scores"], excluded))
 

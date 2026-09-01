@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import importlib
+import math
+import shutil
 
 import pytest
 
 from modelopt.onnx.quantization.sensitivity import score
-from tests._test_utils.onnx.quantization.sensitivity.models import (
+from _test_utils.onnx.quantization.sensitivity.models import (
     SYNTHETIC_OP_SCOPE,
     build_conv_mm_ln_onnx,
     deterministic_calibration,
@@ -39,8 +41,6 @@ def synthetic_onnx_path(tmp_path_factory):
 
 def test_synthetic_random_calibration_smoke(synthetic_onnx_path):
     """With ``calibration_data=None``, the synthetic-random path returns finite scores."""
-    import math
-
     result = score(
         synthetic_onnx_path,
         calibration_data=None,
@@ -85,8 +85,6 @@ def test_synthetic_deterministic_ln_highest(synthetic_onnx_path, metric):
 
 def test_failed_probe_is_recorded(synthetic_onnx_path, monkeypatch):
     """A probe that inserts no Q/DQ nodes is recorded in ``failed`` and absent from ``scores``."""
-    import shutil
-
     # Patch quantize() in score() to copy the input as-is, so the probe path has no Q/DQ nodes
     score_module = importlib.import_module("modelopt.onnx.quantization.sensitivity.score")
 
