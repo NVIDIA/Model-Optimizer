@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import shutil
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -147,10 +148,7 @@ def materialize_normalized_conversation_samples(
                         image = _pil_image(item.get("image")).convert("RGB")
                         try:
                             width, height = image.size
-                            relative = (
-                                Path("images")
-                                / f"{sample_index:04d}_{image_index:02d}.png"
-                            )
+                            relative = Path("images") / f"{sample_index:04d}_{image_index:02d}.png"
                             absolute = transaction / relative
                             temporary = absolute.with_suffix(".png.tmp")
                             image.save(temporary, format="PNG")
@@ -182,9 +180,7 @@ def materialize_normalized_conversation_samples(
                 sample_count += 1
             stream.write("\n]\n")
         if expected_count is not None and sample_count != int(expected_count):
-            raise RuntimeError(
-                f"materialized {sample_count}/{int(expected_count)} expected rows"
-            )
+            raise RuntimeError(f"materialized {sample_count}/{int(expected_count)} expected rows")
         manifest = {
             "version": 1,
             "sample_count": sample_count,
@@ -278,6 +274,8 @@ def load_materialized_conversation_dataset(
     truncate: bool | None = None,
     inject_fake_images: bool | None = None,
     max_length: int | None = None,
+    seed: int = 42,
+    shuffle: bool = False,
     **unknown: Any,
 ):
     """Hydra-friendly AutoModel VLM dataset factory for the offline subset.
@@ -301,6 +299,8 @@ def load_materialized_conversation_dataset(
                 f"contains only {len(samples)} rows"
             )
         samples = samples[:num_samples]
+    if shuffle:
+        random.Random(int(seed)).shuffle(samples)
     return _ConversationDataset(samples)
 
 
@@ -576,9 +576,9 @@ def batch_from_automodel(
         valid_tokens = packed_seq_ids.ne(0)
     elif isinstance(raw_attention_mask, torch.Tensor) and attention_mask.ndim == 2:
         valid_tokens = attention_mask.bool()
-    elif (
-        isinstance(padding_mask, torch.Tensor)
-        and tuple(padding_mask.shape) == (batch_size, seq_len)
+    elif isinstance(padding_mask, torch.Tensor) and tuple(padding_mask.shape) == (
+        batch_size,
+        seq_len,
     ):
         valid_tokens = ~padding_mask.bool()
     else:

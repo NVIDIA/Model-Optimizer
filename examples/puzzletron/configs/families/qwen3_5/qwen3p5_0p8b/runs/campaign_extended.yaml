@@ -47,8 +47,25 @@ depth_importance:
 mip:
   depth_scenario_count: 3
   runs:
+    conservative-ffn: false
     params-90:
+      constraints:
+        params: {max: 90%}
       search_space:
         depth: [0, 1, 2]
         embedding: [1024, 768]
         axes_default: all
+        axes:
+          ffn.intermediate_size: all
+      solver:
+        backend: auto
+        num_solutions: 4
+        min_hamming_distance: 2
+        max_seconds_per_solution: 300
+      homogeneous: {enabled: true, keep: 5, rank_by: objective}
+
+post_mip:
+  flows:
+    candidate-evaluation:
+      source:
+        run: params-90

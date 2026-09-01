@@ -187,6 +187,7 @@ def test_online_eval_injects_resolved_hidden_width_into_solution(monkeypatch):
 def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypatch, tmp_path):
     observed = {}
     checkpoint = tmp_path / "checkpoint"
+    teacher = tmp_path / "teacher"
     node = SimpleNamespace(
         node_id="evaluation",
         stage_id="post.params.evaluation",
@@ -198,6 +199,7 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
     )
     config = {
         "puzzle_dir": str(tmp_path),
+        "convert": {"teacher_dir": str(teacher)},
         "zero_shot_evaluation": {"enabled": False},
         "_runtime": {
             "authored_config": {
@@ -218,7 +220,12 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
                         "checkpoint": str(checkpoint),
                         "metrics": {"score": 1.0},
                         "result_path": str(output / "result.json"),
-                    }
+                    },
+                    {
+                        "checkpoint": str(teacher),
+                        "metrics": {"score": 1.25},
+                        "result_path": str(output / "teacher.json"),
+                    },
                 ]
             )
         )
@@ -235,7 +242,17 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
         ),
         "tasks": ["candidate-task"],
     }
-    assert result["metrics"] == {"score": 1.0}
+    assert result["metrics"] == {
+        "score": 1.0,
+        "candidate.score": 1.0,
+        "reference.score": 1.25,
+        "delta.score": -0.25,
+    }
+    assert result["reference_result_path"] == str(
+        tmp_path
+        / "artifacts/post_mip/nodes/evaluation/executions/execution/raw/architecture"
+        / "teacher.json"
+    )
 
 
 def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(

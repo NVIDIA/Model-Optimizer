@@ -1,11 +1,12 @@
 # Qwen 3.5 0.8B text campaign
 
-Use this example to run a Qwen 3.5 0.8B text pruning campaign. It searches FFN
-intermediate sizes of 3072 and 2048, with the teacher size of 3584 retained as
-an option. Other architecture dimensions remain at their teacher values. The
-campaign scores replacements, selects a parameter-constrained MIP solution,
-benchmarks and distills it, and finishes with a student-versus-teacher
-downstream evaluation.
+Use this example to run a Qwen 3.5 0.8B text pruning campaign. It searches the
+conservative FFN intermediate sizes 3328 and 3072. Other architecture
+dimensions remain at their teacher values. The campaign scores replacements,
+selects parameter-constrained MIP solutions, gives both candidates a 128-step
+KD screen, ranks their LM and downstream metrics, and gives the winner a clean
+256-step KD run from its materialized pre-KD checkpoint. It finishes with a
+full student-versus-teacher downstream evaluation.
 
 The campaign uses larger scoring, validation, serving, and distillation budgets
 than the smoke recipes. Complete a smoke run before allocating resources to
@@ -20,7 +21,7 @@ Use the campaign experiment and execution files with a site-specific runner:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.two_gpu_kd.yaml
 RUNNER=/path/to/site-specific/runner.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_campaign
 export PUZZLETRON_DATASET_PATH=/path/to/puzzle_kd_dataset
@@ -45,11 +46,11 @@ GDN value-head dimension, embedding width, and depth. These dimensions are
 available for additional searches, but have less real-checkpoint coverage and
 may need model-specific fixes.
 
-Run the extended variant with the same single-GPU execution profile:
+Run the extended variant with the same two-GPU KD execution profile:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign_extended.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.two_gpu_kd.yaml
 ```
 
 To create another variant, copy a run config and make each new dimension
@@ -72,10 +73,12 @@ smoke before increasing its budgets.
 
 ## Interpret the final quality comparison
 
-The final quality step evaluates the distilled student and pinned teacher on
-the first 100 examples of pinned IFEval and GSM8K revisions. Both models use the
-same evaluator version, greedy generation settings, seed, batch size, and task
-definitions. The result contains student, teacher, and student-minus-teacher
+The screening quality step evaluates both distilled candidates and the pinned
+teacher on fixed 256-example prefixes of pinned IFEval, GSM8K, MMLU-Pro computer
+science, and MMLU-Pro history revisions. The final quality step evaluates the
+winning student and teacher on the complete task splits. All comparisons use
+the same evaluator version, greedy generation settings, seed, batch size, and
+task definitions. Results contain student, teacher, and student-minus-teacher
 metrics plus generated samples for qualitative inspection.
 The [opt-in quality comparison](qwen3p5_0p8b_smoke.md#run-the-opt-in-end-to-end-quality-comparison)
 uses smaller search and distillation budgets and reuses the same downstream

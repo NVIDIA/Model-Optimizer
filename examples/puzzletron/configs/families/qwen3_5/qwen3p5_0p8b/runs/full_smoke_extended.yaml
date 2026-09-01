@@ -1,0 +1,50 @@
+# @package _global_
+
+defaults:
+  - full_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - _self_
+
+# Explicit multi-axis text smoke. Keep the ordinary full_smoke route bounded
+# to its established FFN control while compiling and exercising the same
+# extended search grid used by campaign_extended.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_full_smoke_extended}
+display_name: Qwen3p5 0.8B extended text smoke
+
+embedding_pruning:
+  widths: [1024, 768]
+
+pruning:
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  gdn_scored_axes:
+    - gdn_key_groups
+    - gdn_value_head_dim
+
+sort:
+  deferred_axes: []
+
+width_sanity:
+  hidden_width_diagnostic: true
+  axes:
+    - hidden_width
+    - ffn_intermediate
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_head_dim
+
+depth_importance:
+  enabled: true
+  max_removals: 2
+  max_subblocks_to_remove: 2
+
+mip:
+  depth_scenario_count: 3
+  runs:
+    params-90:
+      search_space:
+        depth: [0, 1, 2]
+        embedding: [1024, 768]
+        axes_default: all
+        axes:
+          ffn.intermediate_size: all

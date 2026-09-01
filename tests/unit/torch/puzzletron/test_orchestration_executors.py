@@ -174,6 +174,7 @@ def test_render_sbatch_script_requests_gpus_per_node():
     assert "#SBATCH --gpus-per-node=8" in script
     assert "#SBATCH --nodes=2" in script
     assert "#SBATCH --partition=gpu-a,gpu-b" in script
+    assert "#SBATCH --no-requeue" in script
     assert "source /site/setup-envs.sh" in script
     assert script.startswith("#!/bin/bash\n")
 

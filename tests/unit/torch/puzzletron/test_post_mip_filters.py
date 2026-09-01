@@ -265,6 +265,45 @@ def test_best_selection_mode_is_rejected_on_non_top_k_filter():
         )
 
 
+def test_aggregate_rank_combines_directions_and_breaks_ties_by_revision(tmp_path):
+    ledger = _ledger(
+        tmp_path,
+        {
+            "revision-a": {"loss": 1.0, "accuracy": 0.8},
+            "revision-b": {"loss": 2.0, "accuracy": 0.7},
+            "revision-c": {"loss": 3.0, "accuracy": 0.9},
+            "revision-d": {"loss": 3.0, "accuracy": 0.9},
+            "revision-e": {"loss": math.nan, "accuracy": 1.0},
+        },
+    )
+
+    selected, excluded, scores = apply_filter(
+        ledger,
+        tuple(ledger.revisions),
+        {
+            "mode": "aggregate_rank",
+            "metrics": [
+                {"metric": "serving.loss", "direction": "minimize"},
+                {"metric": "serving.accuracy", "direction": "maximize"},
+            ],
+            "top_k": 2,
+        },
+    )
+
+    assert selected == ("revision-a", "revision-c")
+    assert excluded == {
+        "revision-d": "outside aggregate_rank top_k",
+        "revision-b": "outside aggregate_rank top_k",
+        "revision-e": "missing one or more required finite metrics",
+    }
+    assert scores == {
+        "revision-a": 2.0,
+        "revision-b": 3.0,
+        "revision-c": 2.5,
+        "revision-d": 2.5,
+    }
+
+
 @pytest.mark.parametrize("metric", ["output_token_throughput", "mip.score"])
 def test_sweep_selection_requires_a_node_qualified_metric(metric):
     with pytest.raises(ValueError, match="node-qualified"):

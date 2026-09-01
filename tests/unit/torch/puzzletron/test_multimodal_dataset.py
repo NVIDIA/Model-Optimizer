@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 from __future__ import annotations
 
@@ -169,9 +181,7 @@ def test_batch_from_automodel_excludes_padding_from_every_canonical_mask():
         layout=DataLayout.PADDED_VARLEN,
     )
 
-    expected = torch.tensor(
-        [[True, True, True, False], [True, True, False, False]]
-    )
+    expected = torch.tensor([[True, True, True, False], [True, True, False, False]])
     assert torch.equal(batch.hidden_mask, expected)
     assert torch.equal(batch.ce_mask, expected)
     assert torch.equal(batch.kd_mask, expected)
@@ -202,12 +212,8 @@ def test_batch_from_automodel_globalizes_multiple_packed_rows_and_slices_them():
         {
             "input_ids": input_ids,
             "labels": input_ids.clone(),
-            "attention_mask": torch.tensor(
-                [[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]]
-            ),
-            "_packed_seq_ids": torch.tensor(
-                [[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]]
-            ),
+            "attention_mask": torch.tensor([[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]]),
+            "_packed_seq_ids": torch.tensor([[1, 1, 1, 2, 2, 2, 0, 0], [1, 1, 1, 1, 0, 0, 0, 0]]),
             "position_ids": torch.arange(8).repeat(2, 1),
         },
         sample_ids=("pack-0", "pack-1"),
@@ -390,3 +396,25 @@ def test_materialized_dataset_factory_balances_sources_before_prefix_selection(t
         INTERSYN_SINGLE_DATASET,
         INTERSYN_MULTI_DATASET,
     ]
+
+
+def test_materialized_dataset_factory_shuffle_is_seeded(tmp_path):
+    samples = [
+        normalize_intersyn_single(
+            {
+                "id": f"sample-{index}",
+                "human": "question",
+                "gpt": "answer",
+                "image": Image.new("RGB", (2, 2)),
+            }
+        )
+        for index in range(8)
+    ]
+    materialize_normalized_intersyn_samples(samples, tmp_path)
+
+    def order(seed):
+        dataset = load_materialized_conversation_dataset(tmp_path, seed=seed, shuffle=True)
+        return [dataset[index]["source"]["row_id"] for index in range(len(dataset))]
+
+    assert order(2222) == order(2222)
+    assert order(2222) != order(3333)
