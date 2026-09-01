@@ -333,9 +333,9 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
     quantize: QuantizeConfig | None = ModeloptField(
         default=None,
         title="Fixed PTQ baseline",
-        description="Optional normal PTQ QuantizeConfig for modules outside the explicit "
-        "AutoQuantize module_search_spaces. Fixed and searched modules are calibrated, scored, "
-        "costed, and exported in one integrated AutoQuantize operation.",
+        description="Optional normal PTQ QuantizeConfig. A weight AutoQuantize stage uses it for "
+        "modules outside explicit module_search_spaces; a KV AutoQuantize stage applies it first "
+        "as the fixed GEMM weight/activation configuration.",
     )
 
     auto_quantize: AutoQuantizeConfig = Field(
@@ -343,22 +343,47 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
         description="AutoQuantize search configuration. Required.",
     )
 
+    kv_auto_quantize: AutoQuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Follow-up KV-cache AutoQuantize config",
+        description="Optional KV-cache search run after the primary weight AutoQuantize search.",
+    )
+
     @model_validator(mode="after")
     def _validate_fixed_and_searched_spaces(self):
+        primary_is_kv = self.auto_quantize.constraints.kv_effective_bits is not None
+        if self.kv_auto_quantize is not None:
+            if primary_is_kv:
+                raise ValueError(
+                    "kv_auto_quantize cannot follow an auto_quantize stage that already searches "
+                    "the KV cache."
+                )
+            if self.kv_auto_quantize.constraints.kv_effective_bits is None:
+                raise ValueError("kv_auto_quantize must use a kv_effective_bits constraint.")
+            if self.auto_quantize.kv_cache is not None:
+                raise ValueError(
+                    "A weight AutoQuantize stage followed by kv_auto_quantize must omit the "
+                    "uniform auto_quantize.kv_cache post-step."
+                )
         has_fixed_baseline = self.quantize is not None
         has_global_search = bool(self.auto_quantize.candidate_formats)
-        if has_fixed_baseline and has_global_search:
+        if primary_is_kv and has_fixed_baseline and self.auto_quantize.module_search_spaces:
+            raise ValueError(
+                "A KV-cache AutoQuantize stage with a fixed quantize baseline must not define "
+                "auto_quantize.module_search_spaces."
+            )
+        if not primary_is_kv and has_fixed_baseline and has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "
                 "auto_quantize.candidate_formats and explicitly list searched modules under "
                 "auto_quantize.module_search_spaces."
             )
-        if has_fixed_baseline and not self.auto_quantize.module_search_spaces:
+        if not primary_is_kv and has_fixed_baseline and not self.auto_quantize.module_search_spaces:
             raise ValueError(
                 "An AutoQuantize recipe with a fixed quantize baseline requires at least one "
                 "auto_quantize.module_search_spaces entry."
             )
-        if not has_fixed_baseline and not has_global_search:
+        if not primary_is_kv and not has_fixed_baseline and not has_global_search:
             raise ValueError(
                 "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
                 "auto_quantize.candidate_formats for unmatched modules."
