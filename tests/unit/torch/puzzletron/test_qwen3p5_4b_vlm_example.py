@@ -245,9 +245,32 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
         },
     }
     assert nodes["screening_kd"]["config"]["max_steps"] == 64
+    assert nodes["screening_kd"]["config"]["checkpoint_every_steps"] == 64
     assert nodes["global_kd"]["config"]["max_steps"] == 256
-    assert nodes["quality_screen"]["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert nodes["global_kd"]["config"]["checkpoint_every_steps"] == 256
+    assert config["global_distillation"]["automodel"]["activation_checkpointing"] is True
+    assert config["global_distillation"]["freeze_policy"] == "vision_frozen"
+    assert config["global_distillation"]["objective"]["main_kd"]["chunk_size"] == 64
+    assert config["global_distillation"]["objective"]["mtp_kd"]["chunk_size"] == 64
+    for node_id in ("screening_kd", "global_kd"):
+        assert nodes[node_id]["config"]["freeze_policy"] == "vision_frozen"
+        assert nodes[node_id]["config"]["activation_checkpointing"] is True
+        assert nodes[node_id]["config"]["automodel"]["parallel"] == {
+            "tp": 2,
+            "cp": 1,
+            "pp": 1,
+            "ep": 1,
+            "dp_shard": 1,
+            "dp_replicate": 1,
+            "sequence_parallel": False,
+            "pipeline_schedule": "1f1b",
+        }
+        assert nodes[node_id]["config"]["objective"] == config["global_distillation"]["objective"]
+    assert nodes["serving"]["config"]["allow_aiperf_v011_online_tokenizer_resolution"] is True
+    assert nodes["quality_screen"]["config"]["profile"] == "qwen35_vlm_short_eval"
+    assert nodes["quality_screen"]["config"]["disable_thinking"] is True
     assert "reference_checkpoint" not in nodes["quality_screen"]["config"]
+    assert nodes["quality_benchmarks"]["config"]["disable_thinking"] is True
     assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
     assert nodes["selected"]["top_k"] == 1
     assert tuple(stage.stage_id for stage in plan.stages)[-11:-1] == (
@@ -273,6 +296,8 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
         "post.candidate-evaluation.quality_screen",
     }
     assert all(stages[stage_id].instances == 4 for stage_id in candidate_stages)
-    assert all(stages[stage_id].total_gpus == 4 for stage_id in candidate_stages)
+    one_gpu_candidate_stages = candidate_stages - {"post.candidate-evaluation.screening_kd"}
+    assert all(stages[stage_id].total_gpus == 4 for stage_id in one_gpu_candidate_stages)
+    assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 8
     assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
-    assert stages["post.candidate-evaluation.global_kd"].total_gpus == 1
+    assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2

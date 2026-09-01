@@ -1,15 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import copy
 
 import torch
 import torch.nn.functional as F
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Replicate, Shard, distribute_tensor
+from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 
 from modelopt.torch.puzzletron.distillation.flash_kld import TrainingFlashKLD
 from modelopt.torch.puzzletron.distillation.global_kd_recipe import (
+    _align_dtensor_to_module_mesh,
     _distillation_lm_head,
     _install_distillation_head_passthrough,
+    _project_teacher_hidden_on_reference_mesh,
     _refresh_pp_hidden_output_meta,
     _WeightedObjectiveMixin,
 )
@@ -120,12 +138,15 @@ def test_ce_only_does_not_project_teacher():
     )
     ce.backward()
 
-    reference = F.cross_entropy(
-        student_head(student_hidden.detach()),
-        labels,
-        ignore_index=-100,
-        reduction="sum",
-    ) / (labels != -100).sum()
+    reference = (
+        F.cross_entropy(
+            student_head(student_hidden.detach()),
+            labels,
+            ignore_index=-100,
+            reduction="sum",
+        )
+        / (labels != -100).sum()
+    )
     torch.testing.assert_close(ce.detach(), reference.detach())
     assert kd.item() == 0.0
     assert student_head.forward_count == 3
@@ -277,3 +298,58 @@ def test_weighted_objectives_share_hidden_flash_kld_for_main_and_mtp():
     torch.testing.assert_close(terms["mtp_ce"], expected_mtp_ce)
     torch.testing.assert_close(terms["mtp_kd"], expected_mtp_kd)
     torch.testing.assert_close(total, 0.25 * sum(terms.values()))
+
+
+def _tp_teacher_projection_job(_rank: int, _size: int) -> None:
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lm_head = torch.nn.Linear(4, 8, bias=False)
+
+    torch.manual_seed(23)
+    teacher_mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
+    student_mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
+    teacher = Model()
+    full_weight = teacher.lm_head.weight.detach().clone()
+    teacher.lm_head = parallelize_module(
+        teacher.lm_head,
+        teacher_mesh,
+        ColwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Shard(-1),
+            use_local_output=False,
+        ),
+    )
+    assert _install_distillation_head_passthrough([teacher]) == 1
+    full_hidden = torch.randn(3, 4)
+    reference_logits = distribute_tensor(torch.empty(3, 8), student_mesh, (Shard(-1),))
+
+    student_hidden = full_hidden.clone().requires_grad_()
+    aligned_hidden = _align_dtensor_to_module_mesh(student_hidden, teacher.lm_head)
+    assert aligned_hidden.placements == (Replicate(),)
+    student_logits = teacher.lm_head._puzzletron_projection_forward(aligned_hidden)
+    torch.testing.assert_close(student_logits.full_tensor(), F.linear(full_hidden, full_weight))
+    student_logits.full_tensor().sum().backward()
+    assert student_hidden.grad is not None
+
+    actual = _project_teacher_hidden_on_reference_mesh(
+        full_hidden.clone(),
+        teacher.lm_head,
+        reference_logits,
+    )
+
+    assert actual.device_mesh is student_mesh
+    assert actual.placements == reference_logits.placements
+    torch.testing.assert_close(actual.full_tensor(), F.linear(full_hidden, full_weight))
+
+    sharded_hidden = distribute_tensor(full_hidden, teacher_mesh, (Shard(-1),))
+    sharded_actual = _project_teacher_hidden_on_reference_mesh(
+        sharded_hidden,
+        teacher.lm_head,
+        reference_logits,
+    )
+    torch.testing.assert_close(sharded_actual.full_tensor(), F.linear(full_hidden, full_weight))
+
+
+def test_tp_teacher_projection_redistributes_hidden_and_rewraps_logits():
+    spawn_multiprocess_job(size=2, job=_tp_teacher_projection_job, backend="gloo")

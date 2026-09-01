@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 __all__ = [
     "VLM_BENCHMARK_DATASETS",
+    "VLM_BENCHMARK_JUDGE_FREE_TASKS",
     "VLM_BENCHMARK_TASKS",
     "VLM_BENCHMARK_VIDEO_DATASETS",
     "BenchmarkDataset",
@@ -108,6 +109,7 @@ VLM_BENCHMARK_DATASETS = {
     ),
 }
 VLM_BENCHMARK_TASKS = tuple(VLM_BENCHMARK_DATASETS)
+VLM_BENCHMARK_JUDGE_FREE_TASKS = tuple(task for task in VLM_BENCHMARK_TASKS if task != "mmvu_val")
 VLM_BENCHMARK_VIDEO_DATASETS = {
     task: dataset
     for task, dataset in VLM_BENCHMARK_DATASETS.items()

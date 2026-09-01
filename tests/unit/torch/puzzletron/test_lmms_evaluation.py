@@ -166,6 +166,7 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
                 "gpu_group_size": 8,
             },
             "model_args": {"dtype": "bfloat16"},
+            "chat_template": "/templates/qwen35_no_thinking.jinja",
         },
         checkpoint="/ckpts/candidate",
         output_path=tmp_path / "results",
@@ -179,6 +180,7 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert "model=/ckpts/candidate" in model_args
     assert "tensor_parallel_size=4" in model_args
     assert "pipeline_parallel_size=2" in model_args
+    assert "chat_template=/templates/qwen35_no_thinking.jinja" in model_args
     assert "gpu_group_size" not in model_args
     assert env["LMMS_EVAL_HOME"] == str(tmp_path / "cache")
     assert timeout == 123

@@ -178,7 +178,7 @@ route that matches the checkpoint and task:
 | Route | Default smoke | Guide |
 | --- | --- | --- |
 | Text | `python -m examples.puzzletron.evaluation.text` runs eight IFEval and GSM8K samples with `lmms-eval`; the same command can prepare selected NeMo Evaluator task contracts. | [Text checkpoint evaluation](docs/checkpoint_evaluation.md) |
-| Qwen 3.5 0.8B VLM | `python -m examples.puzzletron.evaluation.vlm.run` runs the pinned RealWorldQA and MMMU short suite. | [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) |
+| Qwen 3.5 VLM | `python -m examples.puzzletron.evaluation.vlm.run` runs the pinned RealWorldQA and MMMU smoke suite. | [VLM checkpoint evaluation](docs/vlm_checkpoint_evaluation.md) |
 
 The guides own installation, complete commands, suite or task selection,
 runtime constraints, results, and troubleshooting for their respective routes.

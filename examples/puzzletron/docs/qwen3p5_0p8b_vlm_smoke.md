@@ -334,12 +334,12 @@ python -m examples.puzzletron.evaluation.vlm.run \
   --checkpoint /path/to/pruned-checkpoint \
   --output-dir /path/to/results/vlm-smoke \
   --hf-home /path/to/huggingface-cache \
-  --suite short \
+  --suite smoke \
   --preflight-only
 ```
 
 If preflight succeeds, run the same command without `--preflight-only`. The
-`short` suite runs the pinned RealWorldQA and MMMU tasks. See
+`smoke` suite runs the pinned RealWorldQA and MMMU tasks. See
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 

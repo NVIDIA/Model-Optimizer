@@ -395,7 +395,7 @@ def prepare(
         source_tasks = suites.source_tasks(suite)
     if quick_manifest is not None:
         _write_quick_selection_module(tasks_root, quick_manifest)
-    if suite == "mmvu-smoke":
+    if suite in {"mmvu-smoke", "representative-eval"}:
         _write_mmvu_smoke_selection_module(tasks_root)
     if suite == "full":
         _write_mmvu_guard(tasks_root)
@@ -481,9 +481,10 @@ def _write_single_task(
     configured_task = suites.task_name(task)
     process_docs = None
     process_docs_module = "modelopt_quick_selection"
-    if quick_manifest is not None or (suite == "mmvu-smoke" and task == "mmvu_val"):
+    judge_free_mmvu = suite in {"mmvu-smoke", "representative-eval"} and task == "mmvu_val"
+    if quick_manifest is not None or judge_free_mmvu:
         process_docs = f"select_{configured_task}"
-    if suite == "mmvu-smoke" and task == "mmvu_val":
+    if judge_free_mmvu:
         process_docs_module = _MMVU_SMOKE_SELECTION_MODULE
     doc_to_visual = {
         "videomme": "videomme_doc_to_visual",

@@ -43,6 +43,7 @@ _MODEL_ARG_FIELDS = frozenset(
     {
         "dtype",
         "gpu_memory_utilization",
+        "chat_template",
         "max_model_len",
         "trust_remote_code",
         "tokenizer",
