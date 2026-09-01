@@ -16,17 +16,22 @@
 """Run lm-evaluation-harness against a TensorRT-LLM checkpoint.
 
 Entry point around lm-eval's built-in ``trtllm`` backend
-(``lm_eval.models.trtllm_causallms``, new in 0.4.12). It exists only to correct that
-backend's ``prompt_logprobs`` handling -- everything else is upstream. Drop this file and
-call ``lm_eval`` directly once the fix lands upstream.
+(``lm_eval.models.trtllm_causallms``, new in 0.4.12). It exists to correct that backend's
+``prompt_logprobs`` handling and to forward ``kv_cache_free_gpu_memory_fraction`` to
+TensorRT-LLM -- everything else is upstream. Drop this file and call ``lm_eval`` directly
+once both land upstream.
 
     python lm_eval_trtllm.py --model trtllm \
         --model_args model=<quantized checkpoint dir>,tokenizer=<HF model folder>,\
-tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096 \
+tensor_parallel_size=<tp>,max_batch_size=<max batch size>,max_input_len=4096,\
+kv_cache_free_gpu_memory_fraction=0.7 \
         --tasks <comma separated tasks> --batch_size <max batch size>
 """
 
+import inspect
 import sys
+from contextlib import contextmanager
+from functools import partial
 from importlib.metadata import version
 
 from lm_eval.__main__ import cli_evaluate
@@ -36,6 +41,7 @@ if Version(version("lm_eval")) < Version("0.4.12"):
     # 0.4.12 is the first release shipping lm_eval.models.trtllm_causallms.
     raise ImportError(f"lm_eval_trtllm.py requires lm-eval >= 0.4.12; found {version('lm_eval')}.")
 
+from lm_eval.models import trtllm_causallms
 from lm_eval.models.trtllm_causallms import TRTLLM
 
 # TensorRT-LLM only started passing the prompt token ids into `compute_logprobs` in
@@ -123,6 +129,53 @@ if not hasattr(TRTLLM, "_parse_logprobs"):
 # should be deleted in favour of calling `lm_eval` directly.
 _UPSTREAM_PARSE_LOGPROBS = TRTLLM._parse_logprobs
 TRTLLM._parse_logprobs = staticmethod(_parse_logprobs)
+
+
+# The backend builds `KvCacheConfig(enable_block_reuse=False)` and hands `LLM(...)` a fixed
+# set of keys, dropping every other `--model_args` entry, so the KV cache always takes
+# TensorRT-LLM's default 90% of free memory. On a large-memory GPU that leaves too little
+# room for the `prompt_logprobs` buffers and the run dies with a CUDA OOM.
+_UPSTREAM_TAKES_KV_CACHE_FRACTION = (
+    "kv_cache_free_gpu_memory_fraction" in inspect.signature(TRTLLM.__init__).parameters
+)
+
+
+@contextmanager
+def _kv_cache_fraction_applied(fraction: float):
+    """Make the backend's single ``KvCacheConfig(...)`` call carry ``fraction``."""
+    original = getattr(trtllm_causallms, "KvCacheConfig", None)
+    if original is None:
+        # tensorrt_llm is not installed; the backend raises its own ModuleNotFoundError.
+        yield
+        return
+
+    trtllm_causallms.KvCacheConfig = partial(original, free_gpu_memory_fraction=fraction)
+    try:
+        yield
+    finally:
+        trtllm_causallms.KvCacheConfig = original
+
+
+_UPSTREAM_INIT = TRTLLM.__init__
+
+
+def _init(self, *args, kv_cache_free_gpu_memory_fraction=None, **kwargs) -> None:
+    """``TRTLLM.__init__`` plus one ``--model_args`` key, forwarded to the KV cache."""
+    if kv_cache_free_gpu_memory_fraction is None:
+        _UPSTREAM_INIT(self, *args, **kwargs)
+        return
+
+    fraction = float(kv_cache_free_gpu_memory_fraction)
+    if not 0.0 < fraction <= 1.0:
+        # Out of range, TensorRT-LLM either allocates nothing or fails deep in the engine.
+        raise ValueError(f"kv_cache_free_gpu_memory_fraction must be in (0, 1]; got {fraction}.")
+
+    with _kv_cache_fraction_applied(fraction):
+        _UPSTREAM_INIT(self, *args, **kwargs)
+
+
+if not _UPSTREAM_TAKES_KV_CACHE_FRACTION:
+    TRTLLM.__init__ = _init
 
 
 if __name__ == "__main__":

@@ -176,6 +176,8 @@ scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 
 > *If a GPU OOM error occurs during model quantization despite sufficient memory, setting the --use_seq_device_map flag can help. This enforces sequential device mapping, distributing the model across GPUs and utilizing up to 80% of each GPU's memory.*
 
+> *If a GPU OOM error occurs after quantization, while the checkpoint is being deployed for the `quant` smoke test or an eval task, lower `--kv_cache_free_gpu_memory_fraction` (default 0.7). It caps the share of the free GPU memory the TensorRT-LLM KV cache may take, leaving the rest for context logits and logprob buffers.*
+
 > *You can add `--low_memory_mode` to the command to lower the memory requirements of the PTQ process. With this mode, the script will compress model weights to low precision before calibration. This mode is only supported for FP8 and NVFP4 with max calibration.*
 
 #### Recipe-based Quantization

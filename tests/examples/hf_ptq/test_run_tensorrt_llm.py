@@ -83,6 +83,7 @@ def test_run_forwards_trust_remote_code(run_tensorrt_llm, monkeypatch, trust_rem
             max_output_len=8,
             input_texts="hello|world",
             trust_remote_code=trust_remote_code,
+            kv_cache_free_gpu_memory_fraction=0.7,
         )
     )
 
@@ -91,3 +92,30 @@ def test_run_forwards_trust_remote_code(run_tensorrt_llm, monkeypatch, trust_rem
     assert tokenizer_kwargs["trust_remote_code"] is trust_remote_code
     # Context logits are requested below, so KV cache reuse must stay off.
     assert _RecordingLLM.last.kwargs["enable_kv_cache_reuse"] is False
+
+
+def test_run_forwards_kv_cache_free_gpu_memory_fraction(run_tensorrt_llm, monkeypatch):
+    """The KV cache share has to reach the engine, not just be parsed (nvbug 6701763)."""
+    monkeypatch.setattr(run_tensorrt_llm, "get_tokenizer", lambda **kwargs: object())
+
+    run_tensorrt_llm.run(
+        SimpleNamespace(
+            tokenizer="",
+            checkpoint_dir="/fake/checkpoint",
+            max_output_len=8,
+            input_texts="hello",
+            trust_remote_code=False,
+            kv_cache_free_gpu_memory_fraction=0.5,
+        )
+    )
+
+    assert _RecordingLLM.last.kwargs["kv_cache_free_gpu_memory_fraction"] == 0.5
+
+
+def test_kv_cache_free_gpu_memory_fraction_defaults_below_the_trtllm_default(
+    run_tensorrt_llm, monkeypatch
+):
+    """TensorRT-LLM's own 0.9 leaves too little room for context logits; keep 0.7."""
+    monkeypatch.setattr(sys, "argv", ["run_tensorrt_llm.py", "--checkpoint_dir", "/fake"])
+
+    assert run_tensorrt_llm.parse_arguments().kv_cache_free_gpu_memory_fraction == 0.7

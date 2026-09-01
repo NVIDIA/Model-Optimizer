@@ -229,6 +229,8 @@ if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH
         RUN_ARGS+=" --trust_remote_code "
     fi
 
+    RUN_ARGS+=" --kv_cache_free_gpu_memory_fraction=$KV_CACHE_FREE_GPU_MEMORY_FRACTION "
+
     # Only run the deploy+generate smoke test when "quant" is explicitly requested. Eval tasks
     # (lm_eval/mmlu/simple_eval) deploy the checkpoint themselves, so it is redundant there.
     if [[ $TASKS =~ "quant" ]]; then
@@ -296,7 +298,7 @@ if [[ $TASKS =~ "lm_eval" ]]; then
     # explicitly; the engine's max_seq_len is max_input_len + max_output_len.
     python lm_eval_trtllm.py \
         --model trtllm \
-        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN" \
+        --model_args "model=$SAVE_PATH,tokenizer=$MODEL_ABS_PATH,tensor_parallel_size=$LM_EVAL_TP,max_batch_size=$BUILD_MAX_BATCH_SIZE,max_gen_toks=$BUILD_MAX_OUTPUT_LEN,max_input_len=$BUILD_MAX_INPUT_LEN,max_output_len=$BUILD_MAX_OUTPUT_LEN,kv_cache_free_gpu_memory_fraction=$KV_CACHE_FREE_GPU_MEMORY_FRACTION" \
         --tasks $LM_EVAL_TASKS \
         --batch_size $BUILD_MAX_BATCH_SIZE $lm_eval_flags | tee $LM_EVAL_RESULT
 
@@ -336,6 +338,7 @@ if [[ $TASKS =~ "mmlu" ]]; then
         --model_name causal \
         --model_path $MODEL_ABS_PATH \
         --checkpoint_dir $SAVE_PATH \
+        --kv_cache_free_gpu_memory_fraction $KV_CACHE_FREE_GPU_MEMORY_FRACTION \
         --data_dir $MMLU_DATA_PATH $mmlu_flags | tee $MMLU_RESULT
     popd
 
@@ -348,7 +351,9 @@ if [[ $TASKS =~ "livecodebench" || $TASKS =~ "simple_eval" ]]; then
     HASH=$(echo -n "$SAVE_PATH" | md5sum | awk '{print $1}')
     PORT=$((10000 + (0x${HASH:0:4} % 50001)))
     echo "Starting trtllm-serve on $PORT"
-    trtllm-serve $SAVE_PATH --host 0.0.0.0 --port $PORT >$SAVE_PATH/serve.txt 2>&1 &
+    trtllm-serve $SAVE_PATH --host 0.0.0.0 --port $PORT \
+        --kv_cache_free_gpu_memory_fraction $KV_CACHE_FREE_GPU_MEMORY_FRACTION \
+        >$SAVE_PATH/serve.txt 2>&1 &
     SERVE_PID=$!
 
     # Poll the log instead of `tail -f | while ... break`: under `set -o pipefail` (set above),

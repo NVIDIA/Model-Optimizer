@@ -43,6 +43,15 @@ def parse_arguments():
         default=False,
         action="store_true",
     )
+    parser.add_argument(
+        "--kv_cache_free_gpu_memory_fraction",
+        type=float,
+        default=0.7,
+        help=(
+            "Fraction of the GPU memory left after loading the model weights that the KV cache "
+            "may use. Lower it if the engine runs out of memory."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -74,6 +83,7 @@ def run(args):
         max_batch_size=len(input_texts),
         enable_kv_cache_reuse=False,
         trust_remote_code=args.trust_remote_code,
+        kv_cache_free_gpu_memory_fraction=args.kv_cache_free_gpu_memory_fraction,
     )
     torch.cuda.cudart().cudaProfilerStart()
     outputs = llm.generate_text(input_texts, args.max_output_len)
