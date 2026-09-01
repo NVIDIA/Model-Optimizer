@@ -274,4 +274,5 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     }
     assert all(stages[stage_id].instances == 4 for stage_id in candidate_stages)
     assert all(stages[stage_id].total_gpus == 4 for stage_id in candidate_stages)
+    assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
     assert stages["post.candidate-evaluation.global_kd"].total_gpus == 1
