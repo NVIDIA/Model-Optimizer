@@ -953,6 +953,10 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
     Returns:
         None
     """
+    # Assigned only once setup below completes; the finally block keys off
+    # this so a setup failure (e.g. a CUDA OOM raised by unshard()) propagates
+    # instead of being replaced by an UnboundLocalError. See issue #1859.
+    fsdp_param_mapping = None
     try:
         if isinstance(root_model, FSDPModule):
             # Get FSDP root module, if none is returned, then the update is not made to a submodule of an FSDPModule
@@ -995,7 +999,10 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
     finally:
         from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
 
-        if isinstance(root_model, FSDPModule):
+        # fsdp_param_mapping is None when setup did not complete (nothing was
+        # unsharded or mapped) — skip the update so the original error from
+        # the try block is not masked by an UnboundLocalError here.
+        if isinstance(root_model, FSDPModule) and fsdp_param_mapping is not None:
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():

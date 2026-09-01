@@ -59,6 +59,43 @@ def test_reduce_block_amax(block_sizes, test_input, expected_scales):
     torch.allclose(scales, expected_scales)
 
 
+def test_fsdp2_aware_weight_update_preserves_setup_error(monkeypatch):
+    """A failure during setup (e.g. a CUDA OOM raised by ``unshard()``) must
+    propagate to the caller, not be replaced by an ``UnboundLocalError`` from
+    the ``finally`` block referencing variables that were never assigned.
+
+    Regression test for https://github.com/NVIDIA/Model-Optimizer/issues/1859.
+    """
+    from unittest import mock
+
+    from torch.distributed.fsdp import FSDPModule
+
+    from modelopt.torch.quantization.utils import core_utils
+
+    root_model = mock.MagicMock(spec=FSDPModule)
+    module = torch.nn.Linear(4, 4)
+
+    def _raise_oom(*args, **kwargs):
+        raise RuntimeError("CUDA out of memory (simulated)")
+
+    monkeypatch.setattr(core_utils, "_get_enclosing_fsdp_module", _raise_oom)
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        with core_utils.fsdp2_aware_weight_update(root_model, module):
+            pass  # setup fails before the body runs
+
+
+def test_fsdp2_aware_weight_update_non_fsdp_body_error_passthrough():
+    """For a non-FSDP root model the context manager is a no-op wrapper and
+    must transparently propagate errors raised in the body."""
+    from modelopt.torch.quantization.utils.core_utils import fsdp2_aware_weight_update
+
+    module = torch.nn.Linear(4, 4)
+    with pytest.raises(ValueError, match="body failure"):
+        with fsdp2_aware_weight_update(module, module):
+            raise ValueError("body failure")
+
+
 @pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
 @pytest.mark.parametrize("axis", [None, 0, 1, (0, 1)])
 def test_reduce_amax_fp8(fp8_dtype, axis):
