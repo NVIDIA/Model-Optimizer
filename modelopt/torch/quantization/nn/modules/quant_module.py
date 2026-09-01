@@ -141,11 +141,18 @@ class QuantModule(DynamicModule):
         per-tensor quantizer over all experts of a fused MoE weight) can be folded view by
         view while disabling and dropping its calibration attrs exactly once.
         """
+        if not quantizer.fake_quant:
+            return
+
         for weight in weights:
             weight.data.copy_(quantizer(weight.float().contiguous()).to(weight.dtype))
         quantizer.disable()
         quantizer.disable_rotate()
-        if not keep_attrs:
+        if keep_attrs and hasattr(quantizer, "_pre_quant_scale"):
+            # The scale is already baked into the folded weight.
+            # Disable pre-quant scaling so it is not applied twice.
+            quantizer._enable_pre_quant_scale = False
+        elif not keep_attrs:
             for attr_name in ("_pre_quant_scale", "_amax"):
                 if hasattr(quantizer, attr_name):
                     delattr(quantizer, attr_name)
@@ -153,10 +160,12 @@ class QuantModule(DynamicModule):
     def fold_weight(self, keep_attrs: bool = False):
         """Bake each fake-quant weight quantizer into its weight for faster eval.
 
-        Every fake-quant weight quantizer is folded regardless of its enabled state. The folded
-        transform is baked into the stored weight and then disabled, so subsequent forwards use
-        the stored weight directly. Calibration buffers (``_pre_quant_scale``, ``_amax``) are
-        dropped unless ``keep_attrs``.
+        Every fake-quant weight quantizer is folded, including disabled quantizers whose pre-quant
+        scale or rotation remains active. The folded transform is baked into the stored weight and
+        then disabled, so subsequent forwards use the stored weight directly. Calibration buffers
+        (``_pre_quant_scale``, ``_amax``) are dropped unless ``keep_attrs``. A retained pre-quant
+        scale remains stored but is made inactive because it has already been applied to the folded
+        weight.
         """
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
@@ -173,7 +182,8 @@ class QuantModule(DynamicModule):
                     f"{name} doesn't have a corresponding {weight_name} in {self.__class__.__name__}"
                 )
                 weight = getattr(self, weight_name)
-                self._fold_weight_quantizer(attr, (weight,), keep_attrs)
+                if isinstance(weight, torch.Tensor):
+                    self._fold_weight_quantizer(attr, (weight,), keep_attrs)
 
 
 QuantModuleRegistry = _DMRegistryCls("Quant", QuantModule)

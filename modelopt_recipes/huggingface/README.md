@@ -34,6 +34,9 @@ modelopt_recipes/huggingface/
       <recipe>.yaml
       [<recipe>.<aux>.yaml]          # optional snippet helpers (see below)
       [README.md]                    # optional; describes what's model-specific
+  models/<org>/<checkpoint>/
+    <task>/
+      <recipe>.yaml                  # exact published-checkpoint mirror
 ```
 
 `<task>` is the model-optimization workflow the recipe targets (e.g.
@@ -42,6 +45,11 @@ modelopt_recipes/huggingface/
 Selecting a recipe at runtime uses the path relative to
 `modelopt_recipes/`, e.g.
 `--recipe huggingface/<model_type>/<task>/<recipe>`.
+
+Recipes that reproduce one exact published checkpoint may instead live under
+`huggingface/models/<org>/<checkpoint>/`. This layout records the canonical
+source checkpoint directly and avoids implying that the recipe applies to
+every checkpoint sharing the same `model_type`.
 
 ### Verifying a model's `model_type`
 

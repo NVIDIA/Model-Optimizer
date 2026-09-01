@@ -15,9 +15,11 @@
 
 """Code that export quantized Hugging Face models for deployment."""
 
+import contextlib
 import copy
 import json
 import re
+import shutil
 import tempfile
 import warnings
 from builtins import ValueError
@@ -81,6 +83,7 @@ from .layer_utils import (
     sync_moe_gate_up_amax,
 )
 from .model_config import (
+    FUSION_FREE_FORMATS,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
@@ -381,11 +384,7 @@ def _fuse_shared_input_modules(
         # (must be re-evaluated per group as different modules may have different formats)
         group_quant_format = get_quantization_format(modules[0]) if modules else quantization_format
 
-        if len(modules) > 1 and group_quant_format not in [
-            QUANTIZATION_FP8,
-            QUANTIZATION_NONE,
-            QUANTIZATION_FP8_PB_REAL,
-        ]:
+        if len(modules) > 1 and group_quant_format not in FUSION_FREE_FORMATS:
             if qkv_only:
                 # Filter to only include QKV projection layers (diffusion models)
                 qkv_modules = [m for m in modules if is_qkv_projection(getattr(m, "name", ""))]
@@ -828,11 +827,15 @@ def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContex
 
 def _resolve_export_dtype(model: nn.Module, dtype: torch.dtype | None) -> torch.dtype:
     """Return the export dtype, defaulting to the model's own and warning on a mismatch."""
+    configured_dtype = getattr(model.config, "torch_dtype", None)
     if dtype is None:
-        return model.config.torch_dtype
-    if dtype != model.config.torch_dtype:
+        if configured_dtype is not None:
+            return configured_dtype
+        first_parameter = next(model.parameters(), None)
+        return first_parameter.dtype if first_parameter is not None else torch.float16
+    if configured_dtype is not None and dtype != configured_dtype:
         warnings.warn(
-            f"Model's original dtype ({model.config.torch_dtype}) differs from target dtype "
+            f"Model's original dtype ({configured_dtype}) differs from target dtype "
             f"({dtype}), which may lead to numerical errors."
         )
     return dtype
@@ -1446,6 +1449,34 @@ def _sanitize_generation_config_for_save(model: torch.nn.Module) -> None:
         return
     if getattr(gc, "top_k", None) is not None or getattr(gc, "top_p", None) is not None:
         gc.do_sample = True
+
+
+def save_non_weight_artifacts(model: nn.Module, export_dir: Path) -> None:
+    """Write config.json, generation_config.json, and trust_remote_code modeling files.
+
+    For exporters that stream weights out themselves and never hand a state dict to
+    ``save_pretrained``, which is not an option here: MoE models (e.g. DSR1) share expert
+    storage across layers, so safetensors' shared-tensor check fires even on an empty dict.
+    The ``*.py`` files are what ``trust_remote_code`` checkpoints (e.g. NemotronH) need.
+    """
+    _sanitize_generation_config_for_save(model)
+    # transformers' own revert_weight_conversion cannot handle quantized state dicts.
+    patches = _patch_revert_weight_conversion()
+    try:
+        model.config.save_pretrained(str(export_dir))
+    finally:
+        _unpatch_revert_weight_conversion(patches)
+
+    if getattr(model, "generation_config", None) is not None:
+        with contextlib.suppress(Exception):
+            model.generation_config.save_pretrained(str(export_dir))
+
+    src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
+    if src_dir.is_dir():
+        for py_file in src_dir.glob("*.py"):
+            dst = export_dir / py_file.name
+            if not dst.exists():
+                shutil.copy2(py_file, dst)
 
 
 def export_speculative_decoding(

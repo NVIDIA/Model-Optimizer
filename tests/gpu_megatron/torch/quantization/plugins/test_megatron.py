@@ -30,7 +30,7 @@ from _test_utils.torch.megatron.models import (
     HAS_MAMBA,
     MegatronModel,
     get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
+    get_mcore_hybrid_model,
 )
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
@@ -64,6 +64,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
+from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
@@ -71,10 +72,12 @@ from modelopt.torch.quantization.plugins.megatron import (
     _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
     megatron_replace_quant_module_hook,
+    quant_module_get_extra_state,
 )
 from modelopt.torch.quantization.plugins.transformer_engine import (
     _COMPILE_TEGROUPED_WEIGHT_LOOP_ENV,
 )
+from modelopt.torch.quantization.qtensor import QTensorWrapper
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
@@ -290,7 +293,7 @@ def _gpt_model_provider(
         if is_hybrid:
             # Derive num_layers from pattern length, default to 4
             num_layers = len(hybrid_layer_pattern) if hybrid_layer_pattern else 4
-            model = get_mcore_mamba_hybrid_model(
+            model = get_mcore_hybrid_model(
                 tensor_model_parallel_size=tp_size,
                 num_layers=num_layers,
                 hidden_size=hidden_size,
@@ -1308,7 +1311,7 @@ def test_gptq_mamba_hybrid(dist_workers_size_1):
 
 def _test_gptq_mamba_hybrid(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         hidden_size=32,
         num_attention_heads=4,
@@ -1350,7 +1353,7 @@ def _auto_quantize_mamba_hybrid_cost_helper(rank, size, expert_model_parallel_si
         expert_model_parallel_size=expert_model_parallel_size,
         seed=SEED,
     )
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         expert_model_parallel_size=expert_model_parallel_size,
         hidden_size=32,
@@ -1792,6 +1795,26 @@ def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
             {"transformer_impl": "transformer_engine"},
         ),
     )
+
+
+def test_output_layer_extra_state_empty_when_nothing_quantized():
+    """``GPTModel.sharded_state_dict`` asserts a disabled output_layer carries no extra state.
+
+    The subject is a ``RealQuantLinear`` with an uncompressed weight, which is what ``mtq.compress``
+    leaves behind for a disabled output_layer, and the e2e coverage
+    (``test_homogeneous_compressed_sharded_state_dict``) is Blackwell-skipped.
+    """
+    module = RealQuantLinear.convert(QuantModuleRegistry.convert(torch.nn.Linear(4, 4)))
+    module._modelopt_output_layer = True
+    assert not isinstance(module.weight, QTensorWrapper)  # disabled quantizers are not compressed
+
+    for quantizer in module.modules():
+        if isinstance(quantizer, mtq.nn.TensorQuantizer):
+            quantizer.disable()
+    assert quant_module_get_extra_state(module) == {}
+
+    module.weight_quantizer.enable()
+    assert "modelopt_quantizer_state" in quant_module_get_extra_state(module)
 
 
 def test_resolve_output_layer_untied():

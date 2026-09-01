@@ -256,6 +256,7 @@ For NEL-managed deployment (evaluation with self-deployment), use the evaluation
 
 | Error | Cause | Fix |
 |-------|-------|-----|
+| `CUDA error: an illegal memory access` on an **NVFP4 MoE** (`trtllm_fused_moe_dev_kernel.cu`, `deepgemm`) | Fused-MoE FP4 kernel fault on long-context loads; engine dies, all requests 500 | Try `VLLM_USE_FLASHINFER_MOE_FP4=1` + `VLLM_FLASHINFER_MOE_BACKEND=throughput`. **Not always a fix** — on DeepSeek-V4 it moved the fault from TRT-LLM to DeepGEMM. It also makes quantized vs baseline not kernel-matched; record that when reporting deltas. |
 | `CUDA out of memory` | Model too large for GPU(s) | Increase `--tensor-parallel-size` or use a smaller model |
 | `quantization="modelopt" not recognized` | vLLM/SGLang version too old | Upgrade: vLLM >= 0.10.1, SGLang >= 0.4.10 |
 | `hf_quant_config.json not found` | Not a ModelOpt-exported checkpoint | Re-export with `export_hf_checkpoint()`, or remove `--quantization` flag |

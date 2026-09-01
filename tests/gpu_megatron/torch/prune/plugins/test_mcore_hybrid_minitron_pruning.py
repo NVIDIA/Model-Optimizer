@@ -23,7 +23,7 @@ from _test_utils.import_helper import skip_if_no_mamba
 
 skip_if_no_mamba()
 
-from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
+from _test_utils.torch.megatron.models import get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import (
     run_mcore_inference,
     run_mcore_inference_with_dummy_input,
@@ -62,7 +62,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
     vocab_size = 64
     batch_size = 2
 
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
@@ -123,7 +123,7 @@ def test_mcore_mamba_parameter_sorting(dist_workers):
     dist_workers.run(_test_mcore_mamba_parameter_sorting)
 
 
-def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
+def _test_mcore_hybrid_pruning(rank, size, ckpt_dir):
     channel_divisor = 4
 
     num_layers = min(size * 2, 8)
@@ -139,7 +139,7 @@ def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     batch_size = 2
 
     def _get_model(initialize_megatron=True):
-        model = get_mcore_mamba_hybrid_model(
+        model = get_mcore_hybrid_model(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=size,
             initialize_megatron=initialize_megatron,
@@ -210,10 +210,7 @@ def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     assert mixer.headdim == pruned_mamba_head_dim
     assert mixer.d_inner == pruned_mamba_num_heads * pruned_mamba_head_dim
     assert mixer.out_proj.out_features == pruned_hidden_size
-    if hasattr(mixer, "conv1d"):  # nemo:26.06 and earlier
-        assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
-    else:  # nemo:26.08+
-        assert mixer.conv1d_weight.shape[0] == mixer.conv1d_bias.shape[0] == mixer.d_inner + bc
+    assert mixer.conv1d_weight.shape[0] == mixer.conv1d_bias.shape[0] == mixer.d_inner + bc
 
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn_hidden_size
@@ -233,8 +230,8 @@ def _test_mcore_mamba_hybrid_pruning(rank, size, ckpt_dir):
     prune_minitron(model, constraints, {"checkpoint": ckpt_dir}, channel_divisor)
 
 
-def test_mcore_mamba_hybrid_pruning(dist_workers, tmp_path):
-    dist_workers.run(_test_mcore_mamba_hybrid_pruning, tmp_path / "minitron_scores")
+def test_mcore_hybrid_pruning(dist_workers, tmp_path):
+    dist_workers.run(_test_mcore_hybrid_pruning, tmp_path / "minitron_scores")
 
 
 # Shared parameters for the "ME*-" hybrid NAS tests
@@ -259,7 +256,7 @@ _NAS_MODEL_KWARGS = {
 
 
 def _make_nas_hybrid_model(size, moe_grouped_gemm=False):
-    return get_mcore_mamba_hybrid_model(
+    return get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
@@ -334,7 +331,7 @@ def _assert_top_k_candidates(searcher_state, constraint_key, expected_top_k, k=1
         assert actual.score == score, (actual.score, score)
 
 
-def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
+def _test_mcore_hybrid_pruning_nas_params(rank, size, ckpt_dir):
     set_seed(SEED)
     # Covers grouped-GEMM (TEGroupedMLP) MoE pruning; the memory_mb test below covers SequentialMLP.
     model = _make_nas_hybrid_model(size, moe_grouped_gemm=True)
@@ -424,11 +421,11 @@ def _test_mcore_mamba_hybrid_pruning_nas_params(rank, size, ckpt_dir):
 @pytest.mark.skipif(
     torch.cuda.device_count() > 2, reason="Assertions not configured for more than 2 GPUs"
 )
-def test_mcore_mamba_hybrid_pruning_nas_params(dist_workers, tmp_path):
-    dist_workers.run(_test_mcore_mamba_hybrid_pruning_nas_params, tmp_path / "minitron_scores")
+def test_mcore_hybrid_pruning_nas_params(dist_workers, tmp_path):
+    dist_workers.run(_test_mcore_hybrid_pruning_nas_params, tmp_path / "minitron_scores")
 
 
-def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
+def _test_mcore_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
     set_seed(SEED)
     dtype_bytes = 2
     sequence_length = 128
@@ -508,5 +505,5 @@ def _test_mcore_mamba_hybrid_pruning_nas_memory_mb(rank, size, ckpt_dir):
 @pytest.mark.skipif(
     torch.cuda.device_count() > 2, reason="Assertions not configured for more than 2 GPUs"
 )
-def test_mcore_mamba_hybrid_pruning_nas_memory_mb(dist_workers, tmp_path):
-    dist_workers.run(_test_mcore_mamba_hybrid_pruning_nas_memory_mb, tmp_path / "minitron_scores")
+def test_mcore_hybrid_pruning_nas_memory_mb(dist_workers, tmp_path):
+    dist_workers.run(_test_mcore_hybrid_pruning_nas_memory_mb, tmp_path / "minitron_scores")
