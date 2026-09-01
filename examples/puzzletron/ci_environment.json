@@ -7,7 +7,6 @@
   "transformers": "5.8.1",
   "gpu_image": {
     "base_image": "nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909bdad891fab300ec5700fb4f4656463b2f51980f",
-    "platform": "linux/amd64",
     "torch_cuda": "12.9",
     "aiperf": "0.12.0",
     "langdetect": "1.0.9",
@@ -18,8 +17,7 @@
       "punkt_tab": "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106"
     },
     "nltk_resources": ["punkt", "punkt_tab"],
-    "nox": "2026.8.17",
-    "video_decoder": {"distribution": "eva-decord", "version": "0.6.1"}
+    "nox": "2026.8.17"
   },
   "lmms_eval": {
     "base_version": "0.7.0",
@@ -53,7 +51,6 @@
       "compatibility_patch": "mamba_ssm_tilelang_0_1_9.patch",
       "compatibility_patch_sha256": "5ac3654a620e44db347b30231bafdceaf328058c16fca061d5dadb25ebff7291"
     },
-    "tilelang": "0.1.9",
     "torch_cuda_arch_list": "8.0;8.6;9.0;10.0;12.0"
   }
 }

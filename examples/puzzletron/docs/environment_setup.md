@@ -39,7 +39,7 @@ the required CUDA extensions, and the teacher-evaluation resources. Do not
 maintain a second set of worker installation commands outside the Dockerfile.
 
 Build the Linux amd64 image from the repository root by following the
-[image build and validation guide](../ci/README.md). That guide provides the
+[image build and validation guide](worker_image.md). That guide provides the
 build command and the revision-specific image tag.
 
 The amd64 platform is required because the current CUDA extension set and

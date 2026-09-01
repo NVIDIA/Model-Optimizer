@@ -39,13 +39,9 @@ large storage for the output directory. The local Docker image remains
 available after export and can be removed with normal Docker image-management
 commands when it is no longer needed.
 
-Use `--archive` instead of `--sqsh` for a compressed Docker archive, or pass
-both flags to create both formats.
-
-Both formats use the same source identity:
+The exported file is named after the source revision:
 
 ```text
-modelopt-puzzletron-linux-amd64-git-<12-character-commit>.tar.zst
 modelopt-puzzletron-linux-amd64-git-<12-character-commit>.sqsh
 ```
 

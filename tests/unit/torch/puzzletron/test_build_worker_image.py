@@ -17,18 +17,15 @@
 
 import pytest
 
-from examples.puzzletron.build_worker_image import artifact_names
+from examples.puzzletron.build_worker_image import sqsh_name
 
 
-def test_exported_artifacts_share_a_git_revision_identity():
+def test_sqsh_name_uses_the_git_revision():
     revision = "ba737f1f2301d0526c7d4674e1d21bf3d8c1ff14"
 
-    assert artifact_names(revision) == {
-        "archive": "modelopt-puzzletron-linux-amd64-git-ba737f1f2301.tar.zst",
-        "sqsh": "modelopt-puzzletron-linux-amd64-git-ba737f1f2301.sqsh",
-    }
+    assert sqsh_name(revision) == "modelopt-puzzletron-linux-amd64-git-ba737f1f2301.sqsh"
 
 
-def test_artifact_names_require_a_full_git_revision():
+def test_sqsh_name_requires_a_full_git_revision():
     with pytest.raises(ValueError, match="full lowercase Git commit"):
-        artifact_names("ba737f1f2301")
+        sqsh_name("ba737f1f2301")

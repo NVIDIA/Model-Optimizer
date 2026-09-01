@@ -27,32 +27,21 @@ import tempfile
 from pathlib import Path
 
 __all__ = [
-    "artifact_names",
-    "artifact_stem",
     "build_parser",
     "main",
+    "sqsh_name",
 ]
 
 _PLATFORM = "linux/amd64"
 _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
-def artifact_stem(revision: str) -> str:
-    """Return the common filename stem for artifacts built from ``revision``."""
+def sqsh_name(revision: str) -> str:
+    """Return the SquashFS filename for an image built from ``revision``."""
 
     if not _REVISION_PATTERN.fullmatch(revision):
         raise ValueError("Puzzletron image revision must be a full lowercase Git commit")
-    return f"modelopt-puzzletron-linux-amd64-git-{revision[:12]}"
-
-
-def artifact_names(revision: str) -> dict[str, str]:
-    """Return the filenames shared by the Docker and SquashFS export workflow."""
-
-    stem = artifact_stem(revision)
-    return {
-        "archive": f"{stem}.tar.zst",
-        "sqsh": f"{stem}.sqsh",
-    }
+    return f"modelopt-puzzletron-linux-amd64-git-{revision[:12]}.sqsh"
 
 
 def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -93,31 +82,6 @@ def _output_path(output_dir: Path, name: str) -> Path:
     return path
 
 
-def _export_archive(image: str, output: Path) -> None:
-    partial = output.with_name(f".{output.name}.partial")
-    if partial.exists():
-        raise FileExistsError(f"Refusing to overwrite incomplete artifact: {partial}")
-
-    save = subprocess.Popen(["docker", "save", image], stdout=subprocess.PIPE)
-    if save.stdout is None:
-        raise RuntimeError("Docker archive export did not open its output stream")
-    try:
-        compressed = subprocess.run(
-            ["zstd", "--threads=0", "--quiet", "--output", str(partial)],
-            stdin=save.stdout,
-            check=False,
-        )
-    finally:
-        save.stdout.close()
-    save_returncode = save.wait()
-    if compressed.returncode or save_returncode:
-        partial.unlink(missing_ok=True)
-        raise RuntimeError(
-            f"Docker archive export failed: docker={save_returncode}, zstd={compressed.returncode}"
-        )
-    partial.replace(output)
-
-
 def _export_sqsh(image: str, output: Path) -> None:
     partial = output.with_name(f".{output.stem}.partial.sqsh")
     if partial.exists():
@@ -151,11 +115,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory for optional exported artifacts",
     )
     parser.add_argument(
-        "--archive",
-        action="store_true",
-        help="export a compressed Docker archive",
-    )
-    parser.add_argument(
         "--sqsh",
         action="store_true",
         help="export an Enroot/Pyxis SquashFS image",
@@ -168,29 +127,24 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
-    if (args.archive or args.sqsh) and args.output_dir is None:
-        parser.error("--output-dir is required with --archive or --sqsh")
-    if args.output_dir is not None and not (args.archive or args.sqsh):
-        parser.error("--output-dir requires --archive or --sqsh")
+    if args.sqsh and args.output_dir is None:
+        parser.error("--output-dir is required with --sqsh")
+    if args.output_dir is not None and not args.sqsh:
+        parser.error("--output-dir requires --sqsh")
 
     repository_root = Path(__file__).resolve().parents[2]
     revision = _source_revision(repository_root)
     _require_linux_amd64()
-    names = artifact_names(revision)
     image = f"modelopt-puzzletron:linux-amd64-git-{revision[:12]}"
 
-    archive = None
     sqsh = None
     if args.output_dir is not None:
         args.output_dir = args.output_dir.expanduser().resolve()
         if args.output_dir.is_relative_to(repository_root):
             parser.error("--output-dir must be outside the repository")
-        archive = _output_path(args.output_dir, names["archive"]) if args.archive else None
-        sqsh = _output_path(args.output_dir, names["sqsh"]) if args.sqsh else None
+        sqsh = _output_path(args.output_dir, sqsh_name(revision))
 
     required_tools = ["docker"]
-    if args.archive:
-        required_tools.append("zstd")
     if args.sqsh:
         required_tools.append("enroot")
     _require_tools(*required_tools)
@@ -228,11 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             f"Puzzletron image revision mismatch: expected {revision}, found {recorded_revision}"
         )
-    if args.output_dir is not None:
-        if archive is not None:
-            _export_archive(image, archive)
-        if sqsh is not None:
-            _export_sqsh(image, sqsh)
+    if sqsh is not None:
+        _export_sqsh(image, sqsh)
 
     print(f"Docker image: {image}")
     return 0
