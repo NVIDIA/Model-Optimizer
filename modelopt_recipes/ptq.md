@@ -398,6 +398,18 @@ checkpoint's** quant config verbatim:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
   W4A16, `lm_head` → FP8 W8A16, and the F32 tensors (conv1d, norms) → BF16.
+- **`models/Qwen/Qwen3.8-2.4T-A95B/ptq/nvfp4_experts_mse-fp8_self_attn-fp8_linear_attn-kv_fp8_cast`**
+  mirrors `nvidia/Qwen3.8-2.4T-A95B-NVFP4`: a `qwen3_5_moe_text` MoE with **hybrid
+  attention** — gated-delta (linear-attention) layers interleaved with
+  full-attention layers. Routed experts → NVFP4 (MSE-searched static weight
+  scales, dynamic input scales); **both** self-attention and the gated-delta
+  linear-attention projections (`in_proj_qkv/z/a/b`, `out_proj`) → FP8 W8A8; KV
+  cache → FP8 cast; everything else, including the MTP block, stays BF16. The
+  gated-delta `conv1d` and norms carry no Linear quantizer, so the recurrent
+  state path itself is never quantized — only the projections around it are. The
+  source ships as native block-FP8 (`weight_block_size [128, 128]`); the loader
+  dequantizes it to BF16 before quantizers are inserted, so the scales are
+  calibrated against BF16 weights, not the shipped FP8.
 
 *Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
 different component types — or individual layers** — and hardcode the precise
