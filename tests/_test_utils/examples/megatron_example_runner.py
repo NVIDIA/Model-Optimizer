@@ -38,7 +38,6 @@ import os
 import signal
 import sys
 import tempfile
-import warnings
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,14 +160,13 @@ def _load_example_module(script: str, example_path: str):
     return module
 
 
-def _drivable(script: str, example_path: str) -> bool:
-    """Whether the script exposes the ``get_args()`` + ``main()`` shape this runner drives."""
-    try:
-        module = _load_example_module(script, example_path)
-    except Exception as e:
-        warnings.warn(f"{script} is not drivable in-process ({e!r}); falling back to torchrun")
-        return False
-    return callable(getattr(module, "get_args", None)) and callable(getattr(module, "main", None))
+def _require_drivable(script: str, example_path: str) -> None:
+    """Check the script exposes the ``get_args()`` + ``main()`` shape this runner drives."""
+    module = _load_example_module(script, example_path)
+    if not callable(getattr(module, "get_args", None)) or not callable(
+        getattr(module, "main", None)
+    ):
+        raise AssertionError(f"{script} must define get_args() and main(args)")
 
 
 def requested_world_size(cmd_parts: list[str]) -> int | None:
@@ -253,17 +251,22 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         print(cap[0])
 
 
-def run_example_step(cmd_parts: list[str], example_path: str) -> str | None:
-    """Run an example step without shelling out. ``None`` falls back to a subprocess."""
+def run_example_step(cmd_parts: list[str], example_path: str) -> str:
+    """Run an example step without shelling out.
+
+    Every step must be ``torchrun --nproc_per_node=<int> <script>.py``, with the script exposing
+    ``get_args()`` + ``main()``. Anything else raises: falling back to a subprocess would still
+    pass, only ~6x slower, so a step that breaks the convention has to fail instead of quietly
+    costing the suite its speed-up.
+    """
     script = next((str(p) for p in cmd_parts if str(p).endswith(".py")), None)
     if script is None:
-        return None
+        raise AssertionError(f"step must invoke a .py script: {cmd_parts}")
     world_size = requested_world_size(cmd_parts)
     if world_size is None:
-        return None
+        raise AssertionError(f"--nproc_per_node must be a plain integer: {cmd_parts}")
     if world_size > 1:
         # torchrun imports the script in fresh children, so get_args()/main() need not exist here.
         return run_torchrun_in_process(cmd_parts, example_path)
-    if _drivable(script, example_path):
-        return run_example_in_process(cmd_parts, example_path)
-    return None
+    _require_drivable(script, example_path)
+    return run_example_in_process(cmd_parts, example_path)
