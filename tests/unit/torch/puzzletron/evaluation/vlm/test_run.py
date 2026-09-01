@@ -18,6 +18,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -52,6 +53,26 @@ _QWEN_CONFIG = {
     },
 }
 _TASK_CONFIGS = {name: item.task_config for name, item in profile.VLM_BENCHMARK_DATASETS.items()}
+
+
+def test_direct_launcher_does_not_shadow_standard_library_profile():
+    script = Path(evaluation.__file__).absolute()
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import runpy, sys; "
+                "sys.path.insert(0, sys.argv[1]); "
+                "runpy.run_path(sys.argv[2], run_name='modelopt_vlm_launcher'); "
+                "import cProfile; "
+                "assert callable(cProfile.run)"
+            ),
+            str(script.parent),
+            str(script),
+        ],
+        check=True,
+    )
 
 
 def _write_checkpoint(root: Path) -> Path:

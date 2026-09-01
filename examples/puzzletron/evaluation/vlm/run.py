@@ -25,6 +25,9 @@ from pathlib import Path
 __all__ = ["evaluate"]
 
 REPOSITORY_ROOT = Path(__file__).absolute().parents[4]
+SCRIPT_DIRECTORY = str(Path(__file__).absolute().parent)
+if SCRIPT_DIRECTORY in sys.path:
+    sys.path.remove(SCRIPT_DIRECTORY)
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
