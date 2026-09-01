@@ -5,31 +5,26 @@ The [`Dockerfile`](../Dockerfile) contains the worker installation steps.
 revisions, CUDA targets, and downloaded-file checksums used by those steps.
 The Dockerfile reads the same file for installation and its build-time checks.
 
-## Build with Docker
+## Build
 
-The Dockerfile works with the standard Docker command. From a clean repository
-checkout on a Linux amd64 system, run:
+Run one repository command from a clean checkout on a Linux amd64 system with
+Docker:
 
 ```bash
-revision="$(git rev-parse HEAD)"
-short_revision="$(git rev-parse --short=12 HEAD)"
-docker build \
-  --platform linux/amd64 \
-  --file examples/puzzletron/Dockerfile \
-  --build-arg "MODELOPT_REVISION=${revision}" \
-  --tag "modelopt-puzzletron:linux-amd64-git-${short_revision}" \
-  .
+python examples/puzzletron/build_worker_image.py
 ```
 
-The Docker build checks the installed modules, CUDA version, and required
-evaluation data. The full source revision is recorded in the image label and at
-`/opt/puzzletron/modelopt_revision`.
+The command always uses `examples/puzzletron/Dockerfile`, the repository root as
+the build context, Linux amd64 as the platform, and the current full Git
+revision. It checks the installed modules, CUDA version, and required evaluation
+data. The full source revision is recorded in the image label and at
+`/opt/puzzletron/modelopt_revision`. The Dockerfile remains directly usable by
+standard Docker tools, but users do not need to assemble these arguments.
 
 ## Export for another runtime
 
-The repository helper adds clean-checkout validation, consistent artifact
-names, export, and checksums. Add `--sqsh` for an Enroot/Pyxis image,
-`--archive` for a compressed Docker archive, or both:
+The same command can build and export a revision-named Enroot/Pyxis image in one
+step. No separate Docker build is required:
 
 ```bash
 python examples/puzzletron/build_worker_image.py \
@@ -37,10 +32,15 @@ python examples/puzzletron/build_worker_image.py \
   --sqsh
 ```
 
-Creating a SquashFS image requires Enroot and Docker on the same Linux amd64
-host. Use node-local or other large storage for the output directory. The local
-Docker image remains available after export and can be removed with the normal
-Docker image-management commands when it is no longer needed.
+The helper runs the same controlled Docker build before exporting. Docker reuses
+its build cache when the image is already current. Creating a SquashFS image
+requires Enroot and Docker on the same Linux amd64 host. Use node-local or other
+large storage for the output directory. The local Docker image remains
+available after export and can be removed with normal Docker image-management
+commands when it is no longer needed.
+
+Use `--archive` instead of `--sqsh` for a compressed Docker archive, or pass
+both flags to create both formats.
 
 Both formats use the same source identity:
 
