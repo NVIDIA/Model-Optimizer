@@ -37,6 +37,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -48,6 +49,8 @@ from _test_utils.torch.distributed.utils import get_free_port
 import modelopt.torch.utils.distributed as dist
 
 # torchrun's PContext installs handlers for these and never restores them.
+_TAIL_INTERVAL_S = 0.2  # how often the tailer echoes new output
+
 _LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
 
@@ -60,62 +63,86 @@ def _capture_output():
     and C extensions. Under pytest's fd capture ``sys.stdout``/``sys.stderr`` are objects over
     pytest's own temp file rather than fds 1/2, so both a redirect and an fd swap are needed.
 
-    Tee rather than buffer: a job-level timeout SIGKILLs the runner without running any ``finally``,
-    and that is exactly when the log is wanted.
+    A tailer thread echoes the buffer as it fills, so a job-level timeout -- which SIGKILLs the
+    runner without running any ``finally`` -- still leaves the log in the CI output. Writing to a
+    pipe instead would stream more directly, but its backpressure cost the 1-GPU suite 3m43 -> 9m06.
     """
     holder = [""]
-    chunks: list[str] = []
-    read_fd, write_fd = os.pipe()
-    live = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # the fd we do not touch
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as tmp:
+        live = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # the fd we do not touch
+        done = threading.Event()
+        sent = [0]
 
-    def _drain():
-        with os.fdopen(read_fd, "r", errors="replace") as pipe:
-            for line in pipe:
-                live.write(line)
-                chunks.append(line)
+        def _tail():
+            """Echo new bytes as they land, so a SIGKILLed job still has the log."""
+            while True:
+                data = os.pread(tmp.fileno(), 1 << 20, sent[0])  # pread: leaves the write offset
+                if data:
+                    sent[0] += len(data)
+                    live.write(data.decode("utf-8", errors="replace"))
+                elif done.is_set():
+                    return
+                else:
+                    done.wait(_TAIL_INTERVAL_S)
 
-    reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
-    sys.stdout.flush()
-    sys.stderr.flush()
-    saved_out, saved_err = os.dup(1), os.dup(2)
-    os.dup2(write_fd, 1)
-    os.dup2(write_fd, 2)
-    sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # now the pipe
-    handler = logging.StreamHandler(sink)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    root = logging.getLogger()
-    others = [lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)]
-    # Lower levels only for loggers that own their output; doing it for every logger switches on
-    # torch dynamo/inductor INFO and floods the pipe, which cost the 1-GPU suite 3m43 -> 9m01.
-    # A propagating logger still needs its own level lowered, or it drops the record before root.
-    levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
-    # Attach the handler only where the record cannot reach root, or it is written twice.
-    handled = [root, *(lg for lg in others if not lg.propagate)]
-    try:
-        for lg in levels:
-            if lg.level > logging.INFO:
-                lg.setLevel(logging.INFO)
-        for lg in handled:
-            lg.addHandler(handler)
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            yield holder
-    finally:
-        for lg in handled:
-            lg.removeHandler(handler)
-        for lg, level in levels.items():
-            lg.setLevel(level)
-        sink.close()
         sys.stdout.flush()
         sys.stderr.flush()
-        os.dup2(saved_out, 1)
-        os.dup2(saved_err, 2)
-        os.close(saved_out)
-        os.close(saved_err)
-        os.close(write_fd)  # EOF for the reader
-        reader.join(_ORPHAN_PIPE_TIMEOUT_S)  # bounded: an orphan may still hold the pipe
-        live.close()
-        holder[0] = "".join(chunks)
+        saved_out, saved_err = os.dup(1), os.dup(2)
+        os.dup2(tmp.fileno(), 1)
+        os.dup2(tmp.fileno(), 2)
+        sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # now the temp file
+        handler = logging.StreamHandler(sink)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root = logging.getLogger()
+        others = [lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)]
+        # Lower levels only for loggers that own their output: a propagating logger still needs its
+        # own level lowered, or it drops the record before root sees it.
+        levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
+        # Attach the handler only where the record cannot reach root, or it is written twice.
+        handled = [root, *(lg for lg in others if not lg.propagate)]
+        tailer = threading.Thread(target=_tail, daemon=True)
+        tailer.start()
+        try:
+            for lg in levels:
+                if lg.level > logging.INFO:
+                    lg.setLevel(logging.INFO)
+            for lg in handled:
+                lg.addHandler(handler)
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                yield holder
+        finally:
+            for lg in handled:
+                lg.removeHandler(handler)
+            for lg, level in levels.items():
+                lg.setLevel(level)
+            sink.close()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_out, 1)
+            os.dup2(saved_err, 2)
+            os.close(saved_out)
+            os.close(saved_err)
+            done.set()
+            tailer.join(_ORPHAN_PIPE_TIMEOUT_S)  # bounded, like the subprocess reader
+            live.close()
+            tmp.seek(0)
+            holder[0] = tmp.read()
+
+
+@contextlib.contextmanager
+def _preserved_signal_handlers():
+    """Put back handlers a step installs; with a subprocess launcher, process exit did this.
+
+    Both paths need it: ``PContext.start()`` installs its own, and a Megatron training loop run
+    in-process is if anything likelier to (graceful exit, checkpoint-on-signal). Losing them breaks
+    pytest's Ctrl-C and CI cancellation for the rest of the session.
+    """
+    saved = {s: signal.getsignal(s) for s in _LAUNCHER_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler)
 
 
 def reset_megatron_global_state() -> None:
@@ -179,10 +206,15 @@ def _require_drivable(script: str, example_path: str) -> None:
 
 def requested_world_size(cmd_parts: list[str]) -> int | None:
     """World size a ``torchrun`` command asks for, or ``None`` if it is not a plain integer."""
-    for part in cmd_parts:
-        if str(part).startswith("--nproc_per_node="):
-            value = str(part).split("=", 1)[1]
-            return int(value) if value.isdigit() else None  # "gpu"/"auto": keep torchrun
+    parts = [str(p) for p in cmd_parts]
+    for i, part in enumerate(parts):
+        if part.startswith("--nproc_per_node="):
+            value = part.split("=", 1)[1]
+        elif part == "--nproc_per_node" and i + 1 < len(parts):
+            value = parts[i + 1]  # torchrun accepts the space-separated form too
+        else:
+            continue
+        return int(value) if value.isdigit() else None  # "gpu"/"auto"
     return None
 
 
@@ -195,9 +227,10 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     os.environ["WORLD_SIZE"] = "1"
     os.environ["LOCAL_RANK"] = "0"
     if not dist.is_initialized():
-        os.environ.setdefault("MASTER_PORT", str(get_free_port()))
-        dist.setup()
-        torch.cuda.set_device(dist.local_rank())
+        # Not setdefault: another suite may have left a stale MASTER_PORT in the environment, and
+        # binding an occupied port blocks in rendezvous until timeout instead of failing fast.
+        os.environ["MASTER_PORT"] = str(get_free_port())
+        dist.setup()  # also sets the CUDA device
 
     script = next(p for p in cmd_parts if str(p).endswith(".py"))
     argv = [str(p) for p in cmd_parts[cmd_parts.index(script) :]]
@@ -208,10 +241,13 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     try:
         module = _load_example_module(str(script), example_path)
         reset_megatron_global_state()  # a previous step left its own parallel state behind
-        with patch.object(sys, "argv", argv):
-            args = module.get_args()
         try:
-            with _capture_output() as native:
+            with _preserved_signal_handlers(), _capture_output() as native:
+                # Inside the guard: argparse calls parser.error() -> SystemExit on a flag that has
+                # drifted from the example's parser, which is the failure this suite most wants to
+                # report clearly rather than raise bare out of the runner.
+                with patch.object(sys, "argv", argv):
+                    args = module.get_args()
                 module.main(args)
         except SystemExit as e:
             if e.code not in (0, None):
@@ -242,15 +278,15 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         # The rendezvous store now lives in a long-lived process, so do not rely on torchrun's
         # fixed default port being free by the time the next step starts.
         argv.insert(1, f"--master_port={get_free_port()}")
-    # PContext.start() installs its own handlers for these and never puts them back; with a
-    # subprocess launcher the process exit did that for us. Losing them would break pytest's
-    # Ctrl-C and CI cancellation handling for the rest of the session.
-    saved_handlers = {s: signal.getsignal(s) for s in _LAUNCHER_SIGNALS}
     cwd = os.getcwd()
     os.chdir(example_dir)
     cap = [""]
     try:
-        with _capture_output() as cap, patch.object(sys, "argv", argv):
+        with (
+            _preserved_signal_handlers(),
+            _capture_output() as cap,
+            patch.object(sys, "argv", argv),
+        ):
             torchrun_main()
         return cap[0]
     except BaseException as e:
@@ -259,8 +295,6 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         e.captured_output = cap[0]
         raise
     finally:
-        for sig, handler in saved_handlers.items():
-            signal.signal(sig, handler)
         os.chdir(cwd)
 
 
