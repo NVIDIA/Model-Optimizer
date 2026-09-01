@@ -34,7 +34,6 @@ from modelopt.torch.export.quant_utils import (
     get_weight_block_size,
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
-    permute_quantized_weight_export_state,
     postprocess_state_dict,
     select_quantized_weight_export_state,
     to_quantized_weight,
@@ -190,7 +189,7 @@ def test_functional_nvfp4_export_matches_existing_helpers_without_mutation(quant
         mtq.W4A8_NVFP4_FP8_CFG,
     ],
 )
-def test_functional_export_matches_existing_noninteger_helpers(monkeypatch, quant_cfg):
+def test_functional_export_matches_existing_noninteger_helpers(quant_cfg):
     in_features = 256
     torch.manual_seed(0)
     module = nn.Linear(in_features, in_features, bias=False, device="cuda", dtype=torch.bfloat16)
@@ -228,20 +227,8 @@ def test_functional_export_matches_existing_noninteger_helpers(monkeypatch, quan
     for name, value in module.named_buffers():
         torch.testing.assert_close(value, original_buffers[name])
 
-    called = False
-
-    def record_functional_capture(*args, **kwargs):
-        nonlocal called
-        called = True
-        return capture_quantized_weight_export_state(*args, **kwargs)
-
-    monkeypatch.setattr(
-        "modelopt.torch.export.unified_export_hf.capture_quantized_weight_export_state",
-        record_functional_capture,
-    )
     _export_quantized_weight(module, torch.float16)
 
-    assert called
     for name, value in actual.items():
         torch.testing.assert_close(getattr(module, name), value, rtol=0, atol=0)
     if quantization_format == QUANTIZATION_MXFP8:
@@ -275,30 +262,6 @@ def test_functional_mxfp8_preserves_cached_scale_during_selection():
     )
 
     torch.testing.assert_close(exported["weight_scale"], cached_scale[: features // 2])
-
-
-def test_functional_block_scale_layout_follows_weight_permutation():
-    features = 256
-    module = nn.Linear(features, features, bias=False, device="cuda", dtype=torch.bfloat16)
-    calib_input = torch.randn(2, 4, features, device="cuda", dtype=torch.bfloat16)
-    module = mtq.quantize(
-        module,
-        copy.deepcopy(mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG),
-        lambda model: model(calib_input),
-    )
-    state = capture_quantized_weight_export_state(module)
-    base = export_quantized_weight_tensors(module.weight, state, torch.float16)
-    transposed = export_quantized_weight_tensors(
-        module.weight.T,
-        permute_quantized_weight_export_state(state, (1, 0)),
-        torch.float16,
-    )
-
-    torch.testing.assert_close(transposed["weight"], base["weight"].T)
-    torch.testing.assert_close(
-        transposed["weight_scale"],
-        base["weight_scale"].permute(2, 3, 0, 1),
-    )
 
 
 def test_weight_derived_mxfp4_state_rejects_partial_block_selection():

@@ -936,6 +936,16 @@ _NVFP4_EXPORT_FORMATS = {
     QUANTIZATION_W4A16_NVFP4,
 }
 _MXFP4_EXPORT_FORMATS = {QUANTIZATION_MXFP4, QUANTIZATION_W4A8_MXFP4_FP8}
+_FUNCTIONAL_WEIGHT_EXPORT_FORMATS = (
+    _NVFP4_EXPORT_FORMATS
+    | _MXFP4_EXPORT_FORMATS
+    | {
+        QUANTIZATION_FP8,
+        QUANTIZATION_FP8_PC_PT,
+        QUANTIZATION_FP8_PB_WO,
+        QUANTIZATION_MXFP8,
+    }
+)
 
 
 class _UnsupportedQuantizedWeightExportFormatError(NotImplementedError):
@@ -1177,6 +1187,10 @@ def _resolve_quantized_weight_export_inputs(
         raise _UnsupportedQuantizedWeightExportFormatError(
             f"Functional export does not support {quantization_format!r}"
         )
+    if quantization_format not in _FUNCTIONAL_WEIGHT_EXPORT_FORMATS:
+        raise _UnsupportedQuantizedWeightExportFormatError(
+            f"Functional export does not support {quantization_format!r}"
+        )
     return weight, quantized_view, weight_quantizer, input_quantizer, quantization_format
 
 
@@ -1261,9 +1275,7 @@ def capture_quantized_weight_export_state(
                 )
             )
     elif quantization_format not in _MXFP4_EXPORT_FORMATS:
-        raise _UnsupportedQuantizedWeightExportFormatError(
-            f"Functional export does not support {quantization_format!r}"
-        )
+        raise AssertionError(f"Unexpected functional export format {quantization_format!r}")
 
     if input_quantizer is not None and input_quantizer.is_enabled:
         input_amax = input_quantizer.export_amax()
@@ -1471,27 +1483,6 @@ def select_quantized_weight_export_state(
         tuple(shape),
         tuple(_select_state_tensor(record, packed_dim, indices) for record in state.tensors),
         state.packing_permutation,
-        state.static_nvfp4,
-        state.four_over_six,
-    )
-
-
-def permute_quantized_weight_export_state(
-    state: _QuantizedWeightExportState,
-    dims: Sequence[int],
-) -> _QuantizedWeightExportState:
-    """Permute logical weight dimensions while retaining quantizer packing axes."""
-    dims = tuple(dims)
-    ndim = len(state.weight_shape)
-    if sorted(dims) != list(range(ndim)):
-        raise ValueError(f"Invalid permutation {dims} for a rank-{ndim} weight")
-    inverse = {old_dim: new_dim for new_dim, old_dim in enumerate(dims)}
-    return _QuantizedWeightExportState(
-        state.quantization_format,
-        state.block_size,
-        tuple(state.weight_shape[dim] for dim in dims),
-        state.tensors,
-        tuple(inverse[dim] for dim in state.packing_permutation),
         state.static_nvfp4,
         state.four_over_six,
     )

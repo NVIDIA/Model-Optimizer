@@ -29,7 +29,6 @@ from modelopt.torch.export.quant_utils import (
     export_quantized_weight_tensors,
     get_quantized_weight_export_spec,
     merge_quantized_weight_export_states,
-    permute_quantized_weight_export_state,
     restore_quantized_weight_export_state,
     select_quantized_weight_export_state,
     split_quantized_weight_export_state,
@@ -124,7 +123,7 @@ def test_capture_does_not_modify_zero_amax():
     torch.testing.assert_close(module.input_quantizer._amax, input_amax)
 
 
-def test_functional_fp8_export_is_repeatable_and_supports_permutation():
+def test_functional_fp8_export_is_repeatable():
     module = _fp8_linear()
     original_weight = module.weight
     original_buffers = {name: value.clone() for name, value in module.named_buffers()}
@@ -132,19 +131,12 @@ def test_functional_fp8_export_is_repeatable_and_supports_permutation():
 
     base = export_quantized_weight_tensors(module.weight, state, torch.float32)
     repeated = export_quantized_weight_tensors(module.weight, state, torch.float32)
-    transposed = export_quantized_weight_tensors(
-        module.weight.T,
-        permute_quantized_weight_export_state(state, (1, 0)),
-        torch.float32,
-    )
-
     assert module.weight is original_weight
     assert set(dict(module.named_buffers())) == set(original_buffers)
     for name, value in module.named_buffers():
         torch.testing.assert_close(value, original_buffers[name])
     for name in base:
         torch.testing.assert_close(base[name], repeated[name])
-    torch.testing.assert_close(transposed["weight"], base["weight"].T)
 
 
 def test_export_state_round_trips_through_object_transport():
@@ -172,6 +164,16 @@ def test_unquantized_weight_has_no_export_state_or_spec():
 
     assert capture_quantized_weight_export_state(module) is None
     assert get_quantized_weight_export_spec(module) is None
+
+
+def test_export_spec_rejects_unsupported_format():
+    module = nn.Linear(4, 4, bias=False)
+    module.weight_quantizer = TensorQuantizer(QuantizerAttributeConfig(num_bits=8))
+    module.input_quantizer = TensorQuantizer()
+    module.input_quantizer.disable()
+
+    with pytest.raises(NotImplementedError, match="int8_wo"):
+        get_quantized_weight_export_spec(module)
 
 
 def test_export_state_split_restore_preserves_output():
