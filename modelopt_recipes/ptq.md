@@ -3,10 +3,9 @@
 This doc walks through the **PTQ quantization schemes** in two parts: the
 model-agnostic recipes under [`general/ptq/`](general/ptq/) (the recommended
 starting point for any model), and then the
-[model-specific recipes](#model-specific-recipes-huggingface) under
-`huggingface/` — per-`model_type` folders plus the
-`huggingface/models/<org>/<checkpoint>/` tier — comparing each to its general
-baseline and explaining why it deviates.
+[model-specific recipes](#model-specific-recipes) — per-`model_type` folders
+under `huggingface/` plus the checkpoint-mirror `models/<org>/<checkpoint>/`
+tier — comparing each to its general baseline and explaining why it deviates.
 
 ---
 
@@ -232,14 +231,14 @@ These can also be **stacked** when a single method isn't enough — e.g. `mse` +
 
 ---
 
-## Model-specific recipes (`huggingface/`)
+## Model-specific recipes
 
 The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
 earns a place under `huggingface/<model_type>/` or
-`huggingface/models/<org>/<checkpoint>/` when a model has to **deviate** from
+`models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
 
 | Kind | What changes vs. the general recipe | Examples |
@@ -247,7 +246,7 @@ that baseline. The deviations come in four kinds:
 | **Architecture-aware `quant_cfg`** | Per-sub-module format choices a single wildcard scheme can't express | `minimax_m3_vl`, `qwen3_vl`, `qwen3_5`, `qwen3_5_moe`, `vit`, `nemotron_llama` |
 | **Algorithm override** | Same numerics & scope, but the *calibration algorithm* is tweaked because the default breaks or regresses | `gemma`, `gemma4`, `mpt` |
 | **Extra exclusions** | Adds disabled-quantizer patterns so non-language branches stay full precision | `nemotron_vl`, `diffusion_gemma` |
-| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
+| **Checkpoint mirror** | A mixed-precision map reproducing one published checkpoint exactly | `models/nvidia/NVIDIA-Nemotron-3-*`, `models/mistralai/Mistral-Medium-3.5-128B` |
 
 The numerics and standard exclusions are still inherited from `configs/`
 wherever possible — the model folder captures *only* the delta. Each `<task>/`
@@ -310,7 +309,7 @@ general recipes never enable output quantizers, and the pattern must stay scoped
 to GEMM outputs — a `DynamicQuantize` on non-GEMM outputs (embedding lookup,
 pooling) fails to compile in TensorRT.
 
-A lighter case: **`step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only`** is close to
+A lighter case: **`models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only`** is close to
 `general/ptq/nvfp4_mlp_only` (NVFP4 on MoE/MLP weights+inputs, FP8 KV) but pinned
 to one released checkpoint and carrying instance-specific disables
 (`share_expert`, `moe.gate`, the conv1d branches).
@@ -357,7 +356,7 @@ everything else matches the general recipe.
 
 ### Checkpoint mirrors — `models/<org>/<checkpoint>`
 
-The `huggingface/models/` tier reproduces a **single published (or planned)
+The `models/` tier reproduces a **single published (or planned)
 checkpoint's** quant config verbatim:
 
 - **`models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention`** mirrors
@@ -381,7 +380,7 @@ checkpoint's** quant config verbatim:
   `nvidia/Mistral-Medium-3.5-128B-NVFP4`: decoder MLP layers 4–86 use NVFP4
   W4A4, edge MLP layers 0–3 and 87 use FP8 W8A8, and all attention projections
   and the KV cache use FP8. It uses max calibration.
-- **`Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
+- **`models/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16/ptq/nvfp4-mse`** mirrors
   `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4` exactly — a hybrid
   **Mamba-MoE** with a hand-mapped, **per-component** precision scheme:
   - MoE routed experts → NVFP4 W4A4, `group_size 16`, **static** weight scales
@@ -392,17 +391,17 @@ checkpoint's** quant config verbatim:
   `nvfp4-mse.yaml` uses MSE calibration with an FP8-scale sweep (matches the
   release); `nvfp4-max-calib.yaml` is the identical layer map under plain `max`
   calibration, kept for comparison.
-- **`Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
+- **`models/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16/ptq/nvfp4-4o6`** follows the same Super-style
   component map (routed experts NVFP4 W4A4 block-16; shared experts + Mamba
   `in/out_proj` + KV cache FP8; everything else BF16), but the routed-expert
   weights use **Four-over-Six (4/6)** NVFP4: an MSE search picks each weight's
   amax multiplier from `[1.0, 1.5]` (M=6 vs. M=4). Activations stay dynamic
   NVFP4 (not MSE-calibrated).
-- **`Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
+- **`models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/ptq/w4a16_nvfp4_4o6`** applies
   Four-over-Six NVFP4 W4A16 to routed experts, shared experts, and the language
   model head; Mamba `in/out_proj` weights and inputs plus the KV cache use FP8,
   while attention remains BF16.
-- **`Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
+- **`models/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/ptq/nvfp4_w4a16`** mirrors the GGUF **Q4_K_M** bit
   allocation of the Nemotron-H hybrid, mapped onto NVFP4/FP8 **per layer**:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
