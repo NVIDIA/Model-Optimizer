@@ -54,7 +54,7 @@ def _base_tensor_name(name):
 
 
 class TensorRTRunner:
-    def __init__(self, engine_path, state_names=(), input_callback=None):
+    def __init__(self, engine_path, state_names=()):
         with open(engine_path, "rb") as engine_file:
             engine_bytes = engine_file.read()
         self.engine = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(engine_bytes)
@@ -63,7 +63,6 @@ class TensorRTRunner:
         self.context = self.engine.create_execution_context()
         if self.context is None:
             raise RuntimeError(f"Failed to create an execution context for {engine_path}")
-        self.input_callback = input_callback
         self.tensor_names = [
             self.engine.get_tensor_name(index) for index in range(self.engine.num_io_tensors)
         ]
@@ -115,25 +114,18 @@ class TensorRTRunner:
                 raise ValueError(
                     f"Input {input_key} has shape {tuple(value.shape)}, expected {shape}"
                 )
-        return input_key, value
+        return value
 
     def __call__(self, stream, **inputs):
         input_buffers = []
-        callback_inputs = {}
         for name, shape in self.input_shapes.items():
             if name in self.state:
-                callback_name = _base_tensor_name(name)
-                callback_inputs[callback_name] = self.state[name]
                 continue
-            input_key, value = self.prepare_input(name, inputs)
+            value = self.prepare_input(name, inputs)
             buffer = aligned_tensor(shape, value.dtype, value.device)
             buffer.copy_(value)
             input_buffers.append(buffer)
-            callback_inputs[input_key] = buffer
             self.context.set_tensor_address(name, buffer.data_ptr())
-
-        if self.input_callback:
-            self.input_callback(callback_inputs)
 
         outputs = {}
         for name, shape in self.output_shapes.items():

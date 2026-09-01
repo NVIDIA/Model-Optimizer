@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from examples.onnx_ptq.trt_runner import TensorRTRunner
 
-__all__ = ["PETRPipeline", "build_runtime"]
+__all__ = ["PETRPipeline", "build_runtime", "get_backbone_inputs", "get_head_inputs"]
 
 
 def import_plugin(cfg):
@@ -76,65 +76,61 @@ def build_runtime(config_path, checkpoint_path, cfg_options=None):
     return cfg, dataset, loader, model
 
 
+def get_backbone_inputs(version, model, images, img_metas):
+    if version == "v1":
+        return {"img": images.squeeze(0)}
+    current = images[:, :6].contiguous()
+    previous = images[:, 6:12].contiguous()
+    previous_features = model.extract_img_feat(previous, img_metas)
+    return {
+        "img": current.squeeze(0),
+        **{f"prev.{index}": value for index, value in enumerate(previous_features)},
+    }
+
+
+def get_head_inputs(version, model, features, img_metas):
+    batch_size, num_cams = features[0].shape[:2]
+    input_h, input_w, _ = img_metas[0]["pad_shape"][0]
+    masks = features[0].new_ones((batch_size, num_cams, input_h, input_w))
+    for image_id in range(batch_size):
+        for camera_id in range(num_cams):
+            image_h, image_w, _ = img_metas[image_id]["img_shape"][camera_id]
+            masks[image_id, camera_id, :image_h, :image_w] = 0
+    masks = F.interpolate(masks, size=features[0].shape[-2:]).to(torch.bool)
+    coords, _ = model.pts_bbox_head.position_embeding(features, img_metas, masks)
+    inputs = {
+        "mlvl_feats.0": features[0],
+        "img_metas.0[coords_position_embeding]": coords,
+    }
+    if version == "v2":
+        timestamps = features[0].new_tensor([meta["timestamp"] for meta in img_metas])
+        timestamps = timestamps.view(1, -1, 6)
+        inputs["img_metas.0[mean_time_stamp]"] = (timestamps[:, 1] - timestamps[:, 0]).mean(-1)
+    return inputs
+
+
 class PETRPipeline:
-    def __init__(
-        self,
-        version,
-        model,
-        backbone_engine,
-        head_engine,
-        backbone_input_callback=None,
-        head_input_callback=None,
-    ):
+    def __init__(self, version, model, backbone_engine, head_engine):
         self.version = version
         self.model = model
-        self.backbone = TensorRTRunner(backbone_engine, input_callback=backbone_input_callback)
-        self.head = TensorRTRunner(head_engine, input_callback=head_input_callback)
-
-    @staticmethod
-    def masks(features, img_metas):
-        batch_size, num_cams = features[0].shape[:2]
-        input_h, input_w, _ = img_metas[0]["pad_shape"][0]
-        masks = features[0].new_ones((batch_size, num_cams, input_h, input_w))
-        for image_id in range(batch_size):
-            for camera_id in range(num_cams):
-                image_h, image_w, _ = img_metas[image_id]["img_shape"][camera_id]
-                masks[image_id, camera_id, :image_h, :image_w] = 0
-        return F.interpolate(masks, size=features[0].shape[-2:]).to(torch.bool)
-
-    def backbone_inputs(self, images, img_metas):
-        if self.version == "v1":
-            return {"img": images}
-        current = images[:, :6].contiguous()
-        previous = images[:, 6:12].contiguous()
-        previous_features = self.model.extract_img_feat(previous, img_metas)
-        return {
-            "img": current,
-            **{f"prev.{index}": value for index, value in enumerate(previous_features)},
-        }
-
-    def head_inputs(self, features, img_metas):
-        masks = self.masks(features, img_metas)
-        coords, _ = self.model.pts_bbox_head.position_embeding(features, img_metas, masks)
-        inputs = {"mlvl_feats.0": features[0]}
-        if self.version == "v2":
-            timestamps = features[0].new_tensor([meta["timestamp"] for meta in img_metas])
-            timestamps = timestamps.view(1, -1, 6)
-            inputs["img_metas.0[mean_time_stamp]"] = (timestamps[:, 1] - timestamps[:, 0]).mean(-1)
-        inputs["img_metas.0[coords_position_embeding]"] = coords
-        return inputs
+        self.backbone = TensorRTRunner(backbone_engine)
+        self.head = TensorRTRunner(head_engine)
 
     def __call__(self, stream, data):
         images = data["img"][0].data[0].cuda()
         img_metas = data["img_metas"][0].data[0]
         with torch.cuda.stream(stream), torch.no_grad():
-            feature_outputs = self.backbone(stream, **self.backbone_inputs(images, img_metas))
+            feature_outputs = self.backbone(
+                stream, **get_backbone_inputs(self.version, self.model, images, img_metas)
+            )
             camera_count = 6 if self.version == "v1" else 12
             features = [
                 feature_outputs[name].reshape(1, camera_count, *feature_outputs[name].shape[-3:])
                 for name in ("out.0", "out.1")
             ]
-            outputs = self.head(stream, **self.head_inputs(features, img_metas))
+            outputs = self.head(
+                stream, **get_head_inputs(self.version, self.model, features, img_metas)
+            )
             head_outputs = {
                 "all_cls_scores": outputs["out.all_cls_scores"].float(),
                 "all_bbox_preds": outputs["out.all_bbox_preds"].float(),

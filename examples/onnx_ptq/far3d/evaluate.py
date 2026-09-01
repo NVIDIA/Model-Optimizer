@@ -47,9 +47,13 @@ STATE_NAMES = (
 )
 
 
+def get_image_input(data):
+    return data["img"][0].data[0].flip(2).permute(0, 1, 3, 4, 2).contiguous()
+
+
 class Far3DDecoderRunner(TensorRTRunner):
-    def __init__(self, engine_path, input_callback=None):
-        super().__init__(engine_path, state_names=STATE_NAMES, input_callback=input_callback)
+    def __init__(self, engine_path):
+        super().__init__(engine_path, state_names=STATE_NAMES)
         self.scene_token = None
         self.timestamp_offset = None
 
@@ -80,15 +84,15 @@ class Far3DDecoderRunner(TensorRTRunner):
 
 
 class Far3DPipeline:
-    def __init__(self, encoder_engine, decoder_engine, decoder_input_callback=None):
+    def __init__(self, encoder_engine, decoder_engine):
         self.encoder = TensorRTRunner(encoder_engine)
-        self.decoder = Far3DDecoderRunner(decoder_engine, decoder_input_callback)
+        self.decoder = Far3DDecoderRunner(decoder_engine)
 
     @staticmethod
     def unpack(data):
         lidar2img = data["lidar2img"][0].data[0][0].unsqueeze(0).cuda()
         return {
-            "img": data["img"][0].data[0].flip(2).permute(0, 1, 3, 4, 2).contiguous().cuda(),
+            "img": get_image_input(data).cuda(),
             "intrinsics": data["intrinsics"][0].data[0][0].unsqueeze(0).cuda(),
             "extrinsics": data["extrinsics"][0].data[0][0].unsqueeze(0).cuda(),
             "lidar2img": lidar2img,

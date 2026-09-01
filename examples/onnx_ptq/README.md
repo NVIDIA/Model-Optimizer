@@ -26,6 +26,35 @@ Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`)
 
 > **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
 
+#### PETR and FAR3D containers
+
+PETR and FAR3D share two targets from one Dockerfile. The `evaluator` target contains the legacy OpenMMLab stack used for data preparation, ONNX export, calibration, and final accuracy evaluation. The `modelopt` target uses the PyTorch 26.07 container for Model Optimizer, ONNX Runtime CUDA, and TensorRT 11.1 engine builds. Neither target creates a virtual environment.
+
+From the Model Optimizer repository root:
+
+```bash
+docker build --target evaluator -f examples/onnx_ptq/Dockerfile -t modelopt-onnx-evaluator .
+docker build --target modelopt -f examples/onnx_ptq/Dockerfile -t modelopt-onnx-trt11 .
+```
+
+Mount the same workspace into both containers to hand off ONNX models, calibration batches, and TensorRT engines:
+
+```bash
+docker run --rm -it --gpus=all --ipc=host \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
+  -v /path/to/workspace:/workspace \
+  modelopt-onnx-evaluator
+
+docker run --rm -it --gpus=all --ipc=host \
+  --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e USER="$(id -un)" -e LOGNAME="$(id -un)" \
+  -v /path/to/workspace:/workspace \
+  modelopt-onnx-trt11
+```
+
+TensorRT engines must be built and evaluated with TensorRT 11.1.0.106 on the same GPU architecture. See the [PETR](./petr/) and [FAR3D](./far3d/) guides for their source and dataset mounts.
+
 Set the following environment variables inside the TensorRT docker.
 
 ```bash
@@ -131,11 +160,11 @@ Inference latency of the model is <X> ms
 
 ### FAR3D 3D object detection
 
-The [FAR3D example](./far3d/) demonstrates an end-to-end workflow that exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
+The [FAR3D example](./far3d/) exports and quantizes the FAR3D ONNX image encoder, builds TensorRT engines, and evaluates 3D object detection mAP on the Argoverse 2 validation set.
 
 ### PETR 3D object detection
 
-The [PETR example](./petr/) demonstrates an end-to-end workflow that exports and quantizes PETRv1 and PETRv2 ONNX backbones and heads, builds TensorRT engines, and evaluates 3D object detection mAP on the nuScenes validation set.
+The [PETR example](./petr/) exports and quantizes the PETRv1 and PETRv2 ONNX backbones, builds TensorRT engines, and evaluates 3D object detection mAP on the nuScenes validation set.
 
 ## Advanced Features
 

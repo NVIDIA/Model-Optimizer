@@ -13,49 +13,87 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import re
-import stat
 from pathlib import Path
 
+import numpy as np
 import onnx
+from onnxruntime.quantization.calibrate import CalibrationDataReader
 
-from modelopt.onnx.utils import topologically_sort_graph_nodes
-
-__all__ = ["find_vovnet_nodes_to_exclude"]
-
-MAX_ONNX_BYTES = 512 << 20
+__all__ = ["NpzCalibrationReader", "NpzCalibrationWriter", "find_vovnet_nodes_to_exclude"]
 
 
-def _load_onnx_graph(onnx_path, max_onnx_bytes=MAX_ONNX_BYTES):
-    if max_onnx_bytes < 1:
-        raise ValueError("ONNX byte limit must be positive")
-    path = Path(onnx_path)
-    try:
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(path, flags)
-    except OSError as error:
-        raise ValueError(f"Unable to open {path} as an ONNX file") from error
-    try:
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise ValueError(f"{path} is not a regular ONNX file")
-        if file_stat.st_size > max_onnx_bytes:
-            raise ValueError(f"{path} exceeds the ONNX byte limit")
-        with os.fdopen(descriptor, "rb") as onnx_file:
-            model_bytes = onnx_file.read(max_onnx_bytes + 1)
-            descriptor = None
-        if len(model_bytes) > max_onnx_bytes:
-            raise ValueError(f"{path} exceeds the ONNX byte limit")
-        return onnx.load_model_from_string(model_bytes).graph
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+def _onnx_input_dtypes(onnx_path):
+    graph = onnx.load(onnx_path, load_external_data=False).graph
+    initializer_names = {initializer.name for initializer in graph.initializer}
+    return {
+        value.name: np.dtype(onnx.helper.tensor_dtype_to_np_dtype(value.type.tensor_type.elem_type))
+        for value in graph.input
+        if value.name not in initializer_names
+    }
 
 
-def find_vovnet_nodes_to_exclude(onnx_path, max_onnx_bytes=MAX_ONNX_BYTES):
+class NpzCalibrationWriter:
+    """Write calibration batches that match an ONNX model's inputs."""
+
+    def __init__(self, output_dir, onnx_path):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if any(self.output_dir.glob("batch_*.npz")):
+            raise FileExistsError(f"{self.output_dir} already contains calibration batches")
+        self.input_dtypes = _onnx_input_dtypes(onnx_path)
+        self.count = 0
+
+    def write(self, values):
+        missing = self.input_dtypes.keys() - values.keys()
+        unexpected = values.keys() - self.input_dtypes.keys()
+        if missing or unexpected:
+            raise ValueError(
+                f"Calibration input mismatch; missing={sorted(missing)}, "
+                f"unexpected={sorted(unexpected)}"
+            )
+
+        batch = {}
+        for name, dtype in self.input_dtypes.items():
+            value = values[name]
+            if hasattr(value, "detach"):
+                value = value.detach().cpu().numpy()
+            batch[name] = np.asarray(value).astype(dtype, copy=False)
+        np.savez(self.output_dir / f"batch_{self.count:04d}.npz", **batch)
+        self.count += 1
+
+
+class NpzCalibrationReader(CalibrationDataReader):
+    """Stream example-generated NPZ calibration batches."""
+
+    def __init__(self, calibration_dir):
+        self.batch_paths = sorted(Path(calibration_dir).glob("batch_*.npz"))
+        if not self.batch_paths:
+            raise ValueError(f"No calibration batches found in {calibration_dir}")
+        self.rewind()
+
+    @staticmethod
+    def load(batch_path):
+        with np.load(batch_path, allow_pickle=False) as batch:
+            return {name: batch[name] for name in batch.files}
+
+    def get_next(self):
+        batch_path = next(self._iterator, None)
+        return None if batch_path is None else self.load(batch_path)
+
+    def get_first(self):
+        return self.load(self.batch_paths[0])
+
+    def rewind(self):
+        self._iterator = iter(self.batch_paths)
+
+
+def find_vovnet_nodes_to_exclude(onnx_path):
     """Find the VoVNet OSA4_5 stage and nodes downstream of FPN lateral_convs."""
-    graph = _load_onnx_graph(onnx_path, max_onnx_bytes)
+    # The evaluator image uses the calibration writer without installing ModelOpt.
+    from modelopt.onnx.utils import topologically_sort_graph_nodes
+
+    graph = onnx.load(onnx_path, load_external_data=False).graph
     topologically_sort_graph_nodes(graph)
 
     excluded = set()
