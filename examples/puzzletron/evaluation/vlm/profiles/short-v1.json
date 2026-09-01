@@ -21,6 +21,7 @@
   },
   "seed": 42,
   "repetitions": 1,
+  "batch_size": 1,
   "selection": "exact-rows",
   "tasks": {
     "realworldqa": {

@@ -45,6 +45,8 @@ Use a versioned profile when scores will be compared across checkpoints:
 
 Both profiles pin the evaluator revision, model family, dataset revisions,
 task scoring configurations, preprocessing, generation, and sample selection.
+They also pin batch size 1 because changing VLM batching can change deterministic
+outputs with the maintained backend.
 Preflight reports the profile schema and SHA-256 contract fingerprint. The
 fingerprint is also part of the resumable run identity, so results from a
 different contract are not reused.

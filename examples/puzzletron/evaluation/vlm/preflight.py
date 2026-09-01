@@ -61,6 +61,8 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         )
     if profile_contract is not None and args.seed != profile_contract.manifest["seed"]:
         raise ValueError("--seed cannot override a versioned evaluation profile")
+    if profile_contract is not None and args.batch_size != profile_contract.manifest["batch_size"]:
+        raise ValueError("--batch-size cannot override a versioned evaluation profile")
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
@@ -215,6 +217,7 @@ def _report(
         "hf_home": str(hf_home),
         "frame_policy": execution_policy["frame"],
         "generation_policy": execution_policy["generation"],
+        "batch_size": args.batch_size,
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
         "quick_selected_rows": (

@@ -117,7 +117,11 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
         raise RuntimeError(f"{name} profile preprocessing differs from the runtime policy")
     if manifest.get("generation") != {"do_sample": False, "temperature": 0}:
         raise RuntimeError(f"{name} profile generation differs from the runtime policy")
-    if manifest.get("seed") != 42 or manifest.get("repetitions") != 1:
+    if (
+        manifest.get("seed") != 42
+        or manifest.get("repetitions") != 1
+        or manifest.get("batch_size") != 1
+    ):
         raise RuntimeError(f"{name} profile execution identity differs from the runtime policy")
     selection = manifest.get("selection")
     if selection != _PROFILE_SELECTIONS[name]:

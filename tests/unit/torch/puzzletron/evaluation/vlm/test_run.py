@@ -496,8 +496,8 @@ def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     short = contracts.load_profile("short-v1")
     full = contracts.load_profile("full-v1")
 
-    assert short.fingerprint == "2382765409979e8f4a66f39e90d3597888433677c43aedd79a53a2a9c736f617"
-    assert full.fingerprint == "ac2f8b6b4cee64694ce911a40cab854b0ecc71c042e822fe1d959e605ede7b8b"
+    assert short.fingerprint == "8fa76716683022bd791a5ae2e0c0e00de7998db31b725084a04222458fa32287"
+    assert full.fingerprint == "480bc83cd374718815c32f645fb6f333793f895d7a4b30aae63a727579670a96"
     assert short.source_tasks == suites.QUICK_TASKS
     assert full.source_tasks == tuple(
         task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
@@ -541,6 +541,7 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     assert prepared.report["schema"] == "modelopt.vlm-evaluation-preflight/v1"
     assert prepared.report["profile_schema"] == "modelopt.vlm-evaluation-profile/v1"
     assert prepared.report["profile_fingerprint"] == contract.fingerprint
+    assert prepared.report["batch_size"] == contract.manifest["batch_size"] == 1
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
     assert prepared.report["judge_policy"] is None
     assert (prepared.quick_manifest is not None) == (name == "short-v1")
@@ -573,6 +574,27 @@ def test_versioned_profile_rejects_seed_override(monkeypatch, tmp_path):
     )
 
     with pytest.raises(ValueError, match="--seed cannot override"):
+        preflight.prepare(args)
+
+
+def test_versioned_profile_rejects_batch_size_override(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "short-v1",
+            "--batch-size",
+            "8",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--batch-size cannot override"):
         preflight.prepare(args)
 
 
