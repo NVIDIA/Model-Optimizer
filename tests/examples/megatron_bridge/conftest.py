@@ -24,9 +24,14 @@ from _test_utils.examples.megatron_example_runner import (
 from _test_utils.examples.run_command import set_in_process_runner
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def _fast_example_runner():
-    """Run example steps without shelling out to ``torchrun``."""
+    """Run example steps without shelling out to ``torchrun``.
+
+    Per test, not per session: the hook is a module-global in ``run_command``, and this runner
+    raises rather than falling back, so leaving it installed would break any other example suite
+    collected later in the same session (``pytest tests/examples``).
+    """
     set_in_process_runner(run_example_step)
     try:
         yield

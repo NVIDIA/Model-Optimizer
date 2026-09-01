@@ -176,7 +176,10 @@ def run_example_command(
             except Exception as e:
                 # Re-raise unless it looks transient, so a real failure keeps its traceback
                 # instead of being flattened into CalledProcessError.
-                text = f"{type(e).__name__}: {e}"
+                # An in-process runner attaches what the step printed; the marker is usually
+                # there rather than in str(e), which may be only a launcher-level failure table.
+                captured = getattr(e, "captured_output", "")
+                text = f"{type(e).__name__}: {e}\n{captured}"
                 if attempt == hf_max_retries or not any(
                     marker in text for marker in _HF_TRANSIENT_MARKERS
                 ):

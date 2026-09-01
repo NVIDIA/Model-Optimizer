@@ -21,7 +21,8 @@ commands drive ``torchrun`` itself in-process, which only saves the launcher's o
 pytest process cannot be more than one rank -- but keeps torchrun's fresh worker processes.
 
 The script's own ``get_args()`` still runs, so CLI flags and recipe strings stay covered. Not
-covered: the ``torchrun`` invocation and the ``__main__`` block (``dist.setup()``/``dist.abort()``).
+covered: the ``torchrun`` invocation and the ``__main__`` block (``dist.setup()``, ``dist.abort()``
+and ``dist.cleanup()``).
 
 Megatron and torch.distributed.run are imported lazily on purpose: this module is imported at
 collection time, and importing ``megatron.bridge`` initialises CUDA in the pytest process, which
@@ -52,14 +53,16 @@ _LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUI
 
 
 @contextlib.contextmanager
-def _capture_output():
+def _capture_output(buf):
     """Capture what a step writes in this process, including lines from logging handlers.
 
     ``redirect_stdout`` alone misses them: Megatron-Bridge logs some lines that tests assert on
     through a logger rather than ``print``. stderr is redirected too, so the captured string
-    matches the subprocess path, which combines both streams.
+    matches the subprocess path, which combines both streams. Pair with :func:`_capture_output_fd`
+    for output written straight to fd 1/2, which rebinding ``sys.stdout`` cannot see.
+
+    The caller owns ``buf`` so that its content is still readable if this manager raises on entry.
     """
-    buf = io.StringIO()
     handler = logging.StreamHandler(buf)
     handler.setFormatter(logging.Formatter("%(message)s"))
     targets = [logging.getLogger()]
@@ -69,14 +72,14 @@ def _capture_output():
         if isinstance(lg, logging.Logger) and (lg.handlers or not lg.propagate)
     ]
     levels = {}
-    for lg in targets:
-        lg.addHandler(handler)
-        levels[lg] = lg.level
-        if lg.level > logging.INFO:
-            lg.setLevel(logging.INFO)
     try:
+        for lg in targets:
+            lg.addHandler(handler)
+            levels[lg] = lg.level
+            if lg.level > logging.INFO:
+                lg.setLevel(logging.INFO)
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            yield buf
+            yield
     finally:
         for lg, level in levels.items():
             lg.removeHandler(handler)
@@ -196,24 +199,27 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     example_dir = str(MODELOPT_ROOT / "examples" / example_path)
     cwd = os.getcwd()
     os.chdir(example_dir)  # match the subprocess path, which runs with the example dir as cwd
-    output = ""
+    buf, native = io.StringIO(), [""]  # bound up front: readable even if a capture fails to start
     try:
         module = _load_example_module(str(script), example_path)
         reset_megatron_global_state()  # a previous step left its own parallel state behind
         with patch.object(sys, "argv", argv):
             args = module.get_args()
         try:
-            with _capture_output() as buf:
+            with _capture_output_fd() as native, _capture_output(buf):
                 module.main(args)
         except SystemExit as e:
             if e.code not in (0, None):
                 raise RuntimeError(f"{script} exited with code {e.code}") from e
-        finally:
-            output = buf.getvalue()
-        return output
+        return buf.getvalue() + native[0]
+    except BaseException as e:
+        # The caller matches transient-HuggingFace markers on this; str(e) alone would not show
+        # a 503 raised deep inside the script.
+        e.captured_output = buf.getvalue() + native[0]
+        raise
     finally:
         os.chdir(cwd)
-        print(output)  # keep the script's output in the test log
+        print(buf.getvalue() + native[0])  # keep the script's output in the test log
 
 
 def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
@@ -244,6 +250,11 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         with _capture_output_fd() as cap, patch.object(sys, "argv", argv):
             torchrun_main()
         return cap[0]
+    except BaseException as e:
+        # ChildFailedError only carries the worker's traceback when the entrypoint is decorated
+        # with @record, which the examples are not -- so the captured output is all the caller has.
+        e.captured_output = cap[0]
+        raise
     finally:
         for sig, handler in saved_handlers.items():
             signal.signal(sig, handler)
