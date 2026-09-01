@@ -166,29 +166,75 @@ def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
         hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
 
 
-def test_autoquant_rejects_fsdp2(monkeypatch):
+def test_kv_autoquant_rejects_fsdp2(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(
+        hf_ptq,
+        "_mtq_inputs_from_auto_quantize_config",
+        lambda *_args, **_kwargs: {"search_domain": "kv_cache"},
+    )
     args = SimpleNamespace(
         calib_with_images=False,
         inference_pipeline_parallel=1,
         use_fsdp2=True,
     )
 
-    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
         hf_ptq.auto_quantize(args, torch.nn.Module(), [], SimpleNamespace())
 
 
-def test_fsdp2_autoquant_rejected_before_model_load(monkeypatch):
+def test_weight_autoquant_retains_fsdp2_warning(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
-    monkeypatch.setattr(hf_ptq, "_recipe_is_auto_quantize", lambda _: True)
+    model = torch.nn.Module()
+    inputs = {
+        "search_domain": "weight",
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [],
+        "fixed_quantization_config": None,
+        "module_search_spaces": [],
+        "disabled_layers": [],
+        "kv_cache_quant_cfg": None,
+        "method": "gradient",
+        "score_size": 1,
+    }
+    monkeypatch.setattr(
+        hf_ptq, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
+    )
+    monkeypatch.setattr(
+        hf_ptq.mtq, "auto_quantize", lambda search_model, **_kwargs: (search_model, {})
+    )
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=True,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+
+    with pytest.warns(UserWarning, match="use at your own risk"):
+        assert hf_ptq.auto_quantize(args, model, [], SimpleNamespace()) is model
+
+
+def test_fsdp2_kv_autoquant_rejected_before_model_load(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    monkeypatch.setattr(hf_ptq, "_recipe_is_kv_auto_quantize", lambda _: True)
     monkeypatch.setattr(
         hf_ptq.AutoConfig,
         "from_pretrained",
         lambda *_args, **_kwargs: pytest.fail("The model config must not be loaded."),
     )
 
-    with pytest.raises(NotImplementedError, match="does not support --use_fsdp2"):
+    with pytest.raises(NotImplementedError, match="KV-cache AutoQuantize does not support"):
         hf_ptq.load_model(SimpleNamespace(use_fsdp2=True, recipe="autoquant"))
+
+
+def test_fsdp2_preload_guard_distinguishes_weight_and_kv_autoquant(monkeypatch):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+
+    assert hf_ptq._recipe_is_kv_auto_quantize(
+        "general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits"
+    )
+    assert not hf_ptq._recipe_is_kv_auto_quantize("general/auto_quantize/nvfp4_fp8_at_5p4bits")
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):

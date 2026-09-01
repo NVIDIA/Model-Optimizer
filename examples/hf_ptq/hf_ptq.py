@@ -99,9 +99,14 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
-_FSDP2_AUTOQUANT_ERROR = (
-    "AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
+_FSDP2_KV_AUTOQUANT_ERROR = (
+    "KV-cache AutoQuantize does not support --use_fsdp2 until distributed sensitivity scoring, "
     "selection, and checkpoint writes are synchronized across ranks."
+)
+_FSDP2_AUTOQUANT_WARNING = (
+    "AutoQuantize with --use_fsdp2 has not been validated end-to-end yet "
+    "(distributed calibration, sensitivity scoring, and recipe/checkpoint "
+    "synchronization across ranks); use at your own risk."
 )
 
 
@@ -474,12 +479,13 @@ def auto_quantize(
         "Auto Quantization is not supported for pipeline parallel size > 1"
     )
 
-    if args.use_fsdp2:
-        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
-
     inputs = _mtq_inputs_from_auto_quantize_config(
         aq_config, args, fixed_quantize_config=fixed_quantize_config
     )
+    if args.use_fsdp2:
+        if inputs["search_domain"] == "kv_cache":
+            raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
+        warnings.warn(_FSDP2_AUTOQUANT_WARNING)
 
     # base-model lm_head handling (mirrors the CLI helper)
     is_base_model = (
@@ -585,11 +591,22 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
     return recipe is not None and isinstance(load_recipe(recipe), ModelOptAutoQuantizeRecipe)
 
 
+def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
+    """True if ``recipe`` resolves to a KV AutoQuantize recipe (peeked before model load)."""
+    if recipe is None:
+        return False
+    loaded_recipe = load_recipe(recipe)
+    return (
+        isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe)
+        and loaded_recipe.auto_quantize.constraints.kv_effective_bits is not None
+    )
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if args.use_fsdp2 and _recipe_is_auto_quantize(args.recipe):
-        raise NotImplementedError(_FSDP2_AUTOQUANT_ERROR)
+    if args.use_fsdp2 and _recipe_is_kv_auto_quantize(args.recipe):
+        raise NotImplementedError(_FSDP2_KV_AUTOQUANT_ERROR)
     if args.use_fsdp2:
         hf_config = AutoConfig.from_pretrained(
             args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
