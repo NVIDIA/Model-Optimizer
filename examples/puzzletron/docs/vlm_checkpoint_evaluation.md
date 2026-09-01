@@ -21,18 +21,19 @@ python -m pip install -e '.[hf,puzzletron]' \
 
 The requirements install the upstream EvolvingLMMs `lmms-eval` repository at
 the exact revision recorded in `examples/puzzletron/ci_environment.json`. This
-is the supported older revision based on `lmms-eval` 0.7.0, not a ModelOpt fork
-or a locally patched evaluator. It is installed as an editable checkout because
-the evaluator loads task templates that are not included in its wheel.
+is the generic vLLM profile revision based on `lmms-eval` 0.7.0, not a ModelOpt
+fork or a locally patched evaluator. It is installed as an editable checkout
+because the evaluator loads task templates that are not included in its wheel.
 Puzzletron generates its benchmark task adapters separately and does not modify
 the evaluator checkout.
 
 The documented [worker environment](environment_setup.md) installs the same
 requirements file, and startup validates both the installed revision and that
-the checkout has no local changes. Do not substitute another `lmms-eval`
-revision in this environment. Support for a newer evaluator and its dependency
-set is separate work. This repository does not define a second Puzzletron
-container-specific evaluator pin.
+the checkout has no local changes. To use `short-native-v1`, install
+`examples/puzzletron/requirements-vlm-native.txt` after the base requirements.
+That file selects the separately pinned upstream revision containing the native
+Qwen 3.5 backend. Preflight rejects an evaluator revision that does not match
+the selected profile.
 
 ## Choose a suite
 
@@ -41,17 +42,19 @@ Use a versioned profile when scores will be compared across checkpoints:
 | Profile | Coverage | Sampling policy |
 | --- | --- | --- |
 | `short-v1` | RealWorldQA, MMMU, and MVBench | 344 exact rows; MMMU uses four rows per subject and MVBench uses eight per task |
+| `short-native-v1` | Same rows as `short-v1`, using the native Qwen 3.5 backend | 344 exact rows; native video processing preserves Qwen timestamp metadata |
 | `full-v1` | Eight judge-free image and video benchmarks | Every row from each pinned dataset revision |
 
-Both profiles pin the evaluator revision, model family, dataset revisions,
+All profiles pin the evaluator revision, model family, dataset revisions,
 task scoring configurations, preprocessing, generation, and sample selection.
 They also pin batch size 1 because changing VLM batching can change deterministic
-outputs with the maintained backend. Qwen thinking is disabled by a local,
-evaluation-owned copy of the checkpoint chat template. This ensures short-answer
-tasks spend their token budget on the scored answer instead of hidden reasoning.
-Preflight reports the profile schema and SHA-256 contract fingerprint. The
-fingerprint is also part of the resumable run identity, so results from a
-different contract are not reused.
+outputs with the maintained backends. Generic vLLM profiles disable Qwen
+thinking through a local, evaluation-owned copy of the checkpoint chat
+template; the native profile passes the equivalent backend option directly.
+This ensures short-answer tasks spend their token budget on the scored answer
+instead of hidden reasoning. Preflight reports the profile schema and SHA-256
+contract fingerprint. The fingerprint is also part of the resumable run
+identity, so results from a different contract are not reused.
 
 `full-v1` excludes MMVU because complete MMVU evaluation requires an external
 judge. Run MMVU separately through `mmvu-smoke` or the judge-enabled legacy
@@ -140,7 +143,8 @@ python -m examples.puzzletron.evaluation.vlm.run \
   --profile short-v1
 ```
 
-Replace `short-v1` with `full-v1` after every full-profile dataset and video
+Replace `short-v1` with `short-native-v1` after installing the native
+requirements, or with `full-v1` after every full-profile dataset and video
 asset has been cached. Use `--preflight-only` before consuming GPU time.
 
 For a scheduler with a shorter walltime than the complete full profile, run one
@@ -188,11 +192,13 @@ command, standard output and error, the raw evaluator result, and normalized
 `modelopt.vlm-evaluation-preflight/v1`. Repeating a run creates new attempt
 directories rather than overwriting previous evidence.
 
-Qwen 3.5 uses the pinned evaluator's generic vLLM backend. Image and video
-scores are useful for repeatable development comparisons, but the generic
-backend does not preserve video timestamps as faithfully as the newer native
-Qwen 3.5 wrapper. Do not interpret its video scores as backend-equivalence
-results.
+`short-v1` and `full-v1` use the generic vLLM backend. `short-native-v1` loads
+the checkpoint through Transformers with the native Qwen 3.5 wrapper. The
+native route preserves Qwen video timestamp metadata; the generic route
+converts media to generic multimodal messages and does not preserve that
+metadata. The routes also use different pinned evaluator revisions and prompt
+construction, so their scores are backend-specific baselines rather than an
+engine-only comparison.
 
 If preflight fails, address the reported checkpoint, revision, cache, decoder,
 or credential mismatch before retrying. Inspect `stderr.txt` in the attempt
