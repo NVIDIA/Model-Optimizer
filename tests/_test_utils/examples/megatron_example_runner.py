@@ -47,6 +47,22 @@ from _test_utils.torch.distributed.utils import get_free_port
 
 import modelopt.torch.utils.distributed as dist
 
+_SINK = None  # never closed: a handler built inside a capture keeps a reference to it
+
+
+def _sink():
+    """One long-lived stream on the real stdout, whose fd is redirected per step.
+
+    A per-step stream closed on exit would leave a permanently-closed file behind for anything that
+    captured it -- e.g. the common module-level ``logging.StreamHandler(sys.stdout)``, where
+    ``sys.stdout`` is this sink while a step runs and the handler outlives it in ``sys.modules``.
+    """
+    global _SINK
+    if _SINK is None:
+        _SINK = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")
+    return _SINK
+
+
 # torchrun's PContext installs handlers for these and never restores them.
 _LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
@@ -75,20 +91,24 @@ def _capture_output():
                 lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)
             ]
         # Lower levels only for loggers that own their output: a propagating logger still needs its
-        # own level lowered, or it drops the record before root sees it.
+        # own level lowered, or it drops the record before root sees it. The boost is load-bearing:
+        # without it test_distill_validate_only cannot see "skipping training ...". It does mean the
+        # capture is a superset of what a torchrun user sees, so these assertions check that the
+        # step did the right work, not that its logging is user-visible.
         levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
         # Attach the handler only where the record cannot reach root, or it is written twice.
         handled = [root, *(lg for lg in others if not lg.propagate)]
         sys.stdout.flush()
         sys.stderr.flush()
-        saved_out, saved_err = os.dup(1), os.dup(2)
-        sink = None
+        sink = _sink()  # before the swap, so it holds the real stdout
+        saved_out, saved_err, saved_sink = os.dup(1), os.dup(2), os.dup(sink.fileno())
         try:
             # Inside the try: a raise between here and the restore would otherwise leave fds 1/2
             # pointing at a temp file the ``with`` then closes, silencing the rest of the session.
             os.dup2(tmp.fileno(), 1)
             os.dup2(tmp.fileno(), 2)
-            sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")
+            sink.flush()
+            os.dup2(tmp.fileno(), sink.fileno())  # move its fd rather than replacing the object
             handler.setStream(sink)
             for lg in levels:
                 if lg.level > logging.INFO:
@@ -102,8 +122,9 @@ def _capture_output():
                 lg.removeHandler(handler)
             for lg, level in levels.items():
                 lg.setLevel(level)
-            if sink is not None:
-                sink.close()
+            sink.flush()
+            os.dup2(saved_sink, sink.fileno())
+            os.close(saved_sink)
             sys.stdout.flush()
             sys.stderr.flush()
             os.dup2(saved_out, 1)
@@ -228,12 +249,16 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
         module = _load_example_module(str(script), example_path)
         reset_megatron_global_state()  # a previous step left its own parallel state behind
         try:
-            with _preserved_signal_handlers(), _capture_output() as native:
-                # Inside the guard: argparse calls parser.error() -> SystemExit on a flag that has
-                # drifted from the example's parser, which is the failure this suite most wants to
-                # report clearly rather than raise bare out of the runner.
-                with patch.object(sys, "argv", argv):
-                    args = module.get_args()
+            # get_args() inside the guard: argparse calls parser.error() -> SystemExit on a flag
+            # that has drifted from the example's parser, which is the failure this suite most
+            # wants to report clearly rather than raise bare out of the runner. argv stays patched
+            # across main() as well, which the subprocess path had.
+            with (
+                _preserved_signal_handlers(),
+                _capture_output() as native,
+                patch.object(sys, "argv", argv),
+            ):
+                args = module.get_args()
                 module.main(args)
         except SystemExit as e:
             if e.code not in (0, None):
@@ -257,6 +282,7 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
     """
     from torch.distributed.run import main as torchrun_main
 
+    reset_megatron_global_state()  # release device 0 before the workers claim it
     example_dir = MODELOPT_ROOT / "examples" / example_path
     script = next(p for p in cmd_parts if str(p).endswith(".py"))
     argv = [str(p) for p in cmd_parts]
