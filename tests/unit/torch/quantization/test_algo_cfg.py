@@ -305,6 +305,20 @@ def test_mse_after_a_stage_that_produced_amax_skips_its_own_max_init(quantized):
     assert derive_handoff(quantized, plan, 1) == {"skip_max_init": True}
 
 
+def test_handoff_is_dropped_for_algorithms_without_the_matching_knob():
+    """`awq_clip` also consumes a prior stage's amax but has no `skip_max_init` field."""
+    model = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": ["max", "awq_clip"]}],
+        },
+        _forward_loop,
+    )
+    assert _weight_amax(model)
+
+
 def test_leading_mse_still_initializes_its_own_amax(quantized):
     plan = compile_algo_cfg(
         {"algo_cfg": [{"module_name": "*mlp*", "cfg": ["mse"]}], "algorithm": None}, quantized

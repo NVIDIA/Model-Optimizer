@@ -603,8 +603,15 @@ def calibration_plan_convert(
         descriptor = CalibrateModeRegistry[
             BaseCalibrateModeDescriptor._get_mode_name(stage.algo, check=True)
         ]
-        stage_kwargs = {**stage.cfg, **derive_handoff(model, plan, i)}
-        stage_config = descriptor.config_class(**stage_kwargs)
+        # A derived handoff only takes effect if the algorithm exposes a knob for it:
+        # `derive_handoff` reports what state earlier stages already produced, but most
+        # algorithms have no way to act on that and would reject the extra kwarg.
+        handoff = {
+            key: value
+            for key, value in derive_handoff(model, plan, i).items()
+            if key in descriptor.config_class.model_fields
+        }
+        stage_config = descriptor.config_class(**{**stage.cfg, **handoff})
         wrapped_calib_func(
             model,
             stage_config,
