@@ -162,7 +162,7 @@ def run_example_command(
         # The in-process runner uses the ambient environment, so a caller-supplied env would be
         # silently dropped. Fall back to a subprocess rather than run with the wrong environment.
         warnings.warn(f"[{example_path}] env= given; running this step as a subprocess")
-    env = env or os.environ.copy()
+    env = os.environ.copy() if env is None else env
     cwd = MODELOPT_ROOT / "examples" / example_path
 
     for attempt in range(hf_max_retries + 1):
