@@ -36,11 +36,7 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
-PRODUCTION_RUN_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml"
-)
-BASE_CAMPAIGN_PATH = (
+CAMPAIGN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
@@ -191,15 +187,12 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["global_distillation"]["freeze_policy"] == "train_all"
 
 
-def test_qwen3p5_0p8b_vlm_routes_share_the_final_evaluation_contract(
+def test_qwen3p5_0p8b_vlm_comparison_uses_the_shared_evaluator(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    campaign = _compile_campaign(monkeypatch, tmp_path, run_path=BASE_CAMPAIGN_PATH)
     comparison = _compile_campaign(monkeypatch, tmp_path, run_path=COMPARISON_RUN_PATH)
-    campaign_config = campaign.experiment_config
     comparison_config = comparison.experiment_config
-    campaign_nodes = campaign_config["post_mip"]["flows"]["params-90"]["nodes"]
     comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
     benchmark = comparison_nodes["quality_benchmarks"]
     stages = {stage.stage_id: stage for stage in comparison.stages}
@@ -207,28 +200,16 @@ def test_qwen3p5_0p8b_vlm_routes_share_the_final_evaluation_contract(
     evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
 
     shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
-    assert yaml.safe_load(BASE_CAMPAIGN_PATH.read_text())["defaults"] == [
-        "full_vlm_smoke",
-        shared_evaluator,
-        "_self_",
-    ]
     assert yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"] == [
         "full_vlm_smoke",
         shared_evaluator,
         "_self_",
     ]
-    assert campaign_config["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-
-    campaign_evaluation = dict(campaign_nodes["quality_benchmarks"]["config"])
     comparison_evaluation = dict(benchmark["config"])
-    assert campaign_evaluation.pop("reference_checkpoint") == campaign_config["teacher_dir"]
     assert comparison_evaluation.pop("reference_checkpoint") == comparison_config["teacher_dir"]
-    assert comparison_evaluation == campaign_evaluation
+    evaluator_without_reference = dict(evaluator)
+    evaluator_without_reference.pop("reference_checkpoint")
+    assert comparison_evaluation == evaluator_without_reference
     assert "recorded_observation" not in benchmark["config"]
     assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
     assert benchmark["input"] == "short_vlm_kd"
@@ -240,46 +221,29 @@ def test_qwen3p5_0p8b_vlm_routes_share_the_final_evaluation_contract(
     ]["by_modality"]["multimodal"]
     assert wizard_quality.pop("enabled") is True
     assert wizard_quality == evaluator
-    assert campaign_config["pruning"]["eval_samples"] > comparison_config["pruning"]["eval_samples"]
-    assert (
-        campaign_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
-        > comparison_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
-    )
-    assert (
-        campaign_nodes["image_eval"]["config"]["eval_samples"]
-        > comparison_nodes["image_eval"]["config"]["eval_samples"]
-    )
-    assert campaign_nodes["best_vlm_loss"]["top_k"] > comparison_nodes["best_vlm_loss"]["top_k"]
-    assert (
-        campaign_nodes["vlm_serving"]["config"]["request_count"]
-        > comparison_nodes["vlm_serving"]["config"]["request_count"]
-    )
-    assert (
-        campaign_nodes["short_vlm_kd"]["config"]["max_steps"]
-        > comparison_nodes["short_vlm_kd"]["config"]["max_steps"]
-    )
-    assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))
+    assert all(stage.total_gpus == 1 for stage in comparison.stages)
 
 
 def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    production = _compile_campaign(
+    campaign = _compile_campaign(
         monkeypatch,
         tmp_path,
-        run_path=PRODUCTION_RUN_PATH,
+        run_path=CAMPAIGN_PATH,
     )
     comparison = _compile_campaign(
         monkeypatch,
         tmp_path,
         run_path=COMPARISON_RUN_PATH,
     )
-    config = production.experiment_config
+    config = campaign.experiment_config
     comparison_config = comparison.experiment_config
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
     comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
 
+    assert yaml.safe_load(CAMPAIGN_PATH.read_text())["defaults"] == ["mip_vlm_smoke", "_self_"]
     assert config["search_space"]["axes"] == {
         "ffn_intermediate": {
             "enabled": True,
@@ -323,7 +287,7 @@ def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     assert {
         key: value for key, value in final.items() if key != "reference_checkpoint"
     } == screening
-    assert nodes["winner"] == {
+    assert nodes["selected"] == {
         "type": "filter",
         "input": "quality_screen",
         "mode": "aggregate_rank",
@@ -344,7 +308,7 @@ def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     }
     assert nodes["global_kd"] == {
         "type": "global_kd",
-        "input": "winner",
+        "input": "selected",
         "model_source": "materialized",
         "config": {
             "seed": 1111,
@@ -359,10 +323,10 @@ def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     comparison_benchmark = comparison_nodes["quality_benchmarks"]
     assert comparison_benchmark["input"] == "short_vlm_kd"
     assert comparison_benchmark["failure_policy"] == "strict"
-    comparable_production = dict(final)
+    comparable_campaign = dict(final)
     comparable_comparison = dict(comparison_benchmark["config"])
-    assert comparable_production.pop("reference_checkpoint") == config["teacher_dir"]
+    assert comparable_campaign.pop("reference_checkpoint") == config["teacher_dir"]
     assert comparable_comparison.pop("reference_checkpoint") == comparison_config["teacher_dir"]
-    assert comparable_comparison == comparable_production
+    assert comparable_comparison == comparable_campaign
     assert "recorded_observation" not in comparison_benchmark["config"]
-    assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))
+    assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))
