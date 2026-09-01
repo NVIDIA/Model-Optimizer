@@ -110,7 +110,8 @@ RUN mkdir -p /opt/modelopt-dependencies/modelopt && \
 # Keep the immutable source revision below dependency compilation so source-only
 # rebuilds reuse the pinned CUDA dependency layers.
 ARG MODELOPT_REVISION
-RUN [[ "${MODELOPT_REVISION}" =~ ^[0-9a-f]{40}$ ]]
+RUN [[ "${MODELOPT_REVISION}" =~ ^[0-9a-f]{40}$ ]] && \
+    printf '%s\n' "${MODELOPT_REVISION}" > /opt/puzzletron/modelopt_revision
 
 COPY pyproject.toml LICENSE_HEADER README.md /opt/puzzletron/src/modelopt/
 COPY modelopt /opt/puzzletron/src/modelopt/modelopt

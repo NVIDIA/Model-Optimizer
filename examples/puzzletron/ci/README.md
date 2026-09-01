@@ -3,37 +3,44 @@
 The [`Dockerfile`](../Dockerfile) contains the worker installation steps.
 [`ci_environment.json`](../ci_environment.json) stores the versions, source
 revisions, CUDA targets, and downloaded-file checksums used by those steps.
-The image checker reads the same file, so installation and validation use the
-same values.
+The Dockerfile reads the same file for installation and its build-time checks.
 
-## Build
+## Build with Docker
 
-Run the build command from a clean repository checkout on a Linux amd64 system
-with Docker:
+The Dockerfile works with the standard Docker command. From a clean repository
+checkout on a Linux amd64 system, run:
 
 ```bash
-python examples/puzzletron/build_worker_image.py
+revision="$(git rev-parse HEAD)"
+short_revision="$(git rev-parse --short=12 HEAD)"
+docker build \
+  --platform linux/amd64 \
+  --file examples/puzzletron/Dockerfile \
+  --build-arg "MODELOPT_REVISION=${revision}" \
+  --tag "modelopt-puzzletron:linux-amd64-git-${short_revision}" \
+  .
 ```
 
-The command builds the image and prints its local Docker name. The Docker build
-checks the installed modules, CUDA version, and required evaluation data. The
-local name is only a convenience. The full source commit is recorded in the
-image, and exported files use the same readable commit-based filename.
+The Docker build checks the installed modules, CUDA version, and required
+evaluation data. The full source revision is recorded in the image label and at
+`/opt/puzzletron/modelopt_revision`.
 
-## Export
+## Export for another runtime
 
-Add `--archive` for a portable Docker archive, `--sqsh` for an Enroot/Pyxis
-image, or both:
+The repository helper adds clean-checkout validation, consistent artifact
+names, export, and checksums. Add `--sqsh` for an Enroot/Pyxis image,
+`--archive` for a compressed Docker archive, or both:
 
 ```bash
 python examples/puzzletron/build_worker_image.py \
   --output-dir /path/to/output \
-  --archive \
   --sqsh
 ```
 
-Creating a Docker archive also requires `zstd`. Creating a SquashFS image
-requires Enroot and Docker on the same build host.
+Creating a SquashFS image requires Enroot and Docker on the same Linux amd64
+host. Use node-local or other large storage for the output directory. The local
+Docker image remains available after export and can be removed with the normal
+Docker image-management commands when it is no longer needed.
 
 Both formats use the same source identity:
 
@@ -65,8 +72,8 @@ docker run --gpus all --ipc=host --rm "${image}" \
 
 The image contains the worker environment at `/venv` and the ModelOpt checkout
 at `/opt/puzzletron/src/modelopt`. Use the image directly with Docker, publish
-it to a registry, or convert it to the format accepted by the target Slurm
-container plugin.
+it to a registry, or export it for Enroot, Pyxis, or the target Slurm container
+plugin.
 
 The current image supports Linux amd64 only. Its CUDA extensions and
 `eva-decord 0.6.1` dependency have not been validated on Linux ARM.

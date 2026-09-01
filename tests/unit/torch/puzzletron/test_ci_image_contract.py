@@ -32,6 +32,7 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert f"FROM {base_image}" in dockerfile
     assert "ARG TARGETPLATFORM" in dockerfile
     assert 'test "${TARGETPLATFORM}" = "linux/amd64"' in dockerfile
+    assert "> /opt/puzzletron/modelopt_revision" in dockerfile
     assert (
         "COPY examples/puzzletron/ci_environment.json /opt/puzzletron/ci_environment.json"
         in dockerfile
