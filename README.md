@@ -10,7 +10,7 @@
 
 [Documentation](https://nvidia.github.io/Model-Optimizer) |
 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699) |
-[Announcement Blogs](https://nvidia.github.io/Model-Optimizer/)
+[Announcement Blogs](https://nvidia.github.io/Model-Optimizer/#announcements)
 
 </div>
 
