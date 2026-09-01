@@ -92,10 +92,8 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
         if axis["enabled"]
     }
 
-    assert advanced["pruning"] == {
-        "intermediate_size_list": [3072, 2560, 2048, 1792, 1536],
-        "attn_heads_list": [[2, 1], [4, 1], [4, 2], [8, 2]],
-    }
+    assert advanced["pruning"]["intermediate_size_list"] == [3072, 2560, 2048, 1792, 1536]
+    assert advanced["pruning"]["attn_heads_list"] == [[2, 1], [4, 1], [4, 2], [8, 2]]
     assert enabled_domains == expected_enabled_domains
     assert {
         axis_id: axes[axis_id] for axis_id in ("gdn_value_heads_per_group", "gdn_key_head_dim")

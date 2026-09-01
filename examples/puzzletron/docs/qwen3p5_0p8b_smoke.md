@@ -104,33 +104,11 @@ evaluation contract is also used by the
 [Qwen 3.5 0.8B campaign](qwen3p5_0p8b_campaign.md), so the affordable comparison
 exercises its final downstream evaluation without repeating the larger search.
 
-Two repeated GPU runs produced identical measurements: IFEval was 0.23 for the
-student and 0.55 for the teacher, while GSM8K was 0.01 for the student and 0.45
-for the teacher. The evaluated `params-90` student retained about 89.96% of the
-checkpoint parameters, or about 10.04% parameter pruning. Its realized
-architecture reduced every one of the 24 FFN intermediate widths from 3584 to
-2048, a 42.86% reduction within those FFN dimensions. These results establish
-the comparison mechanism, not an acceptable quality baseline. The observation
-combines this FFN reduction with only two distillation optimizer steps, so it
-does not isolate the effect of pruning and does not test whether a longer,
-tuned distillation phase can recover quality. Establish and validate a stronger
-pruning and distillation recipe before adding regression thresholds.
-
-These historical measurements are stored only in the opt-in comparison recipe.
-They are not setup defaults and are not emitted by the wizard or inherited by
-the larger campaign.
-
-The historical measurements above used fixed 100-example IFEval and GSM8K
-prefixes. The current recipe fixes the evaluator commit, four dataset revisions,
-256-example prefixes, seed, generation settings, and batch size. Keep batch
-size 8 when comparing current runs.
-Backend numerical variation can still change a small number of outputs, so
-compare the reported metrics and logged samples rather than expecting
-bit-for-bit equality. Each fresh comparison also publishes
-`observation_delta.*` metrics and records `difference_from_recorded` in
-`comparison.json` when a recipe provides compatible recorded observations.
-These differences are diagnostic values only; no tolerance or pass/fail rule
-is applied.
+The recipe fixes the evaluator revision, dataset revisions, sample prefixes,
+seed, generation settings, and batch size. Keep those values unchanged when
+comparing checkpoints. Backend numerical variation can still change a small
+number of outputs, so compare the reported metrics and logged samples rather
+than expecting bit-for-bit equality.
 
 Use the shared `execution.single_gpu.yaml` profile with a site-specific runner
 whose walltime covers both serial evaluations. Set a distinct

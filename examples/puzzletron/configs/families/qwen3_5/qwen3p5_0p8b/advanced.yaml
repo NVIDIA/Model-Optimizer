@@ -4,10 +4,12 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/model@_global_
   - _self_
 
-# Opt-in experimental search overlay. The axis structure is adapted from the
-# existing Qwen 3.5 9B config, while the exact targets are derived from the
-# pinned 0.8B geometry in model.yaml. These targets were not selected from a
-# fully run 0.8B campaign and have not completed full runtime validation.
+# Opt-in search overlay for the additional Qwen 3.5 0.8B architecture axes.
+# Run the extended smoke and verify measurement and checkpoint slicing for the
+# target checkpoint before allocating full campaign budgets.
+embedding_pruning:
+  widths: [1024, 768]
+
 pruning:
   intermediate_size_list: [3072, 2560, 2048, 1792, 1536]
   attn_heads_list:
@@ -15,6 +17,28 @@ pruning:
     - [4, 1]
     - [4, 2]
     - [8, 2]
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  gdn_scored_axes:
+    - gdn_key_groups
+    - gdn_value_head_dim
+
+sort:
+  deferred_axes: []
+
+width_sanity:
+  hidden_width_diagnostic: true
+  axes:
+    - hidden_width
+    - ffn_intermediate
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_head_dim
+
+depth_importance:
+  enabled: true
+  max_removals: 2
+  max_subblocks_to_remove: 2
 
 search_space:
   axes:
@@ -42,8 +66,6 @@ search_space:
       enabled: false
       teacher_value: 1
       values: []
-    # The proposed 128 -> 96 target remains blocked on runtime-equivalence
-    # evidence. Keep it documented but non-executable until that gate passes.
     gdn_key_head_dim:
       enabled: false
       teacher_value: 128
@@ -52,3 +74,14 @@ search_space:
       enabled: true
       teacher_value: 128
       values: [96]
+
+mip:
+  depth_scenario_count: 3
+  runs:
+    params-90:
+      search_space:
+        depth: [0, 1, 2]
+        embedding: [1024, 768]
+        axes_default: all
+        axes:
+          ffn.intermediate_size: all

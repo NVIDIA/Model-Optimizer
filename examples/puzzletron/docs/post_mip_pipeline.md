@@ -205,8 +205,11 @@ The post-MIP graph does not treat the teacher as a candidate revision. An
 evaluation node can set `reference_checkpoint` to evaluate the teacher with the
 same task, evaluator version, dataset revision, prompt settings, and sample
 limit. Its summary then publishes `candidate.*`, `reference.*`, and `delta.*`
-metrics together. Without `reference_checkpoint`, evaluate the teacher
-separately under the same contract before comparing results.
+metrics together. Reference evaluation runs once for each candidate revision
+handled by that node. Place the reference comparison after filtering when only
+the selected candidates need teacher-relative metrics. Without
+`reference_checkpoint`, evaluate the teacher separately under the same contract
+before comparing results.
 
 ## Filters
 

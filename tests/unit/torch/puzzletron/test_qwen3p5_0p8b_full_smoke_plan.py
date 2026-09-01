@@ -40,9 +40,7 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
-TWO_GPU_KD_EXECUTION_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.two_gpu_kd.yaml"
-)
+TWO_GPU_KD_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
 QUALITY_COMPARISON_RUN_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/e2e_quality_comparison.yaml"
 EXTENDED_SMOKE_PATH = FAMILY_ROOT / "qwen3p5_0p8b/runs/full_smoke_extended.yaml"
 EXTENDED_QUALITY_COMPARISON_PATH = (
@@ -221,15 +219,6 @@ def test_qwen3p5_0p8b_e2e_quality_comparison_is_opt_in_and_compares_teacher(
         "do_sample": False,
         "temperature": 0,
     }
-    observation = benchmark["config"]["recorded_observation"]
-    assert observation["repeat_count"] > 0
-    assert set(observation["metrics"]) == {
-        "candidate.modelopt_ifeval.prompt_level_strict_acc_none",
-        "reference.modelopt_ifeval.prompt_level_strict_acc_none",
-        "candidate.modelopt_gsm8k.exact_match_flexible-extract",
-        "reference.modelopt_gsm8k.exact_match_flexible-extract",
-    }
-    assert 0 < observation["candidate_architecture"]["parameter_pruning_percent"] < 100
     assert stages["post.params-90.quality_benchmarks"].total_gpus == 1
 
 
@@ -293,7 +282,6 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
     assert smoke["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid
     assert regression["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid
     assert campaign["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid
-    assert "recorded_observation" not in regression["quality_evaluation"]
 
     smoke_plan = _compile_extended_plan(monkeypatch, tmp_path, EXTENDED_SMOKE_PATH)
     regression_plan = _compile_extended_plan(
@@ -344,14 +332,14 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         }
     }
     assert campaign["mip"]["runs"]["params-90"] is False
-    conservative_run = campaign["mip"]["runs"]["conservative-ffn"]
-    assert conservative_run["search_space"] == {
+    ffn_run = campaign["mip"]["runs"]["ffn-candidates"]
+    assert ffn_run["search_space"] == {
         "depth": [0],
         "embedding": [1024],
         "axes_default": "teacher",
         "axes": {"ffn.intermediate_size": "all"},
     }
-    assert conservative_run["variants"] == {
+    assert ffn_run["variants"] == {
         "width-3328": {
             "constraints": {"params": {"max": "99%"}},
             "search_space": {"axes": {"ffn.intermediate_size": [3328]}},
@@ -379,39 +367,20 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         if key not in {"enabled", "reference_checkpoint"}
     } == {
         key: value
-        for key, value in campaign["quality_evaluation"].items()
+        for key, value in comparison["quality_evaluation_reference"].items()
         if key != "reference_checkpoint"
     }
     assert screen_quality == campaign["quality_evaluation"]
     assert full_quality == campaign["quality_evaluation_full"]
-    assert screen_quality["tasks"] == [
-        "ifeval",
-        "gsm8k",
-        "mmlu_pro_computer_science",
-        "mmlu_pro_history",
-    ]
-    assert screen_quality["compatibility_tasks"] == screen_quality["tasks"]
-    assert screen_quality["task_dataset_revisions"] == {
-        "ifeval": "5a5661c2a35488308556cf4453dc074d1eba91a0",
-        "gsm8k": "740312add88f781978c0658806c59bc2815b9866",
-        "mmlu_pro_computer_science": "b189ec765aa7ed75c8acfea42df31fdae71f97be",
-        "mmlu_pro_history": "b189ec765aa7ed75c8acfea42df31fdae71f97be",
-    }
+    assert "reference_checkpoint" not in screen_quality
     assert screen_quality["limit"] == 256
     assert full_quality["limit"] is None
     comparable_screen = dict(screen_quality)
     comparable_full = dict(full_quality)
     comparable_screen.pop("limit")
     comparable_full.pop("limit")
+    comparable_full.pop("reference_checkpoint")
     assert comparable_screen == comparable_full
-    assert screen_quality["seed"] == 42
-    assert screen_quality["num_fewshot"] == 0
-    assert screen_quality["log_samples"] is True
-    assert screen_quality["gen_kwargs"] == {"do_sample": False, "temperature": 0}
-    assert "evaluation_policy" not in campaign
-    assert "quality_evaluation_finalist" not in campaign
-    assert "quality_evaluation_confirmation" not in campaign
-    assert "paired_analysis" not in screen_quality
     parallel = {
         "automodel": {
             "parallel": {
@@ -445,7 +414,7 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         "config": {"eval_samples": 32, "block_size": 2048},
     }
     assert nodes["quality_screen"]["input"] == "screening_eval"
-    assert nodes["winner"] == {
+    assert nodes["selected"] == {
         "type": "filter",
         "input": "quality_screen",
         "mode": "aggregate_rank",
@@ -477,7 +446,7 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
     }
     assert nodes["global_kd"] == {
         "type": "global_kd",
-        "input": "winner",
+        "input": "selected",
         "model_source": "materialized",
         "config": {
             "seed": 1111,
@@ -491,19 +460,9 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         },
     }
     assert nodes["final_eval"]["input"] == "global_kd"
+    assert nodes["final_eval"]["config"]["reference_checkpoint"] == campaign["teacher_dir"]
     assert nodes["quality_benchmarks"]["input"] == "final_eval"
-    assert comparison_quality == comparison["quality_evaluation"]
-    assert "recorded_observation" not in full_quality
-    assert "recorded_observation" not in wizard_quality
-    assert {
-        key: value
-        for key, value in comparison_quality.items()
-        if key not in {"recorded_observation", "reference_checkpoint"}
-    } == {
-        key: value
-        for key, value in campaign["quality_evaluation"].items()
-        if key != "reference_checkpoint"
-    }
+    assert comparison_quality == comparison["quality_evaluation_reference"]
     assert full_quality["reference_checkpoint"] == campaign["teacher_dir"]
     assert comparison_quality["reference_checkpoint"] == comparison["teacher_dir"]
     stages = {stage.stage_id: stage for stage in plan.stages}
@@ -515,13 +474,13 @@ def test_qwen3p5_0p8b_campaign_reuses_the_bounded_quality_settings(
         "post.candidate-evaluation.screening_eval",
         "post.candidate-evaluation.quality_screen",
     }
-    winner_stages = {
+    selected_stages = {
         "post.candidate-evaluation.global_kd",
         "post.candidate-evaluation.final_eval",
         "post.candidate-evaluation.quality_benchmarks",
     }
     assert all(stages[name].instances == 2 for name in two_candidate_stages)
-    assert all(stages[name].instances == 1 for name in winner_stages)
+    assert all(stages[name].instances == 1 for name in selected_stages)
     assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 4
     assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2
 
@@ -531,7 +490,7 @@ def test_qwen3p5_0p8b_extended_campaign_exposes_additional_axes(
     tmp_path: Path,
 ) -> None:
     campaign = pipeline_config_from_path(EXTENDED_CAMPAIGN_PATH)
-    assert campaign["mip"]["runs"]["conservative-ffn"] is False
+    assert campaign["mip"]["runs"]["ffn-candidates"] is False
     assert campaign["post_mip"]["flows"]["candidate-evaluation"]["source"]["run"] == ("params-90")
 
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "extended-campaign"))

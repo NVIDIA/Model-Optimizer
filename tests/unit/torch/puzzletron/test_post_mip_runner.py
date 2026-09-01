@@ -289,6 +289,40 @@ def test_checkpoint_evaluation_requires_configured_reference_result(monkeypatch,
         runner._evaluate_checkpoint(config, node, source, "execution")
 
 
+def test_checkpoint_evaluation_does_not_add_implicit_reference(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    teacher = tmp_path / "teacher"
+    observed = {}
+    node = SimpleNamespace(
+        node_id="evaluation",
+        stage_id="post.params.evaluation",
+        config={"config": {"eval_samples": 8}},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(checkpoint)},
+    )
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "convert": {"teacher_dir": str(teacher)},
+    }
+
+    def _evaluation_stage(candidate, manifest):
+        observed["semantic_config"] = manifest.semantic_config
+        output = Path(candidate["zero_shot_evaluation"]["output_dir"])
+        output.mkdir(parents=True)
+        (output / "evaluation_summary.json").write_text(
+            json.dumps([{"checkpoint": str(checkpoint), "metrics": {"score": 1.0}}])
+        )
+
+    monkeypatch.setattr(future_stages, "evaluation_stage", _evaluation_stage)
+
+    result = runner._evaluate_checkpoint(config, node, source, "execution")
+
+    assert observed["semantic_config"]["zero_shot_evaluation"]["checkpoints"] == [str(checkpoint)]
+    assert result["metrics"] == {"score": 1.0}
+
+
 def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     monkeypatch,
     tmp_path,

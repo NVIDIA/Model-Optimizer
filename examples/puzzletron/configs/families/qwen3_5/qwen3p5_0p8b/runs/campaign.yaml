@@ -5,10 +5,10 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/quality_evaluation@_global_
   - _self_
 
-# Bounded Qwen 3.5 0.8B campaign for conservative FFN-only pruning. Both
-# candidates receive the same meaningful screening KD and deterministic
-# four-task evaluation. The selected winner is then trained cleanly for a
-# longer horizon from its original materialized checkpoint and fully evaluated.
+# Bounded Qwen 3.5 0.8B campaign for FFN-only pruning. Both candidates receive
+# the same screening KD and fixed four-task evaluation contract. Aggregate
+# ranking selects one candidate, which receives a second KD run from its
+# materialized pre-KD checkpoint and a full evaluation.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_campaign}
 display_name: Qwen3p5 0.8B text pruning campaign
 
@@ -19,8 +19,8 @@ data:
   replacement_scoring:
     num_samples: 32
 
-# The long 256-step run consumes 4096 sequences at global batch 16. Materialize
-# that many unique rows so the example does not repeatedly cycle a tiny cache.
+# At global batch 16, 256 optimizer steps consume 4096 sequences. The training
+# cache therefore materializes 4096 unique rows.
 train_token_cache_path: ${puzzle_dir}/dataset_cache/train_4096x2048.tokens
 validation_token_cache_path: ${puzzle_dir}/dataset_cache/validation_32x2048.tokens
 
@@ -45,7 +45,7 @@ embedding_pruning:
   alignment: 256
 
 pruning:
-  experiment_id: qwen35_0p8b_ffn_campaign_conservative
+  experiment_id: qwen35_0p8b_ffn_campaign
   intermediate_size_list: [3328, 3072]
   eval_samples: 512
   block_size: 2048
@@ -125,7 +125,7 @@ mip:
       concurrency: 1
   runs:
     params-90: false
-    conservative-ffn:
+    ffn-candidates:
       search_space:
         depth: [0]
         embedding: [1024]
@@ -153,7 +153,7 @@ post_mip:
   flows:
     candidate-evaluation:
       source:
-        run: conservative-ffn
+        run: ffn-candidates
         variants: all
         objectives: all
       nodes:
@@ -230,7 +230,7 @@ post_mip:
           failure_policy: strict
           config: ${quality_evaluation}
 
-        winner:
+        selected:
           type: filter
           input: quality_screen
           mode: aggregate_rank
@@ -249,7 +249,7 @@ post_mip:
 
         global_kd:
           type: global_kd
-          input: winner
+          input: selected
           model_source: materialized
           config:
             seed: 1111
@@ -273,6 +273,7 @@ post_mip:
           type: evaluation
           input: global_kd
           config:
+            reference_checkpoint: ${teacher_dir}
             eval_samples: 32
             block_size: 2048
 

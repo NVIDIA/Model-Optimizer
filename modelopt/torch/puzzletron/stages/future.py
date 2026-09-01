@@ -499,7 +499,11 @@ def evaluation_stage(config: dict[str, Any], manifest: StageManifest):
     teacher_dir = (config.get("convert") or {}).get("teacher_dir")
     checkpoint_entries = [
         (name, Path(checkpoint))
-        for name, checkpoint in _with_teacher_checkpoint(teacher_dir, raw_checkpoint_entries)
+        for name, checkpoint in (
+            raw_checkpoint_entries
+            if configured
+            else _with_teacher_checkpoint(teacher_dir, raw_checkpoint_entries)
+        )
     ]
     if len(checkpoint_entries) == 1 and teacher_dir is None:
         raise FileNotFoundError("exact evaluation found no scenario checkpoints")
