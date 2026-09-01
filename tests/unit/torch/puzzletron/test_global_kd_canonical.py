@@ -347,6 +347,43 @@ def test_global_kd_training_data_shuffle_uses_recipe_seed_and_keeps_validation_o
     assert recipe["validation_dataset"]["seed"] == 445
 
 
+def test_global_kd_requires_explicit_remote_code_trust(tmp_path):
+    assert (
+        GlobalKDConfig(
+            teacher_dir=tmp_path / "teacher",
+            student_dir=tmp_path / "student",
+            output_dir=tmp_path / "output",
+            descriptor="qwen3_5",
+        ).trust_remote_code
+        is False
+    )
+
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "model": {"descriptor_override": "qwen3_5"},
+        "distillation": {
+            "automodel": {
+                "parallel": {
+                    "tp": 1,
+                    "cp": 1,
+                    "pp": 1,
+                    "ep": 1,
+                    "dp_shard": 1,
+                    "dp_replicate": 1,
+                }
+            }
+        },
+    }
+
+    assert build_global_kd_config(config).trust_remote_code is False
+
+    config["model"]["trust_remote_code"] = True
+    assert build_global_kd_config(config).trust_remote_code is True
+
+    config["distillation"]["trust_remote_code"] = False
+    assert build_global_kd_config(config).trust_remote_code is False
+
+
 def test_global_kd_chat_dataset_keeps_validation_seed_and_order_fixed(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.plugins.automodel.config.inject_descriptor_model_kwargs",

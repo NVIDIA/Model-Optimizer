@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU plan contracts for the complete Qwen 3.5 0.8B VLM smoke."""
+"""CPU plan contracts for the end-to-end Qwen 3.5 0.8B VLM lifecycle smoke."""
 
 from itertools import pairwise
 from pathlib import Path
@@ -40,9 +40,20 @@ PRODUCTION_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml"
 )
+BASE_CAMPAIGN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
+)
 COMPARISON_RUN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml"
+)
+FAMILY_PRESETS_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/setup_v2_defaults.yaml"
+)
+VLM_EVALUATION_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation.yaml"
 )
 
 
@@ -82,6 +93,20 @@ def test_qwen3p5_0p8b_full_vlm_smoke_defaults_to_the_tested_dataset_snapshot(
 
     assert run_config["defaults"] == ["mip_vlm_smoke", "_self_"]
     assert config["data"]["revision"] == "51f4f4d219315c3283950994d4eb3d7fc30aa87b"
+    assert config["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+    assert config["sort"]["deferred_axes"] == [
+        "kv_groups",
+        "q_heads_per_group",
+        "gdn_key_groups",
+        "gdn_value_heads_per_group",
+        "gdn_key_head_dim",
+        "gdn_value_head_dim",
+    ]
 
 
 def test_qwen3p5_0p8b_full_vlm_smoke_compiles_the_one_gpu_lifecycle(
@@ -166,7 +191,77 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["global_distillation"]["freeze_policy"] == "train_all"
 
 
-def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
+def test_qwen3p5_0p8b_vlm_routes_share_the_final_evaluation_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    campaign = _compile_campaign(monkeypatch, tmp_path, run_path=BASE_CAMPAIGN_PATH)
+    comparison = _compile_campaign(monkeypatch, tmp_path, run_path=COMPARISON_RUN_PATH)
+    campaign_config = campaign.experiment_config
+    comparison_config = comparison.experiment_config
+    campaign_nodes = campaign_config["post_mip"]["flows"]["params-90"]["nodes"]
+    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
+    benchmark = comparison_nodes["quality_benchmarks"]
+    stages = {stage.stage_id: stage for stage in comparison.stages}
+    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
+    evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
+
+    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
+    assert yaml.safe_load(BASE_CAMPAIGN_PATH.read_text())["defaults"] == [
+        "full_vlm_smoke",
+        shared_evaluator,
+        "_self_",
+    ]
+    assert yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"] == [
+        "full_vlm_smoke",
+        shared_evaluator,
+        "_self_",
+    ]
+    assert campaign_config["mip"]["runs"]["params-90"]["search_space"] == {
+        "depth": [0],
+        "embedding": [1024],
+        "axes_default": "teacher",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
+
+    campaign_evaluation = dict(campaign_nodes["quality_benchmarks"]["config"])
+    comparison_evaluation = dict(benchmark["config"])
+    assert campaign_evaluation.pop("reference_checkpoint") == campaign_config["teacher_dir"]
+    assert comparison_evaluation.pop("reference_checkpoint") == comparison_config["teacher_dir"]
+    assert comparison_evaluation == campaign_evaluation
+    assert "recorded_observation" not in benchmark["config"]
+    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
+    assert benchmark["input"] == "short_vlm_kd"
+    assert benchmark["failure_policy"] == "strict"
+    assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+
+    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
+        "quality_comparison"
+    ]["by_modality"]["multimodal"]
+    assert wizard_quality.pop("enabled") is True
+    assert wizard_quality == evaluator
+    assert campaign_config["pruning"]["eval_samples"] > comparison_config["pruning"]["eval_samples"]
+    assert (
+        campaign_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
+        > comparison_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
+    )
+    assert (
+        campaign_nodes["image_eval"]["config"]["eval_samples"]
+        > comparison_nodes["image_eval"]["config"]["eval_samples"]
+    )
+    assert campaign_nodes["best_vlm_loss"]["top_k"] > comparison_nodes["best_vlm_loss"]["top_k"]
+    assert (
+        campaign_nodes["vlm_serving"]["config"]["request_count"]
+        > comparison_nodes["vlm_serving"]["config"]["request_count"]
+    )
+    assert (
+        campaign_nodes["short_vlm_kd"]["config"]["max_steps"]
+        > comparison_nodes["short_vlm_kd"]["config"]["max_steps"]
+    )
+    assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))
+
+
+def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -195,8 +290,8 @@ def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
     assert config["mip"]["runs"]["params-90"] is False
     assert config["global_distillation"]["domain"] == "vlm"
     assert config["global_distillation"]["freeze_policy"] == "train_all"
-    conservative = config["mip"]["runs"]["conservative-vlm"]
-    assert conservative["variants"] == {
+    ffn_candidates = config["mip"]["runs"]["ffn-candidates"]
+    assert ffn_candidates["variants"] == {
         "width-2816": {
             "constraints": {"params": {"max": "95%"}},
             "search_space": {"axes": {"ffn.intermediate_size": [2816]}},
@@ -221,7 +316,7 @@ def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
     }
     screening = nodes["quality_screen"]["config"]
     final = nodes["quality_benchmarks"]["config"]
-    assert screening["profile"] == "qwen35_vlm_quality_comparison"
+    assert screening["profile"] == "qwen35_vlm_e2e_full_eval"
     assert "reference_checkpoint" not in screening
     assert final["reference_checkpoint"] == config["teacher_dir"]
     assert screening["limit_mm_per_prompt"] == {"image": 12}

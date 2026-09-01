@@ -2,37 +2,64 @@
 
 defaults:
   - full_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Opt-in bounded student-versus-teacher measurement. This keeps the smoke
-# lifecycle small and adds the same pinned RealWorldQA/MMMU contract used by
-# the production campaign. It records evidence without claiming a quality gate.
-puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality}
-display_name: Qwen3p5 0.8B VLM quality comparison
+# Opt-in deterministic quality comparison for the final distilled candidate.
+# It evaluates the student and pinned teacher with identical RealWorldQA and
+# MMMU settings, records metric deltas, and defines no acceptance threshold.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality_comparison}
+display_name: Qwen3p5 0.8B end-to-end VLM quality comparison
+
+pruning:
+  eval_samples: 8
+
+sort_sanity:
+  eval_samples: 2
+
+width_sanity:
+  target_count_per_axis: 1
+  layer_count: 2
+  eval_samples: 2
+
+replacement_scoring:
+  eval_samples: 2
+
+mip:
+  runs:
+    params-90:
+      solver:
+        num_solutions: 1
+        min_hamming_distance: 2
+        max_seconds_per_solution: 30
+      homogeneous:
+        keep: 5
 
 post_mip:
   flows:
     params-90:
       nodes:
+        image_eval:
+          config:
+            eval_samples: 2
+            block_size: 512
+        best_vlm_loss:
+          top_k: 2
+        vlm_serving:
+          config:
+            concurrency: [1]
+            request_count: 1
+            readiness_timeout: 300
+            benchmark_timeout: 300
+        short_vlm_kd:
+          config:
+            max_steps: 2
+            global_batch_size: 1
+            local_batch_size: 1
+            checkpoint_every_steps: 2
+
         quality_benchmarks:
           type: downstream_evaluation
           input: short_vlm_kd
           failure_policy: strict
-          config:
-            profile: qwen35_vlm_quality_comparison
-            reference_checkpoint: ${teacher_dir}
-            batch_size: 1
-            timeout_seconds: 14400
-            dtype: bfloat16
-            gpu_memory_utilization: 0.5
-            max_model_len: 16384
-            limit_mm_per_prompt: {image: 12}
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
+          config: ${vlm_quality_evaluation}

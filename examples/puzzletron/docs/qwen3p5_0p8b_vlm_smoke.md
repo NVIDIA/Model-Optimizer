@@ -16,6 +16,21 @@ checked-in configuration. This smoke test checks that pruning, evaluation,
 serving, distillation, and resume all work. Its scores and throughput are not
 model-quality or production performance results.
 
+## Generate a complete bundle with the setup wizard
+
+For a new run, start with the [setup wizard](setup_wizard.md), select Qwen 3.5
+0.8B, and choose a multimodal dataset. The generated smoke and production
+bundles cover conversion, multimodal pruning and search, MIP selection,
+materialization, image-aware serving, VLM distillation, final selection, and a
+pinned student-versus-teacher RealWorldQA/MMMU comparison. Inspect the generated
+`dry-run-plan.txt` and materialize the site-specific runner settings before
+launching.
+
+The model-specific defaults are separate from the wizard implementation. The
+same onboarding path can support the 2B and 4B variants by adding their model
+inventory, pruning domains, resource defaults, and pinned evaluation settings.
+The tracked recipes below remain useful for reproducing the bounded 0.8B run.
+
 ## Before you start
 
 Prepare the setup and worker environments described in
@@ -75,11 +90,6 @@ assert all((root / image["path"]).is_file() for image in manifest["images"])
 print(f"prepared {manifest['sample_count']} samples with {manifest['image_count']} images")
 PY
 ```
-
-The smoke intentionally cycles eight rows. Before running the production
-campaign, materialize at least 1,024 rows so its 256 optimizer steps at global
-batch size 4 can consume one full training horizon without recycling this tiny
-smoke sample. Keep the same immutable revision and representative subsets.
 
 ## Configure the runner
 
@@ -193,25 +203,33 @@ multimodal API and provides a value for candidate selection, but it is not a
 performance benchmark. Use more requests, realistic concurrency, and your
 deployment image sizes before drawing throughput conclusions.
 
-## Run the bounded quality comparison
+## Choose a campaign or quality-comparison route
 
-`e2e_vlm_quality_comparison.yaml` adds a pinned student-versus-teacher
-measurement to the two-step lifecycle smoke. It evaluates the first 100 rows of
-the pinned RealWorldQA and MMMU revisions twice with deterministic generation.
-The result retains per-sample outputs, student and teacher metrics, and their
-deltas. It deliberately defines no acceptance threshold: a two-step smoke
-checkpoint validates the machinery, not production model quality.
+All checked-in routes use the pinned Qwen 3.5 0.8B VLM and the
+`ffn_intermediate` search axis. `full_vlm_smoke.yaml` validates the bounded
+end-to-end lifecycle. `vlm_campaign.yaml` expands the FFN search, prefilters
+candidates by image-text loss, and uses serving evidence to select one for
+distillation and final quality comparison. `production_vlm_campaign.yaml` adds
+equivalent screening distillation and multimodal evaluation for each finalist,
+candidate-only ranking, and a clean longer distillation run from the selected
+candidate's original materialized checkpoint. The pinned teacher comparison
+runs only for the final winner.
 
-Use the shared one-GPU execution profile. Completed evaluation repetitions are
-identity-bound and resumable, so a later allocation can continue without
-rerunning them. This opt-in route requires the pinned RealWorldQA and MMMU
-caches and is excluded from default CI:
+The opt-in `e2e_vlm_quality_comparison.yaml` route keeps the lifecycle bounded
+and compares its final student with the pinned teacher on deterministic
+RealWorldQA and MMMU subsets. Repetitions are resumable and are reused only
+when checkpoint identity and evaluator artifacts still match. Results include
+student and teacher metrics and their deltas, but no quality gate.
+
+Run the comparison route with a site-specific runner and a distinct output
+root. This route requires the pinned RealWorldQA and MMMU caches and is
+intentionally excluded from default CI:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml
 EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality_comparison
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -222,6 +240,22 @@ python examples/puzzletron/orchestrate.py \
 
 Inspect the compiled stage order and one-GPU allocation before launch. Then
 omit `--dry-run` to launch or resume the exact same three-input campaign.
+
+Run the extended campaign with the same execution profile and a distinct
+output root:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_production_vlm
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
 
 ## Evaluate a saved checkpoint separately
 
@@ -243,31 +277,9 @@ If preflight succeeds, run the same command without `--preflight-only`. The
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 
-## Run the production campaign
+## Customize a campaign
 
-The maintained campaign compares FFN widths 2816 and 2048, approximately 5%
-and 10% whole-model pruning. It gives both candidates 64 KD steps and the same
-bounded RealWorldQA/MMMU evaluation, selects one candidate by image-text loss
-and benchmark rank, then trains that winner cleanly for 256 steps from its
-pre-KD materialized checkpoint. Use the shared one-GPU execution profile:
-
-```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/production_vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
-RUNNER=/path/to/site-specific/runner.slurm.yaml
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_production_vlm
-
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full --dry-run
-```
-
-Inspect the resolved candidates, stage order, worker source revision, and every
-one-GPU scheduler request before omitting `--dry-run`. Treat the checked-in
-sample counts as a reproducible starting point, not a universal production
-budget.
+Tune site resources and the pinned training dataset for the intended workload.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:
@@ -277,21 +289,10 @@ python examples/puzzletron/puzzletron_setup_v2.py \
   --defaults examples/puzzletron/configs/setup/defaults.example.yaml
 ```
 
-Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. The wizard's
-pruning profile and post-MIP graph are generic, so do not treat the generated
-graph as the maintained VLM example. Apply its site settings to your copied VLM
-configuration instead.
-
-Choose larger-run settings deliberately:
-
-- representative dataset subsets and sample counts;
-- supported FFN widths, search constraints, and number of solutions;
-- evaluation tasks and sample counts for the intended use case;
-- serving image sizes, images per request, concurrency, and request count;
-- distillation steps, batch sizes, validation, and checkpoint frequency;
-- worker resources for every changed or added stage.
-
-Keep this route FFN-only unless another pruning axis has its own correctness
-evidence. Inspect the complete plan with `--dry-run` before launch. See
+Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
+can generate the same route with site-specific settings. Hidden width,
+attention, GDN, embedding width, and depth are available through guided
+customization and `advanced.yaml`, but are outside this checked-in campaign.
+Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

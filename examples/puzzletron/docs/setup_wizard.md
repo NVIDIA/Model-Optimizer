@@ -18,10 +18,16 @@ model family's `setup_v2_defaults.yaml`. The wizard then asks for the model,
 dataset, worker environment, and cluster settings.
 
 Model-specific defaults can also extend the recommended post-MIP flow. For
-Qwen 3.5 0.8B, generated smoke and production bundles finish by evaluating the
-final selected student and the teacher on pinned IFEval and GSM8K subsets. This
-comparison records measurements and samples; it does not enforce a quality
-threshold.
+Qwen 3.5 0.8B, the detected dataset modality selects the complete post-MIP
+route. Text bundles finish with pinned IFEval and GSM8K subsets. Multimodal
+bundles use image-aware serving and VLM distillation, then compare the final
+student and teacher on pinned RealWorldQA and MMMU subsets. Both comparisons
+record measurements and samples without enforcing a quality threshold.
+
+Adding another size from the same model family does not require another wizard
+implementation. Add a model inventory match and model-specific defaults for
+its pruning domains, resources, and pinned evaluator, then validate the
+generated smoke and production plans for that checkpoint.
 
 ## Models and datasets
 

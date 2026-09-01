@@ -408,9 +408,16 @@ def _evaluate_checkpoint(
     candidate = copy.deepcopy(config)
     output = _execution_root(config, node, execution_identity) / "raw" / source.architecture_id
     settings = dict(node.config.get("config") or {})
+    reference_checkpoint = settings.pop("reference_checkpoint", None)
+    if reference_checkpoint is None:
+        reference_checkpoint = (config.get("convert") or {}).get("teacher_dir")
+    checkpoint = str(source.artifact["checkpoint"])
+    checkpoints = [checkpoint]
+    if reference_checkpoint is not None and str(reference_checkpoint) != checkpoint:
+        checkpoints.append(str(reference_checkpoint))
     settings.update(
         enabled=True,
-        checkpoints=[source.artifact["checkpoint"]],
+        checkpoints=checkpoints,
         output_dir=str(output),
     )
     candidate["zero_shot_evaluation"] = settings
@@ -424,35 +431,42 @@ def _evaluate_checkpoint(
     )
     evaluation_stage(candidate, manifest)
     rows = json.loads((output / "evaluation_summary.json").read_text())
-    checkpoint = str(source.artifact["checkpoint"])
     row = next(item for item in rows if str(item.get("checkpoint")) == checkpoint)
     metrics = dict(row.get("metrics") or {})
     result = {"metrics": metrics, "result_path": row.get("result_path")}
-    teacher_checkpoint = (config.get("convert") or {}).get("teacher_dir")
-    teacher_row = next(
+    reference_row = next(
         (
             item
             for item in rows
-            if teacher_checkpoint is not None
-            and str(item.get("checkpoint")) == str(teacher_checkpoint)
+            if reference_checkpoint is not None
+            and str(item.get("checkpoint")) == str(reference_checkpoint)
         ),
         None,
     )
-    if teacher_row is not None and str(teacher_checkpoint) != checkpoint:
-        teacher_metrics = dict(teacher_row.get("metrics") or {})
-        if metrics.keys() != teacher_metrics.keys():
+    if (
+        reference_checkpoint is not None
+        and str(reference_checkpoint) != checkpoint
+        and reference_row is None
+    ):
+        raise RuntimeError(
+            "reference checkpoint is missing from the LM evaluation summary: "
+            f"{reference_checkpoint}"
+        )
+    if reference_row is not None and str(reference_checkpoint) != checkpoint:
+        reference_metrics = dict(reference_row.get("metrics") or {})
+        if metrics.keys() != reference_metrics.keys():
             raise RuntimeError(
-                "candidate and teacher LM evaluations produced different metrics: "
-                f"candidate_only={sorted(metrics.keys() - teacher_metrics.keys())}, "
-                f"teacher_only={sorted(teacher_metrics.keys() - metrics.keys())}"
+                "candidate and reference LM evaluations produced different metrics: "
+                f"candidate_only={sorted(metrics.keys() - reference_metrics.keys())}, "
+                f"reference_only={sorted(reference_metrics.keys() - metrics.keys())}"
             )
         result["metrics"] = {
             **metrics,
             **{f"candidate.{name}": value for name, value in metrics.items()},
-            **{f"reference.{name}": value for name, value in teacher_metrics.items()},
-            **{f"delta.{name}": metrics[name] - teacher_metrics[name] for name in metrics},
+            **{f"reference.{name}": value for name, value in reference_metrics.items()},
+            **{f"delta.{name}": metrics[name] - reference_metrics[name] for name in metrics},
         }
-        result["reference_result_path"] = teacher_row.get("result_path")
+        result["reference_result_path"] = reference_row.get("result_path")
     return result
 
 

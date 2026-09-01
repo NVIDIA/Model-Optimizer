@@ -63,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(
             "short",
             "quick",
-            "quality-comparison",
+            "e2e-full-eval",
             "adapter-smoke",
             *suites.SINGLE_TASK_SMOKE_SUITES,
             "full",

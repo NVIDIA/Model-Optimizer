@@ -133,7 +133,7 @@ class ExecutionPolicy(TypedDict):
 
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
-    if suite in {"short", "quality-comparison"}:
+    if suite in {"short", "e2e-full-eval"}:
         return SHORT_TASKS
     if suite == "quick":
         return QUICK_TASKS
@@ -162,10 +162,10 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
             else 8
             if is_smoke
             else 100
-            if suite == "quality-comparison"
+            if suite == "e2e-full-eval"
             else None
         ),
-        "repetitions": 2 if suite in {"short", "quality-comparison"} else 1,
+        "repetitions": 2 if suite in {"short", "e2e-full-eval"} else 1,
         "timeout_seconds": (
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds
         ),

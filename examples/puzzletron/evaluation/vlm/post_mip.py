@@ -32,7 +32,7 @@ from examples.puzzletron.evaluation.vlm import evaluate
 from modelopt.torch.puzzletron.distributed_eval.storage import atomic_write_json
 
 __all__ = [
-    "evaluate_quality_comparison_checkpoint",
+    "evaluate_e2e_full_eval_checkpoint",
     "evaluate_realworldqa_checkpoint",
     "register_profiles",
 ]
@@ -101,8 +101,8 @@ def register_profiles() -> None:
         evaluate_realworldqa_checkpoint,
     )
     register_downstream_evaluation_profile(
-        "qwen35_vlm_quality_comparison",
-        evaluate_quality_comparison_checkpoint,
+        "qwen35_vlm_e2e_full_eval",
+        evaluate_e2e_full_eval_checkpoint,
     )
 
 
@@ -126,19 +126,19 @@ def evaluate_realworldqa_checkpoint(
     return {**runs[0], "profile_path": str(profile_path)}
 
 
-def evaluate_quality_comparison_checkpoint(
+def evaluate_e2e_full_eval_checkpoint(
     checkpoint_path: str | Path,
     *,
     output_root: str | Path,
     settings: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Run and average the repeated, bounded quality-comparison contract."""
+    """Run and average the repeated, bounded final-evaluation contract."""
 
     args, result, profile_path = _run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
-        suite="quality-comparison",
+        suite="e2e-full-eval",
     )
     runs = result["runs"]
     if (
@@ -146,16 +146,16 @@ def evaluate_quality_comparison_checkpoint(
         or len(runs) != 2
         or not all(isinstance(item, dict) for item in runs)
     ):
-        raise RuntimeError("pinned VLM quality-comparison profile returned an invalid run count")
+        raise RuntimeError("pinned VLM final-evaluation profile returned an invalid run count")
     metric_names = set(runs[0].get("metrics") or {})
     if not metric_names or any(set(item.get("metrics") or {}) != metric_names for item in runs[1:]):
-        raise RuntimeError("pinned VLM quality-comparison repetitions produced different metrics")
+        raise RuntimeError("pinned VLM final-evaluation repetitions produced different metrics")
     metrics = {
         name: sum(float(item["metrics"][name]) for item in runs) / len(runs)
         for name in sorted(metric_names)
     }
     result_paths = [str(item["result_path"]) for item in runs]
-    summary_path = args.output_dir / "quality_comparison_summary.json"
+    summary_path = args.output_dir / "e2e_full_eval_summary.json"
     atomic_write_json(
         summary_path,
         {

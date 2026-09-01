@@ -83,7 +83,7 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
 
 @pytest.mark.parametrize(
     "profile",
-    ["qwen35_vlm_realworldqa", "qwen35_vlm_quality_comparison"],
+    ["qwen35_vlm_realworldqa", "qwen35_vlm_e2e_full_eval"],
 )
 def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch, profile):
     # Keep the examples-layer VLM dependencies out of core test collection.
@@ -240,7 +240,7 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
 
     assert observed["semantic_config"]["zero_shot_evaluation"] == {
         "enabled": True,
-        "checkpoints": [str(checkpoint)],
+        "checkpoints": [str(checkpoint), str(teacher)],
         "output_dir": str(
             tmp_path / "artifacts/post_mip/nodes/evaluation/executions/execution/raw/architecture"
         ),
@@ -257,6 +257,34 @@ def test_checkpoint_evaluation_manifest_uses_candidate_effective_config(monkeypa
         / "artifacts/post_mip/nodes/evaluation/executions/execution/raw/architecture"
         / "teacher.json"
     )
+
+
+def test_checkpoint_evaluation_requires_configured_reference_result(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    reference = tmp_path / "reference"
+    node = SimpleNamespace(
+        node_id="evaluation",
+        stage_id="post.params.evaluation",
+        config={"config": {"reference_checkpoint": str(reference)}},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(checkpoint)},
+    )
+    config = {"puzzle_dir": str(tmp_path)}
+
+    def _evaluation_stage(candidate, manifest):
+        del manifest
+        output = Path(candidate["zero_shot_evaluation"]["output_dir"])
+        output.mkdir(parents=True)
+        (output / "evaluation_summary.json").write_text(
+            json.dumps([{"checkpoint": str(checkpoint), "metrics": {"score": 1.0}}])
+        )
+
+    monkeypatch.setattr(future_stages, "evaluation_stage", _evaluation_stage)
+
+    with pytest.raises(RuntimeError, match="reference checkpoint is missing"):
+        runner._evaluate_checkpoint(config, node, source, "execution")
 
 
 def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(

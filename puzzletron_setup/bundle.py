@@ -346,9 +346,10 @@ def _post_mip_flows(
                     config["minimum_request_count"] = 4
                     config["requests_per_concurrency"] = 1
             elif node_type == "downstream_evaluation":
-                config.setdefault("model", "vllm")
+                if "profile" not in config:
+                    config.setdefault("model", "vllm")
+                    config.setdefault("log_samples", True)
                 config.setdefault("batch_size", 1)
-                config.setdefault("log_samples", True)
                 config.setdefault("topology", deepcopy(dict(default_serving_topology)))
                 if smoke:
                     config["limit"] = min(int(config.get("limit", 8) or 8), 8)
@@ -698,6 +699,23 @@ def render_experiment(state: Mapping[str, Any], budget: str) -> dict[str, Any]:
         overlay["data"].pop("acquisition", None)
     if data["modality"] == "multimodal" or data["layout"] != "fixed":
         overlay["tokenize_data"]["caches"] = []
+    if data["modality"] == "multimodal":
+        overlay["global_distillation"].update(
+            {
+                "domain": "vlm",
+                "force_hf": False,
+                "teacher_force_hf": False,
+                "student_force_hf": False,
+                "freeze_policy": "train_all",
+                "validation_enabled": False,
+                "objective": {
+                    "main_ce": {"weight": 1.0},
+                    "main_kd": {"weight": 1.0},
+                    "mtp_ce": {"weight": 1.0},
+                    "mtp_kd": {"weight": 1.0, "chunk_size": 512},
+                },
+            }
+        )
     rendered = _deep_merge(config, overlay)
     if data["modality"] == "multimodal" or data["layout"] != "fixed":
         for section in (

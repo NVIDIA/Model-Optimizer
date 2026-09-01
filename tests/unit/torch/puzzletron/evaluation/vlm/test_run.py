@@ -226,7 +226,15 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
                 "settings": settings,
             }
         )
-        return {"attempt": len(calls), "output_root": str(output_root)}
+        result_path = output_root / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
+        return {
+            "attempt": len(calls),
+            "metrics": {"accuracy": len(calls) / 10},
+            "output_root": str(output_root),
+            "result_path": str(result_path),
+        }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
     argv = [
@@ -264,15 +272,12 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     ]
     assert all(not any(call["credentials"].values()) for call in calls)
     assert all(call["settings"]["tasks"] == ",".join(expected_tasks) for call in calls)
-    assert result["runs"] == [
-        {"attempt": 1, "output_root": str(output / "short-repetition-1")},
-        {"attempt": 2, "output_root": str(output / "short-repetition-2")},
-    ]
+    assert [run["attempt"] for run in result["runs"]] == [1, 2]
     for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
     assert settings["model"] == "vllm"
-    assert settings["log_samples"] is True
+    assert settings["log_samples"] is False
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings
@@ -295,7 +300,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert report["generation_policy"] == settings["gen_kwargs"]
 
 
-@pytest.mark.parametrize("suite", ["short", "quality-comparison"])
+@pytest.mark.parametrize("suite", ["short", "e2e-full-eval"])
 def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, suite):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
@@ -344,6 +349,8 @@ def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, s
         )
         assert completed["schema"] == "modelopt.vlm-evaluation-completed-run/v1"
         assert completed["identity"]["repetition"] == repetition
+        assert completed["identity"]["checkpoint"]["fingerprint"]
+        assert completed["identity"]["profile"]["suite"] == suite
 
 
 @pytest.mark.parametrize(
@@ -425,9 +432,9 @@ def test_completed_repetition_records_fail_closed_when_malformed(tmp_path, recor
         evaluator._load_completed_run(output, identity={})
 
 
-def test_quality_comparison_policy_is_repeated_and_bounded_to_100_rows_per_task():
-    assert suites.source_tasks("quality-comparison") == ("realworldqa", "mmmu_val")
-    policy = suites.execution_policy("quality-comparison", timeout_seconds=14400)
+def test_e2e_full_eval_policy_is_repeated_and_bounded_to_100_rows_per_task():
+    assert suites.source_tasks("e2e-full-eval") == ("realworldqa", "mmmu_val")
+    policy = suites.execution_policy("e2e-full-eval", timeout_seconds=14400)
     assert policy["limit"] == 100
     assert policy["repetitions"] == 2
     assert policy["generation"] == {"temperature": 0, "do_sample": False}
@@ -452,8 +459,12 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
             output_root=output_root,
             settings=settings,
         )
+        result_path = output_root / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         return {
             "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
+            "result_path": str(result_path),
         }
 
     monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
@@ -479,7 +490,7 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     assert result["profile_path"] == str(output / "profile.json")
 
 
-def test_post_mip_quality_comparison_adapter_averages_repeated_bounded_tasks(
+def test_post_mip_e2e_full_eval_adapter_averages_repeated_bounded_tasks(
     monkeypatch,
     tmp_path,
 ):
@@ -511,7 +522,7 @@ def test_post_mip_quality_comparison_adapter_averages_repeated_bounded_tasks(
         return {"runs": runs}
 
     monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
-    result = post_mip.evaluate_quality_comparison_checkpoint(
+    result = post_mip.evaluate_e2e_full_eval_checkpoint(
         model,
         output_root=output,
         settings={
@@ -522,7 +533,7 @@ def test_post_mip_quality_comparison_adapter_averages_repeated_bounded_tasks(
         },
     )
 
-    assert captured["args"].suite == "quality-comparison"
+    assert captured["args"].suite == "e2e-full-eval"
     assert captured["args"].batch_size == 1
     assert captured["args"].seed == 42
     assert captured["settings_overrides"] == {
@@ -534,11 +545,11 @@ def test_post_mip_quality_comparison_adapter_averages_repeated_bounded_tasks(
         "modelopt_vlm_benchmark_realworldqa.exact_match_none": 0.5,
     }
     summary = json.loads(Path(result["result_path"]).read_text())
-    assert summary["suite"] == "quality-comparison"
+    assert summary["suite"] == "e2e-full-eval"
     assert summary["metrics"] == result["metrics"]
     assert summary["result_paths"] == result["run_result_paths"]
 
-    refreshed = post_mip.evaluate_quality_comparison_checkpoint(
+    refreshed = post_mip.evaluate_e2e_full_eval_checkpoint(
         model,
         output_root=output,
         settings={
@@ -554,7 +565,7 @@ def test_post_mip_quality_comparison_adapter_averages_repeated_bounded_tasks(
     assert json.loads(Path(refreshed["result_path"]).read_text())["metrics"] == refreshed["metrics"]
 
 
-def test_post_mip_quality_comparison_rejects_different_repetition_metrics(
+def test_post_mip_e2e_full_eval_rejects_different_repetition_metrics(
     monkeypatch,
     tmp_path,
 ):
@@ -569,7 +580,7 @@ def test_post_mip_quality_comparison_rejects_different_repetition_metrics(
     monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
 
     with pytest.raises(RuntimeError, match="produced different metrics"):
-        post_mip.evaluate_quality_comparison_checkpoint(
+        post_mip.evaluate_e2e_full_eval_checkpoint(
             tmp_path / "model",
             output_root=tmp_path / "output",
             settings={},

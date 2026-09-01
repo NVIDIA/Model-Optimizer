@@ -1,12 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.scoring_parent import (
     ensure_scoring_parent,
@@ -14,6 +31,7 @@ from modelopt.torch.puzzletron.scoring_parent import (
     resolve_scoring_parent,
     write_scoring_parent,
 )
+from modelopt.torch.puzzletron.stages import pipeline
 from modelopt.torch.puzzletron.stages.depth import _resolve_depth_source
 
 
@@ -36,9 +54,7 @@ def _config(tmp_path, *, enabled=True, use_bypassed=True):
 def test_scoring_parent_uses_sorted_teacher_when_bypass_is_disabled(tmp_path):
     sorted_teacher = _checkpoint(tmp_path / "ckpts" / "sorted_teacher", "teacher")
 
-    parent = resolve_scoring_parent(
-        _config(tmp_path, enabled=False, use_bypassed=True)
-    )
+    parent = resolve_scoring_parent(_config(tmp_path, enabled=False, use_bypassed=True))
 
     assert parent.role == "sorted_teacher"
     assert parent.path == sorted_teacher.resolve()
@@ -122,13 +138,53 @@ def test_ensure_scoring_parent_writes_and_reuses_valid_artifact(tmp_path):
     assert (tmp_path / "artifacts" / "scoring_parent.json").is_file()
 
 
-def test_scoring_parent_artifact_supports_concurrent_atomic_writers(
-    tmp_path, monkeypatch
-):
-    _checkpoint(tmp_path / "ckpts" / "sorted_teacher", "teacher")
-    parent = resolve_scoring_parent(
-        _config(tmp_path, enabled=False, use_bypassed=False)
+def test_mip_stage_restores_scoring_parent_for_subblock_coverage(tmp_path, monkeypatch):
+    sorted_teacher = _checkpoint(tmp_path / "ckpts" / "sorted_teacher", "teacher")
+    config = {
+        **_config(tmp_path, enabled=False, use_bypassed=False),
+        "mip": {"score_granularity": "subblock"},
+    }
+    hydra_cfg = OmegaConf.create(
+        {
+            "puzzle_dir": str(tmp_path),
+            "bypass": {"enabled": False},
+            "mip": {"score_granularity": "subblock"},
+            "scoring": {"eval_samples": 4, "block_size": 512},
+        }
     )
+    captured = {}
+
+    class CoverageReport:
+        def require_complete(self):
+            return None
+
+    def verify_coverage(*_args, **kwargs):
+        captured.update(kwargs)
+        return CoverageReport()
+
+    monkeypatch.setattr(pipeline, "load_runtime_hydra_config", lambda _config: hydra_cfg)
+    monkeypatch.setattr(pipeline, "_distributed", lambda _config: nullcontext())
+    monkeypatch.setattr(pipeline.dist, "is_master", lambda: False)
+    monkeypatch.setattr(pipeline.dist, "barrier", lambda: None)
+    monkeypatch.setattr(pipeline, "_index_mip_results", lambda *_args: {})
+    monkeypatch.setattr(pipeline, "complete_stage", lambda *_args, **kwargs: kwargs["outputs"])
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.artifact_coverage.verify_real_campaign_artifacts",
+        verify_coverage,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.mip.launch_mip_and_realize_model", lambda _config: []
+    )
+
+    pipeline.mip_stage(config, object())
+
+    assert hydra_cfg.scoring.source_checkpoint_dir == str(sorted_teacher.resolve())
+    assert captured["expected_checkpoint_dir"] == str(sorted_teacher.resolve())
+
+
+def test_scoring_parent_artifact_supports_concurrent_atomic_writers(tmp_path, monkeypatch):
+    _checkpoint(tmp_path / "ckpts" / "sorted_teacher", "teacher")
+    parent = resolve_scoring_parent(_config(tmp_path, enabled=False, use_bypassed=False))
     artifact = tmp_path / "artifacts" / "scoring_parent.json"
     writers_ready = threading.Barrier(2)
     original_write_text = Path.write_text

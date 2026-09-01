@@ -16,6 +16,7 @@
 import json
 
 import numpy as np
+import torch
 
 from modelopt.torch.puzzletron.distillation.dataset import make_puzzletron_llm_dataset
 from modelopt.torch.puzzletron.utils.data.dataloaders import create_train_dataloader
@@ -102,38 +103,13 @@ def test_global_kd_packed_dataset_shuffle_is_seeded(tmp_path):
             shuffle=shuffle,
             packed_token_cache_path=str(path),
         )
-        return [sample["input_ids"][0].item() for sample in dataset]
+        return torch.stack([sample["input_ids"][0] for sample in dataset])
 
-    assert order(2222, shuffle=False) == sorted(order(2222, shuffle=False))
-    assert order(2222) == order(2222)
-    assert order(2222) != order(3333)
-
-
-def test_global_kd_packed_dataset_shuffles_by_default(tmp_path):
-    path = tmp_path / "tokens.bin"
-    _write_cache(path, samples=8)
-
-    default_dataset = make_puzzletron_llm_dataset(
-        tokenizer=None,
-        dataset_path="unused",
-        num_samples=8,
-        seq_length=8,
-        seed=2222,
-        packed_token_cache_path=str(path),
-    )
-    ordered_dataset = make_puzzletron_llm_dataset(
-        tokenizer=None,
-        dataset_path="unused",
-        num_samples=8,
-        seq_length=8,
-        seed=2222,
-        shuffle=False,
-        packed_token_cache_path=str(path),
-    )
-
-    default_order = [sample["input_ids"][0].item() for sample in default_dataset]
-    ordered = [sample["input_ids"][0].item() for sample in ordered_dataset]
-    assert default_order != ordered
+    ordered = order(2222, shuffle=False)
+    assert torch.equal(ordered, torch.sort(ordered).values)
+    assert torch.equal(order(2222), order(2222))
+    assert not torch.equal(order(2222), order(3333))
+    assert torch.equal(order(2222, shuffle=True), order(2222))
 
 
 def test_global_kd_packed_dataset_shards_seeded_order_without_overlap(tmp_path):
@@ -149,13 +125,17 @@ def test_global_kd_packed_dataset_shards_seeded_order_without_overlap(tmp_path):
         packed_token_cache_path=str(path),
     )
 
-    global_order = [sample["input_ids"][0].item() for sample in dataset]
+    global_order = torch.stack([sample["input_ids"][0] for sample in dataset])
     shard_orders = [
-        [sample["input_ids"][0].item() for sample in dataset.shard(2, index)] for index in range(2)
+        torch.stack([sample["input_ids"][0] for sample in dataset.shard(2, index)])
+        for index in range(2)
     ]
 
-    assert set(shard_orders[0]).isdisjoint(shard_orders[1])
-    assert [value for pair in zip(*shard_orders, strict=True) for value in pair] == global_order
+    assert torch.equal(
+        torch.isin(shard_orders[0], shard_orders[1]),
+        torch.zeros_like(shard_orders[0], dtype=torch.bool),
+    )
+    assert torch.equal(torch.stack(shard_orders, dim=1).flatten(), global_order)
 
 
 def test_global_kd_non_cache_dataset_respects_shuffle(monkeypatch):

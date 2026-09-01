@@ -42,11 +42,13 @@ def _completion_identity(
     checkpoint_identity: Mapping[str, object],
     settings: Mapping[str, object],
     *,
+    profile_identity: Mapping[str, object],
     repetition: int,
 ) -> dict[str, object]:
     """Describe the immutable inputs for one resumable evaluation repetition."""
     return {
         "checkpoint": dict(checkpoint_identity),
+        "profile": dict(profile_identity),
         "repetition": repetition,
         "settings": dict(settings),
     }
@@ -67,11 +69,13 @@ def _file_identity(path: Path, *, root: Path) -> dict[str, object]:
 
 def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
     """Fingerprint every local file that defines the evaluated checkpoint."""
+    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+
     root = checkpoint_path.resolve()
     files = [_file_identity(path, root=root) for path in sorted(root.rglob("*")) if path.is_file()]
     if not files:
         raise RuntimeError(f"VLM evaluation checkpoint contains no files: {root}")
-    return {"files": files, "path": str(root)}
+    return {**checkpoint_identity(root), "content_files": files}
 
 
 def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:
@@ -101,6 +105,16 @@ def _artifacts_match(output_root: Path, artifacts: object) -> bool:
         if _file_identity(path, root=output_root) != dict(item):
             return False
     return True
+
+
+def _validated_run_result(result: object, *, label: str) -> dict[str, object]:
+    """Validate a fresh evaluator result before publishing its completion record."""
+    if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
+        raise RuntimeError(f"invalid {label} result")
+    result_path = result.get("result_path")
+    if not isinstance(result_path, str) or not Path(result_path).is_file():
+        raise RuntimeError(f"{label} result artifact is missing: {result_path}")
+    return dict(result)
 
 
 def _load_completed_run(
@@ -140,6 +154,7 @@ def _write_completed_run(
     """Atomically mark one repetition complete after its result artifact exists."""
     completion_path = output_root / _COMPLETED_RUN_FILENAME
     output_root.mkdir(parents=True, exist_ok=True)
+    result = _validated_run_result(result, label="VLM evaluation")
     content = (
         json.dumps(
             {
@@ -213,6 +228,13 @@ def evaluate(
     settings.update(settings_overrides or {})
     repetitions = prepared.execution_policy["repetitions"]
     checkpoint_identity = _checkpoint_identity(args.checkpoint)
+    profile_identity = {
+        "dataset_revisions": report["dataset_revisions"],
+        "lmms_eval_revision": report["lmms_eval_revision"],
+        "quick_manifest_sha256": report.get("quick_manifest_sha256"),
+        "source_tasks": report["source_tasks"],
+        "suite": prepared.suite,
+    }
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
@@ -222,6 +244,7 @@ def evaluate(
             identity = _completion_identity(
                 checkpoint_identity,
                 settings,
+                profile_identity=profile_identity,
                 repetition=repetition,
             )
             run_result = _load_completed_run(output_root, identity=identity)
