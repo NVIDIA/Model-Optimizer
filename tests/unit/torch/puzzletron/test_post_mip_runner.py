@@ -749,6 +749,15 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
         (tmp_path / f"comparison-{steps}.json").write_text(
             json.dumps({"identity": {"kd_steps": steps}})
         )
+    ledger.observations["materialized"] = {
+        revisions["materialized"]: NodeObservation(
+            node_id="materialized",
+            input_revision_id=revisions["materialized"],
+            source_revision_id=revisions["materialized"],
+            output_revision_id=revisions["materialized"],
+            status="success",
+        )
+    }
     pre_kd_comparison = tmp_path / "comparison-pre-kd.json"
     pre_kd_comparison.write_text(json.dumps({"identity": {"kd_steps": 0}}))
     ledger.observations["pre_kd_short_v1"] = {
