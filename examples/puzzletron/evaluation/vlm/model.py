@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Checkpoint contract for the initial Qwen 3.5 VLM backend."""
+"""Checkpoint contract for the Qwen 3.5 VLM backend."""
 
 from __future__ import annotations
 
@@ -28,19 +28,18 @@ __all__ = ["verify_checkpoint"]
 _MODEL_TYPE = "qwen3_5"
 _ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
 _PROCESSOR_ASSETS = ("preprocessor_config.json", "video_preprocessor_config.json")
-_TEXT_GEOMETRY = {
-    "hidden_size": 1024,
-    "intermediate_size": 3584,
-    "num_attention_heads": 8,
-    "num_hidden_layers": 24,
-    "num_key_value_heads": 2,
-    "vocab_size": 248320,
-}
-_REALIZED_HIDDEN_WIDTH_ALIGNMENT = 64
+_TEXT_GEOMETRY_FIELDS = (
+    "hidden_size",
+    "intermediate_size",
+    "num_attention_heads",
+    "num_hidden_layers",
+    "num_key_value_heads",
+    "vocab_size",
+)
 
 
 def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
-    """Verify the Qwen 3.5 0.8B VLM geometry and local processor assets."""
+    """Verify a Qwen 3.5 VLM-family checkpoint and its local processor assets."""
     config = _checkpoint_config(checkpoint)
     if config.get("model_type") != _MODEL_TYPE:
         raise ValueError(f"{profile} checkpoint model_type must be qwen3_5")
@@ -57,29 +56,15 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     text_config = config.get("text_config")
     if not isinstance(text_config, dict) or text_config.get("model_type") != "qwen3_5_text":
         raise ValueError(f"{profile} checkpoint text_config.model_type must be qwen3_5_text")
-    expected_geometry = dict(_TEXT_GEOMETRY)
-    if realized_checkpoint:
-        expected_geometry.pop("hidden_size")
-    mismatches = {
-        key: (text_config.get(key), expected)
-        for key, expected in expected_geometry.items()
-        if text_config.get(key) != expected
+    invalid_geometry = {
+        key: text_config.get(key)
+        for key in _TEXT_GEOMETRY_FIELDS
+        if not isinstance(text_config.get(key), int)
+        or isinstance(text_config.get(key), bool)
+        or text_config.get(key) <= 0
     }
-    if mismatches:
-        raise ValueError(f"checkpoint geometry differs from Qwen 3.5 0.8B: {mismatches}")
-    if realized_checkpoint:
-        hidden_size = text_config.get("hidden_size")
-        teacher_hidden_size = _TEXT_GEOMETRY["hidden_size"]
-        if (
-            not isinstance(hidden_size, int)
-            or isinstance(hidden_size, bool)
-            or not 0 < hidden_size <= teacher_hidden_size
-            or hidden_size % _REALIZED_HIDDEN_WIDTH_ALIGNMENT != 0
-        ):
-            raise ValueError(
-                "realized checkpoint hidden_size must be a positive 64-aligned reduction "
-                f"of {teacher_hidden_size}: {hidden_size!r}"
-            )
+    if invalid_geometry:
+        raise ValueError(f"{profile} checkpoint has invalid Qwen 3.5 geometry: {invalid_geometry}")
     processor_assets = []
     for name in _PROCESSOR_ASSETS:
         path = checkpoint / name

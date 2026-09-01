@@ -1,9 +1,10 @@
 # VLM checkpoint evaluation
 
 Use the VLM evaluator to run pinned image and video benchmarks against a local
-Qwen 3.5 0.8B checkpoint without creating a Puzzletron campaign. The default
-`short` suite is a deterministic smoke evaluation intended to catch checkpoint
-or runtime regressions before a larger benchmark run.
+Qwen 3.5 checkpoint without creating a Puzzletron campaign. Versioned profiles
+are the reproducible interface for teacher and student comparisons. The default
+`short` suite remains a small smoke evaluation for checkpoint and runtime
+checks.
 
 For text-only IFEval and GSM8K evaluation, use the separate
 [text checkpoint evaluator](checkpoint_evaluation.md).
@@ -35,6 +36,25 @@ container-specific evaluator pin.
 
 ## Choose a suite
 
+Use a versioned profile when scores will be compared across checkpoints:
+
+| Profile | Coverage | Sampling policy |
+| --- | --- | --- |
+| `short-v1` | RealWorldQA, MMMU, and MVBench | 344 exact rows; MMMU uses four rows per subject and MVBench uses eight per task |
+| `full-v1` | Eight judge-free image and video benchmarks | Every row from each pinned dataset revision |
+
+Both profiles pin the evaluator revision, model family, dataset revisions,
+task scoring configurations, preprocessing, generation, and sample selection.
+Preflight reports the profile schema and SHA-256 contract fingerprint. The
+fingerprint is also part of the resumable run identity, so results from a
+different contract are not reused.
+
+`full-v1` excludes MMVU because complete MMVU evaluation requires an external
+judge. Run MMVU separately through `mmvu-smoke` or the judge-enabled legacy
+`full` suite.
+
+The unversioned suites are useful for development and targeted diagnosis:
+
 | Suite | Coverage | Sampling policy |
 | --- | --- | --- |
 | `short` | RealWorldQA and MMMU | Eight samples per task, repeated twice |
@@ -54,13 +74,13 @@ frames.
 
 Evaluation is offline and requires every selected dataset revision to already
 exist under an explicit Hugging Face cache root. Populate the pinned image
-datasets for the selected suite before starting evaluation. The example uses
-the default `short` suite; replace `short` with another suite name when needed:
+datasets for the selected profile or suite before starting evaluation. The
+example uses `short-v1`:
 
 ```bash
 export HF_HOME=/path/to/huggingface-cache
 
-python - "$HF_HOME" short <<'PY'
+python - "$HF_HOME" short-v1 <<'PY'
 import sys
 from pathlib import Path
 
@@ -102,6 +122,23 @@ Puzzletron requirements select the supported reader for the current platform
 where one is available. Preflight stops before evaluation with an installation
 error if the environment has no compatible reader.
 
+## Run a versioned profile
+
+The checkpoint path is an invocation input, not part of either profile
+manifest. Use the same command with a teacher or any materialized Qwen 3.5
+student checkpoint:
+
+```bash
+python -m examples.puzzletron.evaluation.vlm.run \
+  --checkpoint /path/to/checkpoint \
+  --output-dir /path/to/results/short-v1 \
+  --hf-home "$HF_HOME" \
+  --profile short-v1
+```
+
+Replace `short-v1` with `full-v1` after every full-profile dataset and video
+asset has been cached. Use `--preflight-only` before consuming GPU time.
+
 ## Run the default smoke evaluation
 
 ```bash
@@ -113,7 +150,8 @@ python -m examples.puzzletron.evaluation.vlm.run \
 ```
 
 The checkpoint must contain a readable `config.json` matching the supported
-Qwen 3.5 0.8B VLM architecture. Use `--preflight-only` first to validate the
+Qwen 3.5 VLM family and local multimodal processor assets. Use
+`--preflight-only` first to validate the
 checkpoint, evaluator revision, task definitions, cached datasets, media, and
 credentials without starting model evaluation.
 
@@ -127,8 +165,10 @@ not accept judge options and use a loopback-only disabled judge configuration.
 
 Each execution creates an isolated `attempt_<id>/` directory containing the
 command, standard output and error, the raw evaluator result, and normalized
-`summary.json` metrics. Repeating a run creates new attempt directories rather
-than overwriting previous evidence.
+`summary.json` metrics. The command result uses the
+`modelopt.vlm-evaluation-result/v1` schema, while preflight uses
+`modelopt.vlm-evaluation-preflight/v1`. Repeating a run creates new attempt
+directories rather than overwriting previous evidence.
 
 Qwen 3.5 uses the pinned evaluator's generic vLLM backend. Image and video
 scores are useful for repeatable development comparisons, but the generic

@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from types import ModuleType
 
@@ -26,6 +27,7 @@ import pytest
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import (
+    contracts,
     evaluator,
     post_mip,
     preflight,
@@ -86,44 +88,24 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
-def test_checkpoint_contract_accepts_aligned_realized_hidden_width_reduction(tmp_path):
+def test_checkpoint_contract_accepts_other_positive_qwen35_geometry(tmp_path):
     checkpoint_path = _write_checkpoint(tmp_path)
     config_path = checkpoint_path / "config.json"
     config = json.loads(config_path.read_text())
-    config.update(
-        architectures=["AnyModel"],
-        base_architecture="Qwen3_5ForConditionalGeneration",
+    config["text_config"].update(
+        hidden_size=2560,
+        intermediate_size=9728,
+        num_attention_heads=20,
+        num_hidden_layers=40,
+        num_key_value_heads=4,
     )
-    config["text_config"]["hidden_size"] = 960
     config_path.write_text(json.dumps(config) + "\n")
 
     vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
-
-@pytest.mark.parametrize("hidden_size", [0, 1000, 1088, True])
-def test_checkpoint_contract_rejects_invalid_realized_hidden_width(tmp_path, hidden_size):
-    checkpoint_path = _write_checkpoint(tmp_path)
-    config_path = checkpoint_path / "config.json"
-    config = json.loads(config_path.read_text())
-    config.update(
-        architectures=["AnyModel"],
-        base_architecture="Qwen3_5ForConditionalGeneration",
-    )
-    config["text_config"]["hidden_size"] = hidden_size
+    config["text_config"]["hidden_size"] = 0
     config_path.write_text(json.dumps(config) + "\n")
-
-    with pytest.raises(ValueError, match="positive 64-aligned reduction"):
-        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
-
-
-def test_checkpoint_contract_keeps_native_hidden_width_exact(tmp_path):
-    checkpoint_path = _write_checkpoint(tmp_path)
-    config_path = checkpoint_path / "config.json"
-    config = json.loads(config_path.read_text())
-    config["text_config"]["hidden_size"] = 960
-    config_path.write_text(json.dumps(config) + "\n")
-
-    with pytest.raises(ValueError, match="checkpoint geometry differs"):
+    with pytest.raises(ValueError, match="invalid Qwen 3.5 geometry"):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
@@ -292,6 +274,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert evaluation.main(argv) == 0
 
     result = json.loads(capsys.readouterr().out)
+    assert result["schema"] == "modelopt.vlm-evaluation-result/v1"
     report = result["preflight"]
     assert report["source_tasks"] == list(source_tasks)
     assert report["short_repetitions"] == 2
@@ -507,6 +490,90 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
 
     assert prepared.suite == suites.TASK_PREFIX100_REPEAT2_SUITE
     assert prepared.report["suite"] == suites.TASK_PREFIX100_REPEAT2_SUITE
+
+
+def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
+    short = contracts.load_profile("short-v1")
+    full = contracts.load_profile("full-v1")
+
+    assert short.fingerprint == "2382765409979e8f4a66f39e90d3597888433677c43aedd79a53a2a9c736f617"
+    assert full.fingerprint == "ac2f8b6b4cee64694ce911a40cab854b0ecc71c042e822fe1d959e605ede7b8b"
+    assert short.source_tasks == suites.QUICK_TASKS
+    assert full.source_tasks == tuple(
+        task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
+    )
+    assert full.exact_rows is None
+    mmmu_rows = short.manifest["tasks"]["mmmu_val"]["rows"]
+    assert Counter(row["source_row_index"] // 30 for row in mmmu_rows) == Counter(
+        dict.fromkeys(range(30), 4)
+    )
+
+    exact_rows = short.exact_rows
+    assert exact_rows is not None
+    path = tmp_path / "short-v1-rows.json"
+    path.write_text(json.dumps(exact_rows))
+    validated = suites.load_quick_manifest(path)
+    assert suites.manifest_sha256(validated)
+
+
+@pytest.mark.parametrize("name", contracts.PROFILE_NAMES)
+def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp_path, name):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            name,
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+
+    contract = contracts.load_profile(name)
+    assert prepared.suite == name
+    assert prepared.profile_contract == contract
+    assert prepared.report["profile_name"] == name
+    assert prepared.report["schema"] == "modelopt.vlm-evaluation-preflight/v1"
+    assert prepared.report["profile_schema"] == "modelopt.vlm-evaluation-profile/v1"
+    assert prepared.report["profile_fingerprint"] == contract.fingerprint
+    assert prepared.report["source_tasks"] == list(contract.source_tasks)
+    assert prepared.report["judge_policy"] is None
+    assert (prepared.quick_manifest is not None) == (name == "short-v1")
+
+    task_root, configured_tasks = tasks.prepare(
+        tmp_path / "results",
+        suite=prepared.suite,
+        dataset_snapshots=prepared.dataset_snapshots,
+        quick_manifest=prepared.quick_manifest,
+    )
+    assert configured_tasks == tuple(suites.task_name(task) for task in contract.source_tasks)
+    assert (task_root / "modelopt_quick_selection.py").exists() == (name == "short-v1")
+
+
+def test_versioned_profile_rejects_seed_override(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "short-v1",
+            "--seed",
+            "7",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--seed cannot override"):
+        preflight.prepare(args)
 
 
 def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):

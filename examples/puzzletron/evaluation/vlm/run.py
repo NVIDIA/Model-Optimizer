@@ -29,7 +29,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.puzzletron.evaluation import checkpoint  # noqa: E402
-from examples.puzzletron.evaluation.vlm import suites  # noqa: E402
+from examples.puzzletron.evaluation.vlm import contracts, suites  # noqa: E402
 from examples.puzzletron.evaluation.vlm.evaluator import evaluate  # noqa: E402
 
 
@@ -58,7 +58,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Root directory for isolated per-attempt artifacts.",
     )
-    parser.add_argument(
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--profile",
+        choices=contracts.PROFILE_NAMES,
+        default=None,
+        help="Versioned reproducibility contract for checkpoint-independent evaluation.",
+    )
+    selection.add_argument(
         "--suite",
         choices=(
             "short",
@@ -70,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "full",
         ),
         default="short",
-        help="Pinned Qwen 3.5 0.8B VLM benchmark suite.",
+        help="Pinned Qwen 3.5 VLM benchmark suite.",
     )
     parser.add_argument("--batch-size", type=checkpoint.positive_int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -127,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = evaluate(args)
         if args.preflight_only:
-            result = {"preflight": result["preflight"]}
+            result = {"schema": result["schema"], "preflight": result["preflight"]}
     except Exception as error:
         payload = {
             "error": type(error).__name__,

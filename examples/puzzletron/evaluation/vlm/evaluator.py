@@ -218,7 +218,11 @@ def evaluate(
     if preflight_callback is not None:
         preflight_callback(report)
     if args.preflight_only:
-        return {"preflight": report, "runs": []}
+        return {
+            "schema": "modelopt.vlm-evaluation-result/v1",
+            "preflight": report,
+            "runs": [],
+        }
     settings = preflight.settings(
         args,
         tasks_root=task_root,
@@ -234,6 +238,9 @@ def evaluate(
         "quick_manifest_sha256": report.get("quick_manifest_sha256"),
         "source_tasks": report["source_tasks"],
         "suite": prepared.suite,
+        "profile_fingerprint": report.get("profile_fingerprint"),
+        "profile_name": report.get("profile_name"),
+        "profile_schema": report.get("profile_schema"),
     }
     runs = []
     with checkpoint.without_huggingface_credentials():
@@ -256,4 +263,8 @@ def evaluate(
                 )
                 _write_completed_run(output_root, identity=identity, result=run_result)
             runs.append(run_result)
-    return {"preflight": report, "runs": runs}
+    return {
+        "schema": "modelopt.vlm-evaluation-result/v1",
+        "preflight": report,
+        "runs": runs,
+    }

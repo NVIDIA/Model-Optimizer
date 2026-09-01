@@ -1,0 +1,75 @@
+{
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "full-v1",
+  "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+  "model_family": {
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "model_type": "qwen3_5"
+  },
+  "backend": {
+    "name": "vllm",
+    "reasoning_parser": "qwen3"
+  },
+  "preprocessing": {
+    "fps": 2,
+    "max_frames": 32,
+    "video_reader": "decord"
+  },
+  "generation": {
+    "do_sample": false,
+    "temperature": 0
+  },
+  "seed": 42,
+  "repetitions": 1,
+  "selection": "all",
+  "tasks": {
+    "realworldqa": {
+      "dataset_repository": "lmms-lab/RealWorldQA",
+      "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/realworldqa/realworldqa.yaml"
+    },
+    "mmmu_val": {
+      "dataset_repository": "lmms-lab/MMMU",
+      "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+      "max_new_tokens": 128,
+      "scoring_task_config": "tasks/mmmu/mmmu_val.yaml"
+    },
+    "video_mmmu": {
+      "dataset_repository": "lmms-lab/VideoMMMU",
+      "dataset_revision": "d1c35ac933123d79e877b7f1b9506afb0309cf1b",
+      "max_new_tokens": 1024,
+      "scoring_task_config": "tasks/videommmu/video_mmmu.yaml"
+    },
+    "mvbench": {
+      "dataset_repository": "OpenGVLab/MVBench",
+      "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/mvbench/mvbench.yaml"
+    },
+    "videomme": {
+      "dataset_repository": "lmms-lab/Video-MME",
+      "dataset_revision": "ead1408f75b618502df9a1d8e0950166bf0a2a0b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/videomme/videomme.yaml"
+    },
+    "longvideobench_val_v": {
+      "dataset_repository": "longvideobench/LongVideoBench",
+      "dataset_revision": "60d1c89c1919a198b73be39c2babb213b29d6a5c",
+      "max_new_tokens": 32,
+      "scoring_task_config": "tasks/longvideobench/longvideobench_val_v.yaml"
+    },
+    "mlvu_dev": {
+      "dataset_repository": "sy1998/MLVU_dev",
+      "dataset_revision": "96207eb9aa7101e2a495dd147684a7e618c79e12",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/mlvu/mlvu_dev.yaml"
+    },
+    "perceptiontest_val_mc": {
+      "dataset_repository": "lmms-lab/PerceptionTest_Val",
+      "dataset_revision": "c5e520d8c4167fb1f135c36e9d6e67312b4f8e6b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/perceptiontest/val/perceptiontest_mc.yaml"
+    }
+  }
+}

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     import argparse
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import model, profile, suites, tasks
+from examples.puzzletron.evaluation.vlm import contracts, model, profile, suites, tasks
 
 __all__ = ["PreparedSuite", "prepare", "settings"]
 
@@ -43,12 +43,15 @@ class PreparedSuite:
     hf_home: Path
     judge_env: dict[str, str]
     execution_policy: suites.ExecutionPolicy
+    profile_contract: contracts.ProfileContract | None
     report: dict[str, object]
 
 
 def prepare(args: argparse.Namespace) -> PreparedSuite:
     """Validate model, task, dataset, media, and judge inputs for one suite."""
-    requested_suite = args.suite or "short"
+    profile_name = getattr(args, "profile", None)
+    profile_contract = contracts.load_profile(profile_name) if profile_name is not None else None
+    requested_suite = profile_contract.name if profile_contract is not None else args.suite or "short"
     suite = suites.canonical_suite(requested_suite)
     if suite != requested_suite:
         warnings.warn(
@@ -56,14 +59,23 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
             FutureWarning,
             stacklevel=2,
         )
+    if profile_contract is not None and args.seed != profile_contract.manifest["seed"]:
+        raise ValueError("--seed cannot override a versioned evaluation profile")
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
-    quick_manifest = suites.load_quick_manifest(args.quick_manifest) if suite == "quick" else None
-    if suite != "quick" and args.quick_manifest is not None:
+    if profile_contract is not None and profile_contract.exact_rows is not None:
+        quick_manifest = suites.validate_quick_manifest(profile_contract.exact_rows)
+    elif suite == "quick":
+        quick_manifest = suites.load_quick_manifest(args.quick_manifest)
+    else:
+        quick_manifest = None
+    if suite not in {"quick"} and profile_contract is None and args.quick_manifest is not None:
         raise ValueError("--quick-manifest is valid only for the quick suite")
+    if profile_contract is not None and args.quick_manifest is not None:
+        raise ValueError("--quick-manifest cannot override a versioned evaluation profile")
 
     lmms_eval_revision = checkpoint.verify_lmms_eval_revision()
     for task in source_tasks:
@@ -87,6 +99,7 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         judge_policy=judge_policy,
         lmms_eval_revision=lmms_eval_revision,
         execution_policy=execution_policy,
+        profile_contract=profile_contract,
     )
     return PreparedSuite(
         suite=suite,
@@ -95,6 +108,7 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         hf_home=hf_home,
         judge_env=judge_env,
         execution_policy=execution_policy,
+        profile_contract=profile_contract,
         report=report,
     )
 
@@ -176,9 +190,18 @@ def _report(
     judge_policy: dict[str, object] | None,
     lmms_eval_revision: str,
     execution_policy: suites.ExecutionPolicy,
+    profile_contract: contracts.ProfileContract | None,
 ) -> dict[str, object]:
     return {
+        "schema": "modelopt.vlm-evaluation-preflight/v1",
         "profile": suites.EVALUATION_PROFILE,
+        "profile_name": profile_contract.name if profile_contract is not None else None,
+        "profile_schema": (
+            profile_contract.manifest["schema"] if profile_contract is not None else None
+        ),
+        "profile_fingerprint": (
+            profile_contract.fingerprint if profile_contract is not None else None
+        ),
         "suite": suite,
         "checkpoint": str(args.checkpoint),
         "lmms_eval_revision": lmms_eval_revision,
@@ -194,7 +217,9 @@ def _report(
         "generation_policy": execution_policy["generation"],
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "quick_selected_rows": suites.QUICK_SELECTED_ROWS if suite == "quick" else None,
+        "quick_selected_rows": (
+            suites.QUICK_SELECTED_ROWS if suite in {"quick", "short-v1"} else None
+        ),
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
         ),

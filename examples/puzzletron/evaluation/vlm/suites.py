@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import profile
+from examples.puzzletron.evaluation.vlm import contracts, profile
 
 __all__ = [
     "ADAPTER_SMOKE_TASKS",
@@ -36,6 +36,7 @@ __all__ = [
     "EVALUATION_PROFILE",
     "MMVU_SMOKE_ROWS",
     "MVBENCH_LEAF_TASKS",
+    "PROFILE_NAMES",
     "QUICK_SELECTED_ROWS",
     "QUICK_TASKS",
     "SHORT_TASKS",
@@ -54,11 +55,13 @@ __all__ = [
     "offline_dataset_snapshot",
     "source_tasks",
     "task_name",
+    "validate_quick_manifest",
 ]
 
 EVALUATION_PROFILE = "qwen35-vlm-benchmarks"
 TASK_PREFIX100_REPEAT2_SUITE = "realworldqa-mmmu-prefix100-repeat2"
 DEPRECATED_SUITE_ALIASES = {"e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE}
+PROFILE_NAMES = contracts.PROFILE_NAMES
 ALL_TASKS = profile.VLM_BENCHMARK_TASKS
 SHORT_TASKS = ("realworldqa", "mmmu_val")
 QUICK_TASKS = ("realworldqa", "mmmu_val", "mvbench")
@@ -139,6 +142,8 @@ class ExecutionPolicy(TypedDict):
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
     suite = canonical_suite(suite)
+    if suite in PROFILE_NAMES:
+        return contracts.load_profile(suite).source_tasks
     if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE}:
         return SHORT_TASKS
     if suite == "quick":
@@ -156,22 +161,22 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     """Resolve the provenance and runtime execution fields for one suite."""
     suite = canonical_suite(suite)
     source_tasks(suite)
-    is_smoke = suite in SMOKE_SUITES
+    is_smoke = suite in SMOKE_SUITES or suite == "short-v1"
     default_timeout_seconds = (
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
     )
+    if suite == "realworldqa-smoke":
+        limit = 2
+    elif is_smoke and suite != "short-v1":
+        limit = 8
+    elif suite == TASK_PREFIX100_REPEAT2_SUITE:
+        limit = 100
+    else:
+        limit = None
     return {
         "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
         "generation": {"temperature": 0, "do_sample": False},
-        "limit": (
-            2
-            if suite == "realworldqa-smoke"
-            else 8
-            if is_smoke
-            else 100
-            if suite == TASK_PREFIX100_REPEAT2_SUITE
-            else None
-        ),
+        "limit": limit,
         "repetitions": 2 if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE} else 1,
         "timeout_seconds": (
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds
@@ -199,6 +204,11 @@ def load_quick_manifest(path: Path | None) -> dict[str, object]:
         manifest = json.loads(path.expanduser().absolute().read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"quick manifest is unreadable: {path}") from error
+    return validate_quick_manifest(manifest)
+
+
+def validate_quick_manifest(manifest: object) -> dict[str, object]:
+    """Validate an exact-row quick-suite manifest already loaded in memory."""
     if not isinstance(manifest, dict):
         raise ValueError("quick manifest must contain an object")
     if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
