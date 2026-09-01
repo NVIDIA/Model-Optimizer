@@ -219,11 +219,15 @@ def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
             "checkpoint_every_steps": 32,
         },
     }
-    bounded = nodes["quality_screen"]["config"]
-    assert bounded == nodes["quality_benchmarks"]["config"]
-    assert bounded["profile"] == "qwen35_vlm_quality_comparison"
-    assert bounded["reference_checkpoint"] == config["teacher_dir"]
-    assert bounded["limit_mm_per_prompt"] == {"image": 12}
+    screening = nodes["quality_screen"]["config"]
+    final = nodes["quality_benchmarks"]["config"]
+    assert screening["profile"] == "qwen35_vlm_quality_comparison"
+    assert "reference_checkpoint" not in screening
+    assert final["reference_checkpoint"] == config["teacher_dir"]
+    assert screening["limit_mm_per_prompt"] == {"image": 12}
+    assert {
+        key: value for key, value in final.items() if key != "reference_checkpoint"
+    } == screening
     assert nodes["winner"] == {
         "type": "filter",
         "input": "quality_screen",
@@ -260,10 +264,10 @@ def test_qwen3p5_0p8b_vlm_campaign_matches_the_conservative_text_campaign_shape(
     comparison_benchmark = comparison_nodes["quality_benchmarks"]
     assert comparison_benchmark["input"] == "short_vlm_kd"
     assert comparison_benchmark["failure_policy"] == "strict"
-    comparable_production = dict(bounded)
+    comparable_production = dict(final)
     comparable_comparison = dict(comparison_benchmark["config"])
     assert comparable_production.pop("reference_checkpoint") == config["teacher_dir"]
     assert comparable_comparison.pop("reference_checkpoint") == comparison_config["teacher_dir"]
     assert comparable_comparison == comparable_production
-    assert not any("quality_gate" in stage.stage_id for stage in comparison.stages)
+    assert "recorded_observation" not in comparison_benchmark["config"]
     assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))

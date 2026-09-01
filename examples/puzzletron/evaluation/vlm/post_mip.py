@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import evaluate
+from modelopt.torch.puzzletron.distributed_eval.storage import atomic_write_json
 
 __all__ = [
     "evaluate_quality_comparison_checkpoint",
@@ -155,19 +156,14 @@ def evaluate_quality_comparison_checkpoint(
     }
     result_paths = [str(item["result_path"]) for item in runs]
     summary_path = args.output_dir / "quality_comparison_summary.json"
-    checkpoint.write_generated(
+    atomic_write_json(
         summary_path,
-        json.dumps(
-            {
-                "checkpoint": str(args.checkpoint),
-                "metrics": metrics,
-                "result_paths": result_paths,
-                "suite": args.suite,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
+        {
+            "checkpoint": str(args.checkpoint),
+            "metrics": metrics,
+            "result_paths": result_paths,
+            "suite": args.suite,
+        },
     )
     return {
         "metrics": metrics,

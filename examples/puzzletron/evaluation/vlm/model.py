@@ -63,7 +63,19 @@ def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:
     }
     if mismatches:
         raise ValueError(f"checkpoint geometry differs from Qwen 3.5 0.8B: {mismatches}")
-    if not any((checkpoint / name).is_file() for name in _PROCESSOR_ASSETS):
+    processor_assets = []
+    for name in _PROCESSOR_ASSETS:
+        path = checkpoint / name
+        if not path.is_file():
+            continue
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"{profile} checkpoint processor asset is invalid: {name}") from error
+        if not isinstance(config, dict):
+            raise ValueError(f"{profile} checkpoint processor asset must be an object: {name}")
+        processor_assets.append(name)
+    if not processor_assets:
         raise ValueError(f"{profile} checkpoint requires local multimodal processor assets")
 
 
