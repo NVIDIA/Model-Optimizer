@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Evaluate up to four independent 4B candidates concurrently on one-GPU
+# instances. Selected-student stages retain the one-GPU default.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}
+    post.candidate-evaluation.online_eval: &candidate_instances {instances: 4}
+    post.candidate-evaluation.materialized: *candidate_instances
+    post.candidate-evaluation.serving: *candidate_instances
+    post.candidate-evaluation.screening_kd: *candidate_instances
+    post.candidate-evaluation.screening_eval: *candidate_instances
+    post.candidate-evaluation.quality_screen: *candidate_instances
+    final_report: {partition: cpu}

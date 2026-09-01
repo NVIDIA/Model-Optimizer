@@ -31,22 +31,26 @@ FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qw
 MODEL_PATH = FAMILY_ROOT / "model.yaml"
 MIP_RUN_PATH = FAMILY_ROOT / "runs/mip_vlm_smoke.yaml"
 FULL_RUN_PATH = FAMILY_ROOT / "runs/full_vlm_smoke.yaml"
+CAMPAIGN_RUN_PATH = FAMILY_ROOT / "runs/vlm_campaign.yaml"
 RUNNER_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml"
 )
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
+CAMPAIGN_EXECUTION_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.campaign.yaml"
+)
 
 
-def _compile_plan(monkeypatch, tmp_path: Path, run_path: Path):
+def _compile_plan(monkeypatch, tmp_path: Path, run_path: Path, execution_path=EXECUTION_PATH):
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
     return compile_campaign_plan(
         experiment_config_path=run_path,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(EXECUTION_PATH),
+        execution=load_execution_config(execution_path),
         stage_filter="full",
     )
 
@@ -213,3 +217,61 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["final_image_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
     assert all(stage.total_gpus == 1 for stage in plan.stages)
+
+
+def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp_path) -> None:
+    plan = _compile_plan(
+        monkeypatch,
+        tmp_path,
+        CAMPAIGN_RUN_PATH,
+        execution_path=CAMPAIGN_EXECUTION_PATH,
+    )
+    config = plan.experiment_config
+    candidates = config["mip"]["runs"]["ffn-candidates"]
+    nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
+
+    assert candidates["variants"] == {
+        "width-7168": {
+            "constraints": {"params": {"max": "92%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [7168]}},
+        },
+        "width-6144": {
+            "constraints": {"params": {"max": "87%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [6144]}},
+        },
+        "width-5120": {
+            "constraints": {"params": {"max": "82%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [5120]}},
+        },
+    }
+    assert nodes["screening_kd"]["config"]["max_steps"] == 64
+    assert nodes["global_kd"]["config"]["max_steps"] == 256
+    assert nodes["quality_screen"]["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert "reference_checkpoint" not in nodes["quality_screen"]["config"]
+    assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
+    assert nodes["selected"]["top_k"] == 1
+    assert tuple(stage.stage_id for stage in plan.stages)[-11:-1] == (
+        "post.candidate-evaluation.online_eval",
+        "post.candidate-evaluation.materialized",
+        "post.candidate-evaluation.serving",
+        "post.candidate-evaluation.screening_kd",
+        "post.candidate-evaluation.screening_eval",
+        "post.candidate-evaluation.quality_screen",
+        "post.candidate-evaluation.selected",
+        "post.candidate-evaluation.global_kd",
+        "post.candidate-evaluation.final_eval",
+        "post.candidate-evaluation.quality_benchmarks",
+    )
+    assert tuple(stage.stage_id for stage in plan.stages)[-1] == "post.candidate-evaluation.best"
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    candidate_stages = {
+        "post.candidate-evaluation.online_eval",
+        "post.candidate-evaluation.materialized",
+        "post.candidate-evaluation.serving",
+        "post.candidate-evaluation.screening_kd",
+        "post.candidate-evaluation.screening_eval",
+        "post.candidate-evaluation.quality_screen",
+    }
+    assert all(stages[stage_id].instances == 4 for stage_id in candidate_stages)
+    assert all(stages[stage_id].total_gpus == 4 for stage_id in candidate_stages)
+    assert stages["post.candidate-evaluation.global_kd"].total_gpus == 1
