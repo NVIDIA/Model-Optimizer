@@ -42,7 +42,13 @@ specdec_bench.
 # Not re-exported from specdec_bench/__init__.py: that module deliberately exposes
 # only __version__ (and must stay importable without modelopt), so widening it here
 # would break its own convention.
-__all__ = ["SCHEMA_VERSION", "build_profile", "checkpoint_id", "stub_profile"]
+__all__ = [
+    "SCHEMA_VERSION",
+    "build_profile",
+    "checkpoint_id",
+    "per_step_mean_accept_length",
+    "stub_profile",
+]
 
 SCHEMA_VERSION = "1.0"
 
@@ -102,17 +108,42 @@ def _dense_from_length_keyed(length_keyed, num_speculative_tokens):
     return [length_keyed.get(i + 2, 0.0) for i in range(num_speculative_tokens)]
 
 
+def per_step_mean_accept_length(histogram):
+    """Mean tokens emitted per decode step, weighted by steps.
+
+    This is the quantity the acceptance vectors describe, and the one consumers
+    need: both dynamo's mocker and vLLM's synthetic sampler draw a length *per
+    decode step*.
+
+    It is deliberately not ``AcceptanceRate.out["Average_AL"]``, which averages
+    per-*request* accept length over requests and so weights a short request the
+    same as a long one. On real data the two differ materially -- 2.4733 vs 2.5467
+    on the first MiniMax-M2.7 DFlash run -- and conflating them makes the identity
+    below look broken when nothing is wrong.
+    """
+    if not histogram:
+        return None
+    h = _as_int_keyed(histogram)
+    n = sum(h.values())
+    return sum(k * v for k, v in h.items()) / n if n else None
+
+
 def _consistency_check(mean_accept_length, marginal_accept_rates, tolerance=0.02):
-    """Cross-check the reported mean against the one implied by the marginals.
+    """Check the per-step mean against the one implied by the published marginals.
 
-    For longest-prefix verification, mean accept length is the sum of the survival
-    function: ``AL = 1 + sum_i P(first i+1 drafts all accepted)``. That identity ties
-    two independently-derived numbers together, so a mismatch means the histogram,
-    the offset, or the densification is wrong -- exactly the failure that would
-    otherwise ship silently.
+    For longest-prefix verification the mean is the sum of the survival function:
+    ``AL = 1 + sum_i P(first i+1 drafts all accepted)``.
 
-    Returns a dict rather than raising: a profile that fails the check is still worth
-    emitting (with the failure recorded) so the discrepancy can be inspected.
+    Because both sides derive from the same histogram, this holds exactly *when the
+    published vector spans every observed acceptance length*. So what it actually
+    guards is truncation: if ``num_speculative_tokens`` understates the K the run
+    used, the vector is cut short, the implied mean falls below the measured one,
+    and the profile would otherwise silently describe a weaker draft than was
+    measured. That is the failure mode worth catching, since K is derived from CLI
+    flags whose meaning varies by method.
+
+    Returns a dict rather than raising: a profile that fails is still worth emitting
+    (with the failure recorded) so the discrepancy stays inspectable.
     """
     implied = 1.0 + sum(marginal_accept_rates)
     delta = abs(implied - mean_accept_length)
@@ -181,7 +212,15 @@ def build_profile(
     """
     conditional_by_length = _as_int_keyed(acceptance_out.get("Conditional_Acceptance_Rate"))
     marginal_by_length = _as_int_keyed(acceptance_out.get("Joint_Acceptance_Rate"))
-    mean_accept_length = float(acceptance_out.get("Average_AL", 0.0))
+    # Per-request mean, as the benchmark reports it. Kept for comparison against
+    # published model-card numbers, which do not always state which mean they use.
+    mean_per_request = float(acceptance_out.get("Average_AL", 0.0))
+    histogram = acceptance_out.get("Acceptance_Length_Histogram")
+    # Canonical mean is per-step: it is what the vectors describe (see
+    # per_step_mean_accept_length).
+    mean_accept_length = per_step_mean_accept_length(histogram)
+    if mean_accept_length is None:
+        mean_accept_length = mean_per_request
 
     conditional = _dense_from_length_keyed(conditional_by_length, num_speculative_tokens)
     marginal = _dense_from_length_keyed(marginal_by_length, num_speculative_tokens)
@@ -208,6 +247,7 @@ def build_profile(
         "conditional_accept_rates": [round(x, 6) for x in conditional],
         "marginal_accept_rates": [round(x, 6) for x in marginal],
         "mean_accept_length": round(mean_accept_length, 6),
+        "mean_accept_length_per_request": round(mean_per_request, 6),
         "accept_length_model": accept_length_model,
         # Only meaningful once measured at more than one K; populated by the
         # AR-vs-K sweep for block-parallel methods.

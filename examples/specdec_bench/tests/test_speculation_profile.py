@@ -63,11 +63,34 @@ def test_mean_consistency_identity_holds():
     assert check["implied_mean_accept_length"] == pytest.approx(1.9)
 
 
-def test_mean_consistency_flags_a_wrong_mean():
-    out = _acceptance_out_from_histogram({1: 40, 2: 30, 3: 30})
-    out["Average_AL"] = 3.5  # inconsistent with the histogram
-    profile = build_profile(out, num_speculative_tokens=3, method="eagle3")
-    assert not profile["validation"]["mean_consistency"]["passed"]
+def test_mean_consistency_flags_a_truncated_vector():
+    """K understating the run's actual draft length must not pass silently.
+
+    The run below reached acceptance length 5 (4 accepted drafts), but the profile
+    claims K=2. The published vector is then cut short and describes a weaker draft
+    than was measured -- the failure the check exists to catch, since K comes from
+    CLI flags whose meaning varies by method.
+    """
+    out = _acceptance_out_from_histogram({1: 10, 2: 10, 3: 10, 4: 10, 5: 10})
+    profile = build_profile(out, num_speculative_tokens=2, method="eagle3")
+    check = profile["validation"]["mean_consistency"]
+    assert not check["passed"]
+    assert check["implied_mean_accept_length"] < check["reported_mean_accept_length"]
+
+
+def test_per_request_and_per_step_means_are_both_reported():
+    """They differ on real data; conflating them made the identity look broken.
+
+    Average_AL weights each request equally regardless of how many decode steps it
+    took, while the vectors describe a per-step distribution.
+    """
+    out = _acceptance_out_from_histogram({1: 8611, 2: 7814, 3: 5337, 4: 8891})
+    out["Average_AL"] = 2.54671  # per-request, as measured on MiniMax-M2.7 DFlash
+    profile = build_profile(out, num_speculative_tokens=3, method="dflash")
+    assert profile["mean_accept_length"] == pytest.approx(2.4733, abs=1e-3)
+    assert profile["mean_accept_length_per_request"] == pytest.approx(2.54671)
+    # The identity holds against the per-step mean, which is what the vectors describe.
+    assert profile["validation"]["mean_consistency"]["passed"]
 
 
 def test_marginals_are_non_increasing():
