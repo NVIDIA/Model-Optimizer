@@ -136,6 +136,17 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
     return returncode, "".join(chunks)
 
 
+# Set by a suite's conftest to run a command without spawning a subprocess (see
+# ``_test_utils.torch.megatron.example_runner``). ``None`` means always use a subprocess.
+_in_process_runner = None
+
+
+def set_in_process_runner(runner) -> None:
+    """Register ``runner(cmd_parts, example_path) -> str | None``; ``None`` result falls through."""
+    global _in_process_runner
+    _in_process_runner = runner
+
+
 def run_example_command(
     cmd_parts: list[str],
     example_path: str,
@@ -146,6 +157,10 @@ def run_example_command(
 ) -> str | None:
     """Run an example command, retrying transient HuggingFace access errors."""
     print(f"[{example_path}] Running command: {cmd_parts}")
+    if _in_process_runner is not None:
+        output = _in_process_runner(cmd_parts, example_path)
+        if output is not None:
+            return output
     env = env or os.environ.copy()
     cwd = MODELOPT_ROOT / "examples" / example_path
 
