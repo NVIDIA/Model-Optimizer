@@ -20,6 +20,7 @@ import signal
 import subprocess
 import threading
 import time
+import traceback
 import warnings
 from pathlib import Path
 
@@ -137,12 +138,12 @@ def _run_capturing(cmd_parts: list[str], cwd: Path, env: dict[str, str]) -> tupl
 
 
 # Set by a suite's conftest to run a command without spawning a subprocess (see
-# ``_test_utils.examples.megatron_example_runner``). ``None`` means always use a subprocess.
+# ``_test_utils.examples.megatron_example_runner``). Unset means always use a subprocess.
 _in_process_runner = None
 
 
 def set_in_process_runner(runner) -> None:
-    """Register ``runner(cmd_parts, example_path) -> str | None``; ``None`` result falls through."""
+    """Register ``runner(cmd_parts, example_path) -> str``; it must not fall back to a subprocess."""
     global _in_process_runner
     _in_process_runner = runner
 
@@ -176,20 +177,20 @@ def run_example_command(
             except Exception as e:
                 # Re-raise unless it looks transient, so a real failure keeps its traceback
                 # instead of being flattened into CalledProcessError.
-                # An in-process runner attaches what the step printed; the marker is usually
-                # there rather than in str(e), which may be only a launcher-level failure table.
+                # format_exc() walks __cause__/__context__: most markers are exception type
+                # names that only ever appear in a formatted traceback, never in str(e) -- a Hub
+                # ConnectionError typically surfaces wrapped in a DatasetGenerationError. The
+                # runner also attaches what the step printed, for launcher-level failures.
                 captured = getattr(e, "captured_output", "")
-                text = f"{type(e).__name__}: {e}\n{captured}"
+                text = f"{traceback.format_exc()}\n{captured}"
                 if attempt == hf_max_retries or not any(
                     marker in text for marker in _HF_TRANSIENT_MARKERS
                 ):
                     raise
                 returncode, output = 1, text
             else:
-                if result is not None:
-                    return result
-                in_process = None  # not drivable in-process; use the subprocess path
-                returncode, output = _run_capturing(cmd_parts, cwd, env)
+                assert result is not None, "an in-process runner must return output, not fall back"
+                return result
         else:
             returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:

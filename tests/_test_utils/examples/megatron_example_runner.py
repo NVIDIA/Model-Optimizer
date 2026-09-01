@@ -33,17 +33,16 @@ import contextlib
 import gc
 import importlib
 import importlib.util
-import io
 import logging
 import os
 import signal
 import sys
-import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from _test_utils.examples.run_command import MODELOPT_ROOT
+from _test_utils.examples.run_command import _ORPHAN_PIPE_TIMEOUT_S, MODELOPT_ROOT
 from _test_utils.torch.distributed.utils import get_free_port
 
 import modelopt.torch.utils.distributed as dist
@@ -53,64 +52,70 @@ _LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUI
 
 
 @contextlib.contextmanager
-def _capture_output(buf):
-    """Capture what a step writes in this process, including lines from logging handlers.
+def _capture_output():
+    """Capture everything a step emits, as one ordered stream, while still streaming it live.
 
-    ``redirect_stdout`` alone misses them: Megatron-Bridge logs some lines that tests assert on
-    through a logger rather than ``print``. stderr is redirected too, so the captured string
-    matches the subprocess path, which combines both streams. Pair with :func:`_capture_output_fd`
-    for output written straight to fd 1/2, which rebinding ``sys.stdout`` cannot see.
+    Three sources have to end up in the same place: ``print`` from the script, records from loggers
+    Megatron-Bridge uses for lines tests assert on, and fd-level writes from ``torchrun`` workers
+    and C extensions. Under pytest's fd capture ``sys.stdout``/``sys.stderr`` are objects over
+    pytest's own temp file rather than fds 1/2, so both a redirect and an fd swap are needed.
 
-    The caller owns ``buf`` so that its content is still readable if this manager raises on entry.
-    """
-    handler = logging.StreamHandler(buf)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    targets = [logging.getLogger()]
-    targets += [
-        lg
-        for lg in logging.root.manager.loggerDict.values()
-        if isinstance(lg, logging.Logger) and (lg.handlers or not lg.propagate)
-    ]
-    levels = {}
-    try:
-        for lg in targets:
-            lg.addHandler(handler)
-            levels[lg] = lg.level
-            if lg.level > logging.INFO:
-                lg.setLevel(logging.INFO)
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            yield
-    finally:
-        for lg, level in levels.items():
-            lg.removeHandler(handler)
-            lg.setLevel(level)
-
-
-@contextlib.contextmanager
-def _capture_output_fd():
-    """Capture at the file-descriptor level, for output this process does not itself produce.
-
-    ``torchrun``'s workers are separate processes writing to the inherited fds, so Python-level
-    redirection cannot see them.
+    Tee rather than buffer: a job-level timeout SIGKILLs the runner without running any ``finally``,
+    and that is exactly when the log is wanted.
     """
     holder = [""]
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as tmp:
+    chunks: list[str] = []
+    read_fd, write_fd = os.pipe()
+    live = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # the fd we do not touch
+
+    def _drain():
+        with os.fdopen(read_fd, "r", errors="replace") as pipe:
+            for line in pipe:
+                live.write(line)
+                chunks.append(line)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    os.dup2(write_fd, 1)
+    os.dup2(write_fd, 2)
+    sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # now the pipe
+    handler = logging.StreamHandler(sink)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    root = logging.getLogger()
+    others = [lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)]
+    # Lower levels only for loggers that own their output; doing it for every logger switches on
+    # torch dynamo/inductor INFO and floods the pipe, which cost the 1-GPU suite 3m43 -> 9m01.
+    # A propagating logger still needs its own level lowered, or it drops the record before root.
+    levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
+    # Attach the handler only where the record cannot reach root, or it is written twice.
+    handled = [root, *(lg for lg in others if not lg.propagate)]
+    try:
+        for lg in levels:
+            if lg.level > logging.INFO:
+                lg.setLevel(logging.INFO)
+        for lg in handled:
+            lg.addHandler(handler)
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            yield holder
+    finally:
+        for lg in handled:
+            lg.removeHandler(handler)
+        for lg, level in levels.items():
+            lg.setLevel(level)
+        sink.close()
         sys.stdout.flush()
         sys.stderr.flush()
-        saved_out, saved_err = os.dup(1), os.dup(2)
-        os.dup2(tmp.fileno(), 1)
-        os.dup2(tmp.fileno(), 2)
-        try:
-            yield holder
-        finally:
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os.dup2(saved_out, 1)
-            os.dup2(saved_err, 2)
-            os.close(saved_out)
-            os.close(saved_err)
-            tmp.seek(0)
-            holder[0] = tmp.read()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        os.close(write_fd)  # EOF for the reader
+        reader.join(_ORPHAN_PIPE_TIMEOUT_S)  # bounded: an orphan may still hold the pipe
+        live.close()
+        holder[0] = "".join(chunks)
 
 
 def reset_megatron_global_state() -> None:
@@ -199,27 +204,25 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
     example_dir = str(MODELOPT_ROOT / "examples" / example_path)
     cwd = os.getcwd()
     os.chdir(example_dir)  # match the subprocess path, which runs with the example dir as cwd
-    buf, native = io.StringIO(), [""]  # bound up front: readable even if a capture fails to start
+    native = [""]  # bound up front: readable even if the capture fails to start
     try:
         module = _load_example_module(str(script), example_path)
         reset_megatron_global_state()  # a previous step left its own parallel state behind
         with patch.object(sys, "argv", argv):
             args = module.get_args()
         try:
-            with _capture_output_fd() as native, _capture_output(buf):
+            with _capture_output() as native:
                 module.main(args)
         except SystemExit as e:
             if e.code not in (0, None):
                 raise RuntimeError(f"{script} exited with code {e.code}") from e
-        return buf.getvalue() + native[0]
+        return native[0]
     except BaseException as e:
-        # The caller matches transient-HuggingFace markers on this; str(e) alone would not show
-        # a 503 raised deep inside the script.
-        e.captured_output = buf.getvalue() + native[0]
+        # The caller matches transient-HuggingFace markers on this alongside the traceback.
+        e.captured_output = native[0]
         raise
     finally:
         os.chdir(cwd)
-        print(buf.getvalue() + native[0])  # keep the script's output in the test log
 
 
 def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
@@ -247,7 +250,7 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
     os.chdir(example_dir)
     cap = [""]
     try:
-        with _capture_output_fd() as cap, patch.object(sys, "argv", argv):
+        with _capture_output() as cap, patch.object(sys, "argv", argv):
             torchrun_main()
         return cap[0]
     except BaseException as e:
@@ -259,7 +262,6 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         for sig, handler in saved_handlers.items():
             signal.signal(sig, handler)
         os.chdir(cwd)
-        print(cap[0])
 
 
 def run_example_step(cmd_parts: list[str], example_path: str) -> str:
