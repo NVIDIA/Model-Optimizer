@@ -41,10 +41,11 @@ Model Optimizer is available for free for all developers on [NVIDIA PyPI](https:
 
 ModelOpt-Windows can be installed either as a standalone toolkit or through Microsoft's Olive.
 
-### Windows on ARM (N1x)
+### Windows on Arm
 
-For N1x, first follow the [Windows ARM64 environment and PyArrow guide](./python_313_arm64/README.md),
-then use the same [ONNX PTQ examples](../onnx_ptq/README.md) as standard Windows.
+Windows ARM64 users should first follow the
+[Windows on Arm installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_windows_arm64.html),
+then use the same [ONNX PTQ examples](../onnx_ptq/README.md) as Windows x64 users.
 
 ### Standalone Toolkit Installation (with CUDA 12.x)
 

@@ -15,6 +15,17 @@ ONNX Runtime uses execution providers (EPs) to run models efficiently across a r
 
 Choose the EP that best matches your model, hardware and deployment requirements.
 
+TensorRT-RTX calibration backends
+=================================
+
+ModelOpt uses the legacy TensorRT-RTX EP by default. To use the standalone EP ABI plugin
+instead, install the TensorRT-RTX ABI package and pass
+``--calibration_eps NvTensorRtRtx --trt_rtx_backend abi``. ModelOpt registers the plugin
+only when this backend is selected; CUDA EP calibration remains available independently.
+See the `TensorRT-RTX EP ABI documentation
+<https://github.com/NVIDIA/TensorRT-RTX-EP-ABI>`_ for package requirements and plugin
+usage.
+
 .. note:: Currently, DirectML backend doesn't support 8-bit precision. So, 8-bit quantized models should be deployed on other backends like ORT-CUDA etc. However, DML path does support INT4 quantized models.
 
 ONNX Runtime GenAI

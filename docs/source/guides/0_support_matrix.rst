@@ -84,6 +84,13 @@ Feature Support Matrix
           - PyTorch*, ONNX
           - TensorRT*, TensorRT-LLM*, ORT-CUDA
 
+    .. note::
+
+       Windows ARM64 support is experimental and currently targets the same ONNX quantization
+       formats shown above. Availability still depends on native ARM64 builds of each Python
+       package and execution provider. See the :ref:`Windows on Arm installation guide
+       <Install-Page-Windows-ARM64>` for the tested environment and known dependency limitations.
+
 .. note:: 
   - Features marked with an asterisk (*) are considered experimental.
   - ``ORT-CUDA``, ``ORT-DML``, and ``ORT-TRT-RTX`` are ONNX Runtime Execution Providers (EPs) for CUDA, DirectML, and TensorRT-RTX respectively. Support for different deployment backends can vary across models.
