@@ -1,0 +1,209 @@
+# @package _global_
+
+defaults:
+  - /base@_global_
+  - /families/qwen3_5/family@_global_
+  - /families/qwen3_5/qwen3p5_4b/model@_global_
+  - _self_
+
+# Bounded one-GPU compilation and MIP route for the pinned public checkpoint.
+# The default stops before materialization, evaluation, and distillation.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_4b_vlm_smoke}
+dataset_path: ${oc.env:PUZZLETRON_DATASET_PATH}
+display_name: Qwen3p5_4B_VLM
+
+model:
+  source: ${input_hf_model_path}
+  revision: ${model_info.hf_revision}
+  descriptor_override: qwen3_5
+  trust_remote_code: false
+  force_hf: false
+
+capability_validation:
+  require_complete_pipeline: true
+
+data:
+  modality: multimodal
+  layout: padded_varlen
+  max_sample_length: 512
+  path: ${dataset_path}
+  revision: ${oc.env:PUZZLETRON_DATASET_REVISION}
+  processor_identity: ${model_info.hf_repo}@${model_info.hf_revision}
+  packing:
+
+train_token_cache_path:
+validation_token_cache_path:
+tokenize_data:
+  enabled: false
+  caches: []
+
+embedding_pruning:
+  enabled: true
+  widths: [2560]
+  alignment: 256
+  cycle_widths: true
+
+pruning:
+  eval_samples: 8
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path:
+  automodel:
+    parallel: &single_gpu_parallel
+      tp: 1
+      cp: 1
+      pp: 1
+      ep: 1
+      dp_shard: 1
+      dp_replicate: 1
+      sequence_parallel: false
+
+sort:
+  # The maintained search is FFN-only; preserve unrelated attention and GDN
+  # ordering.
+  deferred_axes:
+    - kv_groups
+    - q_heads_per_group
+    - gdn_key_groups
+    - gdn_value_heads_per_group
+    - gdn_key_head_dim
+    - gdn_value_head_dim
+
+sort_sanity:
+  enabled: true
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path:
+  # The BF16 VLM route can move by a few thousandths under equivalent FFN
+  # permutations because image-text reductions are order-sensitive.
+  max_abs_lm_loss_delta: 0.005
+  max_abs_reverse_lm_loss_delta: 0.005
+  automodel:
+    parallel: *single_gpu_parallel
+    lm_head_backend: streaming
+
+width_sanity:
+  enabled: true
+  hidden_width_diagnostic: false
+  axes: [ffn_intermediate]
+  single_load_parent_sweep: true
+  one_case_per_axis: false
+  target_count_per_axis: 1
+  layer_count: 2
+  layer_selection: spread
+  methods: [activation, random, reverse]
+  physical_realization: true
+  cleanup_physical_checkpoints: true
+  reuse_sort_equivalence: true
+  require_beats_random: false
+  require_beats_reverse: false
+  physical_equivalence_tolerance: 0.001
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+slicing_sanity:
+  enabled: true
+  backend: distributed_parent_sweep
+
+bypass:
+  enabled: false
+
+depth_importance:
+  enabled: false
+  granularity: subblock
+  source_checkpoint_dir: ${teacher_dir}
+  output_dir: ${puzzle_dir}/depth/iterative
+  expected_initial_sublayers: 64
+  max_removals: 0
+  max_subblocks_to_remove: 0
+  metric: lm_loss
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+
+build_library:
+  enabled: true
+  include_bypass: false
+
+vllm_stats:
+  enabled: false
+  # The smoke uses the static weight-plus-KV memory model for its named
+  # workload; measured vLLM runtime collection belongs in a campaign run.
+  runtime_stats:
+    enabled: false
+
+replacement_scoring:
+  enabled: true
+  granularity: subblock
+  eval_samples: 2
+  micro_batch_size: 1
+  block_size: 512
+  packed_token_cache_path:
+  automodel:
+    parallel: *single_gpu_parallel
+    lm_head_backend: streaming
+
+mip:
+  enabled: true
+  score_granularity: subblock
+  single_block_replacement_validation_dir: ${to_path:${replacement_scoring.subblock_output_dir}}
+  canonical_solutions_path: ${to_path:${replacement_scoring.subblock_solutions_path}}
+  workloads:
+    serving-default:
+      isl: 4096
+      osl: 1024
+      batch_size: 1
+      concurrency: 1
+  runs:
+    params-80:
+      constraints:
+        params: {max: 82%}
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space: &bounded_ffn_search
+        depth: [0]
+        embedding: [2560]
+        axes_default: teacher
+        axes: {ffn.intermediate_size: all}
+      solver: &bounded_solver
+        backend: auto
+        num_solutions: 3
+        min_hamming_distance: 2
+        max_seconds_per_solution: 30
+      homogeneous: &bounded_homogeneous {enabled: true, keep: 2, rank_by: objective}
+    memory-85:
+      constraints:
+        memory:
+          at:
+            serving-default: {max: 85%}
+      objectives:
+        - metric: metrics.cosine_embedding_loss_hidden_states
+          direction: minimize
+      search_space: *bounded_ffn_search
+      solver: *bounded_solver
+      homogeneous: *bounded_homogeneous
+
+post_mip:
+  flows: {}
+zero_shot_evaluation:
+  enabled: false
+aiperf:
+  enabled: false
+global_distillation_sanity:
+  enabled: false
+global_distillation:
+  enabled: false
+post_distillation_evaluation:
+  enabled: false
+
+execution:
+  gpus_per_node: 1

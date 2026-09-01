@@ -23,6 +23,8 @@ command resumes compatible work after an interruption.
 For an image-text walkthrough using Qwen 3.5 0.8B and the recommended
 Nemotron-VLM dataset, follow the
 [Qwen VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md).
+For a larger, FFN-only example that keeps evaluation and distillation opt-in,
+see the [Qwen 3.5 4B VLM example](docs/qwen3p5_4b_vlm_example.md).
 
 ### 1. Prepare the environments
 
