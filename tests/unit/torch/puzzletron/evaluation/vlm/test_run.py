@@ -61,7 +61,7 @@ def _write_checkpoint(root: Path) -> Path:
     (model / "preprocessor_config.json").write_text("{}\n")
     (model / "chat_template.jinja").write_text(
         "{% if enable_thinking is defined and enable_thinking is false %}"
-        "no-think{% else %}think{% endif %}\n"
+        "<think>\n\n</think>\n\n{% else %}<think>\n{% endif %}"
     )
     return model
 
@@ -75,6 +75,11 @@ def test_no_think_template_is_local_and_requires_checkpoint_switch(tmp_path):
 
     assert generated.parent == tasks_root
     assert generated.read_text().startswith("{%- set enable_thinking = false %}\n")
+    (checkpoint_path / "chat_template.jinja").write_text(
+        "{% if enable_thinking is defined and enable_thinking is true %}"
+        "<think>\n{% else %}<think>\n\n</think>\n\n{% endif %}"
+    )
+    preflight._no_think_chat_template(checkpoint_path, tasks_root)
     (checkpoint_path / "chat_template.jinja").write_text("unsupported\n")
     with pytest.raises(ValueError, match="cannot disable thinking"):
         preflight._no_think_chat_template(checkpoint_path, tasks_root)

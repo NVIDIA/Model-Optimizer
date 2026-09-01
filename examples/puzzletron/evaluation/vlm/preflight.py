@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from jinja2 import Environment, TemplateError
+
 if TYPE_CHECKING:
     import argparse
 
@@ -33,7 +35,7 @@ from examples.puzzletron.evaluation.vlm import contracts, model, profile, suites
 __all__ = ["PreparedSuite", "prepare", "settings"]
 
 _NO_THINK_TEMPLATE_PREFIX = "{%- set enable_thinking = false %}\n"
-_NO_THINK_TEMPLATE_MARKER = "enable_thinking is defined and enable_thinking is false"
+_NO_THINK_GENERATION_PREFIX = "<think>\n\n</think>\n\n"
 
 
 @dataclass(frozen=True)
@@ -342,11 +344,26 @@ def _no_think_chat_template(checkpoint_path: Path, tasks_root: Path) -> Path:
         content = source.read_text()
     except (OSError, UnicodeError) as error:
         raise ValueError(f"Qwen 3.5 chat template is unreadable: {source}") from error
-    if _NO_THINK_TEMPLATE_MARKER not in content:
+    rendered = _render_no_think_template(_NO_THINK_TEMPLATE_PREFIX + content, source=source)
+    if not rendered.endswith(_NO_THINK_GENERATION_PREFIX):
         raise ValueError(f"Qwen 3.5 chat template cannot disable thinking: {source}")
     target = tasks_root / "modelopt_qwen35_no_think.jinja"
     target.write_text(_NO_THINK_TEMPLATE_PREFIX + content)
     return target
+
+
+def _render_no_think_template(content: str, *, source: Path) -> str:
+    try:
+        return (
+            Environment()
+            .from_string(content)
+            .render(
+                add_generation_prompt=True,
+                messages=[{"content": "test", "role": "user"}],
+            )
+        )
+    except TemplateError as error:
+        raise ValueError(f"Qwen 3.5 chat template is invalid: {source}") from error
 
 
 def _verify_video_reader(source_tasks: tuple[str, ...]) -> None:
