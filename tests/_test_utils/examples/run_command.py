@@ -157,22 +157,43 @@ def run_example_command(
 ) -> str | None:
     """Run an example command, retrying transient HuggingFace access errors."""
     print(f"[{example_path}] Running command: {cmd_parts}")
-    if _in_process_runner is not None:
-        output = _in_process_runner(cmd_parts, example_path)
-        if output is not None:
-            return output
+    in_process = _in_process_runner if env is None else None
+    if _in_process_runner is not None and env is not None:
+        # The in-process runner uses the ambient environment, so a caller-supplied env would be
+        # silently dropped. Fall back to a subprocess rather than run with the wrong environment.
+        warnings.warn(f"[{example_path}] env= given; running this step as a subprocess")
     env = env or os.environ.copy()
     cwd = MODELOPT_ROOT / "examples" / example_path
 
     for attempt in range(hf_max_retries + 1):
         if setup_free_port:
             env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
-        returncode, output = _run_capturing(cmd_parts, cwd, env)
+        if in_process is not None:
+            # Inside the loop so in-process steps get the same transient-HuggingFace retries;
+            # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
+            try:
+                result = in_process(cmd_parts, example_path)
+            except Exception as e:
+                # Re-raise unless it looks transient, so a real failure keeps its traceback
+                # instead of being flattened into CalledProcessError.
+                text = f"{type(e).__name__}: {e}"
+                if attempt == hf_max_retries or not any(
+                    marker in text for marker in _HF_TRANSIENT_MARKERS
+                ):
+                    raise
+                returncode, output = 1, text
+            else:
+                if result is not None:
+                    return result
+                in_process = None  # not drivable in-process; use the subprocess path
+                returncode, output = _run_capturing(cmd_parts, cwd, env)
+        else:
+            returncode, output = _run_capturing(cmd_parts, cwd, env)
         if returncode == 0:
             return output
         transient = any(marker in output for marker in _HF_TRANSIENT_MARKERS)
         if not transient or attempt == hf_max_retries:
-            raise subprocess.CalledProcessError(returncode, cmd_parts)
+            raise subprocess.CalledProcessError(returncode, cmd_parts, output=output)
         warnings.warn(
             f"[{example_path}] transient HuggingFace access error; retrying in "
             f"{hf_retry_delay_s}s (attempt {attempt + 1}/{hf_max_retries})"
