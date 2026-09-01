@@ -38,71 +38,58 @@ import os
 import signal
 import sys
 import tempfile
-import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from _test_utils.examples.run_command import _ORPHAN_PIPE_TIMEOUT_S, MODELOPT_ROOT
+from _test_utils.examples.run_command import MODELOPT_ROOT
 from _test_utils.torch.distributed.utils import get_free_port
 
 import modelopt.torch.utils.distributed as dist
 
 # torchrun's PContext installs handlers for these and never restores them.
-_TAIL_INTERVAL_S = 0.2  # how often the tailer echoes new output
-
 _LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
 
 
 @contextlib.contextmanager
 def _capture_output():
-    """Capture everything a step emits, as one ordered stream, while still streaming it live.
+    """Capture everything a step emits, in the order it happened.
 
     Three sources have to end up in the same place: ``print`` from the script, records from loggers
     Megatron-Bridge uses for lines tests assert on, and fd-level writes from ``torchrun`` workers
     and C extensions. Under pytest's fd capture ``sys.stdout``/``sys.stderr`` are objects over
     pytest's own temp file rather than fds 1/2, so both a redirect and an fd swap are needed.
 
-    A tailer thread echoes the buffer as it fills, so a job-level timeout -- which SIGKILLs the
-    runner without running any ``finally`` -- still leaves the log in the CI output. Writing to a
-    pipe instead would stream more directly, but its backpressure cost the 1-GPU suite 3m43 -> 9m06.
+    Buffered, not streamed: the caller prints the result, which pytest shows for a failing test.
+    Echoing it live would not reach the CI log anyway -- without ``-s``, fd 1 is already pytest's
+    own capture file. Piping it to stream for real cost the 1-GPU suite 3m43 -> 9m06 in
+    backpressure, so surviving a job-level SIGKILL would need a file outside the process.
     """
     holder = [""]
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as tmp:
-        live = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # the fd we do not touch
-        done = threading.Event()
-        sent = [0]
-
-        def _tail():
-            """Echo new bytes as they land, so a SIGKILLed job still has the log."""
-            while True:
-                data = os.pread(tmp.fileno(), 1 << 20, sent[0])  # pread: leaves the write offset
-                if data:
-                    sent[0] += len(data)
-                    live.write(data.decode("utf-8", errors="replace"))
-                elif done.is_set():
-                    return
-                else:
-                    done.wait(_TAIL_INTERVAL_S)
-
-        sys.stdout.flush()
-        sys.stderr.flush()
-        saved_out, saved_err = os.dup(1), os.dup(2)
-        os.dup2(tmp.fileno(), 1)
-        os.dup2(tmp.fileno(), 2)
-        sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")  # now the temp file
-        handler = logging.StreamHandler(sink)
+        handler = logging.StreamHandler()  # bound to the swapped fd 2 below
         handler.setFormatter(logging.Formatter("%(message)s"))
         root = logging.getLogger()
-        others = [lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)]
+        with logging._lock:  # any getLogger() from a background thread mutates loggerDict
+            others = [
+                lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)
+            ]
         # Lower levels only for loggers that own their output: a propagating logger still needs its
         # own level lowered, or it drops the record before root sees it.
         levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
         # Attach the handler only where the record cannot reach root, or it is written twice.
         handled = [root, *(lg for lg in others if not lg.propagate)]
-        tailer = threading.Thread(target=_tail, daemon=True)
-        tailer.start()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        saved_out, saved_err = os.dup(1), os.dup(2)
+        sink = None
         try:
+            # Inside the try: a raise between here and the restore would otherwise leave fds 1/2
+            # pointing at a temp file the ``with`` then closes, silencing the rest of the session.
+            os.dup2(tmp.fileno(), 1)
+            os.dup2(tmp.fileno(), 2)
+            sink = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")
+            handler.setStream(sink)
             for lg in levels:
                 if lg.level > logging.INFO:
                     lg.setLevel(logging.INFO)
@@ -115,16 +102,14 @@ def _capture_output():
                 lg.removeHandler(handler)
             for lg, level in levels.items():
                 lg.setLevel(level)
-            sink.close()
+            if sink is not None:
+                sink.close()
             sys.stdout.flush()
             sys.stderr.flush()
             os.dup2(saved_out, 1)
             os.dup2(saved_err, 2)
             os.close(saved_out)
             os.close(saved_err)
-            done.set()
-            tailer.join(_ORPHAN_PIPE_TIMEOUT_S)  # bounded, like the subprocess reader
-            live.close()
             tmp.seek(0)
             holder[0] = tmp.read()
 
@@ -142,7 +127,8 @@ def _preserved_signal_handlers():
         yield
     finally:
         for sig, handler in saved.items():
-            signal.signal(sig, handler)
+            if handler is not None:  # installed from C; not restorable via signal.signal()
+                signal.signal(sig, handler)
 
 
 def reset_megatron_global_state() -> None:
@@ -259,6 +245,7 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
         raise
     finally:
         os.chdir(cwd)
+        print(native[0])  # keep the step's output in the test log
 
 
 def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
@@ -296,6 +283,7 @@ def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
         raise
     finally:
         os.chdir(cwd)
+        print(cap[0])  # keep the step's output in the test log
 
 
 def run_example_step(cmd_parts: list[str], example_path: str) -> str:

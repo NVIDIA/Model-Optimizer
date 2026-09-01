@@ -168,11 +168,9 @@ def run_example_command(
 
     for attempt in range(hf_max_retries + 1):
         if setup_free_port:
-            # env is a copy, so an in-process runner reading os.environ would not see it.
-            port = str(get_free_port())  # fresh port per attempt
-            env["MASTER_PORT"] = port
-            if in_process is not None:
-                os.environ["MASTER_PORT"] = port
+            # Subprocess steps only: an in-process runner picks its own free port, since env is a
+            # copy it never sees.
+            env["MASTER_PORT"] = str(get_free_port())  # fresh port per attempt
         if in_process is not None:
             # Inside the loop so in-process steps get the same transient-HuggingFace retries;
             # these tests do hit the Hub (e.g. calib_dataset_name="cnn_dailymail").
