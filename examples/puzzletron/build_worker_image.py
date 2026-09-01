@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import platform
 import re
@@ -32,7 +31,6 @@ __all__ = [
     "artifact_stem",
     "build_parser",
     "main",
-    "write_checksum",
 ]
 
 _PLATFORM = "linux/amd64"
@@ -55,18 +53,6 @@ def artifact_names(revision: str) -> dict[str, str]:
         "archive": f"{stem}.tar.zst",
         "sqsh": f"{stem}.sqsh",
     }
-
-
-def write_checksum(path: Path) -> str:
-    """Write and return the SHA-256 checksum for an exported artifact."""
-
-    digest = hashlib.sha256()
-    with path.open("rb") as artifact:
-        while chunk := artifact.read(4 * 1024 * 1024):
-            digest.update(chunk)
-    checksum = digest.hexdigest()
-    path.with_name(f"{path.name}.sha256").write_text(f"{checksum}  {path.name}\n")
-    return checksum
 
 
 def _run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -102,11 +88,8 @@ def _require_linux_amd64() -> None:
 
 def _output_path(output_dir: Path, name: str) -> Path:
     path = output_dir / name
-    existing = [
-        candidate for candidate in (path, path.with_name(f"{name}.sha256")) if candidate.exists()
-    ]
-    if existing:
-        raise FileExistsError(f"Refusing to overwrite existing artifact: {existing[0]}")
+    if path.exists():
+        raise FileExistsError(f"Refusing to overwrite existing artifact: {path}")
     return path
 
 
@@ -170,12 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--archive",
         action="store_true",
-        help="export a compressed Docker archive and checksum",
+        help="export a compressed Docker archive",
     )
     parser.add_argument(
         "--sqsh",
         action="store_true",
-        help="export an Enroot/Pyxis SquashFS image and checksum",
+        help="export an Enroot/Pyxis SquashFS image",
     )
     return parser
 
@@ -248,10 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_dir is not None:
         if archive is not None:
             _export_archive(image, archive)
-            write_checksum(archive)
         if sqsh is not None:
             _export_sqsh(image, sqsh)
-            write_checksum(sqsh)
 
     print(f"Docker image: {image}")
     return 0

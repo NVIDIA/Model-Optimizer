@@ -15,29 +15,18 @@
 
 """Tests for the Puzzletron worker-image build command."""
 
-import hashlib
-
 import pytest
 
-from examples.puzzletron.build_worker_image import artifact_names, write_checksum
+from examples.puzzletron.build_worker_image import artifact_names
 
 
-def test_exported_artifacts_share_a_git_revision_identity(tmp_path):
+def test_exported_artifacts_share_a_git_revision_identity():
     revision = "ba737f1f2301d0526c7d4674e1d21bf3d8c1ff14"
 
     assert artifact_names(revision) == {
         "archive": "modelopt-puzzletron-linux-amd64-git-ba737f1f2301.tar.zst",
         "sqsh": "modelopt-puzzletron-linux-amd64-git-ba737f1f2301.sqsh",
     }
-
-    artifact = tmp_path / artifact_names(revision)["sqsh"]
-    artifact.write_bytes(b"puzzletron-image")
-    checksum = write_checksum(artifact)
-
-    assert checksum == hashlib.sha256(b"puzzletron-image").hexdigest()
-    assert artifact.with_name(f"{artifact.name}.sha256").read_text() == (
-        f"{checksum}  {artifact.name}\n"
-    )
 
 
 def test_artifact_names_require_a_full_git_revision():
