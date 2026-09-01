@@ -129,6 +129,7 @@ post_mip:
           metric: online_eval.lm_loss
           direction: minimize
           top_k: 8
+          origin_variant_quotas: {retained-95: 2, retained-90: 2, retained-85: 2}
 
         materialized:
           type: materialize
@@ -145,7 +146,7 @@ post_mip:
             image_width_mean: 1280
             image_height_mean: 720
             concurrency: [1, 4]
-            request_count: 8
+            request_count: 24
             extra_inputs: {min_tokens: 80}
             use_server_token_count: true
             seed: 42
@@ -178,34 +179,17 @@ post_mip:
           metrics:
             - metric: online_eval.lm_loss
               direction: minimize
+              weight: 1.0
             - metric: serving.images_12.concurrency_4.image_throughput
               direction: maximize
+              weight: 0.25
           top_k: 4
+          origin_variant_quotas: {retained-95: 1, retained-90: 1, retained-85: 1}
 
-        kd_64:
-          type: global_kd
+        pre_kd_short_v1:
+          type: downstream_evaluation
           input: kd_shortlist
           model_source: materialized
-          trajectory: retained-candidate-learning-curve
-          config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            resume: true
-            max_steps: 64
-            global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 64
-          exposure:
-            cumulative_steps: 64
-            global_batch_size: 4
-            cumulative_examples: 256
-            max_sample_length: 512
-            estimated_cumulative_gpu_hours: 0.25
-
-        short_v1_64:
-          type: downstream_evaluation
-          input: kd_64
           failure_policy: strict
           config: &short_v1_evaluation
             profile: qwen35_vlm_short_v1
@@ -230,6 +214,34 @@ post_mip:
               enable_expert_parallel: false
               distributed_executor_backend: mp
               gpu_group_size: 1
+
+        kd_64:
+          type: global_kd
+          input: pre_kd_short_v1
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config:
+            seed: 1111
+            validation_seed: 445
+            shuffle_training_data: true
+            resume: true
+            max_steps: 64
+            global_batch_size: 4
+            local_batch_size: 1
+            checkpoint_every_steps: 64
+          exposure:
+            cumulative_steps: 64
+            global_batch_size: 4
+            cumulative_examples: 256
+            max_sample_length: 512
+            estimated_cumulative_gpu_hours: 0.25
+
+        short_v1_64:
+          type: downstream_evaluation
+          input: kd_64
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
 
         kd_128:
           type: global_kd
@@ -297,6 +309,7 @@ post_mip:
           input: selected
           config:
             pre_kd_source: materialized
+            pre_kd_evaluation: pre_kd_short_v1
             profile: qwen35_vlm_short_v1
             row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
             row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
@@ -390,9 +403,16 @@ post_mip:
         control_materialized:
           type: materialize
 
+        control_pre_kd_short_v1:
+          type: downstream_evaluation
+          input: control_materialized
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
         control_kd_64:
           type: global_kd
-          input: control_materialized
+          input: control_pre_kd_short_v1
           model_source: control_materialized
           trajectory: conservative-control-learning-curve
           config: &control_kd
@@ -465,6 +485,7 @@ post_mip:
           input: control_short_v1_256
           config:
             pre_kd_source: control_materialized
+            pre_kd_evaluation: control_pre_kd_short_v1
             profile: qwen35_vlm_short_v1
             row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
             row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}

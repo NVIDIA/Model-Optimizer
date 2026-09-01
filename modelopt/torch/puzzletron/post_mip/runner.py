@@ -1115,10 +1115,21 @@ def _aggregate_result_manifest(
 
     settings = dict(node.config.get("config") or {})
     pre_kd_source = str(settings["pre_kd_source"])
+    pre_kd_evaluation = str(settings["pre_kd_evaluation"])
     observations = []
     for revision_id in input_set.revision_ids:
         revision = ledger.revisions[revision_id]
         pre_kd = ledger.source_revision(revision_id, pre_kd_source)
+        pre_kd_evaluation_observation = ledger._observation_for_revision(
+            pre_kd_evaluation, revision_id
+        )
+        if pre_kd_evaluation_observation is None:
+            raise RuntimeError(
+                f"missing pre-KD evaluation {pre_kd_evaluation!r} for {revision.architecture_id}"
+            )
+        pre_kd_comparison = json.loads(
+            Path(pre_kd_evaluation_observation.artifacts["comparison_path"]).read_text()
+        )
         milestones = []
         for milestone in settings["milestones"]:
             kd_observation = ledger._observation_for_revision(str(milestone["kd"]), revision_id)
@@ -1158,6 +1169,10 @@ def _aggregate_result_manifest(
             "pre_kd": {
                 "revision_id": pre_kd.revision_id,
                 "checkpoint": pre_kd.artifact["checkpoint"],
+                "evaluation_node": pre_kd_evaluation,
+                "evaluation_metrics": pre_kd_evaluation_observation.metrics,
+                "evaluation_artifacts": pre_kd_evaluation_observation.artifacts,
+                "evaluation_identity": pre_kd_comparison["identity"],
             },
             "evaluation_identity": {
                 "profile": settings.get("profile"),

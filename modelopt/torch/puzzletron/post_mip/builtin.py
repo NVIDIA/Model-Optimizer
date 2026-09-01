@@ -79,11 +79,13 @@ class ResultManifestNode(PostMIPNode):
             raise ValueError("result_manifest milestone steps must increase strictly")
         if not settings.get("pre_kd_source"):
             raise ValueError("result_manifest.config.pre_kd_source is required")
+        if not settings.get("pre_kd_evaluation"):
+            raise ValueError("result_manifest.config.pre_kd_evaluation is required")
 
     @classmethod
     def metric_references(cls, config: Mapping[str, Any]) -> tuple[str, ...]:
         settings = dict(config.get("config") or {})
-        owners = [str(settings["pre_kd_source"])]
+        owners = [str(settings["pre_kd_source"]), str(settings["pre_kd_evaluation"])]
         for milestone in settings.get("milestones") or ():
             owners.extend((str(milestone["kd"]), str(milestone["evaluation"])))
         return tuple(f"{owner}.manifest_dependency" for owner in dict.fromkeys(owners))

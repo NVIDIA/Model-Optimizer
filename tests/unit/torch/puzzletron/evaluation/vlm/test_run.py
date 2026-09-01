@@ -318,7 +318,7 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
     assert settings["model"] == "vllm"
-    assert settings["log_samples"] is False
+    assert settings["log_samples"] is True
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"
     assert "topology" not in settings

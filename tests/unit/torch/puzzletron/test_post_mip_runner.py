@@ -749,12 +749,26 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
         (tmp_path / f"comparison-{steps}.json").write_text(
             json.dumps({"identity": {"kd_steps": steps}})
         )
+    pre_kd_comparison = tmp_path / "comparison-pre-kd.json"
+    pre_kd_comparison.write_text(json.dumps({"identity": {"kd_steps": 0}}))
+    ledger.observations["pre_kd_short_v1"] = {
+        revisions["materialized"]: NodeObservation(
+            node_id="pre_kd_short_v1",
+            input_revision_id=revisions["materialized"],
+            source_revision_id=revisions["materialized"],
+            output_revision_id=revisions["materialized"],
+            status="success",
+            metrics={"accuracy": 0.1},
+            artifacts={"comparison_path": str(pre_kd_comparison)},
+        )
+    }
     node = SimpleNamespace(
         node_id="bounded_result",
         flow_id="campaign",
         config={
             "config": {
                 "pre_kd_source": "materialized",
+                "pre_kd_evaluation": "pre_kd_short_v1",
                 "profile": "qwen35_vlm_short_v1",
                 "row_manifest": "/frozen/short-v1.json",
                 "row_manifest_sha256": "a" * 64,
@@ -785,6 +799,8 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
     manifest = json.loads(Path(observations[0].artifacts["result_manifest_path"]).read_text())
     assert output_set.revision_ids == (revisions["kd_256"],)
     assert manifest["pre_kd"]["checkpoint"] == str(tmp_path / "pre-kd")
+    assert manifest["pre_kd"]["evaluation_identity"] == {"kd_steps": 0}
+    assert manifest["pre_kd"]["evaluation_metrics"] == {"accuracy": 0.1}
     assert [row["steps"] for row in manifest["milestones"]] == [64, 128, 256]
     assert manifest["evaluation_identity"]["row_manifest_sha256"] == "a" * 64
     assert [row["evaluation_identity"] for row in manifest["milestones"]] == [

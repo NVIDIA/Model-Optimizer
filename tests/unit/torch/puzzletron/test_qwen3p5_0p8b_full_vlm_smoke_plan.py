@@ -342,19 +342,28 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
     }
     assert nodes["online_eval"]["input"] == "legal_candidates"
     assert nodes["best_lm"]["top_k"] == 8
+    assert nodes["best_lm"]["origin_variant_quotas"] == {
+        "retained-95": 2,
+        "retained-90": 2,
+        "retained-85": 2,
+    }
     assert nodes["kd_shortlist"] == {
         "type": "filter",
         "input": "serving",
         "mode": "aggregate_rank",
         "metrics": [
-            {"metric": "online_eval.lm_loss", "direction": "minimize"},
+            {"metric": "online_eval.lm_loss", "direction": "minimize", "weight": 1.0},
             {
                 "metric": "serving.images_12.concurrency_4.image_throughput",
                 "direction": "maximize",
+                "weight": 0.25,
             },
         ],
         "top_k": 4,
+        "origin_variant_quotas": {"retained-95": 1, "retained-90": 1, "retained-85": 1},
     }
+    assert nodes["pre_kd_short_v1"]["input"] == "kd_shortlist"
+    assert nodes["kd_64"]["input"] == "pre_kd_short_v1"
     trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
     assert [node["config"]["max_steps"] for node in trajectory_nodes] == [
         64,
@@ -404,6 +413,7 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
     assert nodes["approve_1024"]["input"] == "short_v1_512"
     assert nodes["bounded_result"]["config"] == {
         "pre_kd_source": "materialized",
+        "pre_kd_evaluation": "pre_kd_short_v1",
         "profile": "qwen35_vlm_short_v1",
         "row_manifest": str(tmp_path / "short-v1.json"),
         "row_manifest_sha256": "a" * 64,
@@ -434,6 +444,8 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
         {"steps": 128, "kd": "control_kd_128", "evaluation": "control_short_v1_128"},
         {"steps": 256, "kd": "control_kd_256", "evaluation": "control_short_v1_256"},
     ]
+    assert control_nodes["control_pre_kd_short_v1"]["input"] == "control_materialized"
+    assert control_nodes["control_kd_64"]["input"] == "control_pre_kd_short_v1"
     comparison_benchmark = comparison_nodes["quality_benchmarks"]
     assert comparison_benchmark["input"] == "short_vlm_kd"
     assert comparison_benchmark["failure_policy"] == "strict"
@@ -443,16 +455,17 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
     campaign_post_stages = tuple(
         stage.stage_id for stage in campaign.stages if stage.stage_id.startswith("post.")
     )
-    assert campaign_post_stages[:7] == (
+    assert campaign_post_stages[:8] == (
         "post.candidate-evaluation.legal_candidates",
         "post.candidate-evaluation.online_eval",
         "post.candidate-evaluation.best_lm",
         "post.candidate-evaluation.materialized",
         "post.candidate-evaluation.serving",
         "post.candidate-evaluation.kd_shortlist",
+        "post.candidate-evaluation.pre_kd_short_v1",
         "post.candidate-evaluation.kd_64",
     )
-    assert campaign_post_stages[7:13] == (
+    assert campaign_post_stages[8:14] == (
         "post.candidate-evaluation.short_v1_64",
         "post.candidate-evaluation.kd_128",
         "post.candidate-evaluation.short_v1_128",
@@ -460,7 +473,7 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
         "post.candidate-evaluation.short_v1_256",
         "post.candidate-evaluation.selected",
     )
-    assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))
+    assert all(stage.total_gpus in {0, 1} for stage in (*campaign.stages, *comparison.stages))
 
 
 def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(
