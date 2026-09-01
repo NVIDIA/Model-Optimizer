@@ -17,6 +17,7 @@ Changelog
 
 *Megatron Framework (M-LM / M-Bridge)*
 
+- Add ``clamp_kv_cache_scales`` to ``export_mcore_gpt_to_hf``. Set it to ``False`` when exporting a QAT Megatron-Core model to preserve its learned FP8 KV-cache scales; the default retains the existing minimum scale of 1.0.
 - Add SFT-masked data support to ``examples/megatron_bridge/distill.py``: ``--sft --sft_dataset_root <dir>`` distills on raw prompt-completion JSONL (``{"input", "output"}`` records) with the loss masked to the response tokens, using Megatron-Bridge's ``FinetuningDatasetConfig`` and the model's own HuggingFace tokenizer instead of the pretraining ``GPTDataset`` and ``NullTokenizer``.
 - Add per-expert weight quantization for Transformer Engine ``TEGroupedMLP`` (fused MoE experts): each expert now has its own ``weight_quantizer`` (a ``GroupedQuantizer`` holding one ``TensorQuantizer`` per expert) with an independent ``amax``, instead of a single shared ``amax`` across all experts. Applies to ``mtq.quantize`` calibration, HF / Megatron export, and QAD.
 - Add opt-in ``torch.compile`` execution for Transformer Engine grouped-linear per-expert weight quantizers while preserving their native checkpoint amax shapes. Set ``MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP=1`` before quantized-module conversion; the default path remains eager.

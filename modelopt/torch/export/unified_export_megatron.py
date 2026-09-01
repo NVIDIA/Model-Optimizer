@@ -121,6 +121,7 @@ class GPTModelExporter:
         dtype: The weights data type to export the unquantized layers.
         trust_remote_code: Whether to trust remote code in the HuggingFace pretrained model.
         moe_router_dtype: The data type of the MoE router. Can be "fp32", "fp64", or None (default to the model dtype).
+        clamp_kv_cache_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
     """
 
     def __init__(
@@ -131,6 +132,7 @@ class GPTModelExporter:
         dtype=torch.bfloat16,
         trust_remote_code: bool = False,
         moe_router_dtype: str | None = None,
+        clamp_kv_cache_scales: bool = True,
     ):
         """Create a GPTModel exporter instance."""
         if not isinstance(model, (GPTModel, HybridModel, LLaVAModel)):
@@ -168,6 +170,7 @@ class GPTModelExporter:
         self.model = model.language_model if self.is_multimodal else model
         self.dtype = dtype
         self.trust_remote_code = trust_remote_code
+        self.clamp_kv_cache_scales = clamp_kv_cache_scales
         self.arch = self._hf_config.architectures[0]
         # TODO: May modify this later according to what quantization exported ckpt is, currently only support BF16.
         if self.arch == "GptOssForCausalLM":
@@ -1450,7 +1453,9 @@ class GPTModelExporter:
         k_scale_key = prefix + k_scale_name
         v_scale_key = prefix + v_scale_name
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
-            kv_scales = get_kv_cache_scaling_factor(module)
+            kv_scales = get_kv_cache_scaling_factor(
+                module, clamp_fp8_scales=self.clamp_kv_cache_scales
+            )
             if all(s is not None for s in kv_scales):
                 self._state_dict[k_scale_key] = kv_scales[0]
                 self._state_dict[v_scale_key] = kv_scales[1]
@@ -1692,6 +1697,7 @@ def export_mcore_gpt_to_hf(
     export_dir: Path | str = tempfile.gettempdir(),
     trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
+    clamp_kv_cache_scales: bool = True,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
@@ -1705,6 +1711,7 @@ def export_mcore_gpt_to_hf(
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
         export_dir: The target export path.
+        clamp_kv_cache_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
     """
     exporter = GPTModelExporter(
         model,
@@ -1713,6 +1720,7 @@ def export_mcore_gpt_to_hf(
         dtype=dtype,
         trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
+        clamp_kv_cache_scales=clamp_kv_cache_scales,
     )
     if exporter.export_extra_modules:
         exporter.save_pretrained_extra_modules(export_dir)
