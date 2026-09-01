@@ -31,7 +31,6 @@ import logging
 import os
 import sys
 import tempfile
-from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,6 +41,7 @@ from megatron.bridge.training.config import CheckpointConfig
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.rerun_state_machine import destroy_rerun_state_machine
+from torch.distributed.run import main as torchrun_main
 
 import modelopt.torch.utils.distributed as dist
 
@@ -176,18 +176,6 @@ def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
         print(output)  # keep the script's output in the test log
 
 
-# --- Multi-rank dispatch ---------------------------------------------------------------------
-# The pytest process is a single rank, so a command asking for N>1 ranks cannot run in-process.
-# A pool of persistent workers gives real ranks while still paying the import cost once.
-_pool_provider = None
-
-
-def set_worker_pool_provider(provider) -> None:
-    """Register ``provider(world_size) -> DistributedWorkerPool | None``."""
-    global _pool_provider
-    _pool_provider = provider
-
-
 def requested_world_size(cmd_parts: list[str]) -> int | None:
     """World size a ``torchrun`` command asks for, if it says."""
     for part in cmd_parts:
@@ -196,60 +184,27 @@ def requested_world_size(cmd_parts: list[str]) -> int | None:
     return None
 
 
-def _reinit_process_group(rank: int, world_size: int, master_port: int) -> None:
-    """Give the step a fresh process group, as a ``torchrun`` launch would.
+def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
+    """Drive ``torchrun`` itself in-process, letting it spawn fresh workers as usual.
 
-    Megatron-Bridge tears down what it calls framework-owned distributed resources when a run ends
-    ("Bridge is aborting framework-owned distributed resources..."), which includes the pool's own
-    group. The next step then finds a dead group and its rendezvous is refused. Persistent
-    *processes* are what save the import cost; the group itself is cheap to rebuild per step.
+    Used for multi-rank steps, where the pytest process cannot be more than one rank. This only
+    saves the launcher's own interpreter, not the workers' imports, but the workers are fresh
+    processes -- so none of the global state a reused worker would inherit applies here. Borrowed
+    from Megatron-Bridge's own functional tests.
     """
-    if world_size <= 1:
-        return
-    with contextlib.suppress(Exception):
-        if dist.is_initialized():
-            torch.distributed.destroy_process_group()
-    os.environ["MASTER_ADDR"] = os.environ.get("MASTER_ADDR", "127.0.0.1")
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(rank)
-    torch.distributed.init_process_group("cpu:gloo,cuda:nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-
-def run_example_step_in_worker(rank, world_size, cmd_parts, example_path, output_path, master_port):
-    """Run one example step inside a persistent worker. Top-level so it stays picklable."""
-    _use_spawn_for_async_checkpointing()
-    reset_megatron_global_state()
-    _reinit_process_group(rank, world_size, master_port)
-    env_before = os.environ.copy()
+    example_dir = MODELOPT_ROOT / "examples" / example_path
     script = next(p for p in cmd_parts if str(p).endswith(".py"))
-    argv = [str(p) for p in cmd_parts[cmd_parts.index(script) :]]
-    example_dir = str(MODELOPT_ROOT / "examples" / example_path)
-    sys.path.insert(0, example_dir)
-    output = ""
+    argv = [str(p) for p in cmd_parts]
+    argv[argv.index(str(script))] = str(example_dir / Path(script).name)
+    cwd = os.getcwd()
+    os.chdir(example_dir)
     try:
-        module = importlib.import_module(Path(script).stem)
-        with patch.object(sys, "argv", argv):
-            args = module.get_args()
-        try:
-            with _capture_output_fd() as cap:
-                module.main(args)
-        except SystemExit as e:
-            if e.code not in (0, None):
-                raise RuntimeError(f"{script} exited with code {e.code}") from e
-        finally:
-            output = cap[0]
+        with _capture_output_fd() as cap, patch.object(sys, "argv", argv):
+            torchrun_main()
+        return cap[0]
     finally:
-        sys.path.remove(example_dir)
-        print(output)
-        # Every rank writes: Megatron prints some lines tests assert on with ``print_rank_last``,
-        # so rank 0's output alone is incomplete whenever world_size > 1.
-        Path(f"{output_path}.{rank}").write_text(output, encoding="utf-8")
-        os.environ.clear()
-        os.environ.update(env_before)
-        reset_megatron_global_state()
+        os.chdir(cwd)
+        print(cap[0])
 
 
 def _drivable(script: str, example_path: str) -> bool:
@@ -272,10 +227,7 @@ def _drivable(script: str, example_path: str) -> bool:
 
 
 def run_example_step(cmd_parts: list[str], example_path: str) -> str | None:
-    """Dispatch an example step in-process (1 rank) or to a worker pool (N ranks).
-
-    Returns the script's stdout, or ``None`` to fall back to a ``torchrun`` subprocess.
-    """
+    """Run an example step without shelling out. ``None`` falls back to a subprocess."""
     if os.environ.get("MODELOPT_NO_INPROCESS_EXAMPLES"):
         return None
     script = next((str(p) for p in cmd_parts if str(p).endswith(".py")), None)
@@ -284,23 +236,6 @@ def run_example_step(cmd_parts: list[str], example_path: str) -> str | None:
     world_size = requested_world_size(cmd_parts)
     if world_size == 1:
         return run_example_in_process(cmd_parts, example_path)
-    pool = _pool_provider(world_size) if (world_size and _pool_provider) else None
-    if pool is None:
-        return None
-    with tempfile.TemporaryDirectory() as td:
-        out_file = Path(td) / "stdout.txt"
-        pool.run(
-            partial(
-                run_example_step_in_worker,
-                cmd_parts=cmd_parts,
-                example_path=example_path,
-                output_path=str(out_file),
-                master_port=get_free_port(),  # one port for all ranks, fresh each step
-            )
-        )
-        parts = [
-            Path(f"{out_file}.{r}").read_text(encoding="utf-8")
-            for r in range(world_size)
-            if Path(f"{out_file}.{r}").exists()
-        ]
-        return "\n".join(parts)
+    if world_size and world_size > 1:
+        return run_torchrun_in_process(cmd_parts, example_path)
+    return None

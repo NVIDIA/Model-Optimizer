@@ -17,43 +17,18 @@
 import os
 
 import pytest
-import torch
 from _test_utils.examples.run_command import set_in_process_runner
-from _test_utils.torch.distributed.utils import DistributedWorkerPool, default_worker_teardown
-from _test_utils.torch.megatron.example_runner import (
-    reset_megatron_global_state,
-    run_example_step,
-    set_worker_pool_provider,
-)
+from _test_utils.torch.megatron.example_runner import reset_megatron_global_state, run_example_step
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def _fast_example_runner():
-    """Single-rank steps run in-process; N-rank steps go to a pool of persistent workers.
-
-    Pools are module-scoped (as in ``tests/gpu_megatron``) so workers are never shared across test
-    files, and are torn down with the module.
-    """
-    pools: dict[int, DistributedWorkerPool] = {}
-
-    def provider(world_size: int):
-        if world_size > torch.cuda.device_count():
-            return None  # cannot honour it here; fall back to torchrun
-        if world_size not in pools:
-            pools[world_size] = DistributedWorkerPool(
-                world_size=world_size, teardown_fn=default_worker_teardown
-            )
-        return pools[world_size]
-
-    set_worker_pool_provider(provider)
+    """Run example steps without shelling out to ``torchrun``."""
     set_in_process_runner(run_example_step)
     try:
         yield
     finally:
         set_in_process_runner(None)
-        set_worker_pool_provider(None)
-        for pool in pools.values():
-            pool.shutdown()
 
 
 @pytest.fixture(autouse=True)
