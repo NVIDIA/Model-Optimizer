@@ -5,33 +5,11 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Opt-in deterministic quality comparison. Unlike full_vlm_smoke, this recipe
-# compares the final distilled student with the pinned teacher using identical
-# RealWorldQA and MMMU settings. It records the results without defining
-# pass/fail thresholds and is excluded from default CI because it requires a
-# real checkpoint and GPU time.
+# Opt-in deterministic quality comparison for the final distilled candidate.
+# It evaluates the student and pinned teacher with identical RealWorldQA and
+# MMMU settings, records metric deltas, and defines no acceptance threshold.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality_comparison}
 display_name: Qwen3p5 0.8B end-to-end VLM quality comparison
-
-# Historical evidence belongs to this checkpoint-specific comparison, not to
-# the reusable evaluator settings or generated setup defaults. Two identical
-# 100-example GPU runs produced these values. Fresh runs publish
-# observation_delta.* metrics but never gate on them.
-vlm_quality_evaluation:
-  recorded_observation:
-    repeat_count: 2
-    candidate_architecture:
-      parameter_pruning_percent: 10.042
-      parameter_retention_percent: 89.958
-      ffn_layers: 24
-      teacher_intermediate_size: 3584
-      student_intermediate_size: 2048
-      ffn_width_pruning_percent: 42.857
-    metrics:
-      candidate.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract: 0.24
-      reference.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract: 0.60
-      candidate.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none: 0.25
-      reference.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none: 0.35
 
 pruning:
   eval_samples: 8

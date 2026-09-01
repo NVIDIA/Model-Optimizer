@@ -21,6 +21,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,15 +38,8 @@ _COMPLETED_RUN_SCHEMA = "modelopt.vlm-evaluation-completed-run/v1"
 _COMPLETED_RUN_FILENAME = "completed_run.json"
 
 
-def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
-    """Return the canonical checkpoint fingerprint without loading it."""
-    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
-
-    return checkpoint_identity(checkpoint_path)
-
-
 def _completion_identity(
-    checkpoint_path: Path,
+    checkpoint_identity: Mapping[str, object],
     settings: Mapping[str, object],
     *,
     profile_identity: Mapping[str, object],
@@ -53,14 +47,68 @@ def _completion_identity(
 ) -> dict[str, object]:
     """Describe the immutable inputs for one resumable evaluation repetition."""
     return {
-        "checkpoint": _checkpoint_identity(checkpoint_path),
+        "checkpoint": dict(checkpoint_identity),
         "profile": dict(profile_identity),
         "repetition": repetition,
         "settings": dict(settings),
     }
 
 
+def _file_identity(path: Path, *, root: Path) -> dict[str, object]:
+    """Return a content identity for one checkpoint or evaluation artifact."""
+    digest = sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "path": str(path.relative_to(root)),
+        "sha256": digest.hexdigest(),
+        "size": path.stat().st_size,
+    }
+
+
+def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
+    """Fingerprint every local file that defines the evaluated checkpoint."""
+    from modelopt.torch.puzzletron.distributed_eval.config import checkpoint_identity
+
+    root = checkpoint_path.resolve()
+    files = [_file_identity(path, root=root) for path in sorted(root.rglob("*")) if path.is_file()]
+    if not files:
+        raise RuntimeError(f"VLM evaluation checkpoint contains no files: {root}")
+    return {**checkpoint_identity(root), "content_files": files}
+
+
+def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:
+    """Fingerprint evaluator outputs needed to reuse a completed repetition."""
+    return [
+        _file_identity(path, root=output_root)
+        for path in sorted(output_root.rglob("*"))
+        if path.is_file()
+        and path.name != _COMPLETED_RUN_FILENAME
+        and not path.name.startswith(f".{_COMPLETED_RUN_FILENAME}.")
+    ]
+
+
+def _artifacts_match(output_root: Path, artifacts: object) -> bool:
+    """Return whether every recorded evaluator output remains unchanged."""
+    if not isinstance(artifacts, list) or not artifacts:
+        raise RuntimeError(f"invalid completed VLM evaluation artifacts: {output_root}")
+    for item in artifacts:
+        if not isinstance(item, Mapping) or not isinstance(item.get("path"), str):
+            raise RuntimeError(f"invalid completed VLM evaluation artifacts: {output_root}")
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"invalid completed VLM evaluation artifact path: {relative}")
+        path = output_root / relative
+        if not path.is_file():
+            return False
+        if _file_identity(path, root=output_root) != dict(item):
+            return False
+    return True
+
+
 def _validated_run_result(result: object, *, label: str) -> dict[str, object]:
+    """Validate a fresh evaluator result before publishing its completion record."""
     if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
         raise RuntimeError(f"invalid {label} result")
     result_path = result.get("result_path")
@@ -86,7 +134,15 @@ def _load_completed_run(
         raise RuntimeError(f"invalid completed VLM evaluation record: {completion_path}")
     if payload.get("identity") != dict(identity):
         return None
-    return _validated_run_result(payload.get("result"), label="completed VLM evaluation")
+    result = payload.get("result")
+    if not isinstance(result, Mapping) or not isinstance(result.get("metrics"), Mapping):
+        raise RuntimeError(f"invalid completed VLM evaluation result: {completion_path}")
+    result_path = result.get("result_path")
+    if not isinstance(result_path, str) or not Path(result_path).is_file():
+        return None
+    if not _artifacts_match(output_root, payload.get("artifacts")):
+        return None
+    return dict(result)
 
 
 def _write_completed_run(
@@ -102,6 +158,7 @@ def _write_completed_run(
     content = (
         json.dumps(
             {
+                "artifacts": _artifact_inventory(output_root),
                 "identity": dict(identity),
                 "result": dict(result),
                 "schema": _COMPLETED_RUN_SCHEMA,
@@ -170,6 +227,7 @@ def evaluate(
     )
     settings.update(settings_overrides or {})
     repetitions = prepared.execution_policy["repetitions"]
+    checkpoint_identity = _checkpoint_identity(args.checkpoint)
     profile_identity = {
         "dataset_revisions": report["dataset_revisions"],
         "lmms_eval_revision": report["lmms_eval_revision"],
@@ -182,9 +240,9 @@ def evaluate(
         for repetition in range(1, repetitions + 1):
             output_root = args.output_dir
             if repetitions > 1:
-                output_root = output_root / f"short-repetition-{repetition}"
+                output_root = output_root / f"{prepared.suite}-repetition-{repetition}"
             identity = _completion_identity(
-                args.checkpoint,
+                checkpoint_identity,
                 settings,
                 profile_identity=profile_identity,
                 repetition=repetition,

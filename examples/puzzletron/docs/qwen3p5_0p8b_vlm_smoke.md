@@ -1,7 +1,7 @@
 # Qwen 3.5 0.8B VLM pruning smoke
 
-Use this guide to run the checked-in Qwen 3.5 0.8B vision-language pruning
-example on one GPU. The example uses eight image-conversation samples and keeps
+Use this guide to run the Qwen 3.5 0.8B vision-language pruning example on one
+GPU. The example uses eight image-conversation samples and keeps
 the work small enough to check the complete workflow:
 
 1. Search two FFN intermediate sizes, `3072` and `2048`.
@@ -11,16 +11,16 @@ the work small enough to check the complete workflow:
 5. Distill the faster candidate for two steps, then reload and evaluate the
    resulting checkpoint.
 
-The model, dataset, evaluation task, and small work limits are pinned in the
-checked-in configuration. This smoke test checks that pruning, evaluation,
-serving, distillation, and resume all work. Its scores and throughput are not
-model-quality or production performance results.
+The example configuration pins the model, dataset, evaluation task, and small
+work limits. This smoke test checks that pruning, evaluation, serving,
+distillation, and resume all work. Its scores and throughput are not model
+quality or performance results.
 
 ## Generate a complete bundle with the setup wizard
 
 For a new run, start with the [setup wizard](setup_wizard.md), select Qwen 3.5
-0.8B, and choose a multimodal dataset. The generated smoke and production
-bundles cover conversion, multimodal pruning and search, MIP selection,
+0.8B, and choose a multimodal dataset. The generated smoke and campaign bundles
+cover conversion, multimodal pruning and search, MIP selection,
 materialization, image-aware serving, VLM distillation, final selection, and a
 pinned student-versus-teacher RealWorldQA/MMMU comparison. Inspect the generated
 `dry-run-plan.txt` and materialize the site-specific runner settings before
@@ -47,7 +47,7 @@ Workers also need access to:
 - a shared location for the prepared dataset and campaign output.
 
 If workers cannot access the network, populate the model and benchmark caches
-before launch and mount them through the runner. Keep the checked-in model
+before launch and mount them through the runner. Keep the configured model
 identity instead of replacing it with a machine-specific path.
 
 ## Prepare the dataset
@@ -203,38 +203,25 @@ multimodal API and provides a value for candidate selection, but it is not a
 performance benchmark. Use more requests, realistic concurrency, and your
 deployment image sizes before drawing throughput conclusions.
 
-## Choose the campaign or quality-comparison route
+## Choose a campaign or quality-comparison route
 
-Both routes use only the pinned Qwen 3.5 0.8B VLM and the checked-in
-`ffn_intermediate` search axis. The `vlm_campaign.yaml` route raises candidate
-evaluation, MIP selection, serving measurement, distillation, and final
-evaluation budgets. It requests 16 heterogeneous solutions plus up to eight
-homogeneous solutions, screens each returned candidate with 16 image-text
-samples, and keeps four for materialization and serving. The longer downstream
-comparison runs only after serving selects one candidate.
+The routes use the pinned Qwen 3.5 0.8B VLM and the `ffn_intermediate` search
+axis. `full_vlm_smoke.yaml` validates the bounded end-to-end lifecycle.
+`vlm_campaign.yaml` evaluates two FFN candidates with equivalent screening KD
+and multimodal evaluation, ranks them using image-text loss and benchmark
+metrics, and runs longer KD for the selected candidate from its original
+materialized checkpoint. The teacher comparison runs only for the selected
+candidate after that second KD run.
 
-The opt-in `e2e_vlm_quality_comparison.yaml` route runs the same lifecycle with
-reduced search, serving, and training budgets. The campaign and comparison are
-independent experiment configs that consume one shared pinned evaluation
-specification. The evaluator measures the final student and pinned teacher on
-the first 100 rows of the pinned RealWorldQA and MMMU task revisions, twice. It
-pins the evaluator revision, generated task definitions, selection rule, seed,
-batch size, frame policy, and greedy generation settings. Per-sample outputs,
-student metrics, teacher metrics, and student-minus-teacher deltas are retained.
+The opt-in `e2e_vlm_quality_comparison.yaml` route keeps the lifecycle bounded
+and compares its final student with the pinned teacher on deterministic
+RealWorldQA and MMMU subsets. Repetitions are resumable and are reused only
+when checkpoint identity and evaluator artifacts still match. Results include
+student and teacher metrics and their deltas, but no quality gate.
 
-Repeated bounded GPU runs produced the same measurements. With 10.04% overall
-parameter pruning, the student scored 0.24 on RealWorldQA and 0.25 on MMMU; the
-teacher scored 0.60 and 0.35, respectively. Fresh runs retain these observations
-and report their differences, but do not use the smoke scores as acceptance
-thresholds. The comparison exercises the shared pipeline and evaluation
-machinery; its reduced-budget checkpoint is not evidence for the campaign's
-final numerical quality.
-
-Run the comparison route with a site-specific runner. A completed evaluation
-repetition is identity-bound and resumable, so a later allocation can continue
-without rerunning it. Set a distinct output root; this route requires the
-pinned RealWorldQA and MMMU caches and is intentionally excluded from default
-CI:
+Run the comparison route with a site-specific runner and a distinct output
+root. This route requires the pinned RealWorldQA and MMMU caches and is
+intentionally excluded from default CI:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml
@@ -251,6 +238,21 @@ python examples/puzzletron/orchestrate.py \
 
 Inspect the compiled stage order and one-GPU allocation before launch. Then
 omit `--dry-run` to launch or resume the exact same three-input campaign.
+
+Run the campaign with the same execution profile and a distinct output root:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
 
 ## Evaluate a saved checkpoint separately
 
@@ -272,13 +274,9 @@ If preflight succeeds, run the same command without `--preflight-only`. The
 [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
 result files, and cache preparation.
 
-## Configure a larger campaign
+## Customize a campaign
 
-Use `vlm_campaign.yaml` with `execution.single_gpu.yaml`. It keeps the same
-FFN-only search and final evaluation contract while raising the search
-measurements, MIP solution set, serving requests and concurrency, and VLM
-distillation budget. Tune site resources and the pinned training dataset for
-the intended campaign; do not substitute a tiny model as a quality oracle.
+Tune site resources and the pinned training dataset for the intended workload.
 
 Use guided setup when you need help resolving the model, dataset, and site
 settings:
@@ -288,28 +286,10 @@ python examples/puzzletron/puzzletron_setup_v2.py \
   --defaults examples/puzzletron/configs/setup/defaults.example.yaml
 ```
 
-Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. The wizard's
-generated production bundle follows the maintained FFN-only VLM route and
-includes the selected site settings. Use the checked-in `vlm_campaign.yaml`
-when you need the fixed reference configuration instead of a generated bundle.
-
-Choose larger-run settings deliberately:
-
-- representative dataset subsets and sample counts;
-- supported FFN widths, search constraints, and number of solutions;
-- evaluation tasks and sample counts for the intended use case;
-- serving image sizes, images per request, concurrency, and request count;
-- distillation steps, batch sizes, validation, and checkpoint frequency;
-- worker resources for every changed or added stage.
-
-The maintained campaign enables only FFN width by default. This does not limit
-experimentation: guided setup discovers the legal hidden-width, attention, FFN,
-GDN, and depth domains from the model descriptor, and **Customize** lets you
-select their candidate values. The opt-in `advanced.yaml` overlay is also a
-configuration reference for additional 0.8B axes.
-
-Before promoting another axis into the maintained campaign, add a focused
-real-checkpoint smoke covering scoring, slicing, materialization, and reload.
+Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
+can generate the same route with site-specific settings. Hidden width,
+attention, GDN, embedding width, and depth are available through guided
+customization and `advanced.yaml`, but are outside this campaign.
 Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

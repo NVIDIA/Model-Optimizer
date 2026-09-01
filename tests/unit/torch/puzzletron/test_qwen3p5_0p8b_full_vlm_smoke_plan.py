@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU plan contracts for the complete Qwen 3.5 0.8B VLM smoke."""
+"""CPU plan contracts for the end-to-end Qwen 3.5 0.8B VLM lifecycle smoke."""
 
 from itertools import pairwise
 from pathlib import Path
@@ -36,7 +36,7 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
-PRODUCTION_RUN_PATH = (
+CAMPAIGN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
@@ -68,14 +68,14 @@ def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revi
     )
 
 
-def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path, execution_path: Path):
+def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path):
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
     return compile_campaign_plan(
         experiment_config_path=run_path,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(execution_path),
+        execution=load_execution_config(EXECUTION_PATH),
         stage_filter="full",
     )
 
@@ -187,84 +187,146 @@ def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
     assert config["global_distillation"]["freeze_policy"] == "train_all"
 
 
-def test_qwen3p5_0p8b_vlm_routes_are_independent_and_share_the_evaluation_contract(
+def test_qwen3p5_0p8b_vlm_comparison_uses_the_shared_evaluator(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    production = _compile_campaign(
+    comparison = _compile_campaign(monkeypatch, tmp_path, run_path=COMPARISON_RUN_PATH)
+    comparison_config = comparison.experiment_config
+    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
+    benchmark = comparison_nodes["quality_benchmarks"]
+    stages = {stage.stage_id: stage for stage in comparison.stages}
+    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
+    evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
+
+    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
+    assert yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"] == [
+        "full_vlm_smoke",
+        shared_evaluator,
+        "_self_",
+    ]
+    comparison_evaluation = dict(benchmark["config"])
+    assert comparison_evaluation.pop("reference_checkpoint") == comparison_config["teacher_dir"]
+    evaluator_without_reference = dict(evaluator)
+    evaluator_without_reference.pop("reference_checkpoint")
+    assert comparison_evaluation == evaluator_without_reference
+    assert "recorded_observation" not in benchmark["config"]
+    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
+    assert benchmark["input"] == "short_vlm_kd"
+    assert benchmark["failure_policy"] == "strict"
+    assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+
+    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
+        "quality_comparison"
+    ]["by_modality"]["multimodal"]
+    assert wizard_quality.pop("enabled") is True
+    assert wizard_quality == evaluator
+    assert all(stage.total_gpus == 1 for stage in comparison.stages)
+
+
+def test_qwen3p5_0p8b_vlm_campaign_compiles_equal_candidate_screening(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    campaign = _compile_campaign(
         monkeypatch,
         tmp_path,
-        run_path=PRODUCTION_RUN_PATH,
-        execution_path=EXECUTION_PATH,
+        run_path=CAMPAIGN_PATH,
     )
     comparison = _compile_campaign(
         monkeypatch,
         tmp_path,
         run_path=COMPARISON_RUN_PATH,
-        execution_path=EXECUTION_PATH,
     )
-    production_config = production.experiment_config
-    config = comparison.experiment_config
-    production_nodes = production_config["post_mip"]["flows"]["params-90"]["nodes"]
-    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
-    benchmark = nodes["quality_benchmarks"]
-    stages = {stage.stage_id: stage for stage in comparison.stages}
-    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
-    evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
+    config = campaign.experiment_config
+    comparison_config = comparison.experiment_config
+    nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
+    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
 
-    production_defaults = yaml.safe_load(PRODUCTION_RUN_PATH.read_text())["defaults"]
-    comparison_defaults = yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"]
-    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
-    assert production_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
-    assert comparison_defaults == ["full_vlm_smoke", shared_evaluator, "_self_"]
-    assert production_config["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
+    assert yaml.safe_load(CAMPAIGN_PATH.read_text())["defaults"] == ["mip_vlm_smoke", "_self_"]
+    assert config["search_space"]["axes"] == {
+        "ffn_intermediate": {
+            "enabled": True,
+            "teacher_value": 3584,
+            "values": [2816, 2048],
+        }
     }
-
-    production_evaluation = dict(production_nodes["quality_benchmarks"]["config"])
-    comparison_evaluation = dict(benchmark["config"])
-    assert production_evaluation.pop("reference_checkpoint") == production_config["teacher_dir"]
-    assert comparison_evaluation.pop("reference_checkpoint") == config["teacher_dir"]
-    recorded_observation = comparison_evaluation.pop("recorded_observation")
-    assert comparison_evaluation == production_evaluation
-    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
-    assert benchmark["input"] == "short_vlm_kd"
-    assert benchmark["failure_policy"] == "strict"
-    assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
-    assert benchmark["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert recorded_observation["repeat_count"] == 2
-    assert set(recorded_observation["metrics"]) == {
-        "candidate.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
-        "reference.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
-        "candidate.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
-        "reference.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+    assert config["mip"]["runs"]["params-90"] is False
+    assert config["global_distillation"]["domain"] == "vlm"
+    assert config["global_distillation"]["freeze_policy"] == "train_all"
+    ffn_candidates = config["mip"]["runs"]["ffn-candidates"]
+    assert ffn_candidates["variants"] == {
+        "width-2816": {
+            "constraints": {"params": {"max": "95%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [2816]}},
+        },
+        "width-2048": {
+            "constraints": {"params": {"max": "90%"}},
+            "search_space": {"axes": {"ffn.intermediate_size": [2048]}},
+        },
     }
-    assert all("quality_gate" not in node_id for node_id in nodes)
-    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
-        "quality_comparison"
-    ]["by_modality"]["multimodal"]
-    assert wizard_quality.pop("enabled") is True
-    assert "recorded_observation" not in evaluator
-    assert wizard_quality == evaluator
-    assert production_config["pruning"]["eval_samples"] > config["pruning"]["eval_samples"]
-    assert (
-        production_config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
-        > config["mip"]["runs"]["params-90"]["solver"]["num_solutions"]
-    )
-    assert (
-        production_nodes["image_eval"]["config"]["eval_samples"]
-        > nodes["image_eval"]["config"]["eval_samples"]
-    )
-    assert production_nodes["best_vlm_loss"]["top_k"] > nodes["best_vlm_loss"]["top_k"]
-    assert (
-        production_nodes["vlm_serving"]["config"]["request_count"]
-        > nodes["vlm_serving"]["config"]["request_count"]
-    )
-    assert (
-        production_nodes["short_vlm_kd"]["config"]["max_steps"]
-        > nodes["short_vlm_kd"]["config"]["max_steps"]
-    )
-    assert all(stage.total_gpus == 1 for stage in (*production.stages, *comparison.stages))
+    assert nodes["screening_kd"] == {
+        "type": "global_kd",
+        "input": "serving",
+        "config": {
+            "seed": 1111,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "max_steps": 64,
+            "global_batch_size": 4,
+            "local_batch_size": 1,
+            "checkpoint_every_steps": 32,
+        },
+    }
+    screening = nodes["quality_screen"]["config"]
+    final = nodes["quality_benchmarks"]["config"]
+    assert screening["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert "reference_checkpoint" not in screening
+    assert final["reference_checkpoint"] == config["teacher_dir"]
+    assert screening["limit_mm_per_prompt"] == {"image": 12}
+    assert {
+        key: value for key, value in final.items() if key != "reference_checkpoint"
+    } == screening
+    assert nodes["selected"] == {
+        "type": "filter",
+        "input": "quality_screen",
+        "mode": "aggregate_rank",
+        "metrics": [
+            {"metric": "screening_eval.lm_loss", "direction": "minimize"},
+            {
+                "metric": (
+                    "quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
+                ),
+                "direction": "maximize",
+            },
+            {
+                "metric": "quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+                "direction": "maximize",
+            },
+        ],
+        "top_k": 1,
+    }
+    assert nodes["global_kd"] == {
+        "type": "global_kd",
+        "input": "selected",
+        "model_source": "materialized",
+        "config": {
+            "seed": 1111,
+            "validation_seed": 445,
+            "shuffle_training_data": True,
+            "max_steps": 256,
+            "global_batch_size": 4,
+            "local_batch_size": 1,
+            "checkpoint_every_steps": 32,
+        },
+    }
+    comparison_benchmark = comparison_nodes["quality_benchmarks"]
+    assert comparison_benchmark["input"] == "short_vlm_kd"
+    assert comparison_benchmark["failure_policy"] == "strict"
+    comparable_campaign = dict(final)
+    comparable_comparison = dict(comparison_benchmark["config"])
+    assert comparable_campaign.pop("reference_checkpoint") == config["teacher_dir"]
+    assert comparable_comparison.pop("reference_checkpoint") == comparison_config["teacher_dir"]
+    assert comparable_comparison == comparable_campaign
+    assert "recorded_observation" not in comparison_benchmark["config"]
+    assert all(stage.total_gpus == 1 for stage in (*campaign.stages, *comparison.stages))

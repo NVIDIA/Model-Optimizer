@@ -25,8 +25,15 @@ from types import ModuleType
 import pytest
 
 from examples.puzzletron.evaluation import checkpoint
+from examples.puzzletron.evaluation.vlm import (
+    evaluator,
+    post_mip,
+    preflight,
+    profile,
+    suites,
+    tasks,
+)
 from examples.puzzletron.evaluation.vlm import model as vlm_model
-from examples.puzzletron.evaluation.vlm import post_mip, preflight, profile, suites, tasks
 from examples.puzzletron.evaluation.vlm import run as evaluation
 
 _QWEN_CONFIG = {
@@ -79,11 +86,26 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
-def test_checkpoint_contract_requires_local_processor_assets(tmp_path):
+@pytest.mark.parametrize("processor_content", [None, "", "[]\n", "{\n", b"\xff"])
+def test_checkpoint_contract_requires_valid_local_processor_assets(tmp_path, processor_content):
     checkpoint_path = _write_checkpoint(tmp_path)
-    (checkpoint_path / "preprocessor_config.json").unlink()
+    processor_path = checkpoint_path / "preprocessor_config.json"
+    if processor_content is None:
+        processor_path.unlink()
+    elif isinstance(processor_content, bytes):
+        processor_path.write_bytes(processor_content)
+    else:
+        processor_path.write_text(processor_content)
 
-    with pytest.raises(ValueError, match="multimodal processor assets"):
+    with pytest.raises(ValueError, match="processor asset"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
+def test_checkpoint_contract_rejects_malformed_companion_processor_asset(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    (checkpoint_path / "video_preprocessor_config.json").write_text("{\n")
+
+    with pytest.raises(ValueError, match="video_preprocessor_config.json"):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
 
@@ -194,9 +216,6 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     calls = []
 
     def fake_runner(checkpoint_path, *, output_root, settings):
-        result_path = output_root / "summary.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
         calls.append(
             {
                 "checkpoint": checkpoint_path,
@@ -207,9 +226,13 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
                 "settings": settings,
             }
         )
+        result_path = output_root / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         return {
             "attempt": len(calls),
             "metrics": {"accuracy": len(calls) / 10},
+            "output_root": str(output_root),
             "result_path": str(result_path),
         }
 
@@ -277,7 +300,8 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert report["generation_policy"] == settings["gen_kwargs"]
 
 
-def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, tmp_path):
+@pytest.mark.parametrize("suite", ["short", "e2e-full-eval"])
+def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, suite):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -290,10 +314,73 @@ def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, 
     def fake_runner(checkpoint_path, *, output_root, settings):
         calls.append(output_root)
         result_path = output_root / "attempt" / "summary.json"
+        raw_result_path = output_root / "attempt" / "samples.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text("{}\n")
+        raw_result_path.write_text("{}\n")
         return {
             "metrics": {"accuracy": len(calls) / 10},
+            "raw_result_path": str(raw_result_path),
+            "result_path": str(result_path),
+        }
+
+    monkeypatch.setattr(checkpoint, "run_lmms_eval_checkpoint", fake_runner)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(output),
+            "--suite",
+            suite,
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    first = evaluation.evaluate(args)
+    second = evaluation.evaluate(args)
+
+    assert len(calls) == 2
+    assert second["runs"] == first["runs"]
+    for repetition in (1, 2):
+        completed = json.loads(
+            (output / f"{suite}-repetition-{repetition}" / "completed_run.json").read_text()
+        )
+        assert completed["schema"] == "modelopt.vlm-evaluation-completed-run/v1"
+        assert completed["identity"]["repetition"] == repetition
+        assert completed["identity"]["checkpoint"]["fingerprint"]
+        assert completed["identity"]["profile"]["suite"] == suite
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_calls"),
+    [("checkpoint", 4), ("artifact", 3), ("result", 3)],
+)
+def test_short_profile_reruns_stale_completed_repetitions(
+    monkeypatch,
+    tmp_path,
+    corruption,
+    expected_calls,
+):
+    model = _write_checkpoint(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa", "mmmu_val"))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    output = tmp_path / "results"
+    calls = []
+
+    def fake_runner(checkpoint_path, *, output_root, settings):
+        calls.append(output_root)
+        result_path = output_root / "attempt" / "summary.json"
+        raw_result_path = output_root / "attempt" / "samples.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
+        raw_result_path.write_text("{}\n")
+        return {
+            "metrics": {"accuracy": 0.5},
+            "raw_result_path": str(raw_result_path),
             "result_path": str(result_path),
         }
 
@@ -310,32 +397,39 @@ def test_short_profile_resumes_only_matching_completed_repetitions(monkeypatch, 
             str(hf_home),
         ]
     )
+    evaluation.evaluate(args)
 
-    first = evaluation.evaluate(args)
-    second = evaluation.evaluate(args)
+    if corruption == "checkpoint":
+        (model / "preprocessor_config.json").write_text('{"changed": true}\n')
+    elif corruption == "artifact":
+        (output / "short-repetition-1" / "attempt" / "samples.json").unlink()
+    else:
+        (output / "short-repetition-1" / "attempt" / "summary.json").unlink()
 
-    assert len(calls) == 2
-    assert second["runs"] == first["runs"]
-    for repetition in (1, 2):
-        completed = json.loads(
-            (output / f"short-repetition-{repetition}" / "completed_run.json").read_text()
-        )
-        assert completed["schema"] == "modelopt.vlm-evaluation-completed-run/v1"
-        assert completed["identity"]["repetition"] == repetition
-        assert completed["identity"]["checkpoint"]["fingerprint"]
+    evaluation.evaluate(args)
+    assert len(calls) == expected_calls
 
-    state_path = model / "modelopt_state.json"
-    state_path.write_text("{}\n")
-    changed_checkpoint = evaluation.evaluate(args)
-    assert len(calls) == 4
-    assert changed_checkpoint["runs"] != first["runs"]
 
-    state_path.unlink()
-    restored_checkpoint = evaluation.evaluate(args)
-    assert len(calls) == 6
-    Path(restored_checkpoint["runs"][0]["result_path"]).unlink()
-    with pytest.raises(RuntimeError, match="result artifact is missing"):
-        evaluation.evaluate(args)
+@pytest.mark.parametrize(
+    "record",
+    [
+        "{\n",
+        json.dumps(
+            {
+                "identity": {},
+                "result": {"metrics": []},
+                "schema": "modelopt.vlm-evaluation-completed-run/v1",
+            }
+        ),
+    ],
+)
+def test_completed_repetition_records_fail_closed_when_malformed(tmp_path, record):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "completed_run.json").write_text(record)
+
+    with pytest.raises(RuntimeError, match="invalid completed VLM evaluation"):
+        evaluator._load_completed_run(output, identity={})
 
 
 def test_e2e_full_eval_policy_is_repeated_and_bounded_to_100_rows_per_task():
@@ -357,9 +451,6 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     captured = {}
 
     def fake_runner(checkpoint_path, *, output_root, settings):
-        result_path = output_root / "summary.json"
-        result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
         report = json.loads((output / "profile.json").read_text())
         assert report["configured_tasks"] == ["modelopt_vlm_benchmark_realworldqa"]
         assert report["sample_limit"] == 2
@@ -368,6 +459,9 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
             output_root=output_root,
             settings=settings,
         )
+        result_path = output_root / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}\n")
         return {
             "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
             "result_path": str(result_path),
@@ -403,13 +497,17 @@ def test_post_mip_e2e_full_eval_adapter_averages_repeated_bounded_tasks(
     model = tmp_path / "model"
     model.mkdir()
     output = tmp_path / "output"
-    captured = {}
+    captured = {"invocations": 0}
 
     def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        captured["invocations"] += 1
         captured.update(args=args, settings_overrides=settings_overrides)
         preflight_callback({"profile": suites.EVALUATION_PROFILE, "sample_limit": None})
         runs = []
-        for index, realworldqa_score in enumerate((0.4, 0.6), start=1):
+        score_offset = (captured["invocations"] - 1) * 0.2
+        for index, realworldqa_score in enumerate(
+            (0.4 + score_offset, 0.6 + score_offset), start=1
+        ):
             result_path = tmp_path / f"run-{index}.json"
             result_path.write_text("{}")
             runs.append(
@@ -450,6 +548,43 @@ def test_post_mip_e2e_full_eval_adapter_averages_repeated_bounded_tasks(
     assert summary["suite"] == "e2e-full-eval"
     assert summary["metrics"] == result["metrics"]
     assert summary["result_paths"] == result["run_result_paths"]
+
+    refreshed = post_mip.evaluate_e2e_full_eval_checkpoint(
+        model,
+        output_root=output,
+        settings={
+            "batch_size": 1,
+            "timeout_seconds": 14400,
+            "dtype": "bfloat16",
+            "topology": {"tensor_parallel_size": 1},
+        },
+    )
+    assert refreshed["metrics"][
+        "modelopt_vlm_benchmark_realworldqa.exact_match_none"
+    ] == pytest.approx(0.7)
+    assert json.loads(Path(refreshed["result_path"]).read_text())["metrics"] == refreshed["metrics"]
+
+
+def test_post_mip_e2e_full_eval_rejects_different_repetition_metrics(
+    monkeypatch,
+    tmp_path,
+):
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        return {
+            "runs": [
+                {"metrics": {"realworldqa.accuracy": 0.5}, "result_path": "first.json"},
+                {"metrics": {"mmmu.accuracy": 0.5}, "result_path": "second.json"},
+            ]
+        }
+
+    monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
+
+    with pytest.raises(RuntimeError, match="produced different metrics"):
+        post_mip.evaluate_e2e_full_eval_checkpoint(
+            tmp_path / "model",
+            output_root=tmp_path / "output",
+            settings={},
+        )
 
 
 def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):

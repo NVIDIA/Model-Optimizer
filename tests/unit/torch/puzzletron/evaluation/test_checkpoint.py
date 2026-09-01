@@ -68,7 +68,12 @@ def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkey
     assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
 
 
-def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(monkeypatch, tmp_path):
+@pytest.mark.parametrize("distribution_available", [False, True])
+def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(
+    monkeypatch,
+    tmp_path,
+    distribution_available,
+):
     package = tmp_path / "lmms_eval"
     package.mkdir()
     responses = [
@@ -76,14 +81,12 @@ def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(monkey
         SimpleNamespace(stdout=""),
     ]
 
-    def missing_distribution(_name):
-        raise checkpoint.importlib.metadata.PackageNotFoundError("lmms-eval")
+    def distribution(_name):
+        if not distribution_available:
+            raise checkpoint.importlib.metadata.PackageNotFoundError
+        return _distribution(None)
 
-    monkeypatch.setattr(
-        checkpoint.importlib.metadata,
-        "distribution",
-        missing_distribution,
-    )
+    monkeypatch.setattr(checkpoint.importlib.metadata, "distribution", distribution)
     monkeypatch.setattr(
         checkpoint.importlib.util,
         "find_spec",
