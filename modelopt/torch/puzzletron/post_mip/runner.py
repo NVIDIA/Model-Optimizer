@@ -409,8 +409,6 @@ def _evaluate_checkpoint(
     output = _execution_root(config, node, execution_identity) / "raw" / source.architecture_id
     settings = dict(node.config.get("config") or {})
     reference_checkpoint = settings.pop("reference_checkpoint", None)
-    if reference_checkpoint is None:
-        reference_checkpoint = (config.get("convert") or {}).get("teacher_dir")
     checkpoint = str(source.artifact["checkpoint"])
     checkpoints = [checkpoint]
     if reference_checkpoint is not None and str(reference_checkpoint) != checkpoint:
