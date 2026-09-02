@@ -1,12 +1,13 @@
 # Qwen 3.5 4B VLM FFN-width KD-search run 2026-09-01-r2
 
-Evidence status: `preliminary`.
+Status: early comparison (`preliminary`). These results help choose what to test
+next; they do not show that pruning preserves quality across VLM tasks.
 
-This run completed the three-candidate screening path through 64-step TP2 KD
-and the `qwen35-vlm-rwqa100-mmmu100-prefix100-repeat2-v1` evaluation contract.
-The [structured record](result_record.json) is the source of truth for exact
-provenance, identities, and hashes. The [metric table](metrics.csv) contains
-the curated numerical observations.
+This run created three smaller models, measured their serving speed, trained
+each one for 64 KD steps on two GPUs, and evaluated them on RealWorldQA and
+MMMU. The [structured record](result_record.json) contains exact configuration
+and artifact details. The [metric table](metrics.csv) contains the recorded
+measurements.
 
 ## Results
 
@@ -17,27 +18,30 @@ the curated numerical observations.
 | FFN 6144 | 4,540,589,568 | 14.2567% | 0.335212 | 0.928762 | 0.56 | 0.37 |
 | FFN 5120 | 4,288,931,328 | 19.0090% | 0.238116 | 0.921556 | 0.71 | 0.29 |
 
-The 9.5%-pruned student is the provisional first example candidate because it
-has the strongest teacher-token agreement and the smallest combined absolute
-downstream delta under this pinned screen. The 19.0% student remains a useful
-higher-compression point, but its MMMU regression is larger.
+FFN 7168 is the first student to test further. It agreed most often with the
+teacher's token choices and stayed closest to the teacher across these two
+benchmarks. FFN 5120 removes more parameters, but its MMMU score fell further.
 
-The two downstream repetitions used the same first 100 rows per task with
-deterministic decoding. Their identical metrics establish execution
-reproducibility, not independent sampling evidence.
+## How to read the scores
 
-The teacher values are retained external baseline evidence. The configured
-final matched teacher comparison was not run, and the exact teacher checkpoint
-fingerprint and runtime identity were not retained.
+- We evaluated the first 100 examples from RealWorldQA and the first 100 from
+  MMMU. The examples were not randomly sampled.
+- We ran those same examples twice and got the same scores. This checks that the
+  evaluator repeats its result; it does not test more examples.
+- We did not save the exact example IDs, so a future run cannot prove that it
+  used the identical set.
+- The teacher scores came from an earlier evaluation. We did not run the planned
+  final teacher and student comparison, and we do not have the exact teacher
+  checkpoint fingerprint or runtime settings.
 
-The heterogeneous and homogeneous MIP origins deduplicated to these same three
-physical uniform-width students. This run therefore contains no
-homogeneous-versus-heterogeneous quality comparison.
+The search produced each of the three FFN widths in two different ways, but the
+resulting model shapes were identical. There are three distinct students, not
+six, and this run cannot compare the two search methods.
 
-## Serving screen
+## Serving check
 
-Output-token throughput at concurrency four used eight requests, 100 requested
-input tokens, 80 output tokens, and 1280 by 720 synthetic images.
+We sent eight synthetic requests, four at a time. Each request asked for 100
+input tokens and 80 output tokens and used 1280 by 720 images.
 
 | Student | 1 image | 4 images | 8 images |
 |---|---:|---:|---:|
@@ -45,8 +49,8 @@ input tokens, 80 output tokens, and 1280 by 720 synthetic images.
 | FFN 6144 | 224.55 tok/s | 253.52 tok/s | 217.28 tok/s |
 | FFN 5120 | 237.27 tok/s | 247.89 tok/s | 206.25 tok/s |
 
-These are bounded screening measurements, not a production throughput claim.
-The teacher was not measured under the same serving contract.
+This is a small comparison of the three students, not a production performance
+benchmark. We did not measure the teacher with the same request settings.
 
 ## Runtime
 
@@ -55,34 +59,28 @@ The teacher was not measured under the same serving contract.
 | Three concurrent 64-step TP2 KD students | 7m35s | 6 GPUs |
 | KD controller and report completion | 10m08s | 6-GPU worker plus CPU controller |
 | Post-KD 32-sample loss screen | 4m05s | 3 GPUs |
-| Post-KD bounded downstream evaluation | 14m09s | 3 GPUs |
-| All retained attempts, diagnostics, and validation | - | 8.054 GPU-hours |
+| Post-KD RealWorldQA/MMMU check | 14m09s | 3 GPUs |
+| All runs, including retries | - | 8.054 GPU-hours |
 
-Each KD student used two tensor-parallel ranks, local and global batch size one,
-a frozen vision tower, activation checkpointing, 64-token KD chunks, and the
-uncapped 64-row multimodal dataset. Peak memory was 63.90, 63.19, and 62.48 GiB
-per rank for the 9.5%, 14.3%, and 19.0% students. Effective example and token
-exposure and the optimizer trajectory were not retained.
+Each student used two GPUs, batch size one, and 64 training rows. We left the
+vision tower unchanged and used activation checkpointing and 64-token KD chunks
+to reduce memory use. Peak memory was 63.90, 63.19, and 62.48 GiB per GPU for
+the 9.5%, 14.3%, and 19.0% students. We did not retain the total number of
+examples or tokens processed or the optimizer history.
 
 ## Limitations
 
-- The configured fresh 256-step finalist KD run was not run. It would initialize
-  from the selected materialized pre-KD checkpoint, using the 64-step screening
-  weights only for ranking. Its budget is not an established convergence target.
-- RealWorldQA and MMMU cover only two task families and use the first 100 rows,
-  not a randomized or coverage-preserving sample.
-- Deterministic repetitions reuse the same rows and do not reduce sampling
-  uncertainty. Per-item outputs and a frozen source-ID manifest were not
-  retained in this repository package.
-- The exact execution Git revision and accelerator model were not recorded in
-  the runtime evidence. The checked-in configuration is a validated successor
-  containing the executed campaign behavior; no reproduction revision is claimed.
-- Single-GPU full-objective KD did not fit the observed 80 GiB memory envelope.
-  TP2 completed without reducing batch size or image resolution.
-- The initial thinking-enabled downstream profile and incomplete or failed KD
-  attempts are superseded evidence and are excluded from the reported scores.
-- External checkpoints and runtime artifacts are not published with this
-  repository. The structured record retains opaque identities and hashes for
-  the canonical summaries that support these results.
+- The planned 256-step KD run was not run. It would start again from the selected
+  model before KD; the 64-step results only choose which model to use. The 256
+  steps were an experiment budget, not a proven training requirement.
+- We did not record the exact source revision or GPU model used for this run.
+  The checked-in recipe behaves the same in the tested paths, but it is newer
+  than the code that launched the experiment.
+- The full KD loss ran out of memory on one 80 GiB GPU. Splitting each student
+  across two GPUs worked without reducing the batch size or image resolution.
+- The reported scores exclude the first evaluation with thinking enabled and
+  any incomplete or failed KD attempts.
+- The trained checkpoints and raw run files are stored outside this repository.
+  The structured record includes their identifiers and hashes.
 
 Reproduction instructions are in the [campaign guide](../../README.md).

@@ -1,33 +1,23 @@
 # Qwen 3.5 4B VLM FFN-width 10%-to-20% KD search
 
-This campaign evaluates language-FFN width pruning for `Qwen/Qwen3.5-4B`
-while retaining the multimodal input path. It compares approximately 10%, 15%,
-and 20% parameter reductions, materializes each student, measures serving
-behavior, runs 64 steps of tensor-parallel knowledge distillation, and compares
-the students with the teacher on a bounded two-task evaluation.
+This campaign compares three smaller versions of `Qwen/Qwen3.5-4B`. Each version
+reduces the language model's FFN width while leaving the vision path unchanged.
 
-The campaign records integration and screening evidence. A run is not a model
-quality result unless its leaf record identifies the exact evaluator, pinned
-datasets, sampling policy, checkpoint geometry, and completed stages.
+This page lists the campaign runs and the commands shared by all runs. Each run
+summary owns its results, runtime, and limitations so that those details are not
+repeated here.
 
 ## Runs
 
-| Run | Evidence status | Completed scope | Provisional outcome |
-|---|---|---|---|
-| [2026-09-01-r2](runs/2026-09-01-r2/summary.md) | `preliminary` | Three materialized students, serving, 64-step TP2 KD, post-KD loss, and RealWorldQA/MMMU prefix-100 evaluation repeated twice | The 9.5%-pruned student is the provisional candidate under this screen |
-
-`preliminary` is deliberate because the downstream screen covers only the first
-100 RealWorldQA and MMMU rows and lacks a frozen per-item manifest. The
-configured fresh 256-step finalist KD run was not run, but it is an exploratory budget,
-not a requirement for campaign or scientific completeness. The bounded scores
-select a follow-up candidate; they do not establish general VLM quality
-preservation.
+| Run | Status | What finished |
+|---|---|---|
+| [2026-09-01-r2](runs/2026-09-01-r2/summary.md) | Early comparison | Three students, a serving check, 64 KD steps, and two short quality benchmarks |
 
 ## Reproduce
 
-Use the pinned model and dataset revisions recorded in the run leaf. Prepare a
-worker-visible dataset and replace every placeholder in the checked-in runner
-template before launching.
+Use the model and dataset versions recorded in the run's structured record.
+Prepare the dataset where workers can read it, and replace every placeholder in
+the runner template before launching.
 
 ```bash
 export PUZZLETRON_DATASET_PATH=/path/to/qwen3p5-vlm-campaign-data
@@ -52,11 +42,10 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Inspect the compiled topology, paths, environment, scheduler resources, and
-all nested requests before removing `--dry-run`. The public runner is a
-template and is not runnable until its placeholders are replaced. Launching
-the complete checked-in campaign continues past the scope retained in the
-current run leaf and includes the exploratory fresh finalist KD run.
+Run the dry run first and check the commands, paths, and requested GPUs. The
+runner file is only a template until its placeholders are replaced. The full
+recipe also contains a fresh 256-step KD run and a final teacher comparison;
+run `2026-09-01-r2` stopped before those steps.
 
 See the [Qwen 3.5 4B VLM example](../../../../docs/qwen3p5_4b_vlm_example.md)
 for environment preparation and lifecycle details.
