@@ -40,6 +40,7 @@ TORCH_VERSIONS = {
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
     "torch_213": "torchvision~=0.28.0",
+    "torch_214": "torchvision~=0.29.0",
 }
 
 # Extra install pins applied per transformers matrix entry (installed after the base
