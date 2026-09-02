@@ -36,9 +36,10 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from examples.onnx_ptq.petr.petr_utils import run_backbone
 from examples.onnx_ptq.trt_runner import TensorRTRunner
 
-__all__ = ["PETRPipeline", "build_runtime", "get_backbone_inputs", "get_head_inputs"]
+__all__ = ["PETRPipeline", "build_runtime", "get_head_inputs"]
 
 
 def import_plugin(cfg):
@@ -76,18 +77,6 @@ def build_runtime(config_path, checkpoint_path, cfg_options=None):
     return cfg, dataset, loader, model
 
 
-def get_backbone_inputs(version, model, images, img_metas):
-    if version == "v1":
-        return {"img": images.squeeze(0)}
-    current = images[:, :6].contiguous()
-    previous = images[:, 6:12].contiguous()
-    previous_features = model.extract_img_feat(previous, img_metas)
-    return {
-        "img": current.squeeze(0),
-        **{f"prev.{index}": value for index, value in enumerate(previous_features)},
-    }
-
-
 def get_head_inputs(version, model, features, img_metas):
     batch_size, num_cams = features[0].shape[:2]
     input_h, input_w, _ = img_metas[0]["pad_shape"][0]
@@ -114,14 +103,17 @@ class PETRPipeline:
         self.version = version
         self.model = model
         self.backbone = TensorRTRunner(backbone_engine)
+        self.history_backbone = (
+            self.backbone.new_context(state_names=("prev.0", "prev.1")) if version == "v2" else None
+        )
         self.head = TensorRTRunner(head_engine)
 
     def __call__(self, stream, data):
         images = data["img"][0].data[0].cuda()
         img_metas = data["img_metas"][0].data[0]
         with torch.cuda.stream(stream), torch.no_grad():
-            feature_outputs = self.backbone(
-                stream, **get_backbone_inputs(self.version, self.model, images, img_metas)
+            feature_outputs = run_backbone(
+                self.version, self.backbone, self.history_backbone, stream, images
             )
             camera_count = 6 if self.version == "v1" else 12
             features = [

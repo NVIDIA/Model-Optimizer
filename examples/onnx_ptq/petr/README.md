@@ -115,6 +115,8 @@ done
 
 Collect 512 backbone batches and one representative head batch directly from PyTorch. No temporary TensorRT engines are needed.
 
+For PETRv2 calibration, PyTorch supplies the historical feature inputs because the TensorRT engines have not been built yet. Accuracy evaluation does not reuse that path: it computes both sweeps with the selected TensorRT backbone engine.
+
 ```bash
 python /opt/Model-Optimizer/examples/onnx_ptq/petr/prepare_calibration.py \
   v1 "$V1_CONFIG" "$V1_CHECKPOINT" \
@@ -168,7 +170,7 @@ TensorRT 11.1 uses typed ONNX graphs; the removed `--fp16` builder flag is not u
 
 ## 4. Evaluate in the evaluator
 
-Restart `modelopt-onnx-evaluator` with the same mounts, restore the variables from step 2, and run each backbone precision with the shared FP16 head:
+Restart `modelopt-onnx-evaluator` with the same mounts, restore the variables from step 2, and run each backbone precision with the shared typed mixed FP16/FP32 head:
 
 ```bash
 cd /workspace/DL4AGX/AV-Solutions/petr-trt/export_eval
@@ -191,15 +193,26 @@ done
 
 Add `--max-samples 1` for an export-to-inference smoke test. Full validation contains 6,019 samples.
 
-## Reference accuracy
+PETRv2 evaluates the selected historical six-camera sweep and then the current six-camera sweep through the same backbone engine at the selected precision. The first pass supplies temporal features to the second; no PyTorch image feature extraction is used during accuracy evaluation.
 
-These TensorRT 11.1.0.106 results were measured on an NVIDIA RTX 6000 Ada Generation GPU with 512 calibration batches.
+## Reference accuracy and performance
+
+Accuracy was measured with TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU using 512 calibration batches and the full 6,019-sample validation set.
 
 | Model | Backbone | Head | mAP |
 | --- | --- | --- | ---: |
-| PETRv1 | FP16 | FP16 | 0.3778 |
-| PETRv1 | INT8 | FP16 | 0.3707 |
-| PETRv1 | FP8 | FP16 | 0.3756 |
-| PETRv2 | FP16 | FP16 | 0.4102 |
-| PETRv2 | INT8 | FP16 | 0.4024 |
-| PETRv2 | FP8 | FP16 | 0.4093 |
+| PETRv1 | FP16 | Mixed FP16/FP32 | 0.3778 |
+| PETRv1 | INT8 | Mixed FP16/FP32 | 0.3707 |
+| PETRv1 | FP8 | Mixed FP16/FP32 | 0.3756 |
+| PETRv2 | FP16 | Mixed FP16/FP32 | 0.4102 |
+| PETRv2 | INT8 | Mixed FP16/FP32 | 0.3982 |
+| PETRv2 | FP8 | Mixed FP16/FP32 | 0.4084 |
+
+Engine-only performance is normalized to each model's FP16 pipeline. PETRv1 comprises one backbone pass plus its fixed typed mixed FP16/FP32 head; PETRv2 comprises two serial backbone passes plus its fixed typed mixed FP16/FP32 head, with no temporal cache assumed.
+
+Measurements use TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU with five interleaved trials per engine component. Each component uses the median `trtexec`-reported GPU Compute Time with data transfers disabled and CUDA Graphs enabled. Component times are summed before normalization. Only speedups are reported.
+
+| Model | INT8 speedup vs. FP16 | FP8 speedup vs. FP16 |
+| --- | ---: | ---: |
+| PETRv1 | 1.49x | 1.29x |
+| PETRv2 | 1.51x | 1.30x |

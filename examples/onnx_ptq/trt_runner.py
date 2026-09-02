@@ -60,9 +60,6 @@ class TensorRTRunner:
         self.engine = trt.Runtime(TRT_LOGGER).deserialize_cuda_engine(engine_bytes)
         if self.engine is None:
             raise RuntimeError(f"Failed to deserialize {engine_path}")
-        self.context = self.engine.create_execution_context()
-        if self.context is None:
-            raise RuntimeError(f"Failed to create an execution context for {engine_path}")
         self.tensor_names = [
             self.engine.get_tensor_name(index) for index in range(self.engine.num_io_tensors)
         ]
@@ -77,6 +74,22 @@ class TensorRTRunner:
                 self.input_shapes[name] = shape
             else:
                 self.output_shapes[name] = shape
+        self._create_context(state_names)
+
+    def new_context(self, state_names=()):
+        runner = object.__new__(type(self))
+        runner.engine = self.engine
+        runner.tensor_names = self.tensor_names
+        runner.input_shapes = self.input_shapes
+        runner.output_shapes = self.output_shapes
+        runner.tensor_dtypes = self.tensor_dtypes
+        runner._create_context(state_names)
+        return runner
+
+    def _create_context(self, state_names):
+        self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError("Failed to create a TensorRT execution context")
 
         self.state = {}
         for base_name in state_names:

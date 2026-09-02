@@ -110,12 +110,20 @@ done
 
 Add `--max-samples 2` for a smoke test that also exercises recurrent decoder state. Full validation contains 23,522 frames.
 
-## Reference accuracy
+## Reference accuracy and performance
 
-These TensorRT 11.1.0.106 results were measured on an NVIDIA RTX 6000 Ada Generation GPU with 512 calibration batches.
+Accuracy was measured with TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU using 512 calibration batches.
 
 | Encoder | Decoder | mAP |
 | --- | --- | ---: |
 | FP16 | Mixed FP16/FP32 | 0.241 |
 | INT8 | Mixed FP16/FP32 | 0.235 |
 | FP8 | Mixed FP16/FP32 | 0.239 |
+
+Engine-only performance is normalized to the FP16 pipeline. Each comparison comprises one encoder pass plus the same exported mixed FP16/FP32 decoder; only the encoder precision changes.
+
+Measurements use TensorRT 11.1.0.106 on an NVIDIA RTX 6000 Ada Generation GPU with five interleaved trials per engine component. Each component uses the median `trtexec`-reported GPU Compute Time with data transfers disabled and CUDA Graphs enabled. Component times are summed before normalization. Only speedups are reported.
+
+| Pipeline | INT8 speedup vs. FP16 | FP8 speedup vs. FP16 |
+| --- | ---: | ---: |
+| FAR3D | 1.69x | 1.40x |

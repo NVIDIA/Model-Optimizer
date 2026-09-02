@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 import torch
-from evaluate import build_runtime, get_backbone_inputs, get_head_inputs
+from evaluate import build_runtime, get_head_inputs
 from mmcv import DictAction
 from mmdet3d.datasets import build_dataloader
 from torch.utils.data import Subset
@@ -26,6 +26,18 @@ from torch.utils.data import Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from examples.onnx_ptq.quantization_utils import NpzCalibrationWriter
+
+
+def get_backbone_inputs(version, model, images, img_metas):
+    if version == "v1":
+        return {"img": images.squeeze(0)}
+    current = images[:, :6].contiguous()
+    previous = images[:, 6:12].contiguous()
+    previous_features = model.extract_img_feat(previous, img_metas)
+    return {
+        "img": current.squeeze(0),
+        **{f"prev.{index}": value for index, value in enumerate(previous_features)},
+    }
 
 
 def parse_args():
