@@ -18,9 +18,10 @@ measurements.
 | FFN 6144 | 4,540,589,568 | 14.2567% | 0.335212 | 0.928762 | 0.56 | 0.37 |
 | FFN 5120 | 4,288,931,328 | 19.0090% | 0.238116 | 0.921556 | 0.71 | 0.29 |
 
-FFN 7168 is the first student to test further. It agreed most often with the
-teacher's token choices and stayed closest to the teacher across these two
-benchmarks. FFN 5120 removes more parameters, but its MMMU score fell further.
+The configured aggregate-rank step selected FFN 7168. That step minimizes
+post-KD loss and maximizes the RealWorldQA and MMMU scores. This records the
+pipeline output; it does not state that FFN 7168 is better than the other
+students.
 
 ## How to read the scores
 
@@ -71,8 +72,9 @@ examples or tokens processed or the optimizer history.
 ## Limitations
 
 - The planned 256-step KD run was not run. It would start again from the selected
-  model before KD; the 64-step results only choose which model to use. The 256
-  steps were an experiment budget, not a proven training requirement.
+  model before KD. The configured ranking step used the 64-step measurements to
+  select that model. The 256 steps were an experiment budget, not a proven
+  training requirement.
 - We did not record the exact source revision or GPU model used for this run.
   The checked-in recipe behaves the same in the tested paths, but it is newer
   than the code that launched the experiment.

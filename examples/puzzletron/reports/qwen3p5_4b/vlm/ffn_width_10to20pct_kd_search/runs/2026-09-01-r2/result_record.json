@@ -406,7 +406,7 @@
     "selection": {
       "status": "provisional",
       "architecture_id": "architecture_7160bc27bcdc6149",
-      "rationale": "Best-balanced candidate under the pinned loss, teacher-agreement, RealWorldQA, and MMMU screen. This is not a general VLM quality claim."
+      "rationale": "The configured aggregate-rank filter selected this architecture by minimizing screening_eval.lm_loss and maximizing the RealWorldQA exact-match and MMMU accuracy metrics. This records the pipeline output and does not assert that the selected architecture is better."
     }
   },
   "performance_evidence": {
