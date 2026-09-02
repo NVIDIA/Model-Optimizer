@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 import modelopt.torch.puzzletron.stages.future as future_stages
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
+from modelopt.torch.puzzletron.post_mip.evidence import collect_kd_exposure, kd_exposure_metrics
 from modelopt.torch.puzzletron.post_mip.records import (
     ArchitectureCandidate,
     ArtifactKind,
@@ -532,6 +533,17 @@ def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_p
             },
         )
 
+    for incomplete_settings in (
+        {"row_manifest": str(manifest)},
+        {"row_manifest_sha256": "a" * 64},
+    ):
+        with pytest.raises(ValueError, match="requires row_manifest and row_manifest_sha256"):
+            post_mip.evaluate_frozen_campaign_checkpoint(
+                checkpoint,
+                output_root=tmp_path / "missing-manifest-setting",
+                settings=incomplete_settings,
+            )
+
 
 def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tmp_path):
     candidate = tmp_path / "candidate"
@@ -718,8 +730,6 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
 
 
 def test_global_kd_resume_reports_durable_incremental_gpu_hours(tmp_path):
-    from modelopt.torch.puzzletron.post_mip.evidence import collect_kd_exposure, kd_exposure_metrics
-
     output = tmp_path / "trajectory"
     training_log = output / "checkpoints" / "training.jsonl"
     training_log.parent.mkdir(parents=True)
@@ -918,4 +928,70 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
     with pytest.raises(RuntimeError, match="128-step evaluation contract differs from pre-KD"):
         runner._aggregate_result_manifest(
             {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "mismatch-execution"
+        )
+
+    (tmp_path / "comparison-128.json").write_text(
+        json.dumps({"identity": evaluation_identity(128)})
+    )
+    milestone_observation = ledger.observations["short_v1_128"][revisions["kd_128"]]
+    comparison_path = milestone_observation.artifacts.pop("comparison_path")
+    with pytest.raises(RuntimeError, match="produced no reference comparison"):
+        runner._aggregate_result_manifest(
+            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "missing-comparison"
+        )
+    milestone_observation.artifacts["comparison_path"] = comparison_path
+
+    second_architecture_id = "architecture-second"
+    ledger.architectures[second_architecture_id] = ArchitectureCandidate(
+        architecture_id=second_architecture_id,
+        block_configs=[],
+        mip_metrics={"parameter_ratio": 0.9},
+    )
+    second_materialized = "revision-second-materialized"
+    second_selected = "revision-second-kd-256"
+    ledger.revisions[second_materialized] = CandidateRevision(
+        revision_id=second_materialized,
+        architecture_id=second_architecture_id,
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "second-pre-kd")},
+        parent_revision_id=None,
+        producer_node="materialized",
+    )
+    ledger.revisions[second_selected] = CandidateRevision(
+        revision_id=second_selected,
+        architecture_id=second_architecture_id,
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "second-step-256")},
+        parent_revision_id=second_materialized,
+        producer_node="kd_256",
+    )
+    ledger.observations["materialized"][second_materialized] = NodeObservation(
+        node_id="materialized",
+        input_revision_id=second_materialized,
+        source_revision_id=second_materialized,
+        output_revision_id=second_materialized,
+        status="success",
+    )
+    second_identity = evaluation_identity(0)
+    second_identity["architecture_id"] = second_architecture_id
+    second_identity["evaluator"]["resolved_profile"]["lmms_eval_revision"] = "other-revision"
+    second_comparison = tmp_path / "comparison-second-pre-kd.json"
+    second_comparison.write_text(json.dumps({"identity": second_identity}))
+    ledger.observations["pre_kd_short_v1"][second_materialized] = NodeObservation(
+        node_id="pre_kd_short_v1",
+        input_revision_id=second_materialized,
+        source_revision_id=second_materialized,
+        output_revision_id=second_materialized,
+        status="success",
+        artifacts={"comparison_path": str(second_comparison)},
+    )
+    mixed_input_set = CandidateSet.create(
+        "campaign",
+        "selected",
+        [revisions["kd_256"], second_selected],
+        producer_execution_identity="selected-execution",
+    )
+    with pytest.raises(RuntimeError, match="evaluation contract differs across candidates"):
+        runner._aggregate_result_manifest(
+            {"puzzle_dir": str(tmp_path)}, ledger, node, mixed_input_set, "mixed-contract"
         )

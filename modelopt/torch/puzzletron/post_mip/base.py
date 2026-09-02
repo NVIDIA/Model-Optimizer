@@ -28,6 +28,7 @@ from .records import ArtifactKind
 
 __all__ = [
     "CompiledPostMIPNode",
+    "KD_TRAJECTORY_STEP_FIELDS",
     "NodeCapabilities",
     "NodeKind",
     "PostMIPNode",
@@ -35,6 +36,8 @@ __all__ = [
     "post_mip_node",
     "render_post_mip_node_report",
 ]
+
+KD_TRAJECTORY_STEP_FIELDS = frozenset({"max_steps", "checkpoint_every_steps"})
 
 
 class NodeKind(str, Enum):
@@ -303,7 +306,7 @@ def _validate_kd_trajectories(nodes: list[CompiledPostMIPNode]) -> None:
             contract = {
                 key: value
                 for key, value in settings.items()
-                if key not in {"max_steps", "checkpoint_every_steps"}
+                if key not in KD_TRAJECTORY_STEP_FIELDS
             }
             contract["model_source"] = node.model_source
             if shared_contract is None:

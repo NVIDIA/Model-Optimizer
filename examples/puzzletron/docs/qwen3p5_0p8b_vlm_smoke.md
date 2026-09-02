@@ -351,8 +351,8 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
 can generate the same route with site-specific settings. Hidden width,
 attention, GDN, embedding width, and depth are available through guided
-customization, but grouped-attention reduction is not admitted by the tracked
-runtime-validated routes. Inspect every customized plan
-with `--dry-run` before launch. See
+customization. Attention and GDN reductions are not included in the tracked
+runtime-validated routes. Inspect every customized plan with `--dry-run` before
+launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

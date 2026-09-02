@@ -172,7 +172,7 @@ post_mip:
           failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
-          config:
+          config: &candidate_kd
             seed: 1111
             validation_seed: 445
             shuffle_training_data: true
@@ -181,7 +181,7 @@ post_mip:
             global_batch_size: 4
             local_batch_size: 1
             checkpoint_every_steps: 64
-          exposure:
+          exposure: &candidate_exposure_64
             cumulative_steps: 64
             global_batch_size: 4
             cumulative_examples: 256
@@ -202,19 +202,12 @@ post_mip:
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            resume: true
+            <<: *candidate_kd
             max_steps: 128
-            global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 64
           exposure:
+            <<: *candidate_exposure_64
             cumulative_steps: 128
-            global_batch_size: 4
             cumulative_examples: 512
-            max_sample_length: 512
             estimated_cumulative_gpu_hours: 0.5
 
         short_v1_128:
@@ -231,19 +224,12 @@ post_mip:
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            resume: true
+            <<: *candidate_kd
             max_steps: 256
-            global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 64
           exposure:
+            <<: *candidate_exposure_64
             cumulative_steps: 256
-            global_batch_size: 4
             cumulative_examples: 1024
-            max_sample_length: 512
             estimated_cumulative_gpu_hours: 1.0
 
         short_v1_256:
@@ -261,7 +247,7 @@ post_mip:
         bounded_result:
           type: result_manifest
           input: selected
-          config:
+          config: &bounded_result_config
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_short_v1
             profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
@@ -286,19 +272,12 @@ post_mip:
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            resume: true
+            <<: *candidate_kd
             max_steps: 512
-            global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 64
           exposure:
+            <<: *candidate_exposure_64
             cumulative_steps: 512
-            global_batch_size: 4
             cumulative_examples: 2048
-            max_sample_length: 512
             estimated_cumulative_gpu_hours: 2.0
 
         short_v1_512:
@@ -308,9 +287,20 @@ post_mip:
           config:
             <<: *short_v1_evaluation
 
+        extended_result:
+          type: result_manifest
+          input: short_v1_512
+          config:
+            <<: *bounded_result_config
+            milestones:
+              - {steps: 64, kd: kd_64, evaluation: short_v1_64}
+              - {steps: 128, kd: kd_128, evaluation: short_v1_128}
+              - {steps: 256, kd: kd_256, evaluation: short_v1_256}
+              - {steps: 512, kd: kd_512, evaluation: short_v1_512}
+
         approve_1024:
           type: manual_filter
-          input: short_v1_512
+          input: extended_result
           prompt: Approve the 512-step finalist for the separately budgeted 1024-step extension.
 
         kd_1024:
@@ -320,19 +310,12 @@ post_mip:
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            resume: true
+            <<: *candidate_kd
             max_steps: 1024
-            global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 64
           exposure:
+            <<: *candidate_exposure_64
             cumulative_steps: 1024
-            global_batch_size: 4
             cumulative_examples: 4096
-            max_sample_length: 512
             estimated_cumulative_gpu_hours: 4.0
 
         short_v1_1024:
@@ -342,9 +325,21 @@ post_mip:
           config:
             <<: *short_v1_evaluation
 
+        final_result:
+          type: result_manifest
+          input: short_v1_1024
+          config:
+            <<: *bounded_result_config
+            milestones:
+              - {steps: 64, kd: kd_64, evaluation: short_v1_64}
+              - {steps: 128, kd: kd_128, evaluation: short_v1_128}
+              - {steps: 256, kd: kd_256, evaluation: short_v1_256}
+              - {steps: 512, kd: kd_512, evaluation: short_v1_512}
+              - {steps: 1024, kd: kd_1024, evaluation: short_v1_1024}
+
         best:
           type: filter
-          input: short_v1_1024
+          input: final_result
           mode: top_k
           metric: short_v1_1024.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
           direction: maximize
@@ -524,6 +519,18 @@ post_mip:
           failure_policy: strict
           config:
             <<: *short_v1_evaluation
+
+        control_final_result:
+          type: result_manifest
+          input: control_short_v1_1024
+          config:
+            <<: *control_result_config
+            milestones:
+              - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
+              - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
+              - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+              - {steps: 512, kd: control_kd_512, evaluation: control_short_v1_512}
+              - {steps: 1024, kd: control_kd_1024, evaluation: control_short_v1_1024}
 
 zero_shot_evaluation:
   enabled: false

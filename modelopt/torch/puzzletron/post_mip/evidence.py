@@ -25,6 +25,14 @@ from typing import TYPE_CHECKING, Any
 
 from ..identity import canonicalize
 
+__all__ = [
+    "checkpoint_fingerprint",
+    "collect_kd_exposure",
+    "downstream_evaluation_identity",
+    "evaluation_contract",
+    "kd_exposure_metrics",
+]
+
 if TYPE_CHECKING:
     from .records import CandidateRevision
 

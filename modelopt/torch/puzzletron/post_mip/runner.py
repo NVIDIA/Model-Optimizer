@@ -34,7 +34,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkpoint
 from ..identity import canonicalize, stable_hash
 from ..security_policy import require_boolean_policy
-from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
+from .base import KD_TRAJECTORY_STEP_FIELDS, CompiledPostMIPNode, NodeKind, compile_post_mip_flows
 from .evidence import checkpoint_fingerprint as _checkpoint_fingerprint
 from .evidence import collect_kd_exposure, kd_exposure_metrics
 from .evidence import downstream_evaluation_identity as _downstream_evaluation_identity
@@ -792,9 +792,7 @@ def _global_kd(
         )
     else:
         resume_contract = {
-            key: value
-            for key, value in settings.items()
-            if key not in {"max_steps", "checkpoint_every_steps"}
+            key: value for key, value in settings.items() if key not in KD_TRAJECTORY_STEP_FIELDS
         }
         trajectory_identity = stable_hash(
             {
@@ -1017,6 +1015,16 @@ def _aggregate_result_manifest(
     expected_profile = str(settings["profile"])
     expected_manifest_sha256 = str(settings["row_manifest_sha256"])
     expected_reference_fingerprint = _checkpoint_fingerprint(settings["reference_checkpoint"])
+    campaign_evaluation_contract = None
+
+    def comparison_identity(observation: NodeObservation, *, label: str) -> Any:
+        comparison_path = observation.artifacts.get("comparison_path")
+        if not comparison_path:
+            raise RuntimeError(
+                f"{label} produced no reference comparison; configure reference_checkpoint "
+                "on the referenced evaluation node"
+            )
+        return json.loads(Path(comparison_path).read_text()).get("identity")
 
     for revision_id in input_set.revision_ids:
         revision = ledger.revisions[revision_id]
@@ -1028,10 +1036,10 @@ def _aggregate_result_manifest(
             raise RuntimeError(
                 f"missing pre-KD evaluation {pre_kd_evaluation!r} for {revision.architecture_id}"
             )
-        pre_kd_comparison = json.loads(
-            Path(pre_kd_evaluation_observation.artifacts["comparison_path"]).read_text()
+        pre_kd_identity = comparison_identity(
+            pre_kd_evaluation_observation,
+            label=f"pre-KD evaluation {pre_kd_evaluation!r}",
         )
-        pre_kd_identity = pre_kd_comparison.get("identity")
         expected_evaluation_contract = _evaluation_contract(
             pre_kd_identity,
             label="pre-KD",
@@ -1039,6 +1047,13 @@ def _aggregate_result_manifest(
             expected_manifest_sha256=expected_manifest_sha256,
             expected_reference_fingerprint=expected_reference_fingerprint,
         )
+        if campaign_evaluation_contract is None:
+            campaign_evaluation_contract = expected_evaluation_contract
+        elif expected_evaluation_contract != campaign_evaluation_contract:
+            raise RuntimeError(
+                f"pre-KD evaluation contract differs across candidates for "
+                f"{revision.architecture_id}"
+            )
         milestones = []
         for milestone in settings["milestones"]:
             kd_observation = ledger._observation_for_revision(str(milestone["kd"]), revision_id)
@@ -1055,9 +1070,10 @@ def _aggregate_result_manifest(
                     f"{milestone['evaluation']!r} for {revision.architecture_id}"
                 )
             kd_revision = ledger.revisions[kd_observation.output_revision_id]
-            milestone_identity = json.loads(
-                Path(evaluation_observation.artifacts["comparison_path"]).read_text()
-            ).get("identity")
+            milestone_identity = comparison_identity(
+                evaluation_observation,
+                label=f"{int(milestone['steps'])}-step evaluation {milestone['evaluation']!r}",
+            )
             milestone_contract = _evaluation_contract(
                 milestone_identity,
                 label=f"{int(milestone['steps'])}-step",
@@ -1065,7 +1081,7 @@ def _aggregate_result_manifest(
                 expected_manifest_sha256=expected_manifest_sha256,
                 expected_reference_fingerprint=expected_reference_fingerprint,
             )
-            if milestone_contract != expected_evaluation_contract:
+            if milestone_contract != campaign_evaluation_contract:
                 raise RuntimeError(
                     f"{int(milestone['steps'])}-step evaluation contract differs from pre-KD"
                 )

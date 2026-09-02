@@ -28,7 +28,13 @@ execution:
     post.candidate-evaluation.selected: {strategy: single, resource: cpu}
     post.candidate-evaluation.bounded_result: {strategy: single, resource: cpu}
     post.candidate-evaluation.approve_512: {strategy: single, resource: cpu}
+    post.candidate-evaluation.kd_512: {instances: 1}
+    post.candidate-evaluation.short_v1_512: {instances: 1}
+    post.candidate-evaluation.extended_result: {strategy: single, resource: cpu}
     post.candidate-evaluation.approve_1024: {strategy: single, resource: cpu}
+    post.candidate-evaluation.kd_1024: {instances: 1}
+    post.candidate-evaluation.short_v1_1024: {instances: 1}
+    post.candidate-evaluation.final_result: {strategy: single, resource: cpu}
     post.candidate-evaluation.best: {strategy: single, resource: cpu}
     post.control-learning-curve.control_materialized: &control_instances {instances: 2}
     post.control-learning-curve.control_pre_kd_short_v1: *control_instances
@@ -47,3 +53,4 @@ execution:
     post.control-learning-curve.control_approve_1024: {strategy: single, resource: cpu}
     post.control-learning-curve.control_kd_1024: {instances: 1}
     post.control-learning-curve.control_short_v1_1024: {instances: 1}
+    post.control-learning-curve.control_final_result: {strategy: single, resource: cpu}
