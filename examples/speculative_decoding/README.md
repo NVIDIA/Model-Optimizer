@@ -145,10 +145,89 @@ python scripts/ar_validate.py --model_path $ONLINE_CKPT
 ## Export
 
 ```bash
-python scripts/export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH
+python scripts/export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH \
+    --speculation_profile speculation_profile.json   # optional, see below
 ```
 
 This exports the model from a ModelOpt checkpoint to a deployment-compatible format.
+
+## Speculation Profiles
+
+A draft checkpoint's weights say nothing about *how good* it is. Deployment tooling therefore
+guesses: dynamo's simulator, for instance, models every draft model in existence with one hardcoded
+acceptance vector, so a strong draft and a weak one produce the same capacity estimate.
+
+A `speculation_profile.json` carries the measurement next to the weights.
+
+### Producing one
+
+Two producers, one schema, for different moments:
+
+| Producer | When | Needs |
+|---|---|---|
+| [`scripts/ar_validate.py`](scripts/ar_validate.py) `--output_json` | during/after training | the model only -- no serving engine |
+| [`examples/specdec_bench`](../specdec_bench) `--save_dir` | against a deployed engine | a running engine |
+
+```bash
+# in-training
+python scripts/ar_validate.py --model_path $CKPT --steps 3 --output_json speculation_profile.json
+
+# on a served engine
+python ../specdec_bench/run.py --model_dir $TARGET --draft_model_dir $DRAFT \
+    --speculative_algorithm DFLASH --block_size 3 --engine VLLM \
+    --mtbench <prompts.jsonl> --save_dir ./out     # -> ./out/speculation_profile.json
+```
+
+Both emit identical vectors for the same acceptance distribution.
+
+### Attaching it
+
+Pass `--speculation_profile` at export and it is copied into the checkpoint directory. Exporting
+without one writes an unmeasured stub, so consumers can tell "not measured" from "predates the
+schema".
+
+### What is in it
+
+```json
+{
+  "schema_version": "1.0",
+  "method": "dflash",
+  "num_speculative_tokens": 3,
+  "conditional_accept_rates": [0.816082, 0.776577, 0.749591],
+  "marginal_accept_rates":    [0.816082, 0.633751, 0.475054],
+  "mean_accept_length": 2.924887,
+  "accept_length_model": "measured_per_k"
+}
+```
+
+**Both acceptance conventions are published**, because the two known consumers disagree and neither
+labels which it expects:
+
+| Consumer | Wants | Field |
+|---|---|---|
+| dynamo mocker / AIC | *conditional* -- P(draft i+1 accepted \| first i accepted) | `conditional_accept_rates` |
+| vLLM synthetic rejection sampler | *marginal* -- P(first i+1 all accepted) | `marginal_accept_rates` |
+
+Emitting one and letting a consumer assume the other is a silent, plausible-looking failure.
+
+Two further fields exist to prevent misuse:
+
+- **`mean_accept_length` is per *step***, not per request -- it is the mean of the acceptance-length
+  distribution the vectors describe, and satisfies `AL = 1 + sum(marginal_accept_rates)`. A
+  per-request mean (each request weighted equally regardless of length) is reported separately as
+  `mean_accept_length_per_request`; the two differ on real data.
+- **`accept_length_model`** says whether K may be extrapolated. `chain_analytic` (EAGLE\*) means the
+  K=3 draft is a prefix of the K=5 draft, so one measurement covers every smaller K.
+  `measured_per_k` (DFlash, DSpark, tree drafting) means the draft is re-planned when K changes and
+  each K must be measured.
+
+### Comparing against published numbers
+
+Acceptance length depends strongly on generation length -- truncating responses cuts the long,
+predictable stretches where drafts do best. Measuring `nvidia/MiniMax-M2.7-DFlash` at 512 tokens
+gives AL 2.47 against that card's published 3.05; at the card's stated 4096 it gives 2.92, within
+4.1%. When comparing against a published figure, match the published setup (dataset, draft length,
+temperature, generation length) before economising anywhere.
 
 ## Deployment
 
