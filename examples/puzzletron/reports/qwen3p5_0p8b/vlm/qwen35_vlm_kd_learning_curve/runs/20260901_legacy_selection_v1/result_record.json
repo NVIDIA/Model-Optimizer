@@ -6,6 +6,7 @@
     "family": "qwen3p5_0p8b",
     "modality": "vlm",
     "teacher": "Qwen/Qwen3.5-0.8B",
+    "teacher_revision": "2fc06364715b967f1860aea9cf38778875588b17",
     "teacher_checkpoint_fingerprint": "7bb7780f1aca3ad6a3acb3b280588bd138902bcdb2a542dc36ed876fbc6bffc2"
   },
   "campaign": {
