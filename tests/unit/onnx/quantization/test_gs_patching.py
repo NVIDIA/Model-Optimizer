@@ -17,6 +17,7 @@ import ml_dtypes
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
+import pytest
 
 from modelopt.onnx.quantization.gs_patching import _export_tensor_proto, _export_value_info_proto
 
@@ -43,3 +44,24 @@ def test_export_value_info_uses_explicit_onnx_dtype_without_numpy_conversion():
     value_info = _export_value_info_proto(tensor, do_type_check=True)
 
     assert value_info.type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16
+
+
+def test_export_value_info_accepts_onnx_dtype_without_explicit_dtype():
+    tensor = gs.Variable("input", dtype=onnx.TensorProto.BFLOAT16, shape=[1])
+
+    value_info = _export_value_info_proto(tensor, do_type_check=True)
+
+    assert value_info.type.tensor_type.elem_type == onnx.TensorProto.BFLOAT16
+
+
+def test_export_rejects_unknown_integer_dtype():
+    invalid_dtype = max(onnx.TensorProto.DataType.values()) + 1
+    constant = gs.Constant("scale", np.array([1.0], dtype=np.float32))
+    constant.explicit_dtype = invalid_dtype
+
+    with pytest.raises(ValueError):
+        _export_tensor_proto(constant)
+
+    variable = gs.Variable("input", dtype=invalid_dtype, shape=[1])
+    with pytest.raises(ValueError):
+        _export_value_info_proto(variable, do_type_check=True)
