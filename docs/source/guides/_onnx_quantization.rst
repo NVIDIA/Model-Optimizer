@@ -121,3 +121,320 @@ The following command will build the engine using fp16 precision. After building
 .. note::
 
     If you replace ``--fp16`` flag with ``--best`` flag, this command will create an int8 engine with TensorRT's implicit quantization.
+
+Quantization Sensitivity Scan
+=============================
+
+:func:`modelopt.onnx.quantization.sensitivity.score` ranks each quantizable target (op type or
+individual node) by a proxy metric between the reference and per-target quantized activations,
+so a downstream picker can decide which targets to keep at higher precision. It reuses
+:func:`modelopt.onnx.quantization.quantize` internally for each per-target probe.
+
+.. _sensitivity-supported-options:
+
+Supported options
+-----------------
+
+- ``granularity``: ``op_type`` (default; probes each quantizable op type once) or
+  ``node`` (probes each ONNX node individually; slower).
+- ``metric``: ``kl_div`` (default), ``mse``, or ``cos`` (``1 - cosine_similarity``).
+- ``target_precision``: ``int8`` (default) or ``fp8``.
+- ``calibration_method``: ``entropy`` (default) or ``max``.
+- ``calibration_data``: sequence of input-dicts, path to real data (``.npy`` / ``.npz`` /
+  directory), or ``None`` for synthetic random tensors (directional-only; see note below).
+- ``op_types_scope``: optional whitelist of op types to probe. If omitted, defaults to ops
+  present in the graph intersected with the union of ORT's default quantizable set, activation
+  ops, normalization ops, and fusible reduction ops (graph plumbing like ``Cast`` /
+  ``Constant`` / ``Shape`` is skipped).
+
+Python API:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization.sensitivity import score
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="op_type",
+        metric="kl_div",
+        target_precision="int8",
+    )
+    # result["scores"] is a dict {op_type_or_node_name: metric_value}, higher = more sensitive.
+
+The ``imagenet_calib_500.npz`` in the example above is a 500-sample ImageNet-1k calibration set
+prepared with the same preprocessing as the exported ONNX. For a CoAtNet-0 checkpoint exported
+from timm's ``coatnet_0_rw_224.sw_in1k`` (``pretrained=True``), the code looks like:
+
+.. code-block:: python
+
+    from itertools import islice
+
+    import numpy as np, onnx, timm, torch
+    from datasets import load_dataset
+    from timm.data import resolve_model_data_config, create_transform
+
+    # 1. Export the timm checkpoint to ONNX.
+    model = timm.create_model("coatnet_0_rw_224.sw_in1k", pretrained=True).eval()
+    cfg = resolve_model_data_config(model)
+    dummy = torch.randn(1, *cfg["input_size"])   # (1, 3, 224, 224)
+    torch.onnx.export(
+        model, dummy, "coatnet-0.onnx",
+        input_names=["input"], output_names=["output"],
+        opset_version=17,
+    )
+
+    # 2. Prepare the calibration NPZ with matching preprocessing.
+    m = onnx.load("coatnet-0.onnx")
+    input_name = m.graph.input[0].name
+    tfm = create_transform(**cfg, is_training=False)
+    ds = load_dataset("ILSVRC/imagenet-1k", split="validation", streaming=True)
+    samples = [tfm(ex["image"].convert("RGB")).numpy() for ex in islice(ds, 500)]
+    np.savez("imagenet_calib_500.npz",
+             **{input_name: np.stack(samples).astype(np.float32)})
+
+Command line:
+
+.. code-block:: bash
+
+    # Op-type ranking with real calibration data (one probe per op class; ~14 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity op_type \
+        --metric kl_div
+
+    # Per-node ranking with real calibration data (one probe per quantizable node; ~60 min on CoAtNet-0)
+    python -m modelopt.onnx.quantization.sensitivity \
+        --onnx_path coatnet-0.onnx \
+        --calibration_data_path imagenet_calib_500.npz \
+        --granularity node \
+        --metric kl_div
+
+Rendered ranking (CoAtNet-0, real 500-sample ImageNet calibration)::
+
+    Sensitivity scan (int8 / kl_div / op_type):
+      Add                 2.848  <-- highest impact
+      Mul                 1.890
+      LayerNormalization  1.653
+      ReduceMean          1.570
+      BatchNormalization  0.355
+      Conv                0.181
+      AveragePool         0.057
+      Sigmoid             0.039
+      MatMul              0.015  <-- lowest impact
+      (4 target(s) with score 0.0 hidden; pass --show_zero_scores or read the JSON)
+    Wrote coatnet-0.sensitivity.json
+
+.. note::
+
+    Omitting ``--calibration_data_path`` falls back to synthetic random inputs; scores are
+    directional-only and must not be paired with absolute thresholds. Attention-heavy models
+    are the highest-risk degradation case.
+
+Turning scores into an exclusion list
+-------------------------------------
+
+The :func:`sensitivity.score` output is a dictionary from target name to sensitivity score
+(see ``metric`` in :ref:`sensitivity-supported-options` above). The picker
+function :func:`sensitivity.suggest_exclusion` turns that dictionary into an actionable
+``--nodes_to_exclude`` or ``--op_types_to_exclude`` list, depending on granularity, for
+:func:`modelopt.onnx.quantization.quantize`, and :func:`sensitivity.summarize_exclusion`
+reports what the exclusion set covers.
+
+Two policy modes are supported:
+
+- **Coverage mode** (default): walk targets in descending score order, accumulating them into
+  the exclusion set until the next one would push the cumulative score above
+  ``coverage * total_mass``, at which point it stops (rank-prefix). Architecture-portable --
+  ``coverage=0.90`` means the same thing on any model.
+- **Threshold mode**: exclude every node whose individual score exceeds ``threshold``. Simpler
+  when the operator already knows a per-node cutoff for a specific model. Setting ``threshold``
+  ignores ``coverage``.
+
+See :func:`suggest_exclusion` for the full argument reference.
+
+Python API -- coverage mode:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization import quantize
+    from modelopt.onnx.quantization.sensitivity import (
+        score, suggest_exclusion, summarize_exclusion,
+    )
+
+    result = score(
+        onnx_path="coatnet-0.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="node",
+    )
+
+    # Leave at most 90% of the total sensitivity score mass at FP16; quantize the rest.
+    excluded = suggest_exclusion(result["scores"], coverage=0.90)
+
+    quantize(
+        onnx_path="coatnet-0.onnx",
+        quantize_mode="int8",
+        calibration_data="imagenet_calib_500.npz",
+        nodes_to_exclude=excluded,
+        output_path="coatnet-0.quant.onnx",
+    )
+
+Python API -- threshold mode:
+
+.. code-block:: python
+
+    # The threshold value is determined empirically by looking at the per-node sensitivity scores.
+    # For CoAtNet-0, a threshold of 0.02 captures the load-bearing sensitivity
+    # (roughly the top 25 nodes as per the KL scores, ~89% of total mass).
+    excluded = suggest_exclusion(result["scores"], threshold=0.02)
+
+.. note::
+
+    The picker warns when the exclusion boundary is a near-tie (default:
+    first-excluded score >= 99% of last-included). Widen ``coverage`` or narrow
+    ``threshold`` to absorb the near-tied target, or set ``near_tie_ratio=None`` to silence.
+
+Grouping per-node scores into architectural blocks
+--------------------------------------------------
+
+On attention-heavy transformer architectures (ViT, DeiT, Swin, CoAtNet's
+attention stages), per-node picking can leave transformer blocks with
+fragmented precision -- some FP16 nodes, some INT8 nodes. Making the
+*transformer block* the atomic exclusion unit avoids the fragmentation.
+
+Pass a ``blocks`` mapping to :func:`suggest_exclusion` to switch the picker
+from per-node to per-block ranking. Each node is assigned to at most one
+group (first-match wins across ``blocks``); unmatched nodes become their
+own singleton group. Coverage / threshold / near-tie / ``max_nodes``
+semantics apply to the *group* ranking, and the returned exclusion list is
+the union of member nodes across the selected groups.
+
+Example: ``vit_tiny_patch16_224`` from timm
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Per-node sensitivity scan on ViT-tiny (``timm.create_model(
+"vit_tiny_patch16_224", pretrained=True)`` exported via
+``torch.onnx.export``), then block-level exclusion at ``threshold=0.1`` on
+group max-KL:
+
+.. code-block:: python
+
+    from modelopt.onnx.quantization import quantize
+    from modelopt.onnx.quantization.sensitivity import (
+        score, suggest_exclusion, summarize_exclusion,
+    )
+
+    result = score(
+        onnx_path="vit_tiny_patch16_224.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        granularity="node",
+        metric="kl_div",
+        target_precision="int8",
+    )
+
+    # 12 depth-1 groups, one per transformer block. Standalone nodes not
+    # matching any regex (e.g. the final /norm/LayerNormalization before the
+    # head) become singleton groups automatically.
+    blocks = {f"blocks.{n}": [rf"^/blocks/blocks\.{n}/"] for n in range(12)}
+
+    # Exclude blocks with threshold above 0.1 KL. On ViT-tiny that cleanly 
+    # captures blocks 7-11 and the final /norm/LayerNormalization singleton 
+    # (see ranking below) while leaving blocks 0-6 in INT8.
+    excluded = suggest_exclusion(
+        result["scores"],
+        threshold=0.1, blocks=blocks, block_agg="max",
+    )
+    print(summarize_exclusion(result["scores"], excluded))
+
+    quantize(
+        onnx_path="vit_tiny_patch16_224.onnx",
+        output_path="vit_tiny_patch16_224.block_excluded.onnx",
+        calibration_data="imagenet_calib_500.npz",
+        nodes_to_exclude=excluded,
+        quantize_mode="int8",
+    )
+
+Block-level ranking (ViT-tiny, real 500-sample ImageNet calibration). Both
+aggregations shown side-by-side; rows sorted by ``max``::
+
+    Block ranking (kl_div, sorted by max_agg):
+      Group                     max_agg   sum_agg
+      blocks.8                    6.737     24.97   <-- highest impact
+      blocks.10                   4.632     17.25
+      blocks.11                   4.296     14.70
+      blocks.9                    4.139     15.91
+      /norm/LayerNormalization    4.105      4.11
+      blocks.7                    0.857      1.85   <-- last included at threshold=0.1
+      blocks.0                    0.011      0.05
+      /Add                        0.008      0.01
+      blocks.6                    0.006     ~0.01
+      blocks.4                    0.005     ~0.01
+      blocks.1                    0.004     ~0.01
+      blocks.2                    0.003     ~0.01
+      blocks.3                    0.003     ~0.01
+      blocks.5                    0.003     ~0.01
+      /patch_embed/proj/Conv     ~0        ~0
+      /head/Gemm                  0         0       <-- lowest impact
+
+    summarize_exclusion:
+      coverage_pct              99.86
+      num_excluded             101 (5 whole transformer blocks + 1 singleton)
+      num_previously_quantized 244
+      num_remaining_quantized  143
+
+Both aggregations pick the same top-6 groups (only their internal ordering
+of the four hottest blocks differs: ``max`` orders them 8 > 10 > 11 > 9,
+while ``sum`` orders 8 > 10 > 9 > 11 because blocks.9 has a slightly heavier
+tail than blocks.11), so any of the following expressions produces the same
+101-node exclusion:
+
+.. code-block:: python
+
+    scores = result["scores"]  # from the score() call above
+
+    # max + threshold (recommended natural pairing, used in the example above)
+    suggest_exclusion(scores, threshold=0.1, blocks=blocks, block_agg="max")
+
+    # sum + max_nodes (equivalent -- top 6 groups by cumulative KL mass)
+    suggest_exclusion(scores, coverage=1.0, max_nodes=6, blocks=blocks, block_agg="sum")
+
+On a 500-image ImageNet-1k validation subset, this 101-node block-level
+exclusion recovers ~75% top-1 versus ~60% for the best per-node picking.
+
+Choosing a grouping depth
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The example above is *depth-1* (one group per transformer block). For finer
+control, split each block into its attention and MLP residual branches
+(*depth-2*):
+
+.. code-block:: python
+
+    blocks_depth2 = {}
+    for n in range(12):
+        blocks_depth2[f"blocks.{n}.attn"] = [
+            rf"^/blocks/blocks\.{n}/norm1",
+            rf"^/blocks/blocks\.{n}/attn/",
+            rf"^/blocks/blocks\.{n}/Add$",       # residual sum after attention
+        ]
+        blocks_depth2[f"blocks.{n}.mlp"] = [
+            rf"^/blocks/blocks\.{n}/norm2",
+            rf"^/blocks/blocks\.{n}/mlp/",
+            rf"^/blocks/blocks\.{n}/Add_1$",     # residual sum after MLP
+        ]
+
+Use depth-2 to keep one branch of a transformer block at INT8 while
+excluding the other. The same principle transfers to hybrids like CoAtNet
+(``/stages/stages.N/blocks/blocks.M/``) or CNNs like ResNet (``/layerN/M/``)
+with the architecture's own path prefixes. Mixed depth in one dict works
+too -- first-match ordering decides assignment when patterns overlap.
+
+When per-block picking doesn't help
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Block-level grouping is architecture-specific. On Conv-heavy models where
+sensitivity is diffuse across many small MBConv or Bottleneck contributors
+(MobileNet, ResNet families), per-node ``coverage`` or ``threshold`` picking
+outperforms block grouping. Use ``blocks`` on transformer / attention-heavy
+architectures.

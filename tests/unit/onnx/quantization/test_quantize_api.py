@@ -19,14 +19,16 @@ import importlib
 import os
 
 import onnx
+import onnx_graphsurgeon as gs
 import onnxruntime
 import pytest
 import torch
-from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
+from _test_utils.onnx.lib_test_models import SimpleMLP, build_conv_concat_model, export_as_onnx
+from _test_utils.onnx.quantization.utils import assert_nodes_are_quantized
 from packaging import version
 
 import modelopt.onnx.quantization as moq
-from modelopt.onnx.utils import get_opset_version
+from modelopt.onnx.utils import get_opset_version, save_onnx
 
 # Mapping of quantization mode to minimum required opset
 MIN_OPSET = {
@@ -196,3 +198,41 @@ def test_quantize_opset_handling(
     assert output_opset == expected_opset, (
         f"[{scenario_name}] Expected opset {expected_opset} for {quant_mode}, got {output_opset}"
     )
+
+
+def test_quantize_honors_nodes_to_quantize_allowlist(tmp_path):
+    """``nodes_to_quantize=[<regex>]`` inserts QDQ around the matched Conv only.
+
+    Guards the primitive the ONNX sensitivity scanner relies on to isolate a single node for a
+    per-target probe; also documents the API contract of the flag itself.
+    """
+    onnx_model = build_conv_concat_model()
+    onnx_path = os.path.join(tmp_path, "conv_concat.onnx")
+    save_onnx(onnx_model, onnx_path)
+
+    # Restrict quantization to the second Conv only (interior node with a real producer input).
+    keep = "conv2_conv/Conv2D"
+    moq.quantize(
+        onnx_path,
+        quantize_mode="int8",
+        nodes_to_quantize=[f"^{keep}$"],
+        high_precision_dtype="fp32",
+    )
+
+    quantized_path = onnx_path.replace(".onnx", ".quant.onnx")
+    assert os.path.isfile(quantized_path)
+    graph = gs.import_onnx(onnx.load(quantized_path))
+    conv_nodes = {n.name: n for n in graph.nodes if n.op == "Conv"}
+    assert keep in conv_nodes, f"{keep} missing after quantization: {list(conv_nodes)}"
+
+    # The selected Conv must have QDQ on its variable inputs; the other three must not.
+    assert assert_nodes_are_quantized([conv_nodes[keep]])
+    for name, node in conv_nodes.items():
+        if name == keep:
+            continue
+        for inp_idx, inp in enumerate(node.inputs):
+            if isinstance(inp, gs.Variable) and inp.inputs:
+                producer = node.i(inp_idx)
+                assert producer.op != "DequantizeLinear", (
+                    f"Unselected Conv '{name}' was quantized: input {inp_idx} traces to {producer.op}"
+                )

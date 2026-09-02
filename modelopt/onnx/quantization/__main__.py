@@ -27,6 +27,7 @@ from modelopt.onnx.quantization.autotune.utils import (
     get_node_filter_list,
 )
 from modelopt.onnx.quantization.quantize import quantize
+from modelopt.onnx.utils import validate_file_size
 
 __all__ = ["main"]
 
@@ -55,31 +56,6 @@ def parse_input_shapes_profile(value: str) -> list[dict[str, str]]:
             )
 
     return profile
-
-
-def validate_file_size(file_path: str, max_size_bytes: int) -> None:
-    """Validate that a file exists and does not exceed the maximum allowed size.
-
-    Args:
-        file_path: Path to the file to validate
-        max_size_bytes: Maximum allowed file size in bytes
-
-    Raises:
-        FileNotFoundError: If the file does not exist
-        ValueError: If the file exceeds the maximum allowed size
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    file_size = os.path.getsize(file_path)
-    if file_size > max_size_bytes:
-        max_size_gb = max_size_bytes / (1024 * 1024 * 1024)
-        actual_size_gb = file_size / (1024 * 1024 * 1024)
-        raise ValueError(
-            f"File size validation failed: {file_path} ({actual_size_gb:.2f}GB) exceeds "
-            f"maximum allowed size of {max_size_gb:.2f}GB. This limit helps prevent potential "
-            f"denial-of-service attacks."
-        )
 
 
 def get_parser() -> argparse.ArgumentParser:
