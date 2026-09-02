@@ -530,7 +530,6 @@ class DynamicBlockQuantizationFunction(Function):
                 inputs,
                 onnx_quantizer_type,
                 block_size,
-                trt_high_precision_dtype=trt_high_precision_dtype,
             )
         raise NotImplementedError(
             f"Unsupported num_bits: {num_bits} and scale_bits: {scale_bits} for ONNX export."

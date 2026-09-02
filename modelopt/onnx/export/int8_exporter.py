@@ -40,8 +40,6 @@ class INT8QuantExporter(ONNXQuantExporter):
         return onnx_model
 
     @staticmethod
-    def post_process(
-        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
-    ) -> onnx.ModelProto:
+    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for INT8 quantization."""
         return onnx_model
