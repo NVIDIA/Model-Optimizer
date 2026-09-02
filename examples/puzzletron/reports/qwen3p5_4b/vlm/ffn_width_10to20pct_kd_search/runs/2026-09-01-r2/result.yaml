@@ -48,7 +48,6 @@ provenance:
     suite: realworldqa-mmmu-prefix100-repeat2
     row_selection_policy: prefix_first_100
     deprecated_profile_aliases:
-      - qwen35_vlm_short_eval
       - qwen35_vlm_e2e_full_eval
     tasks:
       realworldqa:
