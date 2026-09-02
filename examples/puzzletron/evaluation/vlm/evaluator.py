@@ -203,12 +203,19 @@ def evaluate(
         dataset_snapshots=prepared.dataset_snapshots,
         quick_manifest=prepared.quick_manifest,
     )
+    settings = preflight.settings(
+        args,
+        tasks_root=task_root,
+        configured_tasks=configured_tasks,
+        prepared=prepared,
+    )
+    settings.update(settings_overrides or {})
     offline_task_preflight = tasks.verify_offline(
         task_root,
         configured_tasks,
         hf_home=prepared.hf_home,
         timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
-        model_name=str(prepared.report["model_backend"]),
+        model_name=str(settings["model"]),
     )
     report = dict(prepared.report)
     report.update(
@@ -218,13 +225,6 @@ def evaluate(
             "task_config_root": str(task_root),
         }
     )
-    settings = preflight.settings(
-        args,
-        tasks_root=task_root,
-        configured_tasks=configured_tasks,
-        prepared=prepared,
-    )
-    settings.update(settings_overrides or {})
     if preflight_callback is not None:
         preflight_callback(report)
     if args.preflight_only:

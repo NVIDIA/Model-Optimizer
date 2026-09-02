@@ -64,58 +64,21 @@ def _backend_policy(
 
 
 def prepare(args: argparse.Namespace) -> PreparedSuite:
-    """Validate model, task, dataset, media, and judge inputs for one suite."""
+    """Resolve and validate everything needed before model loading starts."""
     profile_name = getattr(args, "profile", None)
     profile_contract = contracts.load_profile(profile_name) if profile_name is not None else None
-    requested_suite = profile_contract.name if profile_contract is not None else args.suite or "short"
-    suite = suites.canonical_suite(requested_suite)
-    if suite != requested_suite:
-        warnings.warn(
-            f"VLM suite {requested_suite!r} is deprecated; use {suite!r}",
-            FutureWarning,
-            stacklevel=2,
-        )
-    if profile_contract is not None and args.seed != profile_contract.manifest["seed"]:
-        raise ValueError("--seed cannot override a versioned evaluation profile")
-    if profile_contract is not None and args.batch_size != profile_contract.manifest["batch_size"]:
-        raise ValueError("--batch-size cannot override a versioned evaluation profile")
-    profile_task = getattr(args, "profile_task", None)
-    profile_task_shard = getattr(args, "profile_task_shard", None)
-    if profile_task is not None:
-        if profile_contract is None:
-            raise ValueError("--profile-task requires a versioned evaluation profile")
-        if profile_contract.name not in {"full-v1", "short-all-native-v1"}:
-            raise ValueError("--profile-task is supported only for full-v1 and short-all-native-v1")
-    if profile_task_shard is not None and profile_task is None:
-        raise ValueError("--profile-task-shard requires --profile-task")
+    suite, source_tasks, profile_task_leaves = _resolve_task_selection(args, profile_contract)
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
-    source_tasks = suites.source_tasks(suite)
-    if profile_task is not None:
-        if profile_task not in source_tasks:
-            raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
-        source_tasks = (profile_task,)
-    profile_task_leaves = _profile_task_leaves(profile_task, profile_task_shard)
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
-    if profile_contract is not None and profile_contract.exact_rows is not None:
-        exact_rows = profile_contract.exact_rows
-        if profile_task is not None:
-            manifest_tasks = cast("dict[str, object]", exact_rows["tasks"])
-            exact_rows = {**exact_rows, "tasks": {profile_task: manifest_tasks[profile_task]}}
-        quick_manifest = suites.validate_exact_rows_manifest(
-            exact_rows,
-            expected_revision=str(profile_contract.manifest["lmms_eval_revision"]),
-            expected_tasks=source_tasks,
-        )
-    elif suite == "quick":
-        quick_manifest = suites.load_quick_manifest(args.quick_manifest)
-    else:
-        quick_manifest = None
-    if suite not in {"quick"} and profile_contract is None and args.quick_manifest is not None:
-        raise ValueError("--quick-manifest is valid only for the quick suite")
-    if profile_contract is not None and args.quick_manifest is not None:
-        raise ValueError("--quick-manifest cannot override a versioned evaluation profile")
+    row_manifest = _row_manifest(
+        args,
+        suite,
+        source_tasks,
+        profile_contract,
+        profile_task_leaves=profile_task_leaves,
+    )
 
     expected_lmms_eval_revision = (
         str(profile_contract.manifest["lmms_eval_revision"])
@@ -139,7 +102,7 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         source_tasks=source_tasks,
         revisions=revisions,
         dataset_snapshots=dataset_snapshots,
-        quick_manifest=quick_manifest,
+        quick_manifest=row_manifest,
         hf_home=hf_home,
         judge_policy=judge_policy,
         lmms_eval_revision=lmms_eval_revision,
@@ -152,13 +115,88 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         source_tasks=source_tasks,
         profile_task_leaves=profile_task_leaves,
         dataset_snapshots=dataset_snapshots,
-        quick_manifest=quick_manifest,
+        quick_manifest=row_manifest,
         hf_home=hf_home,
         judge_env=judge_env,
         execution_policy=execution_policy,
         profile_contract=profile_contract,
         report=report,
     )
+
+def _resolve_task_selection(
+    args: argparse.Namespace,
+    profile_contract: contracts.ProfileContract | None,
+) -> tuple[str, tuple[str, ...], tuple[str, ...] | None]:
+    """Resolve the canonical suite, selected tasks, and optional group shard."""
+    requested_suite = profile_contract.name if profile_contract is not None else args.suite or "short"
+    suite = suites.canonical_suite(requested_suite)
+    if suite != requested_suite:
+        warnings.warn(
+            f"VLM suite {requested_suite!r} is deprecated; use {suite!r}",
+            FutureWarning,
+            stacklevel=3,
+        )
+    if profile_contract is not None:
+        if args.seed != profile_contract.manifest["seed"]:
+            raise ValueError("--seed cannot override a versioned evaluation profile")
+        if args.batch_size != profile_contract.manifest["batch_size"]:
+            raise ValueError("--batch-size cannot override a versioned evaluation profile")
+
+    profile_task = getattr(args, "profile_task", None)
+    profile_task_shard = getattr(args, "profile_task_shard", None)
+    if profile_task is not None:
+        if profile_contract is None:
+            raise ValueError("--profile-task requires a versioned evaluation profile")
+        if profile_contract.name not in {"full-v1", "short-all-native-v1"}:
+            raise ValueError("--profile-task is supported only for full-v1 and short-all-native-v1")
+    if profile_task_shard is not None and profile_task is None:
+        raise ValueError("--profile-task-shard requires --profile-task")
+
+    source_tasks = suites.source_tasks(suite)
+    if profile_task is not None:
+        if profile_task not in source_tasks:
+            raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
+        source_tasks = (profile_task,)
+    return suite, source_tasks, _profile_task_leaves(profile_task, profile_task_shard)
+
+
+def _row_manifest(
+    args: argparse.Namespace,
+    suite: str,
+    source_tasks: tuple[str, ...],
+    profile_contract: contracts.ProfileContract | None,
+    *,
+    profile_task_leaves: tuple[str, ...] | None,
+) -> dict[str, object] | None:
+    """Load the exact-row selection used by a profile or the legacy quick suite."""
+    if profile_contract is not None:
+        if args.quick_manifest is not None:
+            raise ValueError("--quick-manifest cannot override a versioned evaluation profile")
+        exact_rows = profile_contract.exact_rows
+        if exact_rows is None:
+            return None
+        profile_task = getattr(args, "profile_task", None)
+        if profile_task is not None:
+            manifest_tasks = cast("dict[str, object]", exact_rows["tasks"])
+            task_entry = cast("dict[str, object]", manifest_tasks[profile_task])
+            if profile_task_leaves is not None:
+                selected_leaves = {f"{profile_task}_{leaf}" for leaf in profile_task_leaves}
+                rows = cast("list[dict[str, object]]", task_entry["rows"])
+                task_entry = {
+                    **task_entry,
+                    "rows": [row for row in rows if row.get("leaf_task") in selected_leaves],
+                }
+            exact_rows = {**exact_rows, "tasks": {profile_task: task_entry}}
+        return suites.validate_exact_rows_manifest(
+            exact_rows,
+            expected_revision=str(profile_contract.manifest["lmms_eval_revision"]),
+            expected_tasks=source_tasks,
+        )
+    if suite == "quick":
+        return suites.load_quick_manifest(args.quick_manifest)
+    if args.quick_manifest is not None:
+        raise ValueError("--quick-manifest is valid only for the quick suite")
+    return None
 
 
 def _profile_task_leaves(

@@ -23,8 +23,6 @@
   "provenance": {
     "execution_source_revision": null,
     "checkpoint_stage": "teacher",
-    "profile_code_relation": "validated_successor",
-    "profile_code_relation_note": "The checked-in profiles preserve the recorded evaluator, row, adapter, preprocessing, generation, and batch settings; the exact execution source revision was not retained.",
     "decoding": {
       "do_sample": false,
       "temperature": 0,
@@ -43,9 +41,9 @@
     "row_selection_identity_sha256": "f329ccd719d11fc4f86542be80bbb46b00d5c4a36dfe642f283972b8ce48b7dd",
     "row_selection_identity_method": "SHA-256 of canonical JSON containing the semantic contract ID and each ordered task's dataset repository, revision, and row list",
     "tasks": [
-      {"id": "realworldqa", "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c", "selected_rows": 64},
-      {"id": "mmmu_val", "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47", "selected_rows": 120},
-      {"id": "mvbench", "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc", "selected_rows": 160}
+      {"id": "realworldqa", "dataset_repository": "lmms-lab/RealWorldQA", "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c", "complete_rows": null, "selected_rows": 64},
+      {"id": "mmmu_val", "dataset_repository": "lmms-lab/MMMU", "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47", "complete_rows": null, "selected_rows": 120},
+      {"id": "mvbench", "dataset_repository": "OpenGVLab/MVBench", "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc", "complete_rows": null, "selected_rows": 160}
     ],
     "conditions": [
       {
@@ -53,6 +51,7 @@
         "runtime_profile": "short-v1",
         "profile_fingerprint_sha256": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
         "profile_fingerprint_relation": "validated_successor",
+        "profile_fingerprint_relation_note": "The checked-in profile preserves the recorded evaluator, row, adapter, preprocessing, generation, and batch settings; the exact execution source revision was not retained.",
         "row_manifest_sha256": null,
         "evaluator_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
         "runtime_adapter": "vllm",
@@ -65,6 +64,7 @@
         "runtime_profile": "short-native-v1",
         "profile_fingerprint_sha256": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
         "profile_fingerprint_relation": "retained_execution_identity",
+        "profile_fingerprint_relation_note": "The fingerprint was retained with the completed Qwen-specific evaluation record.",
         "row_manifest_sha256": "2b787b681463c474aacffe1d56c9c69f3c2f9d670d4576bdbdadc927e96edd50",
         "evaluator_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
         "runtime_adapter": "qwen3_5 Transformers",
@@ -75,6 +75,9 @@
       {
         "id": "qwen-native-empty-system",
         "runtime_profile": null,
+        "profile_fingerprint_sha256": null,
+        "profile_fingerprint_relation": "unavailable",
+        "profile_fingerprint_relation_note": "This prompt ablation was not represented by a checked-in versioned profile.",
         "scope": "realworldqa only",
         "row_manifest_sha256": "2b787b681463c474aacffe1d56c9c69f3c2f9d670d4576bdbdadc927e96edd50",
         "evaluator_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
@@ -105,9 +108,9 @@
       {"path": "examples/puzzletron/evaluation/vlm/profiles/short-native-v1.json", "sha256": "d4e312a8885d0d24958ec08a9df481fd0ca73bcc93cae5e13fc563f0a2f772c4", "role": "Qwen-specific profile overlay"}
     ],
     "external": [
-      {"logical_id": "qwen3p5-4b-generic-vllm-default-raw-evaluator-export", "sha256": null, "byte_size": null, "availability": "not_published"},
-      {"logical_id": "qwen3p5-4b-qwen-native-default-raw-evaluator-export", "sha256": null, "byte_size": null, "availability": "not_published"},
-      {"logical_id": "qwen3p5-4b-qwen-native-empty-system-raw-evaluator-export", "sha256": null, "byte_size": null, "availability": "not_published"}
+      {"logical_id": "qwen3p5-4b-generic-vllm-default-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"},
+      {"logical_id": "qwen3p5-4b-qwen-native-default-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"},
+      {"logical_id": "qwen3p5-4b-qwen-native-empty-system-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"}
     ]
   },
   "limitations": [
@@ -115,6 +118,7 @@
     "Every condition was executed once; no repeated-run uncertainty is available.",
     "The two paths differ in evaluator revision, adapter, prompt serialization, and video timestamp policy.",
     "Correct-count numerators and uncertainty estimates were not retained as first-class fields.",
+    "Complete benchmark sizes at the pinned dataset revisions were not retained.",
     "The exact model revision, generic-path row-manifest byte hash, execution source revision, accelerator topology, and per-condition GPU-hours were not retained.",
     "External artifact checksums and byte sizes were not retained.",
     "The empty-system ablation has no checked-in versioned runtime profile or sanitized reproduction command."

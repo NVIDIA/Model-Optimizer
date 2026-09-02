@@ -836,7 +836,7 @@ def test_short_all_native_profile_task_preserves_exact_rows(monkeypatch, tmp_pat
     )
 
 
-def test_full_profile_group_shard_partitions_leaves(monkeypatch, tmp_path):
+def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, tmp_path):
     model, hf_home = _full_inputs(monkeypatch, tmp_path)
     args = evaluation._build_parser().parse_args(
         [
@@ -845,7 +845,7 @@ def test_full_profile_group_shard_partitions_leaves(monkeypatch, tmp_path):
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "full-v1",
+            "short-all-native-v1",
             "--profile-task",
             "mvbench",
             "--profile-task-shard",
@@ -864,6 +864,20 @@ def test_full_profile_group_shard_partitions_leaves(monkeypatch, tmp_path):
         "count": 8,
         "leaves": list(expected_leaves),
     }
+    assert prepared.quick_manifest is not None
+    manifest_rows = prepared.quick_manifest["tasks"]["mvbench"]["rows"]
+    assert len(manifest_rows) == 24
+    assert {row["leaf_task"] for row in manifest_rows} == {
+        f"mvbench_{leaf}" for leaf in expected_leaves
+    }
+    assert prepared.report["quick_selected_rows"] == 24
+    assert prepared.report["quick_manifest_sha256"] == suites.manifest_sha256(
+        prepared.quick_manifest
+    )
+    assert (
+        prepared.report["profile_fingerprint"]
+        == contracts.load_profile("short-all-native-v1").fingerprint
+    )
     tasks_root, configured_tasks = tasks.prepare(
         tmp_path / "results",
         suite=prepared.suite,
