@@ -37,6 +37,7 @@ venv/
 
 # Machine-local Puzzletron paths
 /nv-internal/
+/puzzle_runs/
 /docs/superpowers/
 /puzzle_runs/
 
