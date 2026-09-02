@@ -268,6 +268,18 @@ def region_pattern_autotuning_workflow(
     if state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
+        if model_transform is not None:
+            for pattern_schemes in autotuner.profiled_patterns:
+                for scheme in pattern_schemes.schemes:
+                    scheme.latency_ms = float("inf")
+                    scheme.error = False
+                    scheme.profile_timestamp = None
+                if autotuner.pattern_cache is not None:
+                    autotuner.pattern_cache.add_pattern_schemes(pattern_schemes)
+            autotuner.profiled_patterns.clear()
+            autotuner.baseline_latency_ms = None
+            autotuner.config = config
+            logger.info("Re-profiling checkpoint measurements for transformed models")
     else:
         logger.info("Starting new autotuning session")
 

@@ -146,6 +146,8 @@ def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
 
 
 def test_workflow_transforms_every_benchmark_export(monkeypatch, tmp_path):
+    stale_scheme = SimpleNamespace(latency_ms=0.5, error=True, profile_timestamp="old")
+    stale_pattern = SimpleNamespace(schemes=[stale_scheme])
     autotuner = Mock(
         regions=[SimpleNamespace(id=0, level=0)],
         baseline_latency_ms=None,
@@ -153,14 +155,28 @@ def test_workflow_transforms_every_benchmark_export(monkeypatch, tmp_path):
     )
     autotuner.generate.return_value = 0
     autotuner.export_onnx.return_value = onnx.ModelProto().SerializeToString()
+
+    def load_state(_):
+        autotuner.baseline_latency_ms = 0.5
+        autotuner.profiled_patterns = [stale_pattern]
+        autotuner.config = Config(default_quant_type="int8")
+
+    autotuner.load_state.side_effect = load_state
     monkeypatch.setattr(workflows, "QDQAutotuner", lambda model: autotuner)
     monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args, **kwargs: 1.0)
 
     def transform(model):
         return model
 
+    state_path = tmp_path / "state.yaml"
+    state_path.touch()
     workflows.region_pattern_autotuning_workflow(
-        onnx.ModelProto(), output_dir=tmp_path, num_schemes_per_region=1, model_transform=transform
+        onnx.ModelProto(),
+        output_dir=tmp_path,
+        state_file=str(state_path),
+        num_schemes_per_region=1,
+        quant_type="fp8",
+        model_transform=transform,
     )
 
     exports = autotuner.export_onnx.call_args_list
@@ -171,3 +187,9 @@ def test_workflow_transforms_every_benchmark_export(monkeypatch, tmp_path):
         (True, False),
     ]
     assert all(call.kwargs["model_transform"] is transform for call in exports)
+    assert stale_scheme.latency_ms == float("inf")
+    assert not stale_scheme.error
+    assert stale_scheme.profile_timestamp is None
+    autotuner.pattern_cache.add_pattern_schemes.assert_called_once_with(stale_pattern)
+    assert autotuner.profiled_patterns == []
+    assert autotuner.config.default_quant_type == "fp8"
