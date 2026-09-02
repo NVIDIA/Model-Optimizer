@@ -266,14 +266,14 @@ def run_simple(args):
         for metric in metrics_list:
             metric.update_directory(args.save_dir)
         metrics.AcceptanceRate.set_profile_metadata(_speculation_profile_metadata(args))
-    else:
-        # Class-level state, so clear it: a second in-process run (e.g. an AR-vs-K
-        # sweep) without --save_dir must not inherit the previous run's metadata.
-        metrics.AcceptanceRate.set_profile_metadata(None)
         # Stamp configuration.json BEFORE the run loop so the file lands even
         # when the run crashes mid-way. Engine init is already done, so the
         # live serving_config from the model is available.
         dump_env(args, args.save_dir, overrides={"serving_config": model.get_serving_config()})
+    else:
+        # Class-level state, so clear it: a second in-process run (e.g. an AR-vs-K
+        # sweep) without --save_dir must not inherit the previous run's metadata.
+        metrics.AcceptanceRate.set_profile_metadata(None)
 
     runner = runners.SimpleRunner(model, metrics=metrics_list)
 
