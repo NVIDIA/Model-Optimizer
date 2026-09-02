@@ -50,6 +50,8 @@ __all__ = [
     "stub_profile",
 ]
 
+from math import isinf, isnan
+
 SCHEMA_VERSION = "1.0"
 
 # Methods whose K=n draft is a strict prefix of their K=n+1 draft. For those, the
@@ -184,6 +186,21 @@ def _monotonicity_check(marginal_accept_rates):
     return {"passed": not violations, "violations": violations}
 
 
+def _validate_rates(rates, name):
+    """Reject values a consumer would silently misuse.
+
+    Both known consumers treat these as probabilities: dynamo's sampler feeds them to
+    ``rng.random_bool()`` and vLLM's synthetic sampler expects a survival function. A
+    NaN or an out-of-range entry does not fail loudly there -- it produces nonsense
+    acceptance -- so it is rejected here, at the boundary, rather than serialized.
+    """
+    for i, r in enumerate(rates):
+        if not isinstance(r, (int, float)) or isnan(r) or isinf(r):
+            raise ValueError(f"{name}[{i}] is not a finite number: {r!r}")
+        if not 0.0 <= r <= 1.0:
+            raise ValueError(f"{name}[{i}] is not a probability: {r!r}")
+
+
 def build_profile(
     acceptance_out,
     num_speculative_tokens,
@@ -245,6 +262,29 @@ def build_profile(
     for m in marginal:
         conditional.append(m / prev if prev > 0 else 0.0)
         prev = m
+    _validate_rates(marginal, "marginal_accept_rates")
+    _validate_rates(conditional, "conditional_accept_rates")
+
+    # Nothing was observed. Emitting measured=true here would advertise a draft that
+    # accepts nothing, which is indistinguishable from a genuinely terrible draft.
+    observed_steps = sum(_as_int_keyed(histogram).values()) if histogram else 0
+    measured = observed_steps > 0
+
+    # Longest-prefix verification is what these vectors describe: acceptance stops at
+    # the first rejection. vLLM also offers block verification, which accepts or
+    # rejects a drafted block jointly, producing a different length distribution
+    # entirely. Publishing the vectors under that method would invite a consumer to
+    # read them as longest-prefix data, so they are withheld explicitly instead.
+    vectors_apply = verification_method == "longest_prefix"
+    unavailable_reason = (
+        None
+        if vectors_apply
+        else (
+            f"verification_method={verification_method!r} does not produce a "
+            "longest-prefix acceptance distribution, so per-position rates are not "
+            "defined for it"
+        )
+    )
 
     if accept_length_model is None:
         accept_length_model = (
@@ -255,7 +295,7 @@ def build_profile(
 
     profile = {
         "schema_version": SCHEMA_VERSION,
-        "measured": True,
+        "measured": measured,
         "method": method,
         "draft_checkpoint": draft_checkpoint,
         "target_model": target_model,
@@ -265,8 +305,9 @@ def build_profile(
         if max_supported_k is not None
         else num_speculative_tokens,
         "verification_method": verification_method,
-        "conditional_accept_rates": [round(x, 6) for x in conditional],
-        "marginal_accept_rates": [round(x, 6) for x in marginal],
+        "conditional_accept_rates": [round(x, 6) for x in conditional] if vectors_apply else None,
+        "marginal_accept_rates": [round(x, 6) for x in marginal] if vectors_apply else None,
+        "vectors_unavailable_reason": unavailable_reason,
         "mean_accept_length": round(mean_accept_length, 6),
         "mean_accept_length_per_request": round(mean_per_request, 6),
         "accept_length_model": accept_length_model,
