@@ -46,6 +46,13 @@ Use a versioned profile when scores will be compared across checkpoints:
 | `short-all-native-v1` | All eight judge-free benchmarks, using the native Qwen 3.5 backend | 690 exact rows; retains the 344-row selection and adds 346 rows across the five additional benchmarks |
 | `full-v1` | Eight judge-free image and video benchmarks | Every row from each pinned dataset revision |
 
+For future short teacher and student comparisons through the Qwen-specific
+adapter, prefer `short-all-native-v1` when all eight datasets are available.
+It checks more kinds of image and video tasks than the 344-row profiles. Use
+the 344-row profiles for faster three-benchmark regression checks or when the
+same rows must be compared across both execution paths. Neither short profile
+replaces `full-v1` for complete benchmark reporting.
+
 All profiles pin the evaluator revision, model family, dataset revisions,
 task scoring configurations, preprocessing, generation, and sample selection.
 They also pin batch size 1 because changing VLM batching can change deterministic
