@@ -103,7 +103,7 @@
 """Utility to export a quantized torch model to quantized ONNX."""
 
 import contextlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import onnx
 import torch
@@ -124,9 +124,20 @@ onnx_dtype_map = {
     "INT8": onnx.TensorProto.INT8,
     "UINT8": onnx.TensorProto.UINT8,
 }
-mha_valid_precisions = {"Half", "BFloat16"}
+mha_fusion_precisions = {"Half", "BFloat16"}
+mha_supported_precisions = {"Float", "Half", "BFloat16"}
 
 torch_dtype_map = {"Float": torch.float32, "Half": torch.float16, "BFloat16": torch.bfloat16}
+
+
+def _cast_to_dtype(g: "GraphContext", tensor: torch.Value, dtype: str):
+    """Cast a graph value only when its dtype differs from the target."""
+    if tensor.type().scalarType() == dtype:
+        return tensor
+    output_shape = sym_help._get_tensor_sizes(tensor)
+    return g.op("Cast", tensor, to_i=onnx_dtype_map[dtype]).setType(
+        tensor.type().with_dtype(torch_dtype_map[dtype]).with_sizes(output_shape)
+    )
 
 
 def export_int8(
@@ -146,6 +157,9 @@ def export_int8(
     input_type = inputs.type().scalarType()
     if trt_high_precision_dtype is None:
         trt_high_precision_dtype = input_type
+    assert trt_high_precision_dtype in torch_dtype_map, (
+        f"Unsupported high precision dtype: {trt_high_precision_dtype}"
+    )
 
     if amax.numel() == 1:
         zero_point, axis = torch.tensor(0.0, device=amax.device), None
@@ -169,21 +183,11 @@ def export_int8(
     scale.masked_fill_(scale == 0, 1.0)
     scale = g.op("Constant", value_t=scale)
 
-    assert trt_high_precision_dtype in (input_type, "Float", "BFloat16"), (
-        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
-    )
-
-    # custom ops, so cast the input if needed.
-    if trt_high_precision_dtype != input_type:
-        inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[trt_high_precision_dtype])
+    inputs = _cast_to_dtype(g, inputs, trt_high_precision_dtype)
     quantized = g.op("QuantizeLinear", inputs, scale, zero_point, axis_i=axis)
     out = g.op("DequantizeLinear", quantized, scale, zero_point, axis_i=axis).setType(
         inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
     )
-
-    # custom ops, so cast the output if needed.
-    if trt_high_precision_dtype != input_type:
-        inputs = g.op("Cast", inputs, to_i=onnx_dtype_map[input_type])
 
     return out
 
@@ -199,12 +203,17 @@ def export_int4(
 ):
     """Export quantized model to INT4 ONNX."""
     assert num_bits == 4, "Number of bits must be 4 for INT4 ONNX export."
-    scale_inv = amax / 7.0
-    scale_inv_op = g.op("Constant", value_t=scale_inv)
     otype = inputs.type().scalarType()
     output_shape = sym_help._get_tensor_sizes(inputs)
     if trt_high_precision_dtype is None:
         trt_high_precision_dtype = otype
+        scale_inv = amax / 7.0
+    else:
+        assert trt_high_precision_dtype in torch_dtype_map, (
+            f"Unsupported high precision dtype: {trt_high_precision_dtype}"
+        )
+        scale_inv = (amax / 7.0).to(torch_dtype_map[trt_high_precision_dtype])
+    scale_inv_op = g.op("Constant", value_t=scale_inv)
     return g.op(
         "trt::DequantizeLinear", inputs, scale_inv_op, axis_i=axis, block_size_i=block_size
     ).setType(
@@ -216,14 +225,13 @@ def _fp8_quantize(
     g: "GraphContext",
     inputs: torch.Value,
     scale_inv: float,
+    output_dtype: str,
 ):
     """Helper Function for Quantization."""
-    # Emit the scale in the native input dtype so no Cast is inserted between the
-    # graph and Q/DQ (Cast nodes block TRT from fusing DQ into the MatMul kernel).
     output_shape = sym_help._get_tensor_sizes(inputs)
     scale = g.op(
         "Constant",
-        value_t=torch.tensor(scale_inv).to(torch_dtype_map[inputs.type().scalarType()]),
+        value_t=torch.tensor(scale_inv, dtype=torch_dtype_map[output_dtype]),
     )
     return g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
         inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
@@ -255,15 +263,19 @@ def export_fp8(
 ):
     """Export quantized model to FP8 ONNX.
 
-    ``trt_high_precision_dtype`` is accepted for API compatibility but unused: Q/DQ now
-    emit scales in the native input dtype, so no intermediate Cast is required.
+    ``None`` preserves the native input dtype.
     """
-    del trt_high_precision_dtype
     scale = 1.0 if amax is None else 448.0 / float(amax)
-    otype = inputs.type().scalarType()
+    input_dtype = inputs.type().scalarType()
+    if trt_high_precision_dtype is None:
+        trt_high_precision_dtype = input_dtype
+    assert trt_high_precision_dtype in torch_dtype_map, (
+        f"Unsupported high precision dtype: {trt_high_precision_dtype}"
+    )
 
-    q_tensor = _fp8_quantize(g, inputs, 1.0 / scale)
-    return _fp8_dequantize(g, q_tensor, 1.0 / scale, otype)
+    inputs = _cast_to_dtype(g, inputs, trt_high_precision_dtype)
+    q_tensor = _fp8_quantize(g, inputs, 1.0 / scale, trt_high_precision_dtype)
+    return _fp8_dequantize(g, q_tensor, 1.0 / scale, trt_high_precision_dtype)
 
 
 def scaled_dot_product_attention(
@@ -362,7 +374,7 @@ def export_fp8_mha(
     q_quantized_scale: float = 1.0,
     k_quantized_scale: float = 1.0,
     v_quantized_scale: float = 1.0,
-    high_precision_flag: str = "Half",
+    high_precision_flag: str | None = "Half",
     disable_fp8_mha: bool = True,
 ):
     r"""Export quantized fMHA to FP8 ONNX.
@@ -408,6 +420,22 @@ def export_fp8_mha(
         "is_causal and attn_mask cannot be set at the same time"
     )
 
+    if not disable_fp8_mha:
+        if high_precision_flag is None:
+            high_precision_flag = query.type().scalarType()
+        if high_precision_flag not in mha_supported_precisions:
+            raise ValueError(f"Unsupported FP8 MHA precision: {high_precision_flag}")
+        if high_precision_flag == "Float":
+            query = _cast_to_dtype(g, query, high_precision_flag)
+            key = _cast_to_dtype(g, key, high_precision_flag)
+            value = _cast_to_dtype(g, value, high_precision_flag)
+        elif high_precision_flag in mha_fusion_precisions and {
+            query.type().scalarType(),
+            key.type().scalarType(),
+            value.type().scalarType(),
+        } != {high_precision_flag}:
+            raise ValueError("The quantized MHA must have 16-bit inputs.")
+
     scale = sym_help._maybe_get_const(scale, "f")
     if sym_help._is_none(scale):
         scale = _attention_scale(g, query)
@@ -431,24 +459,15 @@ def export_fp8_mha(
     query_scaled = g.op("Mul", query, g.op("Sqrt", scale))
     key_transposed_scaled = g.op("Mul", key_transposed, g.op("Sqrt", scale))
     if not disable_fp8_mha:
-        if high_precision_flag not in mha_valid_precisions:
-            raise ValueError(
-                "The Quantized config setting doesn't match TRT's fusion pattern; the qdqs must be in 16 bits."
-            )
-        q_input_dtype = query.type().scalarType()
-        k_input_dtype = key.type().scalarType()
-        v_input_dtype = value.type().scalarType()
-        if {q_input_dtype, k_input_dtype, v_input_dtype} != {high_precision_flag}:
-            raise ValueError("The quantized MHA must have 16-bit inputs.")
         query_scaled = export_fp8(g, query_scaled, q_quantized_scale, high_precision_flag)
-        query_scaled = g.op("Cast", query_scaled, to_i=onnx_dtype_map["Float"])
+        query_scaled = _cast_to_dtype(g, query_scaled, "Float")
         key_transposed_scaled = export_fp8(
             g, key_transposed_scaled, k_quantized_scale, high_precision_flag
         )
-        key_transposed_scaled = g.op("Cast", key_transposed_scaled, to_i=onnx_dtype_map["Float"])
+        key_transposed_scaled = _cast_to_dtype(g, key_transposed_scaled, "Float")
     mul_qk = g.op("MatMul", query_scaled, key_transposed_scaled)
     if not disable_fp8_mha:
-        mul_qk = g.op("Cast", mul_qk, to_i=onnx_dtype_map[high_precision_flag])
+        mul_qk = _cast_to_dtype(g, mul_qk, cast("str", high_precision_flag))
 
     if sym_help._is_none(attn_mask):
         mul_qk_add = mul_qk
@@ -472,7 +491,7 @@ def export_fp8_mha(
     if not disable_fp8_mha:
         # Softmax's output scale is hard coded to 1.0
         attn_weight = export_fp8(g, attn_weight, 1.0, high_precision_flag)
-        attn_weight = g.op("Cast", attn_weight, to_i=onnx_dtype_map["Float"])
+        attn_weight = _cast_to_dtype(g, attn_weight, "Float")
 
     if dropout_p != 0:
         attn_weight = g.op(
@@ -482,11 +501,9 @@ def export_fp8_mha(
         )
     if not disable_fp8_mha:
         value = export_fp8(g, value, v_quantized_scale, high_precision_flag)
-        value = g.op("Cast", value, to_i=onnx_dtype_map["Float"])
-        return g.op(
-            "Cast",
-            g.op("MatMul", attn_weight, value),
-            to_i=onnx_dtype_map[high_precision_flag],
+        value = _cast_to_dtype(g, value, "Float")
+        return _cast_to_dtype(
+            g, g.op("MatMul", attn_weight, value), cast("str", high_precision_flag)
         )
     else:
         return g.op("MatMul", attn_weight, value)
@@ -502,7 +519,7 @@ def _fp4_dynamic_quantize(
     scale_type: int = onnx_dtype_map["Float8"],
 ):
     """Helper Function for Dynamic Quantization."""
-    # TRT StronglyType only supports FP16 QDQ ops, so cast the input if needed.
+    # Match the input to the requested strongly typed QDQ precision.
     input_type = inputs.type().scalarType()
     if trt_high_precision_dtype is None:
         trt_high_precision_dtype = input_type
@@ -596,16 +613,37 @@ def export_mxfp8(
     onnx_quantizer_type: str,
     block_size: int,
     axis: int = -1,
+    trt_high_precision_dtype: str | None = None,
 ):
     """Export quantized model to MXFP8 ONNX."""
     input_dtype = inputs.type().scalarType()
+    output_shape = sym_help._get_tensor_sizes(inputs)
+    if trt_high_precision_dtype is None:
+        trt_high_precision_dtype = input_dtype
+    assert trt_high_precision_dtype in torch_dtype_map, (
+        f"Unsupported high precision dtype: {trt_high_precision_dtype}"
+    )
+
     if onnx_quantizer_type == "dynamic":
+        inputs = _cast_to_dtype(g, inputs, trt_high_precision_dtype)
         x_f8, sx_ui8 = _mxfp8_dynamic_quantize(g, inputs, block_size, axis=axis)
 
-        return _mxfp8_dequantize(g, x_f8, sx_ui8, block_size, axis=axis, input_dtype=input_dtype)
+        output = _mxfp8_dequantize(
+            g,
+            x_f8,
+            sx_ui8,
+            block_size,
+            axis=axis,
+            input_dtype=trt_high_precision_dtype,
+        )
     else:
-        scale = torch.tensor(1.0, dtype=torch_dtype_map[input_dtype])
-        return _mxfp8_dequantize(g, inputs, scale, block_size, axis=axis, input_dtype=input_dtype)
+        scale = torch.tensor(1.0, dtype=torch_dtype_map[trt_high_precision_dtype])
+        output = _mxfp8_dequantize(
+            g, inputs, scale, block_size, axis=axis, input_dtype=trt_high_precision_dtype
+        )
+    return output.setType(
+        inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
+    )
 
 
 def export_fp4(

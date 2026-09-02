@@ -223,8 +223,11 @@ class INT4QuantExporter(ONNXQuantExporter):
         return onnx_model
 
     @staticmethod
-    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    def post_process(
+        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
+    ) -> onnx.ModelProto:
         """Post-processes the ONNX model for INT4 quantization."""
+        precision_dtype = high_precision_dtype or "Half"
 
         def is_pre_quant_scale_node(node: onnx.NodeProto) -> bool:
             has_pqs_input = any(input for input in node.input if "_pre_quant_scale" in input)
@@ -265,12 +268,12 @@ class INT4QuantExporter(ONNXQuantExporter):
         del graph.node[:]
         graph.node.extend(new_nodes)
 
-        # Cast bias to float16
+        # Cast bias to the graph's high-precision dtype
         for node in graph.node:
             if node.op_type == "Add" and "proj/Add" in node.name:
-                cast_initializer_to_dtype(node, "Half", initializer_map)
+                cast_initializer_to_dtype(node, precision_dtype, initializer_map)
 
-        # Cast pre quant scales of o_proj and down_proj to float16
+        # Cast pre quant scales of o_proj and down_proj to the high-precision dtype
         for node in graph.node:
             if node.op_type == "Mul" and (
                 any(
@@ -278,6 +281,6 @@ class INT4QuantExporter(ONNXQuantExporter):
                     for x in ("o_proj/input_quantizer/Mul", "down_proj/input_quantizer/Mul")
                 )
             ):
-                cast_initializer_to_dtype(node, "Half", initializer_map)
+                cast_initializer_to_dtype(node, precision_dtype, initializer_map)
 
         return onnx_model

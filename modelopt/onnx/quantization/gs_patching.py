@@ -70,9 +70,9 @@ def _export_tensor_proto(tensor: gs.Constant) -> onnx.TensorProto:
         onnx_tensor = tensor._values.tensor
     else:
         # is numpy array.
-        dtype = getattr(
-            tensor, "explicit_dtype", onnx.helper.np_dtype_to_tensor_dtype(tensor.values.dtype)
-        )
+        dtype = getattr(tensor, "explicit_dtype", None)
+        if dtype is None:
+            dtype = onnx.helper.np_dtype_to_tensor_dtype(tensor.values.dtype)
 
         vals = tensor.values
         if _onnx_supports_int4() and dtype in [onnx.TensorProto.INT4, onnx.TensorProto.UINT4]:
@@ -101,9 +101,9 @@ def _export_value_info_proto(tensor: gs.Variable, do_type_check: bool) -> onnx.V
         )
 
     if tensor.dtype is not None:
-        dtype = getattr(
-            tensor, "explicit_dtype", onnx.helper.np_dtype_to_tensor_dtype(np.dtype(tensor.dtype))
-        )
+        dtype = getattr(tensor, "explicit_dtype", None)
+        if dtype is None:
+            dtype = onnx.helper.np_dtype_to_tensor_dtype(np.dtype(tensor.dtype))
         onnx_tensor = onnx.helper.make_tensor_value_info(tensor.name, dtype, tensor.shape)
     else:
         onnx_tensor = onnx.helper.make_empty_tensor_value_info(tensor.name)
