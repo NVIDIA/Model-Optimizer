@@ -87,7 +87,7 @@ def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_p
     assert 'test "$(git -C /tmp/mamba-ssm rev-parse HEAD)" = \\' in dockerfile
 
 
-def test_lmms_eval_compatibility_patch_only_reconciles_wandb(project_root_path):
+def test_lmms_eval_compatibility_patch_removes_private_wandb_api(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     dockerfile = (puzzletron_root / "Dockerfile").read_text()
@@ -99,13 +99,31 @@ def test_lmms_eval_compatibility_patch_only_reconciles_wandb(project_root_path):
     changed_lines = [
         line
         for line in patch_bytes.decode().splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++ ", "--- "))
+        if line.startswith(("+", "-"))
+        and line not in {"+", "-"}
+        and not line.startswith(("+++ ", "--- "))
     ]
     assert changed_lines == [
+        "-from typing import Any, Dict, List, Literal, Tuple",
+        "+from typing import Any, Dict, List, Tuple",
+        '-def get_wandb_printer() -> Literal["Printer"]:',
+        '-    """Returns a wandb printer instance for pretty stdout."""',
+        "-    from wandb.sdk.wandb_settings import Settings",
+        "-    try:",
+        "-        from wandb.sdk.lib.printer import get_printer",
+        "-    except ImportError:",
+        "-        from wandb.sdk.lib.printer import new_printer as get_printer",
+        "-    printer = get_printer(Settings()._jupyter)",
+        "-    return printer",
+        "-        self.printer = get_wandb_printer()",
         '-    "wandb==0.25.0",',
         '+    "wandb>=0.28.0,<0.30",',
     ]
-    assert lmms_source["compatibility_patch_files"] == ["pyproject.toml"]
+    assert lmms_source["compatibility_patch_files"] == [
+        "lmms_eval/loggers/wandb_logger.py",
+        "pyproject.toml",
+    ]
+    assert lmms_source["compatibility_patch_context_lines"] == 0
     assert '"$(pin lmms_eval.repository)" "${LMMS_EVAL_ROOT}"' in dockerfile
     assert 'git -C "${LMMS_EVAL_ROOT}" checkout --detach "$(pin lmms_eval.commit)"' in dockerfile
     assert 'git -C "${LMMS_EVAL_ROOT}" apply --check' in dockerfile

@@ -67,9 +67,21 @@ def verify_vcs_checkout(checkout: Path, package: str, expected: dict[str, Any]) 
             f"Pinned Puzzletron dependency {package!r} compatibility patch files differ: "
             f"actual={actual_files!r}, expected={expected_files!r}"
         )
-    diff = subprocess.check_output(
-        ["git", "-C", str(checkout), "diff", "--binary", "HEAD"], text=True
-    )
+    diff_command = ["git", "-C", str(checkout), "diff", "--binary"]
+    context_lines = expected.get("compatibility_patch_context_lines")
+    if context_lines is not None:
+        if (
+            isinstance(context_lines, bool)
+            or not isinstance(context_lines, int)
+            or context_lines < 0
+        ):
+            raise RuntimeError(
+                f"Pinned Puzzletron dependency {package!r} has invalid patch context lines: "
+                f"{context_lines!r}"
+            )
+        diff_command.append(f"--unified={context_lines}")
+    diff_command.append("HEAD")
+    diff = subprocess.check_output(diff_command, text=True)
     actual_patch_sha256 = hashlib.sha256(diff.encode()).hexdigest()
     if actual_patch_sha256 != patch_sha256:
         raise RuntimeError(

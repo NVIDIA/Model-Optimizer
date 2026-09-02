@@ -32,8 +32,9 @@
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
     "commit": "3e675904f8cba6793de12b91979b04d91754bdf3",
     "compatibility_patch": "lmms_eval_wandb_0_29.patch",
-    "compatibility_patch_files": ["pyproject.toml"],
-    "compatibility_patch_sha256": "05a20d097c86bc37a3cfbde47b652be6959f5a4f5302cb238c19ae184f173b7c",
+    "compatibility_patch_context_lines": 0,
+    "compatibility_patch_files": ["lmms_eval/loggers/wandb_logger.py", "pyproject.toml"],
+    "compatibility_patch_sha256": "338baa14b3ddefe8fdddb4376d9950e7bc7b5af09dc12e5af1347094affd7114",
     "required_paths": [
       "models/chat/qwen3_5.py",
       "tasks/gsm8k/gsm8k.yaml",

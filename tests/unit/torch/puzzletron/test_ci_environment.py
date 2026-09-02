@@ -31,6 +31,7 @@ _EXPECTED_SOURCE = {
 _EXPECTED_PATCHED_SOURCE = {
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
     "commit": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "compatibility_patch_context_lines": 0,
     "compatibility_patch_files": ["pyproject.toml"],
     "compatibility_patch_sha256": "a" * 64,
 }
@@ -119,13 +120,16 @@ def test_editable_compatibility_patch_must_match_exact_diff(monkeypatch):
             diff,
         ]
     )
-    monkeypatch.setattr(
-        ci_environment.subprocess,
-        "check_output",
-        lambda *_args, **_kwargs: next(outputs),
-    )
+    commands = []
+
+    def check_output(command, **_kwargs):
+        commands.append(command)
+        return next(outputs)
+
+    monkeypatch.setattr(ci_environment.subprocess, "check_output", check_output)
 
     ci_environment.verify_installed_vcs_source("lmms-eval", expected)
+    assert commands[-1][-2:] == ["--unified=0", "HEAD"]
 
 
 def test_direct_vcs_install_cannot_satisfy_required_compatibility_patch(monkeypatch):
