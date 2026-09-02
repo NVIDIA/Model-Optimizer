@@ -522,12 +522,12 @@ def test_realworldqa_mmmu_prefix100_policy_is_explicit_and_repeated():
     assert policy["limit"] == 100
     assert policy["repetitions"] == 2
     assert policy["generation"] == {"temperature": 0, "do_sample": False}
-    assert suites.canonical_suite("e2e-full-eval") == suite
     assert suites.execution_policy("full", timeout_seconds=None)["limit"] is None
     assert suites.execution_policy("full-v1", timeout_seconds=None)["limit"] is None
 
 
-def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_path):
+@pytest.mark.parametrize("alias", suites.DEPRECATED_SUITE_ALIASES)
+def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_path, alias):
     model = _write_checkpoint(tmp_path)
     lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa", "mmmu_val"))
     _use_offline_fakes(monkeypatch, lmms_root)
@@ -540,7 +540,7 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
             "--output-dir",
             str(tmp_path / "results"),
             "--suite",
-            "e2e-full-eval",
+            alias,
             "--hf-home",
             str(hf_home),
         ]
@@ -553,30 +553,7 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
     assert prepared.report["suite"] == suites.TASK_PREFIX100_REPEAT2_SUITE
 
 
-def test_deprecated_full_name_reports_explicit_suite_identity(monkeypatch, tmp_path):
-    model, hf_home = _full_inputs(monkeypatch, tmp_path)
-    args = evaluation._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(model),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--suite",
-            "e2e-full-eval",
-            "--hf-home",
-            str(hf_home),
-        ]
-    )
-
-    with pytest.warns(FutureWarning, match="realworldqa-mmmu-prefix100-x2"):
-        prepared = preflight.prepare(args)
-
-    assert prepared.suite == "realworldqa-mmmu-prefix100-x2"
-    assert prepared.report["suite"] == prepared.suite
-    assert prepared.execution_policy["limit"] == 100
-
-
-def test_versioned_profile_contracts_pin_selection_and_fingerprints():
+def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {
         "short-v1": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",

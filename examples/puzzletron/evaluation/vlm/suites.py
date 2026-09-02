@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from collections import Counter
 from pathlib import Path
 from typing import TypedDict, cast
@@ -62,7 +63,10 @@ __all__ = [
 
 EVALUATION_PROFILE = "qwen35-vlm-benchmarks"
 TASK_PREFIX100_REPEAT2_SUITE = "realworldqa-mmmu-prefix100-repeat2"
-DEPRECATED_SUITE_ALIASES = {"e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE}
+DEPRECATED_SUITE_ALIASES = {
+    "e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE,
+    "realworldqa-mmmu-prefix100-x2": TASK_PREFIX100_REPEAT2_SUITE,
+}
 PROFILE_NAMES = contracts.PROFILE_NAMES
 ALL_TASKS = profile.VLM_BENCHMARK_TASKS
 SHORT_TASKS = ("realworldqa", "mmmu_val")
@@ -141,6 +145,19 @@ class ExecutionPolicy(TypedDict):
     timeout_seconds: float
 
 
+def canonical_suite(suite: str) -> str:
+    """Return the explicit suite name used in reports and run identities."""
+    canonical = DEPRECATED_SUITE_ALIASES.get(suite)
+    if canonical is None:
+        return suite
+    warnings.warn(
+        f"{suite} is deprecated; use {canonical}",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return canonical
+
+
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
     suite = canonical_suite(suite)
@@ -185,12 +202,6 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds
         ),
     }
-
-
-def canonical_suite(suite: str) -> str:
-    """Resolve a deprecated suite alias to its explicit canonical identity."""
-
-    return DEPRECATED_SUITE_ALIASES.get(suite, suite)
 
 
 def task_name(task: str, *, leaf: str | None = None) -> str:

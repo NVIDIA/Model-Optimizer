@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -124,14 +123,10 @@ def _resolve_task_selection(
     profile_contract: contracts.ProfileContract | None,
 ) -> tuple[str, tuple[str, ...], tuple[str, ...] | None]:
     """Resolve the canonical suite, selected tasks, and optional group shard."""
-    requested_suite = profile_contract.name if profile_contract is not None else args.suite or "short"
+    requested_suite = (
+        profile_contract.name if profile_contract is not None else args.suite or "short"
+    )
     suite = suites.canonical_suite(requested_suite)
-    if suite != requested_suite:
-        warnings.warn(
-            f"VLM suite {requested_suite!r} is deprecated; use {suite!r}",
-            FutureWarning,
-            stacklevel=3,
-        )
     if profile_contract is not None:
         if args.seed != profile_contract.manifest["seed"]:
             raise ValueError("--seed cannot override a versioned evaluation profile")

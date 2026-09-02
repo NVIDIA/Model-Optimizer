@@ -88,7 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "short",
             "quick",
             suites.TASK_PREFIX100_REPEAT2_SUITE,
-            "e2e-full-eval",
+            *suites.DEPRECATED_SUITE_ALIASES,
             "adapter-smoke",
             *suites.SINGLE_TASK_SMOKE_SUITES,
             "full",

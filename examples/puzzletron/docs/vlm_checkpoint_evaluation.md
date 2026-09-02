@@ -95,7 +95,7 @@ These additional options are intended for setup checks and targeted diagnosis:
 | Option | Coverage | Examples evaluated |
 | --- | --- | --- |
 | `short` | RealWorldQA and MMMU | Eight samples per task, repeated twice |
-| `realworldqa-mmmu-prefix100-x2` | RealWorldQA and MMMU | First 100 rows of each task, repeated twice |
+| `realworldqa-mmmu-prefix100-repeat2` | RealWorldQA and MMMU | First 100 rows of each task, repeated twice |
 | `quick` | RealWorldQA, MMMU, and MVBench | 344 predefined examples from a required profile file |
 | `adapter-smoke` | Video-MME and PerceptionTest | Eight samples per task |
 | `video-mmmu-smoke` | VideoMMMU | Eight samples |
