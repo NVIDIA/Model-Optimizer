@@ -20,10 +20,12 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from jinja2 import Environment, TemplateError
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["verify_checkpoint"]
+__all__ = ["no_think_chat_template", "verify_checkpoint"]
 
 _MODEL_TYPE = "qwen3_5"
 _ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
@@ -36,6 +38,37 @@ _TEXT_GEOMETRY_FIELDS = (
     "num_key_value_heads",
     "vocab_size",
 )
+_NO_THINK_TEMPLATE_PREFIX = "{%- set enable_thinking = false %}\n"
+_NO_THINK_GENERATION_PREFIX = "<think>\n\n</think>\n\n"
+
+
+def no_think_chat_template(checkpoint: Path, output_directory: Path) -> Path:
+    """Copy a checkpoint chat template and verify that thinking is disabled."""
+    source = checkpoint / "chat_template.jinja"
+    try:
+        content = source.read_text()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"Qwen 3.5 chat template is unreadable: {source}") from error
+    candidate = _NO_THINK_TEMPLATE_PREFIX + content
+    if not _render_template(candidate, source=source).endswith(_NO_THINK_GENERATION_PREFIX):
+        raise ValueError(f"Qwen 3.5 chat template cannot disable thinking: {source}")
+    target = output_directory / "modelopt_qwen35_no_think.jinja"
+    target.write_text(candidate)
+    return target
+
+
+def _render_template(content: str, *, source: Path) -> str:
+    try:
+        return (
+            Environment()
+            .from_string(content)
+            .render(
+                add_generation_prompt=True,
+                messages=[{"content": "test", "role": "user"}],
+            )
+        )
+    except TemplateError as error:
+        raise ValueError(f"Qwen 3.5 chat template is invalid: {source}") from error
 
 
 def verify_checkpoint(checkpoint: Path, *, profile: str) -> None:

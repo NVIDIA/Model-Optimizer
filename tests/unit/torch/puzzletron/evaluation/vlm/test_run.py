@@ -509,6 +509,8 @@ def test_realworldqa_mmmu_prefix100_policy_is_explicit_and_repeated():
     assert policy["repetitions"] == 2
     assert policy["generation"] == {"temperature": 0, "do_sample": False}
     assert suites.canonical_suite("e2e-full-eval") == suite
+    assert suites.execution_policy("full", timeout_seconds=None)["limit"] is None
+    assert suites.execution_policy("full-v1", timeout_seconds=None)["limit"] is None
 
 
 def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_path):
