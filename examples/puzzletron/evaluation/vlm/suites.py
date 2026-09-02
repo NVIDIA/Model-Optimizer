@@ -32,6 +32,7 @@ __all__ = [
     "ALL_TASKS",
     "DEFAULT_FULL_TIMEOUT_SECONDS",
     "DEFAULT_SMOKE_TIMEOUT_SECONDS",
+    "DEPRECATED_SUITE_ALIASES",
     "EVALUATION_PROFILE",
     "MMVU_SMOKE_ROWS",
     "MVBENCH_LEAF_TASKS",
@@ -40,10 +41,12 @@ __all__ = [
     "SHORT_TASKS",
     "SINGLE_TASK_SMOKE_SUITES",
     "SMOKE_SUITES",
+    "TASK_PREFIX100_REPEAT2_SUITE",
     "VIDEO_MMMU_LEAF_TASKS",
     "ExecutionPolicy",
     "FramePolicy",
     "GenerationPolicy",
+    "canonical_suite",
     "execution_policy",
     "generation_kwargs",
     "load_quick_manifest",
@@ -54,6 +57,8 @@ __all__ = [
 ]
 
 EVALUATION_PROFILE = "qwen35-vlm-benchmarks"
+TASK_PREFIX100_REPEAT2_SUITE = "realworldqa-mmmu-prefix100-repeat2"
+DEPRECATED_SUITE_ALIASES = {"e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE}
 ALL_TASKS = profile.VLM_BENCHMARK_TASKS
 SHORT_TASKS = ("realworldqa", "mmmu_val")
 QUICK_TASKS = ("realworldqa", "mmmu_val", "mvbench")
@@ -134,7 +139,8 @@ class ExecutionPolicy(TypedDict):
 
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
-    if suite in {"short", "e2e-full-eval"}:
+    suite = canonical_suite(suite)
+    if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE}:
         return SHORT_TASKS
     if suite == "quick":
         return QUICK_TASKS
@@ -149,6 +155,7 @@ def source_tasks(suite: str) -> tuple[str, ...]:
 
 def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionPolicy:
     """Resolve the provenance and runtime execution fields for one suite."""
+    suite = canonical_suite(suite)
     source_tasks(suite)
     is_smoke = suite in SMOKE_SUITES
     default_timeout_seconds = (
@@ -163,14 +170,20 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
             else 8
             if is_smoke
             else 100
-            if suite == "e2e-full-eval"
+            if suite == TASK_PREFIX100_REPEAT2_SUITE
             else None
         ),
-        "repetitions": 2 if suite in {"short", "e2e-full-eval"} else 1,
+        "repetitions": 2 if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE} else 1,
         "timeout_seconds": (
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds
         ),
     }
+
+
+def canonical_suite(suite: str) -> str:
+    """Resolve a deprecated suite alias to its explicit canonical identity."""
+
+    return DEPRECATED_SUITE_ALIASES.get(suite, suite)
 
 
 def task_name(task: str, *, leaf: str | None = None) -> str:

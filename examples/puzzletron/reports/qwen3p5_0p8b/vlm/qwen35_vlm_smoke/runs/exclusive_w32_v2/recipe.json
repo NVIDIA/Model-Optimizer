@@ -1,0 +1,59 @@
+{
+  "schema": "modelopt.vlm-serving-study-recipe/v1",
+  "study_id": "qwen35-vlm-post-mip-ffn2048-exclusive-w32-v2",
+  "models": {
+    "teacher": {
+      "checkpoint": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17"
+    },
+    "student-smoke-ffn2048-p90": {
+      "architecture": "Qwen 3.5 0.8B with every language FFN intermediate size set to 2048",
+      "architecture_id": "aiperf_architecture_550230a21b683012",
+      "checkpoint_identity_status": "architecture_only",
+      "source": "materialized output of the Qwen 3.5 0.8B VLM smoke campaign"
+    }
+  },
+  "hardware": {
+    "accelerator": "NVIDIA H100 80GB HBM3",
+    "accelerators": 8,
+    "allocation": "one exclusive node",
+    "workers": "one model server and AIPerf client per accelerator"
+  },
+  "measurement": {
+    "endpoint_type": "chat",
+    "input_tokens": 100,
+    "output_tokens": 80,
+    "image_counts": [1, 6, 12],
+    "image_width": 1280,
+    "image_height": 720,
+    "concurrencies": [1, 4],
+    "warmup_request_count": 32,
+    "warmup_seed_offset": 100000,
+    "measured_request_counts": [64, 256],
+    "prefix_caching": false,
+    "thinking": false
+  },
+  "placement": {
+    "server_lifetime": "fresh server for each of four phases",
+    "comparison_pairing": "same GPU slot; different synthetic request streams",
+    "phases": [
+      "64 requests: teacher on GPU slots 0-3, student on 4-7",
+      "64 requests: student on GPU slots 0-3, teacher on 4-7",
+      "256 requests for six-image cells: teacher on GPU slots 0-3, student on 4-7",
+      "256 requests for six-image cells: student on GPU slots 0-3, teacher on 4-7"
+    ],
+    "cache_isolation": "separate temporary, compiler, and runtime cache roots per worker"
+  },
+  "phase_seed_bases": {
+    "main1": 1000,
+    "main2": 2000,
+    "high1": 3000,
+    "high2": 4000
+  },
+  "software": {
+    "python": "3.12.3",
+    "torch": "2.11.0+cu129",
+    "aiperf": "0.12.0",
+    "vllm": "0.1.dev17514+ga056958c7.cu129"
+  }
+}

@@ -8,32 +8,33 @@ defaults:
 # Run the extended smoke and verify measurement and checkpoint slicing for the
 # target checkpoint before allocating full campaign budgets.
 embedding_pruning:
-  widths: [1024, 768]
+  widths: [1024, 960, 896]
+  alignment: 64
 
 pruning:
-  intermediate_size_list: [3072, 2560, 2048, 1792, 1536]
-  attn_heads_list:
-    - [2, 1]
-    - [4, 1]
-    - [4, 2]
-    - [8, 2]
-  attention_scored_axes: [kv_groups, q_heads_per_group]
-  gdn_scored_axes:
-    - gdn_key_groups
-    - gdn_value_head_dim
+  intermediate_size_list: [3328, 3072, 2816, 2432, 2048, 1664, 1408]
+  # Native AutoModel Qwen3NextAttention does not yet support compact reduced
+  # grouped-attention scoring. Keep only the teacher geometry until that
+  # runtime path has physical-versus-dynamic equivalence coverage.
+  attn_heads_list: [[8, 2]]
+  attention_scored_axes: []
+  # The native CP-aware Qwen GDN wrapper likewise has no compact scoring
+  # equivalence path yet. Keep every GDN dimension at teacher geometry.
+  gdn_scored_axes: []
 
 sort:
   deferred_axes: []
+
+# Parameter accounting must inventory every hidden-width scenario before the
+# root aggregate is projected into scenario-local replacement libraries.
+vllm_stats:
+  model_hidden_sizes: [1024, 960, 896]
 
 width_sanity:
   hidden_width_diagnostic: true
   axes:
     - hidden_width
     - ffn_intermediate
-    - kv_groups
-    - q_heads_per_group
-    - gdn_key_groups
-    - gdn_value_head_dim
 
 depth_importance:
   enabled: true
@@ -45,23 +46,23 @@ search_space:
     hidden_width:
       enabled: true
       teacher_value: 1024
-      values: [768]
+      values: [960, 896]
     kv_groups:
-      enabled: true
+      enabled: false
       teacher_value: 2
-      values: [1]
+      values: []
     q_heads_per_group:
-      enabled: true
+      enabled: false
       teacher_value: 4
-      values: [2]
+      values: []
     ffn_intermediate:
       enabled: true
       teacher_value: 3584
-      values: [3072, 2560, 2048, 1792, 1536]
+      values: [3328, 3072, 2816, 2432, 2048, 1664, 1408]
     gdn_key_groups:
-      enabled: true
+      enabled: false
       teacher_value: 16
-      values: [12, 8]
+      values: []
     gdn_value_heads_per_group:
       enabled: false
       teacher_value: 1
@@ -71,9 +72,9 @@ search_space:
       teacher_value: 128
       values: []
     gdn_value_head_dim:
-      enabled: true
+      enabled: false
       teacher_value: 128
-      values: [96]
+      values: []
 
 mip:
   depth_scenario_count: 3
@@ -81,7 +82,7 @@ mip:
     params-90:
       search_space:
         depth: [0, 1, 2]
-        embedding: [1024, 768]
+        embedding: [1024, 960, 896]
         axes_default: all
         axes:
           ffn.intermediate_size: all

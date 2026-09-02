@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -174,7 +175,7 @@ class PostMIPAdapter(WorkAdapter):
     def plan(self, plan: CampaignPlan, node: StagePlanNode) -> WorkPlan:
         config = _node_config(plan, node.stage_id)
         node_type = str(config.get("type"))
-        count = 1 if node_type in {"filter", "manual_filter"} else node.instances
+        count = 1 if node_type in {"filter", "manual_filter", "result_manifest"} else node.instances
         if node_type in {"evaluation", "downstream_evaluation"}:
             available = _available_evaluation_candidates(plan, node.stage_id)
             if available is not None:
@@ -231,7 +232,7 @@ class PostMIPAdapter(WorkAdapter):
             "--stage-id",
             node.stage_id,
         ]
-        if node_type in {"filter", "manual_filter"}:
+        if node_type in {"filter", "manual_filter", "result_manifest"}:
             argv.append("--aggregate")
         else:
             argv.extend(
@@ -283,7 +284,7 @@ class PostMIPAdapter(WorkAdapter):
         repo = Path(plan.runner.contract.repository)
         script = repo / "examples" / "puzzletron" / "run_post_mip_node.py"
         argv = [
-            "python",
+            sys.executable,
             str(script),
             "--config",
             plan.experiment_config_path,

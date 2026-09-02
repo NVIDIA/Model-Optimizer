@@ -46,7 +46,10 @@ def test_load_runner_restores_import_state(monkeypatch):
 
 
 def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
-    provenance = {"vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION}}
+    provenance = {
+        "url": checkpoint.LMMS_EVAL_SOURCE["repository"],
+        "vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION},
+    }
     monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)

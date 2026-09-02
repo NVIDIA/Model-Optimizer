@@ -1,0 +1,567 @@
+{
+  "schema": "modelopt.puzzletron-result-record/v1",
+  "record_id": "qwen35-vlm-kd-learning-curve-20260901-legacy-selection-v1",
+  "evidence_status": "superseded",
+  "model": {
+    "family": "qwen3p5_0p8b",
+    "modality": "vlm",
+    "teacher": "Qwen/Qwen3.5-0.8B",
+    "teacher_revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "teacher_checkpoint_fingerprint": "7bb7780f1aca3ad6a3acb3b280588bd138902bcdb2a542dc36ed876fbc6bffc2"
+  },
+  "campaign": {
+    "id": "qwen35_vlm_kd_learning_curve",
+    "admitted_axes": [
+      "hidden_width",
+      "heterogeneous_ffn_width",
+      "depth"
+    ],
+    "exact_controls": [
+      {
+        "ffn_intermediate_size": 3328
+      },
+      {
+        "ffn_intermediate_size": 3072
+      }
+    ],
+    "fixed_axes": [
+      "attention",
+      "gdn"
+    ],
+    "selection_protocol": {
+      "status": "superseded_by_current_recipe",
+      "executed": [
+        "up to 8 MIP solutions per retained band with minimum Hamming distance 2",
+        "exact-architecture deduplication",
+        "best 24 by MIP objective",
+        "64-sample image-text LM-loss screening",
+        "best 8 by LM loss with at least 2 from each retained-95, retained-90, and retained-85 band",
+        "materialization and observational serving",
+        "best 4 by mean rank with LM-loss weight 1.0, throughput weight 0.25, and at least 1 from each band"
+      ],
+      "current_recipe": "existing params-90 run followed by LM-loss top_k 2; serving metrics are observational",
+      "consequence": "A corrected-recipe execution can retain different students."
+    }
+  },
+  "run": {
+    "id": "20260901_legacy_selection_v1",
+    "collected_on": "2026-09-02",
+    "status": "success",
+    "student_count": 6,
+    "teacher_evaluation_count": 1
+  },
+  "benchmark_coverage": {
+    "scope": "64 RealWorldQA rows, 120 MMMU validation rows, and 160 MVBench rows from one frozen ordered selection",
+    "evaluation_contract_id": "qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1",
+    "runtime_profile_name": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
+    "evaluator_id": "modelopt-vlm-evaluator@30fa674e68699b00db7582ed151cc078227ba970+lmms-eval@15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "row_manifest": {
+      "path": "row_manifest.json",
+      "row_count": 344,
+      "selection_identity_sha256": "c088a0421497c34592a1fe7828cbb93a399744e7e29ec4b098206cde04906326",
+      "file_sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce"
+    },
+    "tasks": [
+      {
+        "id": "realworldqa",
+        "sample_count": 64,
+        "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c"
+      },
+      {
+        "id": "mmmu_val",
+        "sample_count": 120,
+        "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47"
+      },
+      {
+        "id": "mvbench_macro",
+        "sample_count": 160,
+        "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc"
+      }
+    ],
+    "sampling_method": "one frozen row manifest reused for teacher and every student milestone"
+  },
+  "quality_evidence": {
+    "mvbench_denominator_audit": {
+      "path": "mvbench_audit.csv",
+      "scope": "all 19 retained post-KD evaluations across 20 leaves and 160 selected rows",
+      "reported_metric": "leaf-macro accuracy with empty generations excluded from affected leaf denominators",
+      "comparable_metric": "fixed_160_accuracy with empty generations scored incorrect",
+      "teacher_and_pre_kd_status": "retained only as reported aggregates because raw per-leaf samples were unavailable"
+    },
+    "teacher": {
+      "evaluation_count": 1,
+      "metrics": {
+        "realworldqa": 0.5625,
+        "mmmu_val": 0.29167,
+        "mvbench_macro_percent": 41.875
+      }
+    },
+    "models": {
+      "architecture_2a343aec3100a1b4": {
+        "cohort": "exploratory_retained_95_hidden_960_depth_0",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.59375,
+            "mmmu_val": 0.29167,
+            "mvbench_macro_percent": 40.625
+          },
+          "128": {
+            "realworldqa": 0.59375,
+            "mmmu_val": 0.325,
+            "mvbench_macro_percent": 41.25
+          },
+          "256": {
+            "realworldqa": 0.578125,
+            "mmmu_val": 0.325,
+            "mvbench_macro_percent": 37.5
+          },
+          "pre": {
+            "realworldqa": 0.4375,
+            "mmmu_val": 0.225,
+            "mvbench_macro_percent": 25.625
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.08729000960476696
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.17524036691756917
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.2929585664336466
+          }
+        ]
+      },
+      "architecture_f01974e675dc335b": {
+        "cohort": "exploratory_retained_95_hidden_960_depth_1",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.625,
+            "mmmu_val": 0.30833,
+            "mvbench_macro_percent": 35.970238
+          },
+          "128": {
+            "realworldqa": 0.59375,
+            "mmmu_val": 0.34167,
+            "mvbench_macro_percent": 34.065476
+          },
+          "256": {
+            "realworldqa": 0.546875,
+            "mmmu_val": 0.30833,
+            "mvbench_macro_percent": 35.625
+          },
+          "pre": {
+            "realworldqa": 0.296875,
+            "mmmu_val": 0.25,
+            "mvbench_macro_percent": 24.375
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.07983072392105695
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.11586012998938613
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.18292298760245712
+          }
+        ]
+      },
+      "architecture_abbb430e18472a62": {
+        "cohort": "exploratory_retained_90",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.5,
+            "mmmu_val": 0.21667,
+            "mvbench_macro_percent": 28.47619
+          },
+          "128": {
+            "realworldqa": 0.484375,
+            "mmmu_val": 0.30833,
+            "mvbench_macro_percent": 32.642857
+          },
+          "256": {
+            "realworldqa": 0.515625,
+            "mmmu_val": 0.275,
+            "mvbench_macro_percent": 30.267857
+          },
+          "pre": {
+            "realworldqa": 0.125,
+            "mmmu_val": 0.26667,
+            "mvbench_macro_percent": 13.75
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.08711349726059578
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.17483887697337197
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.2924600663277993
+          }
+        ]
+      },
+      "architecture_60ef4164a42c59b3": {
+        "cohort": "exploratory_retained_85",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.484375,
+            "mmmu_val": 0.34167,
+            "mvbench_macro_percent": 10.375
+          },
+          "128": {
+            "realworldqa": 0.453125,
+            "mmmu_val": 0.25,
+            "mvbench_macro_percent": 16.339286
+          },
+          "256": {
+            "realworldqa": 0.46875,
+            "mmmu_val": 0.24167,
+            "mvbench_macro_percent": 13.839286
+          },
+          "pre": {
+            "realworldqa": 0.109375,
+            "mmmu_val": 0.25,
+            "mvbench_macro_percent": 10.625
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.08284450800722375
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.11844841745612536
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.18529755111170948
+          }
+        ]
+      },
+      "architecture_9f4b0f4244aaca1c": {
+        "cohort": "control_ffn_3328",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.625,
+            "mmmu_val": 0.325,
+            "mvbench_macro_percent": 39.375
+          },
+          "128": {
+            "realworldqa": 0.640625,
+            "mmmu_val": 0.325,
+            "mvbench_macro_percent": 44.375
+          },
+          "256": {
+            "realworldqa": 0.671875,
+            "mmmu_val": 0.35,
+            "mvbench_macro_percent": 43.125
+          },
+          "512": {
+            "realworldqa": 0.65625,
+            "mmmu_val": 0.325,
+            "mvbench_macro_percent": 42.5
+          },
+          "pre": {
+            "realworldqa": 0.5625,
+            "mmmu_val": 0.28333,
+            "mvbench_macro_percent": 32.5
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.08971836064334235
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.23177039662890214
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.3516174567555653
+          },
+          {
+            "steps": 512,
+            "global_batch_size": 4,
+            "cumulative_examples": 2048,
+            "effective_tokens": 2816224,
+            "estimated_cumulative_gpu_hours": 2,
+            "actual_cumulative_gpu_hours": 0.5382561673389703
+          }
+        ]
+      },
+      "architecture_05357c1774af922e": {
+        "cohort": "control_ffn_3072",
+        "checkpoint_identity_status": "identity bound in immutable external runtime manifests",
+        "milestones": {
+          "64": {
+            "realworldqa": 0.546875,
+            "mmmu_val": 0.29167,
+            "mvbench_macro_percent": 42.5
+          },
+          "128": {
+            "realworldqa": 0.609375,
+            "mmmu_val": 0.28333,
+            "mvbench_macro_percent": 39.375
+          },
+          "256": {
+            "realworldqa": 0.625,
+            "mmmu_val": 0.28333,
+            "mvbench_macro_percent": 40
+          },
+          "pre": {
+            "realworldqa": 0.5625,
+            "mmmu_val": 0.24167,
+            "mvbench_macro_percent": 28.75
+          }
+        },
+        "kd_exposure": [
+          {
+            "steps": 64,
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "effective_tokens": 352028,
+            "estimated_cumulative_gpu_hours": 0.25,
+            "actual_cumulative_gpu_hours": 0.08999834861748644
+          },
+          {
+            "steps": 128,
+            "global_batch_size": 4,
+            "cumulative_examples": 512,
+            "effective_tokens": 704056,
+            "estimated_cumulative_gpu_hours": 0.5,
+            "actual_cumulative_gpu_hours": 0.23196473220582348
+          },
+          {
+            "steps": 256,
+            "global_batch_size": 4,
+            "cumulative_examples": 1024,
+            "effective_tokens": 1408112,
+            "estimated_cumulative_gpu_hours": 1,
+            "actual_cumulative_gpu_hours": 0.35088428383804665
+          }
+        ]
+      }
+    },
+    "uncertainty": "single deterministic frozen-row evaluation; no repeated sampling or inferential interval"
+  },
+  "performance_contract": null,
+  "performance_evidence": null,
+  "provenance": {
+    "evaluator_id": "modelopt-vlm-evaluator@30fa674e68699b00db7582ed151cc078227ba970+lmms-eval@15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "evaluator_source_commit": "30fa674e68699b00db7582ed151cc078227ba970",
+    "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "generation": {
+      "seed": 42,
+      "do_sample": false,
+      "temperature": 0
+    },
+    "evaluation": {
+      "dtype": "bfloat16",
+      "batch_size": 1,
+      "max_model_len": 65536,
+      "max_images_per_prompt": 32,
+      "tensor_parallel_size": 1,
+      "pipeline_parallel_size": 1,
+      "data_parallel_size": 1
+    },
+    "distillation": {
+      "dataset_rows": 512,
+      "seed": 42,
+      "global_batch_size": 4,
+      "local_batch_size": 1,
+      "max_sample_length": 512,
+      "resumable_trajectory": true,
+      "optimizer_state_preserved": true
+    }
+  },
+  "reproduction": {
+    "integrated_campaign": "../../../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml",
+    "quality_evaluator": "../../../../../../evaluation/vlm/run.py",
+    "corrected_recipe_status": "reproducible from repository configuration",
+    "historical_selection_status": "partial: exact selection requires archived external runtime evidence; the corrected repository recipe intentionally does not encode the superseded heuristics",
+    "frozen_rows": "row_manifest.json",
+    "source_join": "Match external artifacts by SHA-256, then use architecture ID, milestone, checkpoint identity, and frozen row-selection identity."
+  },
+  "artifacts": {
+    "repository": [
+      {
+        "path": "metrics.csv",
+        "sha256": "d6732f0213f950d38b55bc6414ebf90f639822ccbbe8e9f353a707b800363ead",
+        "size_bytes": 40293
+      },
+      {
+        "path": "summary.md",
+        "sha256": "9713a5f724f4d839a2ee607437bdaf10c473a6d4edaee9e3eb6af2bb8065abd8",
+        "size_bytes": 5052
+      },
+      {
+        "path": "row_manifest.json",
+        "sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce",
+        "size_bytes": 58867
+      },
+      {
+        "path": "mvbench_audit.csv",
+        "sha256": "49c4491a4cdf84fff50eead15ceabbe78f4ef1d11342929bb8006b971ffd80f1",
+        "size_bytes": 24431
+      }
+    ],
+    "external": [
+      {
+        "id": "exploratory-pre-kd-observations",
+        "sha256": "cb571e6070012e8e817d76484239d0fde187eb2c4ff963266fc03ff1716bf1d8",
+        "size_bytes": 20797
+      },
+      {
+        "id": "exploratory-64-step-observations",
+        "sha256": "e5fcbd44ac510e97078b3d8298603659b5a75e8523f658611788b98b56df740c",
+        "size_bytes": 83914
+      },
+      {
+        "id": "exploratory-128-step-observations",
+        "sha256": "266449cbb5cbe46b146df74478e77e02bd77779776846ac1b4e347ecb4970b35",
+        "size_bytes": 84050
+      },
+      {
+        "id": "exploratory-256-step-observations",
+        "sha256": "74e8a22ada3225ce9de0ed333974ece8f0811520634c9781d5ef8665145c4aea",
+        "size_bytes": 83895
+      },
+      {
+        "id": "controls-pre-kd-observations",
+        "sha256": "e37f010036c41e76f24ca656236060fb38b8dc997aa0162a2c7add8ff61f10fb",
+        "size_bytes": 41998
+      },
+      {
+        "id": "controls-64-step-observations",
+        "sha256": "b6fbbb6081cf7cb56a68418a64c7130bad721f819cc96c6dfb8bf0e9898e811f",
+        "size_bytes": 21100
+      },
+      {
+        "id": "controls-128-step-observations",
+        "sha256": "2befb724fedb67cbd5c13e22ec1e4412f8b7d6c110420af49fe28a295a089a67",
+        "size_bytes": 42258
+      },
+      {
+        "id": "controls-256-step-observations",
+        "sha256": "a918aed0e504c18afed8ec5e2b4d494391363fc942d8731b4679ef437d2c199f",
+        "size_bytes": 42296
+      },
+      {
+        "id": "control-3328-512-step-observations",
+        "sha256": "90d9f65198b172405ebfc4dd8a5bf5796e23c000c0e1b8a62bd3014e7c2901d7",
+        "size_bytes": 21119
+      },
+      {
+        "id": "selected-exploratory-result-manifest",
+        "sha256": "5224cbf9b9fc2e61316aea6694233a4b75950fae630c17474471c60066c96548",
+        "size_bytes": 298734
+      },
+      {
+        "id": "control-3072-result-manifest",
+        "sha256": "d9f04b0f7aae60963c6253abc10d76c09aab0f020ad59b342e5e9df313180a55",
+        "size_bytes": 299270
+      },
+      {
+        "id": "control-3328-result-manifest",
+        "sha256": "e25954c75adee46e77cc3279a48618898f69a728e42861258817390a3801db5f",
+        "size_bytes": 299241
+      },
+      {
+        "id": "control-3328-extended-result-manifest",
+        "sha256": "72a397870ac71a4669689a581fd3318f15da11c2e23d82c03386bbe5c0440b9d",
+        "size_bytes": 506477
+      }
+    ]
+  },
+  "limitations": [
+    "The executed candidate-selection policy was bespoke and is superseded; these measurements must not be presented as outputs of the corrected integrated recipe.",
+    "A corrected-recipe rerun can select different students.",
+    "The evaluation is one fixed 344-row selection without repetitions or confidence intervals; the separate eight-task all-rows scope qwen35-vlm-judge-free8-all-rows-v1 was not run.",
+    "Attention and GDN remained at teacher geometry, so this is not a full-axis pruning campaign.",
+    "The 512-step extension was run only for the FFN-3328 control; no 1024-step milestone was run.",
+    "Evaluator-reported MVBench macros can use model-dependent denominators when generations are empty; use fixed_160_accuracy for audited post-KD comparisons. Teacher and pre-KD MVBench remain aggregate-only.",
+    "The exact frozen row-selection manifest is bundled; external runtime manifests and checkpoints are joined through immutable hashes.",
+    "Effective-token values use the runtime training-objective counter and can exceed examples multiplied by maximum sample length."
+  ]
+}

@@ -2,18 +2,21 @@
 
 defaults:
   - mip_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - _self_
 
-# Bounded Qwen 3.5 0.8B VLM campaign for FFN-only pruning. Both candidates
-# receive the same image-text screening KD and fixed two-task evaluation
-# contract. Aggregate ranking selects one candidate, which receives a second KD
-# run from its materialized pre-KD checkpoint and a final teacher comparison.
+# Bounded hidden-width, heterogeneous-FFN, and depth Qwen 3.5 0.8B VLM
+# campaign. It reuses the established params-90 MIP profile, LM-loss top-k
+# screening, one resumable KD learning curve, frozen-row evaluation, and a
+# serving benchmark for the final selected checkpoint. Attention and GDN remain
+# at teacher geometry until the native runtime passes compact-scoring and
+# slicing equivalence gates.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
-display_name: Qwen3p5 0.8B VLM pruning campaign
+display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM pruning campaign
 
 pruning:
-  experiment_id: qwen35_0p8b_vlm_ffn_campaign
-  intermediate_size_list: [2816, 2048]
+  experiment_id: qwen35_0p8b_vlm_multi_axis_campaign
+  intermediate_size_list: [3328, 3072, 2816, 2432, 2048, 1664, 1408]
   eval_samples: 128
   seed: 42
 
@@ -28,39 +31,35 @@ width_sanity:
 replacement_scoring:
   eval_samples: 64
 
-search_space:
-  axes:
-    ffn_intermediate:
-      enabled: true
-      teacher_value: 3584
-      values: [2816, 2048]
-
 mip:
   runs:
-    params-90: false
-    ffn-candidates:
+    # Conservative FFN controls calibrate exact checkpoint accounting and enter
+    # a dedicated matched post-MIP learning curve. They are not claim-bearing
+    # defaults. Likewise, 2816 and 2048 are exploratory search bins, not
+    # justified VLM defaults.
+    calibration-controls:
       search_space:
         depth: [0]
         embedding: [1024]
         axes_default: teacher
         axes: {ffn.intermediate_size: all}
       variants:
-        width-2816:
+        width-3328:
           constraints:
-            params: {max: 95%}
+            params: {min: 95%, max: 100%}
           search_space:
-            axes: {ffn.intermediate_size: [2816]}
-        width-2048:
+            axes: {ffn.intermediate_size: [3328]}
+        width-3072:
           constraints:
-            params: {max: 90%}
+            params: {min: 95%, max: 100%}
           search_space:
-            axes: {ffn.intermediate_size: [2048]}
+            axes: {ffn.intermediate_size: [3072]}
       solver:
         backend: auto
         num_solutions: 1
-        min_hamming_distance: 2
+        min_hamming_distance: 1
         max_seconds_per_solution: 300
-      homogeneous: {enabled: true, keep: 1, rank_by: objective}
+      homogeneous: {enabled: false}
 
 global_distillation:
   enabled: false
@@ -80,7 +79,7 @@ post_mip:
   flows:
     candidate-evaluation:
       source:
-        run: ffn-candidates
+        run: params-90
         variants: all
         objectives: all
       nodes:
@@ -102,9 +101,216 @@ post_mip:
           type: materialize
           input: best_lm
 
+        pre_kd_short_v1:
+          type: downstream_evaluation
+          input: materialized
+          failure_policy: strict
+          config: &short_v1_evaluation
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
+            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+            row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
+            row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
+            reference_checkpoint: ${teacher_dir}
+            reference_once: true
+            reference_cache_id: qwen35-0p8b-short-v1-teacher
+            batch_size: 1
+            timeout_seconds: 14400
+            dtype: bfloat16
+            gpu_memory_utilization: 0.5
+            max_model_len: 65536
+            limit_mm_per_prompt: {image: 32}
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+
+        kd_64:
+          type: global_kd
+          input: pre_kd_short_v1
+          failure_policy: strict
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config: &candidate_kd
+            seed: 1111
+            validation_seed: 445
+            shuffle_training_data: true
+            resume: true
+            max_steps: 64
+            global_batch_size: 4
+            local_batch_size: 1
+            checkpoint_every_steps: 64
+          exposure: &candidate_exposure_64
+            cumulative_steps: 64
+            global_batch_size: 4
+            cumulative_examples: 256
+            max_sample_length: 512
+            estimated_cumulative_gpu_hours: 0.25
+
+        short_v1_64:
+          type: downstream_evaluation
+          input: kd_64
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        kd_128:
+          type: global_kd
+          input: short_v1_64
+          failure_policy: strict
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config:
+            <<: *candidate_kd
+            max_steps: 128
+          exposure:
+            <<: *candidate_exposure_64
+            cumulative_steps: 128
+            cumulative_examples: 512
+            estimated_cumulative_gpu_hours: 0.5
+
+        short_v1_128:
+          type: downstream_evaluation
+          input: kd_128
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        kd_256:
+          type: global_kd
+          input: short_v1_128
+          failure_policy: strict
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config:
+            <<: *candidate_kd
+            max_steps: 256
+          exposure:
+            <<: *candidate_exposure_64
+            cumulative_steps: 256
+            cumulative_examples: 1024
+            estimated_cumulative_gpu_hours: 1.0
+
+        short_v1_256:
+          type: downstream_evaluation
+          input: kd_256
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        selected:
+          type: manual_filter
+          input: short_v1_256
+          prompt: Select one 256-step finalist using the separately owned fixed 344-row interpretation.
+
+        bounded_result:
+          type: result_manifest
+          input: selected
+          config: &bounded_result_config
+            pre_kd_source: materialized
+            pre_kd_evaluation: pre_kd_short_v1
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
+            row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
+            row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
+            reference_checkpoint: ${teacher_dir}
+            reference_cache_id: qwen35-0p8b-short-v1-teacher
+            milestones:
+              - {steps: 64, kd: kd_64, evaluation: short_v1_64}
+              - {steps: 128, kd: kd_128, evaluation: short_v1_128}
+              - {steps: 256, kd: kd_256, evaluation: short_v1_256}
+
+        approve_512:
+          type: manual_filter
+          input: bounded_result
+          prompt: Approve the selected finalist for the separately budgeted 512-step extension.
+
+        kd_512:
+          type: global_kd
+          input: approve_512
+          failure_policy: strict
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config:
+            <<: *candidate_kd
+            max_steps: 512
+          exposure:
+            <<: *candidate_exposure_64
+            cumulative_steps: 512
+            cumulative_examples: 2048
+            estimated_cumulative_gpu_hours: 2.0
+
+        short_v1_512:
+          type: downstream_evaluation
+          input: kd_512
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        extended_result:
+          type: result_manifest
+          input: short_v1_512
+          config:
+            <<: *bounded_result_config
+            milestones:
+              - {steps: 64, kd: kd_64, evaluation: short_v1_64}
+              - {steps: 128, kd: kd_128, evaluation: short_v1_128}
+              - {steps: 256, kd: kd_256, evaluation: short_v1_256}
+              - {steps: 512, kd: kd_512, evaluation: short_v1_512}
+
+        approve_1024:
+          type: manual_filter
+          input: extended_result
+          prompt: Approve the 512-step finalist for the separately budgeted 1024-step extension.
+
+        kd_1024:
+          type: global_kd
+          input: approve_1024
+          failure_policy: strict
+          model_source: materialized
+          trajectory: retained-candidate-learning-curve
+          config:
+            <<: *candidate_kd
+            max_steps: 1024
+          exposure:
+            <<: *candidate_exposure_64
+            cumulative_steps: 1024
+            cumulative_examples: 4096
+            estimated_cumulative_gpu_hours: 4.0
+
+        short_v1_1024:
+          type: downstream_evaluation
+          input: kd_1024
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        final_result:
+          type: result_manifest
+          input: short_v1_1024
+          config:
+            <<: *bounded_result_config
+            milestones:
+              - {steps: 64, kd: kd_64, evaluation: short_v1_64}
+              - {steps: 128, kd: kd_128, evaluation: short_v1_128}
+              - {steps: 256, kd: kd_256, evaluation: short_v1_256}
+              - {steps: 512, kd: kd_512, evaluation: short_v1_512}
+              - {steps: 1024, kd: kd_1024, evaluation: short_v1_1024}
+
+        best:
+          type: filter
+          input: final_result
+          mode: top_k
+          metric: short_v1_1024.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
+          direction: maximize
+          top_k: 1
+
         serving:
           type: aiperf
-          input: materialized
+          input: best
           config:
             endpoint_type: chat
             input_tokens: 100
@@ -113,7 +319,9 @@ post_mip:
             image_width_mean: 1280
             image_height_mean: 720
             concurrency: [1, 4]
-            request_count: 8
+            request_count: 64
+            warmup_request_count: 32
+            repetitions: 3
             extra_inputs: {min_tokens: 80}
             use_server_token_count: true
             seed: 42
@@ -139,95 +347,192 @@ post_mip:
                 - --default-chat-template-kwargs
                 - '{"enable_thinking": false}'
 
-        screening_kd:
-          type: global_kd
-          input: serving
+    control-learning-curve:
+      source:
+        run: calibration-controls
+        variants: all
+        objectives: all
+      nodes:
+        control_materialized:
+          type: materialize
+
+        control_pre_kd_short_v1:
+          type: downstream_evaluation
+          input: control_materialized
+          failure_policy: strict
           config:
+            <<: *short_v1_evaluation
+
+        control_kd_64:
+          type: global_kd
+          input: control_pre_kd_short_v1
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config: &control_kd
             seed: 1111
             validation_seed: 445
             shuffle_training_data: true
+            resume: true
             max_steps: 64
             global_batch_size: 4
             local_batch_size: 1
-            checkpoint_every_steps: 32
-
-        screening_eval:
-          type: evaluation
-          input: screening_kd
-          config:
-            eval_samples: 64
-            block_size: 512
-
-        quality_screen:
-          type: downstream_evaluation
-          input: screening_eval
-          failure_policy: strict
-          config: &bounded_vlm_evaluation
-            profile: qwen35_vlm_e2e_full_eval
-            batch_size: 1
-            timeout_seconds: 14400
-            dtype: bfloat16
-            gpu_memory_utilization: 0.5
-            max_model_len: 16384
-            limit_mm_per_prompt: {image: 12}
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
-
-        selected:
-          type: filter
-          input: quality_screen
-          mode: aggregate_rank
-          metrics:
-            - metric: screening_eval.lm_loss
-              direction: minimize
-            - metric: quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
-              direction: maximize
-            - metric: quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none
-              direction: maximize
-          top_k: 1
-
-        global_kd:
-          type: global_kd
-          input: selected
-          model_source: materialized
-          config:
-            seed: 1111
-            validation_seed: 445
-            shuffle_training_data: true
-            max_steps: 256
+            checkpoint_every_steps: 64
+          exposure: &control_exposure_64
+            cumulative_steps: 64
             global_batch_size: 4
-            local_batch_size: 1
-            checkpoint_every_steps: 32
+            cumulative_examples: 256
+            max_sample_length: 512
+            estimated_cumulative_gpu_hours: 0.25
 
-        final_eval:
-          type: evaluation
-          input: global_kd
-          config:
-            eval_samples: 64
-            block_size: 512
-
-        quality_benchmarks:
+        control_short_v1_64:
           type: downstream_evaluation
-          input: final_eval
+          input: control_kd_64
           failure_policy: strict
           config:
-            <<: *bounded_vlm_evaluation
-            reference_checkpoint: ${teacher_dir}
+            <<: *short_v1_evaluation
 
-        best:
-          type: filter
-          input: quality_benchmarks
-          mode: top_k
-          metric: final_eval.lm_loss
-          direction: minimize
-          top_k: 1
+        control_kd_128:
+          type: global_kd
+          input: control_short_v1_64
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 128
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 128
+            cumulative_examples: 512
+            estimated_cumulative_gpu_hours: 0.5
+
+        control_short_v1_128:
+          type: downstream_evaluation
+          input: control_kd_128
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        control_kd_256:
+          type: global_kd
+          input: control_short_v1_128
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 256
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 256
+            cumulative_examples: 1024
+            estimated_cumulative_gpu_hours: 1.0
+
+        control_short_v1_256:
+          type: downstream_evaluation
+          input: control_kd_256
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        control_result:
+          type: result_manifest
+          input: control_short_v1_256
+          config: &control_result_config
+            pre_kd_source: control_materialized
+            pre_kd_evaluation: control_pre_kd_short_v1
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
+            row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
+            row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
+            reference_checkpoint: ${teacher_dir}
+            reference_cache_id: qwen35-0p8b-short-v1-teacher
+            milestones:
+              - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
+              - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
+              - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+
+        control_selected:
+          type: manual_filter
+          input: control_result
+          prompt: Select one 256-step conservative-control finalist using the fixed 344-row curve.
+
+        control_approve_512:
+          type: manual_filter
+          input: control_selected
+          prompt: Approve the selected conservative-control finalist for the 512-step extension.
+
+        control_kd_512:
+          type: global_kd
+          input: control_approve_512
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 512
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 512
+            cumulative_examples: 2048
+            estimated_cumulative_gpu_hours: 2.0
+
+        control_short_v1_512:
+          type: downstream_evaluation
+          input: control_kd_512
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        control_extended_result:
+          type: result_manifest
+          input: control_short_v1_512
+          config:
+            <<: *control_result_config
+            milestones:
+              - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
+              - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
+              - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+              - {steps: 512, kd: control_kd_512, evaluation: control_short_v1_512}
+
+        control_approve_1024:
+          type: manual_filter
+          input: control_extended_result
+          prompt: Approve the 512-step control finalist for the separately reviewed 1024-step extension.
+
+        control_kd_1024:
+          type: global_kd
+          input: control_approve_1024
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 1024
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 1024
+            cumulative_examples: 4096
+            estimated_cumulative_gpu_hours: 4.0
+
+        control_short_v1_1024:
+          type: downstream_evaluation
+          input: control_kd_1024
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        control_final_result:
+          type: result_manifest
+          input: control_short_v1_1024
+          config:
+            <<: *control_result_config
+            milestones:
+              - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
+              - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
+              - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+              - {steps: 512, kd: control_kd_512, evaluation: control_short_v1_512}
+              - {steps: 1024, kd: control_kd_1024, evaluation: control_short_v1_1024}
 
 zero_shot_evaluation:
   enabled: false

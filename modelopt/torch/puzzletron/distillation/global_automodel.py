@@ -24,9 +24,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from ..dataset.config import DataLayout, Modality, PuzzletronDataSpec
+import torch
+
+from ..dataset.batch import DataLayout, Modality
+from ..dataset.config import PuzzletronDataSpec
 from ..identity import cache_key, canonicalize
 
 logger = logging.getLogger(__name__)
@@ -151,12 +154,18 @@ class GlobalKDConfig:
                 )
 
     @property
-    def resolved_student_descriptor(self) -> str | None:
-        return self.student_descriptor or self.descriptor
+    def resolved_student_descriptor(self) -> str:
+        descriptor = self.student_descriptor or self.descriptor
+        if not descriptor:
+            raise ValueError("Global KD requires a student descriptor")
+        return descriptor
 
     @property
-    def resolved_teacher_descriptor(self) -> str | None:
-        return self.teacher_descriptor or self.descriptor or self.student_descriptor
+    def resolved_teacher_descriptor(self) -> str:
+        descriptor = self.teacher_descriptor or self.descriptor or self.student_descriptor
+        if not descriptor:
+            raise ValueError("Global KD requires a teacher descriptor")
+        return descriptor
 
     @property
     def resolved_student_force_hf(self) -> bool:
@@ -207,8 +216,12 @@ def _int_value(*keys: tuple[dict[str, Any], str], default: int = 1) -> int:
 
 
 def _loss_term(node: dict[str, Any], *, legacy_temperature: float) -> KDLossTermConfig:
+    metric = str(node.get("metric", "kld")).lower()
+    if metric not in ("kld", "tvd"):
+        raise ValueError(f"Unsupported KD metric {metric!r}")
+    validated_metric = cast("Literal['kld', 'tvd']", metric)
     return KDLossTermConfig(
-        metric=str(node.get("metric", "kld")).lower(),
+        metric=validated_metric,
         temperature=float(node.get("temperature", legacy_temperature)),
         chunk_size=int(node.get("chunk_size", 0)),
     )
@@ -281,6 +294,27 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             value = kd_cfg.get(legacy)
         return float(default if value is None else value)
 
+    domain = str(kd_cfg.get("domain", "auto")).lower()
+    if domain not in ("auto", "llm", "vlm"):
+        raise ValueError("distillation.domain must be auto, llm, or vlm")
+    validated_domain = cast("Literal['auto', 'llm', 'vlm']", domain)
+    pp_schedule = str(parallel.get("pipeline_schedule", "1f1b")).lower()
+    if pp_schedule not in ("1f1b", "interleaved1f1b"):
+        raise ValueError("distillation.pp_schedule must be 1f1b or interleaved1f1b")
+    validated_pp_schedule = cast("Literal['1f1b', 'interleaved1f1b']", pp_schedule)
+    checkpoint_format = str(kd_cfg.get("checkpoint_format", "auto")).lower()
+    if checkpoint_format not in ("auto", "safetensors", "torch_save"):
+        raise ValueError("distillation.checkpoint_format must be auto, safetensors, or torch_save")
+    validated_checkpoint_format = cast(
+        "Literal['auto', 'safetensors', 'torch_save']", checkpoint_format
+    )
+    freeze_policy = str(kd_cfg.get("freeze_policy", "vision_frozen"))
+    if freeze_policy not in ("vision_frozen", "projector_and_language", "train_all"):
+        raise ValueError(f"unknown global KD freeze_policy={freeze_policy!r}")
+    validated_freeze_policy = cast(
+        "Literal['vision_frozen', 'projector_and_language', 'train_all']", freeze_policy
+    )
+
     return GlobalKDConfig(
         teacher_dir=Path(
             teacher.get("dir") or kd_cfg.get("teacher_dir") or exp_dir / "ckpts" / "teacher"
@@ -307,7 +341,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             **dict(kd_cfg.get("teacher_model_kwargs") or {}),
             **dict(teacher.get("model_kwargs") or {}),
         },
-        domain=str(kd_cfg.get("domain", "auto")).lower(),
+        domain=validated_domain,
         trust_remote_code=bool(
             kd_cfg.get("trust_remote_code", model_cfg.get("trust_remote_code", False))
         ),
@@ -324,9 +358,9 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
             "activation_checkpointing",
             automodel.get("activation_checkpointing", False),
         ),
-        pp_schedule=str(parallel.get("pipeline_schedule", "1f1b")).lower(),
+        pp_schedule=validated_pp_schedule,
         save_consolidated=kd_cfg.get("save_consolidated", False),
-        checkpoint_format=str(kd_cfg.get("checkpoint_format", "auto")).lower(),
+        checkpoint_format=validated_checkpoint_format,
         main_ce_weight=_weight("main_ce", "ce_weight", 1.0),
         mtp_ce_weight=_weight("mtp_ce", None, 0.0),
         main_kd_weight=_weight("main_kd", "kd_weight", 1.0),
@@ -355,7 +389,7 @@ def build_global_kd_config(config: dict[str, Any]) -> GlobalKDConfig:
         resume=bool(kd_cfg.get("resume", True)),
         metadata=dict(kd_cfg.get("metadata") or {}),
         data=data,
-        freeze_policy=str(kd_cfg.get("freeze_policy", "vision_frozen")),
+        freeze_policy=validated_freeze_policy,
     )
 
 
@@ -394,6 +428,85 @@ def _resolve_domain(kd_config: GlobalKDConfig) -> Literal["llm", "vlm"]:
     return "llm"
 
 
+def _completed_vlm_resume_observability(
+    kd_config: GlobalKDConfig, observability: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """Restore durable observability only for an already completed identical milestone."""
+
+    if _resolve_domain(kd_config) != "vlm" or int(observability.get("vision_forward_count", 0)) > 0:
+        return observability, False
+    summary_path = kd_config.output_dir / "global_distillation_summary.json"
+    try:
+        prior_summary = json.loads(summary_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return observability, False
+    prior_observability = dict((prior_summary.get("metrics") or {}).get("observability") or {})
+    checkpoint = Path(prior_summary.get("post_kd_checkpoint") or "")
+    try:
+        checkpoint_is_local = checkpoint.resolve().is_relative_to(kd_config.output_dir.resolve())
+    except (OSError, RuntimeError):
+        checkpoint_is_local = False
+    step_dir = checkpoint.parents[1] if len(checkpoint.parents) >= 2 else Path()
+    try:
+        checkpoint_step = int(step_dir.name.rsplit("_step_", 1)[1])
+    except (IndexError, ValueError):
+        checkpoint_step = -1
+    completed = (
+        prior_summary.get("kd_id") == kd_config.identity
+        and prior_summary.get("max_steps") == kd_config.max_steps
+        and int(prior_observability.get("vision_forward_count", 0)) > 0
+        and checkpoint_is_local
+        and (checkpoint / "config.json").is_file()
+        and (step_dir / "saving_completed").is_file()
+        and checkpoint_step >= kd_config.max_steps - 1
+    )
+    if completed:
+        logger.info(
+            "Reused identity-bound VLM observability for completed global-KD milestone %d",
+            kd_config.max_steps,
+        )
+    return (prior_observability, True) if completed else (observability, False)
+
+
+def _aggregate_objective_buffers(
+    objective_names: list[str], objective_buffers: dict[str, list[Any]], torch_dist: Any
+) -> dict[str, float | None]:
+    """Average objective buffers with one packed tensor collective."""
+    buffered_values = [
+        value
+        for name in objective_names
+        for value in objective_buffers.get(name, [])
+        if isinstance(value, torch.Tensor)
+    ]
+    distributed = torch_dist.is_available() and torch_dist.is_initialized()
+    if distributed and torch_dist.get_backend() == "nccl":
+        device = torch.device("cuda", torch.cuda.current_device())
+    elif buffered_values:
+        device = buffered_values[0].device
+    else:
+        device = torch.device("cpu")
+
+    totals = torch.zeros((len(objective_names), 2), dtype=torch.float64, device=device)
+    for index, name in enumerate(objective_names):
+        values = objective_buffers.get(name, [])
+        if values:
+            totals[index, 0] = torch.stack(
+                [value.detach().to(device=device, dtype=torch.float64) for value in values]
+            ).sum()
+            totals[index, 1] = len(values)
+
+    if distributed:
+        try:
+            torch_dist.all_reduce(totals)
+        except RuntimeError as error:
+            raise RuntimeError("Global-KD objective metric gathering failed") from error
+    rows = totals.cpu().tolist()
+    return {
+        name: total / count if count else None
+        for name, (total, count) in zip(objective_names, rows)
+    }
+
+
 def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> dict[str, Any]:
     descriptor = (
         kd_config.resolved_teacher_descriptor if teacher else kd_config.resolved_student_descriptor
@@ -407,7 +520,7 @@ def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> d
         if domain == "vlm"
         else "nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained"
     )
-    model = {
+    model: dict[str, Any] = {
         "_target_": target,
         "pretrained_model_name_or_path": str(model_dir),
         "anymodel_descriptor": descriptor,
@@ -582,7 +695,10 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     data_spec = PuzzletronDataSpec.from_mapping(kd_config.data) if kd_config.data else None
     packed_sequence_size = int(kd_config.packed_sequence_size)
     if data_spec is not None and data_spec.layout is DataLayout.PACKED_VARLEN:
-        canonical_pack_size = int(data_spec.packing.pack_size)
+        packing = data_spec.packing
+        if packing is None:
+            raise ValueError("layout=packed_varlen requires data.packing")
+        canonical_pack_size = int(packing.pack_size)
         if packed_sequence_size not in (0, canonical_pack_size):
             raise ValueError(
                 "distillation.packed_sequence_size conflicts with "
@@ -668,7 +784,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
     domain_metadata = _materialize_target_keys(dict(kd_config.metadata.get(domain) or {}))
     if domain == "llm":
         if kd_config.data:
-            data_spec = PuzzletronDataSpec.from_mapping(kd_config.data)
+            llm_data_spec = PuzzletronDataSpec.from_mapping(kd_config.data)
 
             def _dataset(
                 split: str,
@@ -679,7 +795,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 shuffle: bool,
             ) -> dict[str, Any]:
                 sample_config = dict(kd_config.data.get(samples_key) or {})
-                if data_spec.layout is not DataLayout.FIXED:
+                if llm_data_spec.layout is not DataLayout.FIXED:
                     dataset = {
                         "_target_": (
                             "modelopt.torch.puzzletron.distillation.dataset."
@@ -687,11 +803,11 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                         ),
                         "dataset_path": str(kd_config.data.get("path") or ""),
                         "split": split,
-                        "seq_length": int(data_spec.max_sample_length),
+                        "seq_length": int(llm_data_spec.max_sample_length),
                         "seed": seed,
                         "shuffle": shuffle,
                     }
-                    if data_spec.layout is DataLayout.PADDED_VARLEN:
+                    if llm_data_spec.layout is DataLayout.PADDED_VARLEN:
                         dataset["num_samples"] = int(
                             sample_config.get(
                                 "num_samples",
@@ -711,7 +827,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                             kd_config.max_steps * kd_config.global_batch_size,
                         )
                     ),
-                    "seq_length": int(data_spec.sequence_length),
+                    "seq_length": int(llm_data_spec.sequence_length),
                     "seed": seed,
                     "shuffle": shuffle,
                 }
@@ -723,7 +839,7 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 "_target_": "torchdata.stateful_dataloader.StatefulDataLoader",
                 "collate_fn": (
                     "nemo_automodel.components.datasets.utils.default_collater"
-                    if data_spec.layout is not DataLayout.FIXED
+                    if llm_data_spec.layout is not DataLayout.FIXED
                     else (
                         "modelopt.torch.puzzletron.distillation.dataset."
                         "collate_puzzletron_llm_batch"
@@ -743,12 +859,15 @@ def build_automodel_global_kd_recipe(kd_config: GlobalKDConfig) -> dict[str, Any
                 ),
                 dataloader=dict(dataloader),
             )
-            if data_spec.layout is DataLayout.PACKED_VARLEN:
+            if llm_data_spec.layout is DataLayout.PACKED_VARLEN:
+                packing = llm_data_spec.packing
+                if packing is None:
+                    raise ValueError("layout=packed_varlen requires data.packing")
                 calibration = dict(kd_config.data.get("calibration") or {})
                 recipe["packed_sequence"] = {
-                    "packed_sequence_size": int(data_spec.packing.pack_size),
+                    "packed_sequence_size": int(packing.pack_size),
                     "packing_strategy": "neat",
-                    "drop_long_samples": bool(data_spec.packing.drop_long_samples),
+                    "drop_long_samples": bool(packing.drop_long_samples),
                     "max_packs": int(
                         calibration.get(
                             "num_samples",
@@ -1161,7 +1280,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     )
     if kd_config.pp > 1:
         install_pp_checkpoint_state_dict_support()
-    trainer = recipe_cls(cfg)
+    trainer: Any = recipe_cls(cfg)
     trainer.setup()
     trainer.run_train_validation_loop()
     import torch.distributed as torch_dist
@@ -1178,23 +1297,11 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     observability = (
         trainer.observability_metadata() if hasattr(trainer, "observability_metadata") else {}
     )
-    local_terms = {}
-    for name, values in getattr(trainer, "_objective_buffers", {}).items():
-        local_terms[name] = [float(value.detach().float().cpu()) for value in values]
-    gathered_terms = [local_terms]
-
-    if torch_dist.is_available() and torch_dist.is_initialized():
-        gathered_terms = [None] * torch_dist.get_world_size()
-        try:
-            torch_dist.all_gather_object(gathered_terms, local_terms)
-        except RuntimeError as error:
-            raise RuntimeError("Global-KD objective metric gathering failed") from error
-    objective_metrics = {}
-    for name in kd_config.objective_weights:
-        values = [
-            value for rank_terms in gathered_terms for value in (rank_terms or {}).get(name, [])
-        ]
-        objective_metrics[name] = sum(values) / len(values) if values else None
+    objective_metrics = _aggregate_objective_buffers(
+        list(kd_config.objective_weights),
+        getattr(trainer, "_objective_buffers", {}),
+        torch_dist,
+    )
     # The weighted recipe flushes its per-step buffers into training.jsonl so
     # they do not accumulate across optimizer steps.  Prefer the final logged
     # values for the stage manifest; they are the metrics associated with the
@@ -1227,6 +1334,9 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
         }
     if hasattr(trainer, "close_observability"):
         trainer.close_observability()
+    observability, resumed_completed_milestone = _completed_vlm_resume_observability(
+        kd_config, observability
+    )
     if kd_config.max_steps >= 8 and (trend is None or not trend["decreased"]):
         raise RuntimeError(f"global KD acceptance loss did not decrease: {trend}")
     if kd_config.freeze_policy == "train_all":
@@ -1255,6 +1365,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
         "loss_history": loss_values,
         "loss_trend": trend,
         "observability": observability,
+        "resumed_completed_milestone": resumed_completed_milestone,
         "latest_training_metrics": latest_record,
     }
 

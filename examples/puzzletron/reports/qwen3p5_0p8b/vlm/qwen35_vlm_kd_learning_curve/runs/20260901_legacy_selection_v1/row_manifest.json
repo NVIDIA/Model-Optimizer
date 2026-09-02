@@ -1,0 +1,1735 @@
+{
+  "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+  "schema": "modelopt.vlm-benchmark-quick/v1",
+  "selection": {
+    "method": "seeded_uniform_without_replacement",
+    "seed": 42
+  },
+  "tasks": {
+    "mmmu_val": {
+      "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+      "rows": [
+        {
+          "source_row_index": 2,
+          "source_sample_id": "validation_Accounting_3"
+        },
+        {
+          "source_row_index": 6,
+          "source_sample_id": "validation_Accounting_7"
+        },
+        {
+          "source_row_index": 7,
+          "source_sample_id": "validation_Accounting_8"
+        },
+        {
+          "source_row_index": 24,
+          "source_sample_id": "validation_Accounting_25"
+        },
+        {
+          "source_row_index": 48,
+          "source_sample_id": "validation_Agriculture_19"
+        },
+        {
+          "source_row_index": 57,
+          "source_sample_id": "validation_Agriculture_28"
+        },
+        {
+          "source_row_index": 63,
+          "source_sample_id": "validation_Architecture_and_Engineering_4"
+        },
+        {
+          "source_row_index": 64,
+          "source_sample_id": "validation_Architecture_and_Engineering_5"
+        },
+        {
+          "source_row_index": 67,
+          "source_sample_id": "validation_Architecture_and_Engineering_8"
+        },
+        {
+          "source_row_index": 70,
+          "source_sample_id": "validation_Architecture_and_Engineering_11"
+        },
+        {
+          "source_row_index": 71,
+          "source_sample_id": "validation_Architecture_and_Engineering_12"
+        },
+        {
+          "source_row_index": 74,
+          "source_sample_id": "validation_Architecture_and_Engineering_15"
+        },
+        {
+          "source_row_index": 80,
+          "source_sample_id": "validation_Architecture_and_Engineering_21"
+        },
+        {
+          "source_row_index": 101,
+          "source_sample_id": "validation_Art_12"
+        },
+        {
+          "source_row_index": 127,
+          "source_sample_id": "validation_Art_Theory_8"
+        },
+        {
+          "source_row_index": 129,
+          "source_sample_id": "validation_Art_Theory_10"
+        },
+        {
+          "source_row_index": 130,
+          "source_sample_id": "validation_Art_Theory_11"
+        },
+        {
+          "source_row_index": 139,
+          "source_sample_id": "validation_Art_Theory_20"
+        },
+        {
+          "source_row_index": 140,
+          "source_sample_id": "validation_Art_Theory_21"
+        },
+        {
+          "source_row_index": 142,
+          "source_sample_id": "validation_Art_Theory_23"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "validation_Art_Theory_24"
+        },
+        {
+          "source_row_index": 144,
+          "source_sample_id": "validation_Art_Theory_25"
+        },
+        {
+          "source_row_index": 146,
+          "source_sample_id": "validation_Art_Theory_27"
+        },
+        {
+          "source_row_index": 160,
+          "source_sample_id": "validation_Basic_Medical_Science_11"
+        },
+        {
+          "source_row_index": 178,
+          "source_sample_id": "validation_Basic_Medical_Science_29"
+        },
+        {
+          "source_row_index": 184,
+          "source_sample_id": "validation_Biology_5"
+        },
+        {
+          "source_row_index": 185,
+          "source_sample_id": "validation_Biology_6"
+        },
+        {
+          "source_row_index": 186,
+          "source_sample_id": "validation_Biology_7"
+        },
+        {
+          "source_row_index": 190,
+          "source_sample_id": "validation_Biology_11"
+        },
+        {
+          "source_row_index": 192,
+          "source_sample_id": "validation_Biology_13"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "validation_Biology_16"
+        },
+        {
+          "source_row_index": 213,
+          "source_sample_id": "validation_Chemistry_4"
+        },
+        {
+          "source_row_index": 222,
+          "source_sample_id": "validation_Chemistry_13"
+        },
+        {
+          "source_row_index": 228,
+          "source_sample_id": "validation_Chemistry_19"
+        },
+        {
+          "source_row_index": 242,
+          "source_sample_id": "validation_Clinical_Medicine_3"
+        },
+        {
+          "source_row_index": 244,
+          "source_sample_id": "validation_Clinical_Medicine_5"
+        },
+        {
+          "source_row_index": 254,
+          "source_sample_id": "validation_Clinical_Medicine_15"
+        },
+        {
+          "source_row_index": 259,
+          "source_sample_id": "validation_Clinical_Medicine_20"
+        },
+        {
+          "source_row_index": 278,
+          "source_sample_id": "validation_Computer_Science_9"
+        },
+        {
+          "source_row_index": 287,
+          "source_sample_id": "validation_Computer_Science_18"
+        },
+        {
+          "source_row_index": 299,
+          "source_sample_id": "validation_Computer_Science_30"
+        },
+        {
+          "source_row_index": 306,
+          "source_sample_id": "validation_Design_7"
+        },
+        {
+          "source_row_index": 318,
+          "source_sample_id": "validation_Design_19"
+        },
+        {
+          "source_row_index": 322,
+          "source_sample_id": "validation_Design_23"
+        },
+        {
+          "source_row_index": 325,
+          "source_sample_id": "validation_Design_26"
+        },
+        {
+          "source_row_index": 337,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_8"
+        },
+        {
+          "source_row_index": 343,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_14"
+        },
+        {
+          "source_row_index": 351,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_22"
+        },
+        {
+          "source_row_index": 372,
+          "source_sample_id": "validation_Economics_13"
+        },
+        {
+          "source_row_index": 390,
+          "source_sample_id": "validation_Electronics_1"
+        },
+        {
+          "source_row_index": 391,
+          "source_sample_id": "validation_Electronics_2"
+        },
+        {
+          "source_row_index": 402,
+          "source_sample_id": "validation_Electronics_13"
+        },
+        {
+          "source_row_index": 406,
+          "source_sample_id": "validation_Electronics_17"
+        },
+        {
+          "source_row_index": 415,
+          "source_sample_id": "validation_Electronics_26"
+        },
+        {
+          "source_row_index": 451,
+          "source_sample_id": "validation_Finance_2"
+        },
+        {
+          "source_row_index": 459,
+          "source_sample_id": "validation_Finance_10"
+        },
+        {
+          "source_row_index": 465,
+          "source_sample_id": "validation_Finance_16"
+        },
+        {
+          "source_row_index": 472,
+          "source_sample_id": "validation_Finance_23"
+        },
+        {
+          "source_row_index": 473,
+          "source_sample_id": "validation_Finance_24"
+        },
+        {
+          "source_row_index": 476,
+          "source_sample_id": "validation_Finance_27"
+        },
+        {
+          "source_row_index": 483,
+          "source_sample_id": "validation_Geography_4"
+        },
+        {
+          "source_row_index": 494,
+          "source_sample_id": "validation_Geography_15"
+        },
+        {
+          "source_row_index": 495,
+          "source_sample_id": "validation_Geography_16"
+        },
+        {
+          "source_row_index": 501,
+          "source_sample_id": "validation_Geography_22"
+        },
+        {
+          "source_row_index": 502,
+          "source_sample_id": "validation_Geography_23"
+        },
+        {
+          "source_row_index": 513,
+          "source_sample_id": "validation_History_4"
+        },
+        {
+          "source_row_index": 515,
+          "source_sample_id": "validation_History_6"
+        },
+        {
+          "source_row_index": 516,
+          "source_sample_id": "validation_History_7"
+        },
+        {
+          "source_row_index": 520,
+          "source_sample_id": "validation_History_11"
+        },
+        {
+          "source_row_index": 529,
+          "source_sample_id": "validation_History_20"
+        },
+        {
+          "source_row_index": 541,
+          "source_sample_id": "validation_Literature_2"
+        },
+        {
+          "source_row_index": 542,
+          "source_sample_id": "validation_Literature_3"
+        },
+        {
+          "source_row_index": 543,
+          "source_sample_id": "validation_Literature_4"
+        },
+        {
+          "source_row_index": 550,
+          "source_sample_id": "validation_Literature_11"
+        },
+        {
+          "source_row_index": 554,
+          "source_sample_id": "validation_Literature_15"
+        },
+        {
+          "source_row_index": 556,
+          "source_sample_id": "validation_Literature_17"
+        },
+        {
+          "source_row_index": 569,
+          "source_sample_id": "validation_Literature_30"
+        },
+        {
+          "source_row_index": 571,
+          "source_sample_id": "validation_Manage_2"
+        },
+        {
+          "source_row_index": 582,
+          "source_sample_id": "validation_Manage_13"
+        },
+        {
+          "source_row_index": 585,
+          "source_sample_id": "validation_Manage_16"
+        },
+        {
+          "source_row_index": 597,
+          "source_sample_id": "validation_Manage_28"
+        },
+        {
+          "source_row_index": 604,
+          "source_sample_id": "validation_Marketing_5"
+        },
+        {
+          "source_row_index": 607,
+          "source_sample_id": "validation_Marketing_8"
+        },
+        {
+          "source_row_index": 637,
+          "source_sample_id": "validation_Materials_8"
+        },
+        {
+          "source_row_index": 644,
+          "source_sample_id": "validation_Materials_15"
+        },
+        {
+          "source_row_index": 657,
+          "source_sample_id": "validation_Materials_28"
+        },
+        {
+          "source_row_index": 668,
+          "source_sample_id": "validation_Math_9"
+        },
+        {
+          "source_row_index": 669,
+          "source_sample_id": "validation_Math_10"
+        },
+        {
+          "source_row_index": 676,
+          "source_sample_id": "validation_Math_17"
+        },
+        {
+          "source_row_index": 678,
+          "source_sample_id": "validation_Math_19"
+        },
+        {
+          "source_row_index": 682,
+          "source_sample_id": "validation_Math_23"
+        },
+        {
+          "source_row_index": 688,
+          "source_sample_id": "validation_Math_29"
+        },
+        {
+          "source_row_index": 690,
+          "source_sample_id": "validation_Mechanical_Engineering_1"
+        },
+        {
+          "source_row_index": 700,
+          "source_sample_id": "validation_Mechanical_Engineering_11"
+        },
+        {
+          "source_row_index": 705,
+          "source_sample_id": "validation_Mechanical_Engineering_16"
+        },
+        {
+          "source_row_index": 718,
+          "source_sample_id": "validation_Mechanical_Engineering_29"
+        },
+        {
+          "source_row_index": 728,
+          "source_sample_id": "validation_Music_9"
+        },
+        {
+          "source_row_index": 739,
+          "source_sample_id": "validation_Music_20"
+        },
+        {
+          "source_row_index": 749,
+          "source_sample_id": "validation_Music_30"
+        },
+        {
+          "source_row_index": 763,
+          "source_sample_id": "validation_Pharmacy_14"
+        },
+        {
+          "source_row_index": 779,
+          "source_sample_id": "validation_Pharmacy_30"
+        },
+        {
+          "source_row_index": 785,
+          "source_sample_id": "validation_Physics_6"
+        },
+        {
+          "source_row_index": 794,
+          "source_sample_id": "validation_Physics_15"
+        },
+        {
+          "source_row_index": 795,
+          "source_sample_id": "validation_Physics_16"
+        },
+        {
+          "source_row_index": 798,
+          "source_sample_id": "validation_Physics_19"
+        },
+        {
+          "source_row_index": 800,
+          "source_sample_id": "validation_Physics_21"
+        },
+        {
+          "source_row_index": 801,
+          "source_sample_id": "validation_Physics_22"
+        },
+        {
+          "source_row_index": 810,
+          "source_sample_id": "validation_Psychology_1"
+        },
+        {
+          "source_row_index": 821,
+          "source_sample_id": "validation_Psychology_12"
+        },
+        {
+          "source_row_index": 826,
+          "source_sample_id": "validation_Psychology_17"
+        },
+        {
+          "source_row_index": 834,
+          "source_sample_id": "validation_Psychology_25"
+        },
+        {
+          "source_row_index": 835,
+          "source_sample_id": "validation_Psychology_26"
+        },
+        {
+          "source_row_index": 841,
+          "source_sample_id": "validation_Public_Health_2"
+        },
+        {
+          "source_row_index": 843,
+          "source_sample_id": "validation_Public_Health_4"
+        },
+        {
+          "source_row_index": 847,
+          "source_sample_id": "validation_Public_Health_8"
+        },
+        {
+          "source_row_index": 854,
+          "source_sample_id": "validation_Public_Health_15"
+        },
+        {
+          "source_row_index": 856,
+          "source_sample_id": "validation_Public_Health_17"
+        },
+        {
+          "source_row_index": 883,
+          "source_sample_id": "validation_Sociology_14"
+        },
+        {
+          "source_row_index": 889,
+          "source_sample_id": "validation_Sociology_20"
+        },
+        {
+          "source_row_index": 897,
+          "source_sample_id": "validation_Sociology_28"
+        }
+      ],
+      "selection": {
+        "method": "seeded_uniform_without_replacement",
+        "seed": 42
+      }
+    },
+    "mvbench": {
+      "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc",
+      "rows": [
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/3064K_3.0_18.0.mp4",
+          "source_row_index": 23,
+          "source_sample_id": "action_sequence:23"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/YMGGV_0.0_17.9.mp4",
+          "source_row_index": 30,
+          "source_sample_id": "action_sequence:30"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/P2HZG_0.0_10.2.mp4",
+          "source_row_index": 132,
+          "source_sample_id": "action_sequence:132"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/C1DK7_4.2_21.6.mp4",
+          "source_row_index": 133,
+          "source_sample_id": "action_sequence:133"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/RNLTR_11.6_24.0.mp4",
+          "source_row_index": 146,
+          "source_sample_id": "action_sequence:146"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/OY3LS_34.9_42.1.mp4",
+          "source_row_index": 165,
+          "source_sample_id": "action_sequence:165"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/RXLKF_0.0_9.4.mp4",
+          "source_row_index": 167,
+          "source_sample_id": "action_sequence:167"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_media_path": "star/Charades_segment/APVAD_6.7_16.5.mp4",
+          "source_row_index": 179,
+          "source_sample_id": "action_sequence:179"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_12512.mp4",
+          "source_row_index": 24,
+          "source_sample_id": "moving_count:24"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_11453.mp4",
+          "source_row_index": 37,
+          "source_sample_id": "moving_count:37"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_14515.mp4",
+          "source_row_index": 77,
+          "source_sample_id": "moving_count:77"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_13184.mp4",
+          "source_row_index": 79,
+          "source_sample_id": "moving_count:79"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_12027.mp4",
+          "source_row_index": 97,
+          "source_sample_id": "moving_count:97"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_13904.mp4",
+          "source_row_index": 175,
+          "source_sample_id": "moving_count:175"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_13071.mp4",
+          "source_row_index": 190,
+          "source_sample_id": "moving_count:190"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_media_path": "clevrer/video_validation/video_12980.mp4",
+          "source_row_index": 194,
+          "source_sample_id": "moving_count:194"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/T2J3M_9.2_23.599999999999998.mp4",
+          "source_row_index": 4,
+          "source_sample_id": "action_prediction:4"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/5INX3_0.0_34.6.mp4",
+          "source_row_index": 7,
+          "source_sample_id": "action_prediction:7"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/2U0QT_10.0_21.575.mp4",
+          "source_row_index": 26,
+          "source_sample_id": "action_prediction:26"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/J6TVB_0.0_13.0.mp4",
+          "source_row_index": 28,
+          "source_sample_id": "action_prediction:28"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/D1NT7_3.2_12.25.mp4",
+          "source_row_index": 55,
+          "source_sample_id": "action_prediction:55"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/C6LW1_0.0_20.625.mp4",
+          "source_row_index": 116,
+          "source_sample_id": "action_prediction:116"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/92UB5_0.0_26.15.mp4",
+          "source_row_index": 124,
+          "source_sample_id": "action_prediction:124"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_media_path": "star/Charades_segment/5XKVP_0.0_9.125.mp4",
+          "source_row_index": 150,
+          "source_sample_id": "action_prediction:150"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/s08e07_seg01_clip_00_32.77_61.26.mp4",
+          "source_row_index": 1,
+          "source_sample_id": "episodic_reasoning:1"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/grey_s02e25_seg02_clip_11_57.26_90.18.mp4",
+          "source_row_index": 2,
+          "source_sample_id": "episodic_reasoning:2"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/friends_s10e01_seg02_clip_02_29.31_63.03.mp4",
+          "source_row_index": 5,
+          "source_sample_id": "episodic_reasoning:5"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/s07e06_seg02_clip_09_0.0_37.22.mp4",
+          "source_row_index": 67,
+          "source_sample_id": "episodic_reasoning:67"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/castle_s04e22_seg02_clip_25_0.0_26.69.mp4",
+          "source_row_index": 116,
+          "source_sample_id": "episodic_reasoning:116"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/castle_s06e18_seg02_clip_23_0.0_32.89.mp4",
+          "source_row_index": 152,
+          "source_sample_id": "episodic_reasoning:152"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/s06e08_seg02_clip_01_26.14_60.09.mp4",
+          "source_row_index": 180,
+          "source_sample_id": "episodic_reasoning:180"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_media_path": "tvqa/video_fps3_hq_segment/castle_s05e20_seg02_clip_07_20.26_46.36.mp4",
+          "source_row_index": 196,
+          "source_sample_id": "episodic_reasoning:196"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/90178.mp4",
+          "source_row_index": 25,
+          "source_sample_id": "action_antonym:25"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/17532.mp4",
+          "source_row_index": 44,
+          "source_sample_id": "action_antonym:44"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/93569.mp4",
+          "source_row_index": 55,
+          "source_sample_id": "action_antonym:55"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/202156.mp4",
+          "source_row_index": 141,
+          "source_sample_id": "action_antonym:141"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/112665.mp4",
+          "source_row_index": 146,
+          "source_sample_id": "action_antonym:146"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/156586.mp4",
+          "source_row_index": 161,
+          "source_sample_id": "action_antonym:161"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/214380.mp4",
+          "source_row_index": 164,
+          "source_sample_id": "action_antonym:164"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_media_path": "ssv2_video_mp4/213615.mp4",
+          "source_row_index": 183,
+          "source_sample_id": "action_antonym:183"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_7916.mp4",
+          "source_row_index": 21,
+          "source_sample_id": "action_count:21"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_362.mp4",
+          "source_row_index": 45,
+          "source_sample_id": "action_count:45"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_8082.mp4",
+          "source_row_index": 50,
+          "source_sample_id": "action_count:50"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_1004.mp4",
+          "source_row_index": 66,
+          "source_sample_id": "action_count:66"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_9676.mp4",
+          "source_row_index": 82,
+          "source_sample_id": "action_count:82"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_11271.mp4",
+          "source_row_index": 102,
+          "source_sample_id": "action_count:102"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_9087.mp4",
+          "source_row_index": 191,
+          "source_sample_id": "action_count:191"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_media_path": "perception/videos/video_4518.mp4",
+          "source_row_index": 195,
+          "source_sample_id": "action_count:195"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top012_07450.mp4",
+          "source_row_index": 6,
+          "source_sample_id": "scene_transition:6"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top048_06240.mp4",
+          "source_row_index": 16,
+          "source_sample_id": "scene_transition:16"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top090_06680.mp4",
+          "source_row_index": 39,
+          "source_sample_id": "scene_transition:39"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top009_02605.mp4",
+          "source_row_index": 70,
+          "source_sample_id": "scene_transition:70"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top008_00190.mp4",
+          "source_row_index": 78,
+          "source_sample_id": "scene_transition:78"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top066_09305.mp4",
+          "source_row_index": 114,
+          "source_sample_id": "scene_transition:114"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top119_00995.mp4",
+          "source_row_index": 115,
+          "source_sample_id": "scene_transition:115"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_media_path": "scene_qa/video/Top033_03315.mp4",
+          "source_row_index": 195,
+          "source_sample_id": "scene_transition:195"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_3889.mp4",
+          "source_row_index": 3,
+          "source_sample_id": "object_shuffle:3"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_9171.mp4",
+          "source_row_index": 51,
+          "source_sample_id": "object_shuffle:51"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_4078.mp4",
+          "source_row_index": 62,
+          "source_sample_id": "object_shuffle:62"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_4813.mp4",
+          "source_row_index": 98,
+          "source_sample_id": "object_shuffle:98"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_6438.mp4",
+          "source_row_index": 102,
+          "source_sample_id": "object_shuffle:102"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_5016.mp4",
+          "source_row_index": 110,
+          "source_sample_id": "object_shuffle:110"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_807.mp4",
+          "source_row_index": 156,
+          "source_sample_id": "object_shuffle:156"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_media_path": "perception/videos/video_864.mp4",
+          "source_row_index": 159,
+          "source_sample_id": "object_shuffle:159"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_13534.mp4",
+          "source_row_index": 18,
+          "source_sample_id": "object_existence:18"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_11117.mp4",
+          "source_row_index": 80,
+          "source_sample_id": "object_existence:80"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_14101.mp4",
+          "source_row_index": 100,
+          "source_sample_id": "object_existence:100"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_11093.mp4",
+          "source_row_index": 130,
+          "source_sample_id": "object_existence:130"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_11737.mp4",
+          "source_row_index": 136,
+          "source_sample_id": "object_existence:136"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_11145.mp4",
+          "source_row_index": 150,
+          "source_sample_id": "object_existence:150"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_14700.mp4",
+          "source_row_index": 162,
+          "source_sample_id": "object_existence:162"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_media_path": "clevrer/video_validation/video_12289.mp4",
+          "source_row_index": 183,
+          "source_sample_id": "object_existence:183"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S031C003P041R002A080_rgb.mp4",
+          "source_row_index": 38,
+          "source_sample_id": "fine_grained_pose:38"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S007C002P001R002A023_rgb.mp4",
+          "source_row_index": 50,
+          "source_sample_id": "fine_grained_pose:50"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S007C003P008R002A010_rgb.mp4",
+          "source_row_index": 68,
+          "source_sample_id": "fine_grained_pose:68"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S018C002P041R002A097_rgb.mp4",
+          "source_row_index": 73,
+          "source_sample_id": "fine_grained_pose:73"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S022C003P064R001A098_rgb.mp4",
+          "source_row_index": 102,
+          "source_sample_id": "fine_grained_pose:102"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S003C003P002R002A036_rgb.mp4",
+          "source_row_index": 145,
+          "source_sample_id": "fine_grained_pose:145"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S006C003P019R002A037_rgb.mp4",
+          "source_row_index": 159,
+          "source_sample_id": "fine_grained_pose:159"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_media_path": "nturgbd_convert/S007C001P019R001A036_rgb.mp4",
+          "source_row_index": 160,
+          "source_sample_id": "fine_grained_pose:160"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_humor/H_A_112_0436_0691.mp4",
+          "source_row_index": 19,
+          "source_sample_id": "unexpected_action:19"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_humor/H_H_101_2970_3120.mp4",
+          "source_row_index": 42,
+          "source_sample_id": "unexpected_action:42"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_humor/H_A_3_0760_0950.mp4",
+          "source_row_index": 44,
+          "source_sample_id": "unexpected_action:44"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_creative/C_KT_21_8053_8120.mp4",
+          "source_row_index": 103,
+          "source_sample_id": "unexpected_action:103"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_creative/C_KT_21_4308_4428.mp4",
+          "source_row_index": 104,
+          "source_sample_id": "unexpected_action:104"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_creative/C_KT_8_0418_0453.mp4",
+          "source_row_index": 105,
+          "source_sample_id": "unexpected_action:105"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_magic/M_Z_21_14050_14250.mp4",
+          "source_row_index": 151,
+          "source_sample_id": "unexpected_action:151"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_media_path": "FunQA_test/test/test_magic/M_Z_277_0987_1354.mp4",
+          "source_row_index": 194,
+          "source_sample_id": "unexpected_action:194"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_14366.mp4",
+          "source_row_index": 1,
+          "source_sample_id": "moving_direction:1"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_14515.mp4",
+          "source_row_index": 5,
+          "source_sample_id": "moving_direction:5"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_13860.mp4",
+          "source_row_index": 11,
+          "source_sample_id": "moving_direction:11"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_10393.mp4",
+          "source_row_index": 27,
+          "source_sample_id": "moving_direction:27"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_11804.mp4",
+          "source_row_index": 44,
+          "source_sample_id": "moving_direction:44"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_11978.mp4",
+          "source_row_index": 93,
+          "source_sample_id": "moving_direction:93"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_12005.mp4",
+          "source_row_index": 105,
+          "source_sample_id": "moving_direction:105"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_media_path": "clevrer/video_validation/video_12413.mp4",
+          "source_row_index": 174,
+          "source_sample_id": "moving_direction:174"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_9129.mp4",
+          "source_row_index": 40,
+          "source_sample_id": "state_change:40"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_3411.mp4",
+          "source_row_index": 63,
+          "source_sample_id": "state_change:63"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_8763.mp4",
+          "source_row_index": 72,
+          "source_sample_id": "state_change:72"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_2968.mp4",
+          "source_row_index": 78,
+          "source_sample_id": "state_change:78"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_9253.mp4",
+          "source_row_index": 83,
+          "source_sample_id": "state_change:83"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_9559.mp4",
+          "source_row_index": 107,
+          "source_sample_id": "state_change:107"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_10203.mp4",
+          "source_row_index": 132,
+          "source_sample_id": "state_change:132"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_media_path": "perception/videos/video_2140.mp4",
+          "source_row_index": 177,
+          "source_sample_id": "state_change:177"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/HCM5Y_0.0_15.4.mp4",
+          "source_row_index": 7,
+          "source_sample_id": "object_interaction:7"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/XZ9C0_0.0_15.7.mp4",
+          "source_row_index": 15,
+          "source_sample_id": "object_interaction:15"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/52WDV_15.5_29.7.mp4",
+          "source_row_index": 30,
+          "source_sample_id": "object_interaction:30"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/Q3HZI_14.9_30.1.mp4",
+          "source_row_index": 33,
+          "source_sample_id": "object_interaction:33"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/XQDQ4_1.4000000000000004_17.7.mp4",
+          "source_row_index": 90,
+          "source_sample_id": "object_interaction:90"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/VS7VS_6.0_20.1.mp4",
+          "source_row_index": 108,
+          "source_sample_id": "object_interaction:108"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/6TNP4_0.0_16.8.mp4",
+          "source_row_index": 114,
+          "source_sample_id": "object_interaction:114"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_media_path": "star/Charades_segment/V115C_8.266666666666666_23.733333333333334.mp4",
+          "source_row_index": 168,
+          "source_sample_id": "object_interaction:168"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_3025.mp4",
+          "source_row_index": 12,
+          "source_sample_id": "character_order:12"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_9724.mp4",
+          "source_row_index": 19,
+          "source_sample_id": "character_order:19"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_3168.mp4",
+          "source_row_index": 93,
+          "source_sample_id": "character_order:93"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_2492.mp4",
+          "source_row_index": 178,
+          "source_sample_id": "character_order:178"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_341.mp4",
+          "source_row_index": 180,
+          "source_sample_id": "character_order:180"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_8747.mp4",
+          "source_row_index": 185,
+          "source_sample_id": "character_order:185"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_8470.mp4",
+          "source_row_index": 187,
+          "source_sample_id": "character_order:187"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_media_path": "perception/videos/video_6373.mp4",
+          "source_row_index": 194,
+          "source_sample_id": "character_order:194"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/TDAY1_0.0_16.6.mp4",
+          "source_row_index": 33,
+          "source_sample_id": "action_localization:33"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/L5YHH_17.3_35.4.mp4",
+          "source_row_index": 36,
+          "source_sample_id": "action_localization:36"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/WM6RQ_1.799999999999999_18.0.mp4",
+          "source_row_index": 94,
+          "source_sample_id": "action_localization:94"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/ME4YL_4.0_23.5.mp4",
+          "source_row_index": 103,
+          "source_sample_id": "action_localization:103"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/LR9KL_4.299999999999997_28.000000000000004.mp4",
+          "source_row_index": 104,
+          "source_sample_id": "action_localization:104"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/BIQGN_10.400000000000002_26.599999999999998.mp4",
+          "source_row_index": 122,
+          "source_sample_id": "action_localization:122"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/EJFUA_5.199999999999999_28.9.mp4",
+          "source_row_index": 135,
+          "source_sample_id": "action_localization:135"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_media_path": "sta/sta_video_segment/GAOV2_2.3_23.0.mp4",
+          "source_row_index": 196,
+          "source_sample_id": "action_localization:196"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_12709.mp4",
+          "source_row_index": 8,
+          "source_sample_id": "counterfactual_inference:8"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_13307.mp4",
+          "source_row_index": 76,
+          "source_sample_id": "counterfactual_inference:76"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_14184.mp4",
+          "source_row_index": 80,
+          "source_sample_id": "counterfactual_inference:80"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_10652.mp4",
+          "source_row_index": 103,
+          "source_sample_id": "counterfactual_inference:103"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_10561.mp4",
+          "source_row_index": 115,
+          "source_sample_id": "counterfactual_inference:115"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_11868.mp4",
+          "source_row_index": 119,
+          "source_sample_id": "counterfactual_inference:119"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_12268.mp4",
+          "source_row_index": 129,
+          "source_sample_id": "counterfactual_inference:129"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_media_path": "clevrer/video_validation/video_10882.mp4",
+          "source_row_index": 141,
+          "source_sample_id": "counterfactual_inference:141"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/extinguishing/vb-BIO-Hesprides-A-33-Indian-Ocean-02-March-2011-Fire-drill-procedures-in-the-ship-A-33-Hesperides-4y7NkbNYxijzcmnj5_1.mp4",
+          "source_row_index": 5,
+          "source_sample_id": "fine_grained_action:5"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/loading/getty-apps-fill-smart-phones-loop-video-id187196035_3.mp4",
+          "source_row_index": 47,
+          "source_sample_id": "fine_grained_action:47"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/sketching/LT7u09z55Qc_33.mp4",
+          "source_row_index": 67,
+          "source_sample_id": "fine_grained_action:67"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/sliding/getty-cross-step-video-id458067452_10.mp4",
+          "source_row_index": 77,
+          "source_sample_id": "fine_grained_action:77"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/leaning/getty-young-woman-using-smart-phone-in-a-modern-office-video-id482408526_1.mp4",
+          "source_row_index": 78,
+          "source_sample_id": "fine_grained_action:78"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/queuing/getty-june-2016-an-aerial-view-of-vehicles-stuck-in-gridlock-kazi-nazrul-video-id543524348_6.mp4",
+          "source_row_index": 142,
+          "source_sample_id": "fine_grained_action:142"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/plunging/getty-four-businessmen-race-on-multicoloured-space-hoppers-on-the-floor-of-video-iddv1423014_4.mp4",
+          "source_row_index": 150,
+          "source_sample_id": "fine_grained_action:150"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_media_path": "Moments_in_Time_Raw/videos/validation/buttoning/yt-X91mzIPqGHY_36.mp4",
+          "source_row_index": 178,
+          "source_sample_id": "fine_grained_action:178"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_11343.mp4",
+          "source_row_index": 22,
+          "source_sample_id": "moving_attribute:22"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_11397.mp4",
+          "source_row_index": 43,
+          "source_sample_id": "moving_attribute:43"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_13226.mp4",
+          "source_row_index": 46,
+          "source_sample_id": "moving_attribute:46"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_12353.mp4",
+          "source_row_index": 50,
+          "source_sample_id": "moving_attribute:50"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_13527.mp4",
+          "source_row_index": 133,
+          "source_sample_id": "moving_attribute:133"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_10439.mp4",
+          "source_row_index": 151,
+          "source_sample_id": "moving_attribute:151"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_12506.mp4",
+          "source_row_index": 158,
+          "source_sample_id": "moving_attribute:158"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_media_path": "clevrer/video_validation/video_13752.mp4",
+          "source_row_index": 177,
+          "source_sample_id": "moving_attribute:177"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/left/4597_frame44.mp4",
+          "source_row_index": 9,
+          "source_sample_id": "egocentric_navigation:9"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/right/2749_frame35.mp4",
+          "source_row_index": 74,
+          "source_sample_id": "egocentric_navigation:74"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/right/6595_frame41.mp4",
+          "source_row_index": 82,
+          "source_sample_id": "egocentric_navigation:82"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/forward/1539_frame47.mp4",
+          "source_row_index": 126,
+          "source_sample_id": "egocentric_navigation:126"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/forward/1836_frame40.mp4",
+          "source_row_index": 144,
+          "source_sample_id": "egocentric_navigation:144"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/stop/4721_frame48.mp4",
+          "source_row_index": 164,
+          "source_sample_id": "egocentric_navigation:164"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/stop/5840_frame44.mp4",
+          "source_row_index": 176,
+          "source_sample_id": "egocentric_navigation:176"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_media_path": "vlnqa/stop/573_frame36.mp4",
+          "source_row_index": 180,
+          "source_sample_id": "egocentric_navigation:180"
+        }
+      ],
+      "selection": {
+        "method": "seeded_uniform_without_replacement",
+        "rows_per_leaf": 8,
+        "seed": 42,
+        "stratified_by": "leaf_task"
+      }
+    },
+    "realworldqa": {
+      "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+      "rows": [
+        {
+          "source_row_index": 2,
+          "source_sample_id": "test:2"
+        },
+        {
+          "source_row_index": 21,
+          "source_sample_id": "test:21"
+        },
+        {
+          "source_row_index": 34,
+          "source_sample_id": "test:34"
+        },
+        {
+          "source_row_index": 45,
+          "source_sample_id": "test:45"
+        },
+        {
+          "source_row_index": 66,
+          "source_sample_id": "test:66"
+        },
+        {
+          "source_row_index": 81,
+          "source_sample_id": "test:81"
+        },
+        {
+          "source_row_index": 83,
+          "source_sample_id": "test:83"
+        },
+        {
+          "source_row_index": 94,
+          "source_sample_id": "test:94"
+        },
+        {
+          "source_row_index": 97,
+          "source_sample_id": "test:97"
+        },
+        {
+          "source_row_index": 125,
+          "source_sample_id": "test:125"
+        },
+        {
+          "source_row_index": 126,
+          "source_sample_id": "test:126"
+        },
+        {
+          "source_row_index": 129,
+          "source_sample_id": "test:129"
+        },
+        {
+          "source_row_index": 146,
+          "source_sample_id": "test:146"
+        },
+        {
+          "source_row_index": 194,
+          "source_sample_id": "test:194"
+        },
+        {
+          "source_row_index": 197,
+          "source_sample_id": "test:197"
+        },
+        {
+          "source_row_index": 229,
+          "source_sample_id": "test:229"
+        },
+        {
+          "source_row_index": 242,
+          "source_sample_id": "test:242"
+        },
+        {
+          "source_row_index": 251,
+          "source_sample_id": "test:251"
+        },
+        {
+          "source_row_index": 261,
+          "source_sample_id": "test:261"
+        },
+        {
+          "source_row_index": 265,
+          "source_sample_id": "test:265"
+        },
+        {
+          "source_row_index": 312,
+          "source_sample_id": "test:312"
+        },
+        {
+          "source_row_index": 323,
+          "source_sample_id": "test:323"
+        },
+        {
+          "source_row_index": 337,
+          "source_sample_id": "test:337"
+        },
+        {
+          "source_row_index": 341,
+          "source_sample_id": "test:341"
+        },
+        {
+          "source_row_index": 347,
+          "source_sample_id": "test:347"
+        },
+        {
+          "source_row_index": 365,
+          "source_sample_id": "test:365"
+        },
+        {
+          "source_row_index": 380,
+          "source_sample_id": "test:380"
+        },
+        {
+          "source_row_index": 388,
+          "source_sample_id": "test:388"
+        },
+        {
+          "source_row_index": 392,
+          "source_sample_id": "test:392"
+        },
+        {
+          "source_row_index": 415,
+          "source_sample_id": "test:415"
+        },
+        {
+          "source_row_index": 417,
+          "source_sample_id": "test:417"
+        },
+        {
+          "source_row_index": 432,
+          "source_sample_id": "test:432"
+        },
+        {
+          "source_row_index": 433,
+          "source_sample_id": "test:433"
+        },
+        {
+          "source_row_index": 439,
+          "source_sample_id": "test:439"
+        },
+        {
+          "source_row_index": 450,
+          "source_sample_id": "test:450"
+        },
+        {
+          "source_row_index": 454,
+          "source_sample_id": "test:454"
+        },
+        {
+          "source_row_index": 481,
+          "source_sample_id": "test:481"
+        },
+        {
+          "source_row_index": 483,
+          "source_sample_id": "test:483"
+        },
+        {
+          "source_row_index": 486,
+          "source_sample_id": "test:486"
+        },
+        {
+          "source_row_index": 490,
+          "source_sample_id": "test:490"
+        },
+        {
+          "source_row_index": 518,
+          "source_sample_id": "test:518"
+        },
+        {
+          "source_row_index": 521,
+          "source_sample_id": "test:521"
+        },
+        {
+          "source_row_index": 523,
+          "source_sample_id": "test:523"
+        },
+        {
+          "source_row_index": 541,
+          "source_sample_id": "test:541"
+        },
+        {
+          "source_row_index": 549,
+          "source_sample_id": "test:549"
+        },
+        {
+          "source_row_index": 553,
+          "source_sample_id": "test:553"
+        },
+        {
+          "source_row_index": 565,
+          "source_sample_id": "test:565"
+        },
+        {
+          "source_row_index": 604,
+          "source_sample_id": "test:604"
+        },
+        {
+          "source_row_index": 630,
+          "source_sample_id": "test:630"
+        },
+        {
+          "source_row_index": 634,
+          "source_sample_id": "test:634"
+        },
+        {
+          "source_row_index": 676,
+          "source_sample_id": "test:676"
+        },
+        {
+          "source_row_index": 688,
+          "source_sample_id": "test:688"
+        },
+        {
+          "source_row_index": 701,
+          "source_sample_id": "test:701"
+        },
+        {
+          "source_row_index": 703,
+          "source_sample_id": "test:703"
+        },
+        {
+          "source_row_index": 706,
+          "source_sample_id": "test:706"
+        },
+        {
+          "source_row_index": 708,
+          "source_sample_id": "test:708"
+        },
+        {
+          "source_row_index": 711,
+          "source_sample_id": "test:711"
+        },
+        {
+          "source_row_index": 729,
+          "source_sample_id": "test:729"
+        },
+        {
+          "source_row_index": 734,
+          "source_sample_id": "test:734"
+        },
+        {
+          "source_row_index": 741,
+          "source_sample_id": "test:741"
+        },
+        {
+          "source_row_index": 744,
+          "source_sample_id": "test:744"
+        },
+        {
+          "source_row_index": 749,
+          "source_sample_id": "test:749"
+        },
+        {
+          "source_row_index": 755,
+          "source_sample_id": "test:755"
+        },
+        {
+          "source_row_index": 758,
+          "source_sample_id": "test:758"
+        }
+      ],
+      "selection": {
+        "method": "seeded_uniform_without_replacement",
+        "seed": 42
+      }
+    }
+  }
+}

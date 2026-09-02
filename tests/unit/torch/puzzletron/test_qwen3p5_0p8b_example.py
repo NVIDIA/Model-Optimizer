@@ -16,10 +16,15 @@
 """CPU contracts for the Qwen 3.5 0.8B model example."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
+
+from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
+    Qwen3P5VLModelDescriptor,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 CONFIG_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs"
@@ -79,12 +84,8 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
     axes = advanced["search_space"]["axes"]
 
     expected_enabled_domains = {
-        "hidden_width": (1024, [768]),
-        "kv_groups": (2, [1]),
-        "q_heads_per_group": (4, [2]),
-        "ffn_intermediate": (3584, [3072, 2560, 2048, 1792, 1536]),
-        "gdn_key_groups": (16, [12, 8]),
-        "gdn_value_head_dim": (128, [96]),
+        "hidden_width": (1024, [960, 896]),
+        "ffn_intermediate": (3584, [3328, 3072, 2816, 2432, 2048, 1664, 1408]),
     }
     enabled_domains = {
         axis_id: (axis["teacher_value"], axis["values"])
@@ -92,12 +93,41 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
         if axis["enabled"]
     }
 
-    assert advanced["pruning"]["intermediate_size_list"] == [3072, 2560, 2048, 1792, 1536]
-    assert advanced["pruning"]["attn_heads_list"] == [[2, 1], [4, 1], [4, 2], [8, 2]]
+    assert advanced["embedding_pruning"]["widths"] == [1024, 960, 896]
+    spec = Qwen3P5VLModelDescriptor.embedding_pruning_spec(
+        SimpleNamespace(
+            text_config=SimpleNamespace(hidden_size=1024, tie_word_embeddings=True),
+        ),
+        widths=advanced["embedding_pruning"]["widths"],
+        alignment=advanced["embedding_pruning"]["alignment"],
+    )
+    assert [spec.validate_width(width) for width in spec.legal_widths] == [1024, 960, 896]
+    assert advanced["pruning"]["intermediate_size_list"] == [
+        3328,
+        3072,
+        2816,
+        2432,
+        2048,
+        1664,
+        1408,
+    ]
+    assert advanced["pruning"]["attn_heads_list"] == [[8, 2]]
+    assert advanced["pruning"]["attention_scored_axes"] == []
     assert enabled_domains == expected_enabled_domains
     assert {
-        axis_id: axes[axis_id] for axis_id in ("gdn_value_heads_per_group", "gdn_key_head_dim")
+        axis_id: axes[axis_id]
+        for axis_id in (
+            "kv_groups",
+            "q_heads_per_group",
+            "gdn_key_groups",
+            "gdn_value_heads_per_group",
+            "gdn_key_head_dim",
+            "gdn_value_head_dim",
+        )
     } == {
+        "kv_groups": {"enabled": False, "teacher_value": 2, "values": []},
+        "q_heads_per_group": {"enabled": False, "teacher_value": 4, "values": []},
+        "gdn_key_groups": {"enabled": False, "teacher_value": 16, "values": []},
         "gdn_value_heads_per_group": {
             "enabled": False,
             "teacher_value": 1,
@@ -108,11 +138,20 @@ def test_qwen3p5_0p8b_advanced_search_keeps_broad_domains_explicit() -> None:
             "teacher_value": 128,
             "values": [],
         },
+        "gdn_value_head_dim": {
+            "enabled": False,
+            "teacher_value": 128,
+            "values": [],
+        },
     }
     assert set(axes) == {
         *expected_enabled_domains,
+        "kv_groups",
+        "q_heads_per_group",
+        "gdn_key_groups",
         "gdn_value_heads_per_group",
         "gdn_key_head_dim",
+        "gdn_value_head_dim",
     }
 
 
@@ -125,9 +164,11 @@ def test_qwen3p5_0p8b_advanced_search_composes_the_pinned_model() -> None:
     assert config["model_info"]["hf_revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
     assert config["model"]["revision"] == config["model_info"]["hf_revision"]
     assert config["search_space"]["axes"]["ffn_intermediate"]["values"] == [
+        3328,
         3072,
-        2560,
+        2816,
+        2432,
         2048,
-        1792,
-        1536,
+        1664,
+        1408,
     ]

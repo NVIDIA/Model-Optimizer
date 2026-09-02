@@ -429,6 +429,14 @@ def aiperf_stage(config: dict[str, Any], manifest: StageManifest):
                 extra_inputs=dict(stage_cfg.get("extra_inputs") or {}),
                 use_server_token_count=bool(stage_cfg.get("use_server_token_count", True)),
                 seed=int(stage_cfg.get("seed", 42)),
+                warmup_request_count=int(stage_cfg.get("warmup_request_count", 0)),
+                warmup_seed=(
+                    int(stage_cfg["warmup_seed"])
+                    if stage_cfg.get("warmup_seed") is not None
+                    else None
+                ),
+                repetitions=int(stage_cfg.get("repetitions", 1)),
+                collect_peak_gpu_memory=bool(stage_cfg.get("collect_peak_gpu_memory", False)),
                 trust_remote_code=trust_remote_code,
                 allow_aiperf_v011_online_tokenizer_resolution=(
                     allow_aiperf_v011_online_tokenizer_resolution

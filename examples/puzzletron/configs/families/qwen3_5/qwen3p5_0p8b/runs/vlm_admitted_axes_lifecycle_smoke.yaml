@@ -1,0 +1,50 @@
+# @package _global_
+
+defaults:
+  - full_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - _self_
+
+# Expanded admitted-axis VLM lifecycle smoke, not a full-axis campaign. Width
+# sanity exercises hidden width and FFN width, while the MIP profile also
+# realizes one depth-pruned mixed candidate for materialization, reload,
+# serving, two-step KD, and image-text evaluation.
+puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_admitted_axes_lifecycle_smoke}
+display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM smoke
+
+pruning:
+  eval_samples: 8
+
+sort_sanity:
+  eval_samples: 2
+
+width_sanity:
+  target_count_per_axis: 1
+  layer_count: 2
+  eval_samples: 2
+
+depth_importance:
+  eval_samples: 2
+  max_removals: 1
+  max_subblocks_to_remove: 1
+
+replacement_scoring:
+  eval_samples: 2
+
+mip:
+  depth_scenario_count: 2
+  runs:
+    params-90:
+      constraints:
+        params: {min: 85%, max: 95%}
+      search_space:
+        depth: [1]
+        embedding: [960]
+        axes_default: teacher
+        axes:
+          ffn.intermediate_size: [2816]
+      solver:
+        num_solutions: 1
+        min_hamming_distance: 1
+        max_seconds_per_solution: 30
+      homogeneous: {enabled: false}
