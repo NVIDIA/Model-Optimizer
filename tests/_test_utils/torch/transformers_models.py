@@ -44,6 +44,7 @@ from transformers import (
     Qwen3Config,
     Qwen3MoeConfig,
     Qwen3VLConfig,
+    Qwen3VLTextConfig,
     T5Config,
     T5ForConditionalGeneration,
     ViTConfig,
@@ -224,6 +225,14 @@ def get_tiny_qwen3vl(**config_kwargs) -> PreTrainedModel:
         "max_position_embeddings": 32,
         "vocab_size": 32,
     }
+    # Transformers 4.x names this field rope_scaling; 5.x renamed it to rope_parameters.
+    # Supplying it avoids the 4.57 Qwen3-VL constructor dereferencing a None rope config.
+    rope_field = (
+        "rope_parameters"
+        if "rope_parameters" in getattr(Qwen3VLTextConfig, "__annotations__", {})
+        else "rope_scaling"
+    )
+    text_kwargs[rope_field] = {"rope_type": "default", "mrope_section": [1, 1, 2]}
     text_kwargs.update(config_kwargs)
     # Pass as dicts — transformers 5.3.0 Qwen3VLConfig.__init__ only handles
     # vision_config/text_config when they are dicts or None, not instances.
@@ -327,14 +336,28 @@ def create_tiny_gemma3vl_dir(
 QWEN3_5_VL_REF = "Qwen/Qwen3.5-0.8B"
 
 
-def _get_tiny_qwen3_5_vl(moe: bool = False, **config_kwargs) -> PreTrainedModel:
+class _TinyQwen35Tokenizer:
+    """Minimal offline tokenizer contract required to construct a tiny Qwen3.5-VL model."""
+
+    image_token_id = 1
+    video_token_id = 2
+    vision_bos_token_id = 3
+    vision_eos_token_id = 4
+
+    def __len__(self):
+        return 32
+
+
+def _get_tiny_qwen3_5_vl(moe: bool = False, *, tokenizer=None, **config_kwargs) -> PreTrainedModel:
     # Lazy imports — Qwen3.5-VL requires a recent transformers version.
     from transformers import Qwen3_5Config, Qwen3_5MoeConfig
 
     set_seed(SEED)
 
-    # Vocab + vision token ids derive from the ref tokenizer to match the saved processor.
-    tokenizer = _get_tiny_vlm_tokenizer(AutoTokenizer.from_pretrained(QWEN3_5_VL_REF))
+    # Vocab + vision token ids normally derive from the reference tokenizer. Tests that do not
+    # exercise processing may inject the minimal offline contract above instead.
+    if tokenizer is None:
+        tokenizer = _get_tiny_vlm_tokenizer(AutoTokenizer.from_pretrained(QWEN3_5_VL_REF))
 
     # Hybrid GatedDeltaNet (linear attention) + gated full-attention (layer_types auto-generated).
     text_kwargs = {
@@ -458,6 +481,11 @@ get_tiny_qwen3_5_vl = partial(_get_tiny_qwen3_5_vl, moe=False)
 create_tiny_qwen3_5_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=False)
 get_tiny_qwen3_5_moe_vl = partial(_get_tiny_qwen3_5_vl, moe=True)
 create_tiny_qwen3_5_moe_vl_dir = partial(_create_tiny_qwen3_5_vl_dir, moe=True)
+
+
+def get_tiny_qwen3_5_vl_offline(**config_kwargs) -> PreTrainedModel:
+    """Build a dense tiny Qwen3.5-VL without downloading its reference tokenizer."""
+    return _get_tiny_qwen3_5_vl(moe=False, tokenizer=_TinyQwen35Tokenizer(), **config_kwargs)
 
 
 ##### NEMOTRON #####
