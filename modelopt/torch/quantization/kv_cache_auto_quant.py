@@ -19,26 +19,32 @@ from __future__ import annotations
 
 import fnmatch
 import math
-import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from modelopt.torch.opt.searcher import LPS
-from modelopt.torch.utils import print_rank_0, safe_load, safe_save
+from modelopt.torch.opt.hparam import Hparam
+from modelopt.torch.opt.searcher import LPS, BaseSearcher, SearchConfig, SearchStateDict
+from modelopt.torch.utils import print_rank_0
 
+from ._auto_quantize_cost import (
+    COST_MODEL_KV_CACHE,
+    KVCacheCostModel,
+    get_auto_quantize_cost_model,
+    normalize_auto_quantize_constraints,
+)
 from .config import QuantizeConfig
 from .conversion import set_quantizer_by_cfg
 from .nn import TensorQuantizer
 
-__all__ = ["auto_quantize_kv_cache"]
+__all__ = ["AutoQuantizeKVSearcher"]
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable
 
 _KV_QUANTIZER_ATTRS = ("k_bmm_quantizer", "v_bmm_quantizer")
 _KV_AUTOQUANT_SCHEMA_VERSION = 1
@@ -199,14 +205,19 @@ def _validate_search_inputs(
     num_score_steps: int,
 ) -> tuple[float, list[tuple[str, QuantizeConfig]]]:
     """Validate a KV-cache search before the caller converts the model."""
-    if set(constraints) != {"kv_effective_bits"}:
+    if (
+        set(constraints) - {"effective_bits", "cost_model", "cost"}
+        or constraints.get("cost_model") != COST_MODEL_KV_CACHE
+        or "effective_bits" not in constraints
+        or constraints.get("cost") not in (None, {})
+    ):
         raise ValueError(
-            "KV-cache AutoQuant constraints must contain only kv_effective_bits; "
-            f"got {sorted(constraints)}."
+            "KV-cache AutoQuant requires an effective_bits target with "
+            f"cost_model='kv_cache'; got {constraints}."
         )
-    target_bits = float(constraints["kv_effective_bits"])
+    target_bits = float(constraints["effective_bits"])
     if not (0 < target_bits <= 16):
-        raise ValueError(f"kv_effective_bits must be in (0, 16], got {target_bits}.")
+        raise ValueError(f"effective_bits must be in (0, 16], got {target_bits}.")
     if num_calib_steps <= 0:
         raise ValueError("num_calib_steps must be positive.")
     if num_score_steps <= 0:
@@ -349,16 +360,22 @@ def _get_logits(
 
 def _solve_additive_recipe(
     layer_names: list[str],
-    scalar_weights: list[int],
+    layer_widths: list[tuple[int, int]],
     candidate_names: list[str],
-    candidate_bits: list[float],
+    candidate_kv_bits: list[tuple[float, float]],
     scores: list[list[float]],
     target_bits: float,
     verbose: bool,
 ) -> tuple[list[int], str]:
-    denominator = float(sum(scalar_weights))
+    cost_model = get_auto_quantize_cost_model(COST_MODEL_KV_CACHE)
+    assert isinstance(cost_model, KVCacheCostModel)
+    denominator = float(sum(k_width + v_width for k_width, v_width in layer_widths))
     candidate_costs = [
-        [weight * bits / 16.0 for bits in candidate_bits] for weight in scalar_weights
+        [
+            cost_model.candidate_cost(k_width, v_width, k_bits, v_bits) / 16.0
+            for k_bits, v_bits in candidate_kv_bits
+        ]
+        for k_width, v_width in layer_widths
     ]
     max_cost = denominator * target_bits / 16.0
     lps = LPS(
@@ -371,9 +388,9 @@ def _solve_additive_recipe(
     )
     selections, status = lps()
     if status != "Optimal":
-        minimum_bits = sum(weight * min(candidate_bits) for weight in scalar_weights) / denominator
+        minimum_bits = sum(min(costs) for costs in candidate_costs) * 16.0 / denominator
         raise ValueError(
-            f"KV-cache AutoQuant could not satisfy kv_effective_bits={target_bits}; "
+            f"KV-cache AutoQuant could not satisfy effective_bits={target_bits}; "
             f"minimum achievable value is {minimum_bits:.4f}. Solver status: {status}."
         )
     if len(selections) != len(layer_names):
@@ -387,13 +404,11 @@ def _solve_additive_recipe(
 def _search_signature(
     candidates: list[tuple[str, QuantizeConfig]],
     layers: list[tuple[str, nn.Module, int]],
-    target_bits: float,
     num_calib_steps: int,
     num_score_steps: int,
 ) -> dict[str, Any]:
     return {
         "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
-        "kv_effective_bits": target_bits,
         "num_calib_steps": num_calib_steps,
         "num_score_steps": num_score_steps,
         "candidates": [
@@ -403,7 +418,14 @@ def _search_signature(
             }
             for name, config in candidates
         ],
-        "layers": [{"name": name, "kv_scalar_weight": weight} for name, _, weight in layers],
+        "layers": [
+            {
+                "name": name,
+                "k_width": _projection_width(module, "k"),
+                "v_width": _projection_width(module, "v"),
+            }
+            for name, module, _ in layers
+        ],
     }
 
 
@@ -459,277 +481,427 @@ def _report_state(state: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in state.items() if key != "quantizer_state"}
 
 
-@torch.inference_mode()
-def auto_quantize_kv_cache(
-    model: nn.Module,
-    constraints: dict[str, Any],
-    quantization_formats: list[tuple[dict[str, Any], str]],
-    data_loader: Iterable,
-    forward_step: Callable[[nn.Module, Any], torch.Tensor],
-    *,
-    num_calib_steps: int,
-    num_score_steps: int,
-    disabled_layers: list[str] | str | None = None,
-    verbose: bool = False,
-    checkpoint: str | None = None,
-) -> tuple[nn.Module, dict[str, Any]]:
-    """Select one supplied K/V format per attention layer using isolated forward KL.
+class QuantKVRecipeHparam(Hparam):
+    """One paired K/V format decision for an attention layer."""
 
-    Candidate formats are format-agnostic ``QuantizeConfig`` dictionaries. Each must
-    configure K and V together and declare ``effective_bits`` matching its packed
-    storage per K-or-V scalar, including scale overhead. Candidate calibration is scoped
-    to the candidate K/V quantizers, while pre-existing fixed quantizers keep executing
-    with frozen state. Persistent ``constant_amax`` formats may skip calibration forwards.
-    """
-    target_bits, candidates = _validate_search_inputs(
-        constraints, quantization_formats, num_calib_steps, num_score_steps
-    )
-
-    layers = _eligible_layers(model, disabled_layers)
-    _validate_candidate_cost_geometry(candidates, layers)
-    signature = _search_signature(
-        candidates,
-        layers,
-        target_bits,
-        num_calib_steps,
-        num_score_steps,
-    )
-    candidate_names = [name for name, _ in candidates]
-    candidate_bits = []
-    for _, config in candidates:
-        assert config.effective_bits is not None
-        candidate_bits.append(config.effective_bits)
-
-    original_quantizers = {
-        name: {attr: getattr(module, attr) for attr in _KV_QUANTIZER_ATTRS}
-        for name, module, _ in layers
-    }
-    disabled_quantizers = {
-        name: {attr: _disabled_quantizer() for attr in _KV_QUANTIZER_ATTRS} for name, _, _ in layers
-    }
-    candidate_quantizers = {
-        name: {
-            candidate_name: _candidate_quantizers(config) for candidate_name, config in candidates
+    def __init__(
+        self,
+        name: str,
+        module: nn.Module,
+        candidates: list[tuple[str, QuantizeConfig]],
+    ) -> None:
+        super().__init__(range(len(candidates)), original=0)
+        self.name = name
+        self.module = module
+        self.candidates = candidates
+        self.original_quantizers = {attr: getattr(module, attr) for attr in _KV_QUANTIZER_ATTRS}
+        self.reference_quantizers = {attr: _disabled_quantizer() for attr in _KV_QUANTIZER_ATTRS}
+        self.candidate_quantizers = {
+            index: _candidate_quantizers(config) for index, (_, config) in enumerate(candidates)
         }
-        for name, _, _ in layers
-    }
+        k_width = _projection_width(module, "k")
+        v_width = _projection_width(module, "v")
+        assert k_width is not None and v_width is not None
+        self.k_width = k_width
+        self.v_width = v_width
+        self.use_reference()
 
-    is_training = model.training
-    model.eval()
-    try:
-        for name, module, _ in layers:
-            _apply_layer_quantizers(module, disabled_quantizers[name])
+    @property
+    def active(self) -> int:
+        """Return the selected candidate index."""
+        assert isinstance(self._active, int)
+        return self._active
 
-        state: dict[str, Any] | None = None
-        if checkpoint is not None and os.path.exists(checkpoint):
-            restored = safe_load(checkpoint)
-            if not isinstance(restored, dict):
-                raise ValueError(
-                    "KV-cache AutoQuant checkpoint must contain a search-state dictionary."
-                )
-            if _checkpoint_state_is_compatible(restored, signature):
-                state = restored
-                if verbose:
-                    print_rank_0(f"KV-cache AutoQuant restored search state from {checkpoint}.")
-            else:
-                raise ValueError(
-                    "KV-cache AutoQuant checkpoint does not match the current candidates "
-                    "or eligible layers. Use a different checkpoint path."
-                )
+    @active.setter
+    def active(self, value: int | None) -> None:
+        if value is None:
+            assert isinstance(self.original, int)
+            value = self.original
+        assert value in self.choices
+        self._active = value
+        _apply_layer_quantizers(self.module, self.candidate_quantizers[value])
 
-        if state is not None and state.get("calibration_complete"):
-            quantizer_state = state.get("quantizer_state")
-            if quantizer_state is None:
+    def use_reference(self) -> None:
+        """Use BF16/no-quant K/V as the scoring reference, never as a solver choice."""
+        _apply_layer_quantizers(self.module, self.reference_quantizers)
+
+    def restore_original(self) -> None:
+        """Restore the K/V quantizer objects present before search."""
+        _apply_layer_quantizers(self.module, self.original_quantizers)
+
+    def candidate_name(self, index: int) -> str:
+        return self.candidates[index][0]
+
+    def candidate_bits(self, index: int) -> tuple[float, float]:
+        return _candidate_kv_bits(self.candidates[index][1])
+
+    def candidate_cost(self, index: int, cost_model: KVCacheCostModel) -> float:
+        k_bits, v_bits = self.candidate_bits(index)
+        return cost_model.candidate_cost(self.k_width, self.v_width, k_bits, v_bits)
+
+
+class AutoQuantizeKVSearcher(BaseSearcher):
+    """KV-cache AutoQuant backend using the shared search/checkpoint lifecycle."""
+
+    method_name = "kl_div"
+
+    @property
+    def default_search_config(self) -> SearchConfig:
+        """Return KV-specific fields layered on the shared search configuration."""
+        config = super().default_search_config
+        config.update(
+            {
+                "quantization_formats": [],
+                "forward_step": None,
+                "num_calib_steps": 512,
+                "num_score_steps": 128,
+                "disabled_layers": None,
+            }
+        )
+        return config
+
+    @property
+    def default_state_dict(self) -> SearchStateDict:
+        """Return the checkpointed KV search state."""
+        return {
+            "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
+            "method": self.method_name,
+            "cost_model": COST_MODEL_KV_CACHE,
+            "search_signature": None,
+            "calibration_complete": False,
+            "num_calib_steps": 0,
+            "score_reduction": "mean_per_scored_token",
+            "num_score_steps": 0,
+            "num_scored_tokens": 0,
+            "candidates": [],
+            "layers": {},
+            "quantizer_state": {},
+            "requested_constraints": {},
+            "best": {
+                "recipe": {},
+                "constraints": {},
+                "score": float("inf"),
+                "is_satisfied": False,
+                "solver_status": None,
+            },
+        }
+
+    def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
+        """Validate the data inputs required by isolated forward-KL scoring."""
+        config = super().sanitize_search_config(config)
+        if config["data_loader"] is None:
+            raise ValueError("data_loader must be provided for KV-cache AutoQuant.")
+        if config["forward_step"] is None:
+            raise ValueError("forward_step must be provided for KV-cache AutoQuant.")
+        return config
+
+    def load_search_checkpoint(self) -> bool:
+        """Load compatible fields before validating the resolved KV search signature."""
+        return super().load_search_checkpoint(strict=False)
+
+    @property
+    def _candidate_quantizer_map(
+        self,
+    ) -> dict[str, dict[str, dict[str, TensorQuantizer]]]:
+        return {
+            hparam.name: {
+                hparam.candidate_name(index): quantizers
+                for index, quantizers in hparam.candidate_quantizers.items()
+            }
+            for hparam in self._hparams
+        }
+
+    def restore_original_quantizers(self) -> None:
+        """Restore pre-search K/V objects after a failed search."""
+        for hparam in getattr(self, "_hparams", []):
+            hparam.restore_original()
+
+    def _calibrate_candidates(self) -> None:
+        from .model_quant import calibrate
+
+        data_loader = self.config["data_loader"]
+        forward_step = self.config["forward_step"]
+        num_calib_steps = self.config["num_calib_steps"]
+        for candidate_index, (_, config) in enumerate(self._candidates):
+            for hparam in self._hparams:
+                hparam.active = candidate_index
+
+            if config.algorithm is not None:
+
+                def calibration_loop(calibration_model):
+                    for step, data in enumerate(data_loader):
+                        if step >= num_calib_steps:
+                            break
+                        _get_logits(forward_step, calibration_model, data)
+
+                active_quantizers = [
+                    quantizer
+                    for hparam in self._hparams
+                    for quantizer in hparam.candidate_quantizers[candidate_index].values()
+                ]
+                calibration_proxy = nn.Module()
+                calibration_proxy.quantizers = nn.ModuleList(active_quantizers)
+                with _freeze_existing_quantizers(self.model, active_quantizers):
+                    calibrate(
+                        calibration_proxy,
+                        algorithm=config.algorithm,
+                        forward_loop=lambda _: calibration_loop(self.model),
+                    )
+
+            for hparam in self._hparams:
+                hparam.use_reference()
+
+        candidate_quantizers = self._candidate_quantizer_map
+        _validate_persistent_candidate_scales(candidate_quantizers)
+        self.quantizer_state = _quantizer_state_dict(candidate_quantizers)
+        self.calibration_complete = True
+        self.num_calib_steps = num_calib_steps
+        self.save_search_checkpoint(verbose=self.config["verbose"])
+
+    def before_search(self) -> None:
+        """Resolve attention decisions and calibrate or restore candidate scales."""
+        super().before_search()
+        self.constraints = normalize_auto_quantize_constraints(self.model, self.constraints)
+        target_bits, self._candidates = _validate_search_inputs(
+            self.constraints,
+            self.config["quantization_formats"],
+            self.config["num_calib_steps"],
+            self.config["num_score_steps"],
+        )
+        self._target_bits = target_bits
+        layers = _eligible_layers(self.model, self.config["disabled_layers"])
+        _validate_candidate_cost_geometry(self._candidates, layers)
+        signature = _search_signature(
+            self._candidates,
+            layers,
+            self.config["num_calib_steps"],
+            self.config["num_score_steps"],
+        )
+        if self.search_signature is not None and not _checkpoint_state_is_compatible(
+            self.state_dict(), signature
+        ):
+            raise ValueError(
+                "KV-cache AutoQuant checkpoint does not match the current candidates, scoring "
+                "setup, or eligible layers. Use a different checkpoint path."
+            )
+        self.search_signature = signature
+        self._hparams = [
+            QuantKVRecipeHparam(name, module, self._candidates) for name, module, _ in layers
+        ]
+        self._cost_model = get_auto_quantize_cost_model(COST_MODEL_KV_CACHE)
+        assert isinstance(self._cost_model, KVCacheCostModel)
+        self.candidates = [
+            {
+                "name": name,
+                "effective_bits": config.effective_bits,
+                "k_bits": _candidate_kv_bits(config)[0],
+                "v_bits": _candidate_kv_bits(config)[1],
+                "config": config.model_dump(mode="python", exclude_none=True),
+            }
+            for name, config in self._candidates
+        ]
+        self.model.eval()
+
+        if self.calibration_complete:
+            if not self.quantizer_state:
                 raise ValueError(
                     "KV-cache AutoQuant checkpoint is missing calibrated quantizer state. "
                     "Use a different checkpoint path."
                 )
-            _restore_quantizer_state_dict(candidate_quantizers, quantizer_state)
+            candidate_quantizers = self._candidate_quantizer_map
+            _restore_quantizer_state_dict(candidate_quantizers, self.quantizer_state)
             _validate_persistent_candidate_scales(candidate_quantizers)
+            if self.config["verbose"]:
+                print_rank_0("KV-cache AutoQuant restored calibration from checkpoint.")
         else:
-            from .model_quant import calibrate
+            self._calibrate_candidates()
 
-            for candidate_name, config in candidates:
-                for layer_name, module, _ in layers:
-                    _apply_layer_quantizers(
-                        module, candidate_quantizers[layer_name][candidate_name]
-                    )
+    def _estimate_sensitivity_scores(self) -> None:
+        candidate_names = [name for name, _ in self._candidates]
+        score_sums: dict[str, dict[str, torch.Tensor | None]] = {
+            hparam.name: dict.fromkeys(candidate_names) for hparam in self._hparams
+        }
+        scored_tokens = 0
+        scored_steps = 0
+        iterator = tqdm(
+            self.config["data_loader"],
+            total=self.config["num_score_steps"],
+            desc="Estimating KV-cache KL sensitivity",
+            disable=not self.config["verbose"],
+        )
+        for data in iterator:
+            if scored_steps >= self.config["num_score_steps"]:
+                break
+            logits_ref = _get_logits(self.config["forward_step"], self.model, data)
+            log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
+            scored_tokens += logits_ref.numel() // logits_ref.shape[-1]
 
-                if config.algorithm is not None:
-
-                    def calibration_loop(calibration_model):
-                        for step, data in enumerate(data_loader):
-                            if step >= num_calib_steps:
-                                break
-                            _get_logits(forward_step, calibration_model, data)
-
-                    active_quantizers = [
-                        quantizer
-                        for layer_name, _, _ in layers
-                        for quantizer in candidate_quantizers[layer_name][candidate_name].values()
-                    ]
-                    calibration_proxy = nn.Module()
-                    calibration_proxy.quantizers = nn.ModuleList(active_quantizers)
-                    with _freeze_existing_quantizers(model, active_quantizers):
-                        calibrate(
-                            calibration_proxy,
-                            algorithm=config.algorithm,
-                            forward_loop=lambda _: calibration_loop(model),
-                        )
-
-                for layer_name, module, _ in layers:
-                    _apply_layer_quantizers(module, disabled_quantizers[layer_name])
-
-            _validate_persistent_candidate_scales(candidate_quantizers)
-            state = {
-                "schema_version": _KV_AUTOQUANT_SCHEMA_VERSION,
-                "search_signature": signature,
-                "calibration_complete": True,
-                "num_calib_steps": num_calib_steps,
-                "quantizer_state": _quantizer_state_dict(candidate_quantizers),
-            }
-            if checkpoint is not None:
-                checkpoint_dir = os.path.dirname(checkpoint)
-                if checkpoint_dir:
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-                safe_save(state, checkpoint)
-
-        assert state is not None
-        if not state.get("layers"):
-            score_sums: dict[str, dict[str, torch.Tensor | None]] = {
-                layer_name: dict.fromkeys(candidate_names) for layer_name, _, _ in layers
-            }
-            scored_tokens = 0
-            scored_steps = 0
-            iterator = tqdm(
-                data_loader,
-                total=num_score_steps,
-                desc="Estimating KV-cache KL sensitivity",
-                disable=not verbose,
-            )
-            for data in iterator:
-                if scored_steps >= num_score_steps:
-                    break
-                logits_ref = _get_logits(forward_step, model, data)
-                log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
-                scored_tokens += logits_ref.numel() // logits_ref.shape[-1]
-
-                for layer_name, module, _ in layers:
-                    for candidate_name, _ in candidates:
-                        _apply_layer_quantizers(
-                            module, candidate_quantizers[layer_name][candidate_name]
-                        )
-                        logits_quant = _get_logits(forward_step, model, data)
-                        if logits_quant.shape != logits_ref.shape:
-                            raise ValueError(
-                                "KV-cache AutoQuant forward_step returned different reference and "
-                                f"candidate logits shapes: {tuple(logits_ref.shape)} and "
-                                f"{tuple(logits_quant.shape)}."
-                            )
-                        score = F.kl_div(
-                            torch.log_softmax(logits_quant.float(), dim=-1),
-                            log_prob_ref,
-                            reduction="sum",
-                            log_target=True,
-                        )
-                        previous_score = score_sums[layer_name][candidate_name]
-                        score_sums[layer_name][candidate_name] = (
-                            score if previous_score is None else previous_score + score
-                        )
-                        _apply_layer_quantizers(module, disabled_quantizers[layer_name])
-                scored_steps += 1
-
-            if scored_steps == 0 or scored_tokens == 0:
-                raise ValueError("KV-cache AutoQuant data_loader produced no scoring batches.")
-            scores = []
-            for layer_name, _, _ in layers:
-                layer_scores = []
-                for candidate_name in candidate_names:
-                    score_sum = score_sums[layer_name][candidate_name]
-                    if score_sum is None:
-                        raise RuntimeError(
-                            "KV-cache AutoQuant did not collect a score for "
-                            f"{layer_name!r}/{candidate_name!r}."
-                        )
-                    if not torch.isfinite(score_sum):
+            for hparam in self._hparams:
+                for candidate_index, candidate_name in enumerate(candidate_names):
+                    hparam.active = candidate_index
+                    logits_quant = _get_logits(self.config["forward_step"], self.model, data)
+                    if logits_quant.shape != logits_ref.shape:
                         raise ValueError(
-                            "KV-cache AutoQuant produced a non-finite KL score for "
-                            f"{layer_name!r}/{candidate_name!r}."
+                            "KV-cache AutoQuant forward_step returned different reference and "
+                            f"candidate logits shapes: {tuple(logits_ref.shape)} and "
+                            f"{tuple(logits_quant.shape)}."
                         )
-                    layer_scores.append(float(score_sum.item()) / scored_tokens)
-                scores.append(layer_scores)
-            selections, status = _solve_additive_recipe(
-                [name for name, _, _ in layers],
-                [weight for _, _, weight in layers],
-                candidate_names,
-                candidate_bits,
-                scores,
-                target_bits,
-                verbose,
-            )
-            denominator = float(sum(weight for _, _, weight in layers))
-            achieved_bits = (
-                sum(
-                    weight * candidate_bits[selected]
-                    for selected, (_, _, weight) in zip(selections, layers)
-                )
-                / denominator
-            )
-            selected_score = sum(
-                layer_scores[selected] for selected, layer_scores in zip(selections, scores)
-            )
-            state.update(
-                {
-                    "method": "kl_div",
-                    "score_reduction": "mean_per_scored_token",
-                    "constraints": {"kv_effective_bits": target_bits},
-                    "num_score_steps": scored_steps,
-                    "num_scored_tokens": scored_tokens,
-                    "candidates": [
-                        {
-                            "name": name,
-                            "effective_bits": effective_bits,
-                            "config": config.model_dump(mode="json", exclude_none=True),
-                        }
-                        for (name, config), effective_bits in zip(candidates, candidate_bits)
-                    ],
-                    "layers": {
-                        layer_name: {
-                            "kv_scalar_weight": weight,
-                            "scores": dict(zip(candidate_names, layer_scores)),
-                            "selected": candidate_names[selected],
-                        }
-                        for selected, layer_scores, (layer_name, _, weight) in zip(
-                            selections, scores, layers
-                        )
-                    },
-                    "best": {
-                        "effective_bits": achieved_bits,
-                        "score": selected_score,
-                        "is_satisfied": achieved_bits <= target_bits + 1e-12,
-                        "solver_status": status,
-                    },
-                }
-            )
-            if checkpoint is not None:
-                checkpoint_dir = os.path.dirname(checkpoint)
-                if checkpoint_dir:
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-                safe_save(state, checkpoint)
-                if verbose:
-                    print_rank_0(f"Saved KV-cache AutoQuant report to {checkpoint}.")
+                    score = F.kl_div(
+                        torch.log_softmax(logits_quant.float(), dim=-1),
+                        log_prob_ref,
+                        reduction="sum",
+                        log_target=True,
+                    )
+                    previous_score = score_sums[hparam.name][candidate_name]
+                    score_sums[hparam.name][candidate_name] = (
+                        score if previous_score is None else previous_score + score
+                    )
+                    hparam.use_reference()
+            scored_steps += 1
 
-        for layer_name, module, _ in layers:
-            selected_name = state["layers"][layer_name]["selected"]
-            _apply_layer_quantizers(module, candidate_quantizers[layer_name][selected_name])
-            if verbose:
-                print_rank_0(f"KV-cache AutoQuant selected {selected_name} for {layer_name}.")
-        report = _report_state(state)
-        model._modelopt_kv_cache_auto_quantize_state = report
-        return model, report
-    except Exception:
-        for layer_name, module, _ in layers:
-            _apply_layer_quantizers(module, original_quantizers[layer_name])
-        raise
-    finally:
-        model.train(is_training)
+        if scored_steps == 0 or scored_tokens == 0:
+            raise ValueError("KV-cache AutoQuant data_loader produced no scoring batches.")
+
+        self.layers = {}
+        for hparam in self._hparams:
+            scores = {}
+            for candidate_name in candidate_names:
+                score_sum = score_sums[hparam.name][candidate_name]
+                if score_sum is None:
+                    raise RuntimeError(
+                        "KV-cache AutoQuant did not collect a score for "
+                        f"{hparam.name!r}/{candidate_name!r}."
+                    )
+                if not torch.isfinite(score_sum):
+                    raise ValueError(
+                        "KV-cache AutoQuant produced a non-finite KL score for "
+                        f"{hparam.name!r}/{candidate_name!r}."
+                    )
+                scores[candidate_name] = float(score_sum.item()) / scored_tokens
+            self.layers[hparam.name] = {
+                "k_width": hparam.k_width,
+                "v_width": hparam.v_width,
+                "scores": scores,
+            }
+        self.num_score_steps = scored_steps
+        self.num_scored_tokens = scored_tokens
+        self.save_search_checkpoint(verbose=self.config["verbose"])
+
+    def _solve(self) -> None:
+        candidate_names = [name for name, _ in self._candidates]
+        candidate_kv_bits = [_candidate_kv_bits(config) for _, config in self._candidates]
+        layers = cast("dict[str, dict[str, Any]]", self.layers)
+        scores = [
+            [layers[hparam.name]["scores"][name] for name in candidate_names]
+            for hparam in self._hparams
+        ]
+        selections, status = _solve_additive_recipe(
+            [hparam.name for hparam in self._hparams],
+            [(hparam.k_width, hparam.v_width) for hparam in self._hparams],
+            candidate_names,
+            candidate_kv_bits,
+            scores,
+            self._target_bits,
+            self.config["verbose"],
+        )
+        denominator = float(sum(hparam.k_width + hparam.v_width for hparam in self._hparams))
+        cost_model = self._cost_model
+        assert isinstance(cost_model, KVCacheCostModel)
+        total_cost = sum(
+            (
+                hparam.candidate_cost(selected, cost_model)
+                for hparam, selected in zip(self._hparams, selections)
+            ),
+            start=0.0,
+        )
+        achieved_bits = total_cost / denominator
+        selected_score = sum(
+            layer_scores[selected] for selected, layer_scores in zip(selections, scores)
+        )
+        recipe = {}
+        for hparam, selected in zip(self._hparams, selections):
+            hparam.active = selected
+            selected_name = hparam.candidate_name(selected)
+            self.layers[hparam.name]["selected"] = selected_name
+            recipe[hparam.name] = selected_name
+            if self.config["verbose"]:
+                print_rank_0(f"KV-cache AutoQuant selected {selected_name} for {hparam.name}.")
+        self.requested_constraints = {
+            "effective_bits": self._target_bits,
+            "cost_model": COST_MODEL_KV_CACHE,
+        }
+        self.best = {
+            "recipe": recipe,
+            "constraints": {
+                "effective_bits": achieved_bits,
+                "cost_model": COST_MODEL_KV_CACHE,
+            },
+            "score": selected_score,
+            "is_satisfied": achieved_bits <= self._target_bits + 1e-12,
+            "solver_status": status,
+        }
+
+    @torch.inference_mode()
+    def run_search(self) -> None:
+        """Score candidates when needed, solve the budget, and apply the selection."""
+        if not self.layers:
+            self._estimate_sensitivity_scores()
+        self._solve()
+        self.save_search_checkpoint(verbose=self.config["verbose"])
+
+    def after_search(self) -> None:
+        """Attach the JSON-safe sensitivity report used by unified export."""
+        self.model._modelopt_kv_cache_auto_quantize_state = _report_state(self.state_dict())
+
+
+def _config_entry_dict(entry: Any) -> dict[str, Any]:
+    if hasattr(entry, "model_dump"):
+        return entry.model_dump(mode="python", exclude_none=True)
+    return dict(entry)
+
+
+def get_kv_cache_auto_quantize_config(
+    search_state: dict[str, Any],
+    constraints: dict[str, Any] | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]:
+    """Build a flat K/V quantization config, optionally re-solving at a new target."""
+    requested = constraints or search_state.get("requested_constraints")
+    if not isinstance(requested, dict):
+        raise ValueError("KV-cache AutoQuant search state has no requested constraints.")
+    target_bits = float(requested["effective_bits"])
+    if requested.get("cost_model", COST_MODEL_KV_CACHE) != COST_MODEL_KV_CACHE:
+        raise ValueError("KV-cache search state can only be re-solved with cost_model='kv_cache'.")
+
+    candidates = search_state["candidates"]
+    candidate_names = [candidate["name"] for candidate in candidates]
+    candidate_kv_bits = [
+        (float(candidate["k_bits"]), float(candidate["v_bits"])) for candidate in candidates
+    ]
+    layers = search_state["layers"]
+    layer_names = list(layers)
+    selections, _ = _solve_additive_recipe(
+        layer_names,
+        [(layers[name]["k_width"], layers[name]["v_width"]) for name in layer_names],
+        candidate_names,
+        candidate_kv_bits,
+        [
+            [layers[name]["scores"][candidate] for candidate in candidate_names]
+            for name in layer_names
+        ],
+        target_bits,
+        verbose,
+    )
+
+    quant_cfg: list[dict[str, Any]] = []
+    for layer_name, selected in zip(layer_names, selections):
+        config = QuantizeConfig(**candidates[selected]["config"])
+        for entry in config.quant_cfg:
+            entry_dict = _config_entry_dict(entry)
+            pattern = entry_dict["quantizer_name"]
+            for attr in _KV_QUANTIZER_ATTRS:
+                if fnmatch.fnmatch(f"{_KV_CANDIDATE_HOLDER_NAME}.{attr}", pattern):
+                    resolved = dict(entry_dict)
+                    resolved["quantizer_name"] = f"{layer_name}.{attr}"
+                    quant_cfg.append(resolved)
+    return {"quant_cfg": quant_cfg, "algorithm": "max"}

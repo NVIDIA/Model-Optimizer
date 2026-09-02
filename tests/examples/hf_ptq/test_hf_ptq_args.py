@@ -108,7 +108,7 @@ def test_kv_autoquant_recipe_builds_kv_search_inputs(monkeypatch):
     inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
 
     assert inputs["search_domain"] == "kv_cache"
-    assert inputs["constraints"] == {"kv_effective_bits": 5.4}
+    assert inputs["constraints"] == {"effective_bits": 5.4, "cost_model": "kv_cache"}
     assert inputs["method"] == "kl_div"
     assert [config["effective_bits"] for config, _ in inputs["quantization_formats"]] == [
         8.0,

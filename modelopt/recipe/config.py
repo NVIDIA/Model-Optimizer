@@ -149,24 +149,20 @@ class AutoQuantizeCost(ModeloptBaseConfig):
 class AutoQuantizeConstraints(ModeloptBaseConfig):
     """LP search constraints + cost model; matches the ``mtq.auto_quantize`` constraints dict."""
 
-    effective_bits: float | None = ModeloptField(
+    effective_bits: float = ModeloptField(
         default=4.8,
-        title="Effective bits per weight",
-        description=("Average weight-storage bits target for the LP, in (0, 16]. Defaults to 4.8."),
-    )
-    kv_effective_bits: float | None = ModeloptField(
-        default=None,
-        title="Effective bits per KV-cache scalar",
+        title="Effective bits",
         description=(
-            "Average KV-cache storage bits target across eligible layers for layer-wise KV "
-            "AutoQuant, in (0, 16]. Exactly one of effective_bits and kv_effective_bits may "
-            "be set."
+            "Average storage-bits target for the selected cost model, in (0, 16]. Defaults to 4.8."
         ),
     )
-    cost_model: Literal["weight", "active_moe"] = ModeloptField(
+    cost_model: Literal["weight", "active_moe", "kv_cache"] = ModeloptField(
         default="weight",
         title="Cost model",
-        description="'weight' counts all weights equally; 'active_moe' scales routed-expert weights.",
+        description=(
+            "'weight' counts all weights equally; 'active_moe' scales routed-expert weights; "
+            "'kv_cache' accounts for paired K/V-cache storage."
+        ),
     )
     cost: AutoQuantizeCost | None = ModeloptField(
         default=None,
@@ -174,33 +170,17 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         description="Extra cost-model parameters; omit for the 'weight' cost model.",
     )
 
-    @model_validator(mode="before")
+    @field_validator("effective_bits")
     @classmethod
-    def _select_kv_constraint(cls, data):
-        if isinstance(data, dict) and "kv_effective_bits" in data and "effective_bits" not in data:
-            data = dict(data)
-            data["effective_bits"] = None
-        return data
-
-    @field_validator("effective_bits", "kv_effective_bits")
-    @classmethod
-    def _validate_effective_bits(cls, v: float | None) -> float | None:
-        if v is not None and not (0 < v <= 16):
+    def _validate_effective_bits(cls, v: float) -> float:
+        if not (0 < v <= 16):
             raise ValueError(f"effective_bits must be in (0, 16], got {v}")
         return v
 
     @model_validator(mode="after")
-    def _exactly_one_bit_constraint(self):
-        if (self.effective_bits is None) == (self.kv_effective_bits is None):
-            raise ValueError(
-                "Exactly one of effective_bits and kv_effective_bits must be specified."
-            )
-        if self.kv_effective_bits is not None and (
-            self.cost_model != "weight" or self.cost is not None
-        ):
-            raise ValueError(
-                "KV-cache AutoQuant does not support weight or active-MoE cost settings."
-            )
+    def _validate_cost_settings(self):
+        if self.cost_model == "kv_cache" and self.cost is not None:
+            raise ValueError("KV-cache AutoQuant does not accept weight cost settings.")
         return self
 
 
@@ -303,7 +283,7 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
                 "auto_quantize requires candidate_formats or at least one module_search_spaces "
                 "entry. For uniform quantization, use a PTQ recipe instead."
             )
-        if self.constraints.kv_effective_bits is not None:
+        if self.constraints.cost_model == "kv_cache":
             if self.auto_quantize_method != "kl_div":
                 raise ValueError(
                     "KV-cache AutoQuant currently requires auto_quantize_method=kl_div."

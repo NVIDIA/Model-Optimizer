@@ -433,7 +433,8 @@ For models without backprop support (e.g. Llama-4), use the `kl_div` scoring met
 Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
 `--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
 
-KV-cache AutoQuantize recipes instead set `constraints.kv_effective_bits`. Their
+KV-cache AutoQuantize recipes use the same `mtq.auto_quantize` API and set
+`constraints.cost_model: kv_cache` with an `effective_bits` target. Their
 `candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
 packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
 preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.

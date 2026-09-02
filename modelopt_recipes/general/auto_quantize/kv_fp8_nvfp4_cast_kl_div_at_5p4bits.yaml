@@ -17,7 +17,8 @@ metadata:
 
 auto_quantize:
   constraints:
-    kv_effective_bits: 5.4
+    effective_bits: 5.4
+    cost_model: kv_cache
 
   candidate_formats:
     - quant_cfg:

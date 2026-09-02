@@ -273,7 +273,7 @@ def make_calib_dataloader(
         )
     else:
         assert tokenizer is not None and isinstance(
-            tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)
+            tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
         ), "The PreTrainedTokenizer must be set"
         # Labels are only needed for gradient-based auto_quantize
         include_labels = autoquant_gradient_recipe
@@ -404,11 +404,11 @@ def _mtq_inputs_from_auto_quantize_config(
     to ``--kv_cache_qformat`` when the recipe omits it.
     """
     constraints = aq_config.constraints.model_dump(exclude_none=True)
-    is_kv_search = aq_config.constraints.kv_effective_bits is not None
+    is_kv_search = aq_config.constraints.cost_model == "kv_cache"
     if is_kv_search:
         return {
             "search_domain": "kv_cache",
-            "constraints": {"kv_effective_bits": constraints["kv_effective_bits"]},
+            "constraints": constraints,
             "quantization_formats": _mtq_kv_candidate_formats(aq_config.candidate_formats),
             "disabled_layers": aq_config.disabled_layers,
             "method": aq_config.auto_quantize_method,
@@ -534,39 +534,35 @@ def auto_quantize(
             f"Invalid auto_quantize method: {inputs['method']}. Must be 'gradient' or 'kl_div'"
         )
 
-    if inputs["search_domain"] == "kv_cache":
-        language_model, _ = mtq.auto_quantize_kv_cache(
-            language_model,
-            constraints=inputs["constraints"],
-            data_loader=calib_dataloader,
-            forward_step=forward_step,
-            quantization_formats=inputs["quantization_formats"],
-            num_calib_steps=len(calib_dataloader),
-            num_score_steps=min(
-                len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
-            ),
-            verbose=True,
-            disabled_layers=inputs["disabled_layers"],
-            checkpoint=args.auto_quantize_checkpoint,
+    auto_quantize_kwargs: dict[str, Any] = {
+        "constraints": inputs["constraints"],
+        "data_loader": calib_dataloader,
+        "forward_step": forward_step,
+        "quantization_formats": inputs["quantization_formats"],
+        "num_calib_steps": len(calib_dataloader),
+        "num_score_steps": min(
+            len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)
+        ),
+        "verbose": True,
+        "disabled_layers": inputs["disabled_layers"],
+        "method": inputs["method"],
+        "checkpoint": args.auto_quantize_checkpoint,
+    }
+    if inputs["search_domain"] == "weight":
+        auto_quantize_kwargs.update(
+            {
+                "loss_func": loss_func,
+                "fixed_quantization_config": inputs["fixed_quantization_config"],
+                "module_search_spaces": inputs["module_search_spaces"],
+            }
         )
-        return language_model
 
     language_model, _ = mtq.auto_quantize(
         language_model,
-        constraints=inputs["constraints"],
-        data_loader=calib_dataloader,
-        forward_step=forward_step,
-        loss_func=loss_func,
-        quantization_formats=inputs["quantization_formats"],
-        fixed_quantization_config=inputs["fixed_quantization_config"],
-        module_search_spaces=inputs["module_search_spaces"],
-        num_calib_steps=len(calib_dataloader),
-        num_score_steps=min(len(calib_dataloader), max(inputs["score_size"] // args.batch_size, 1)),
-        verbose=True,
-        disabled_layers=inputs["disabled_layers"],
-        method=inputs["method"],
-        checkpoint=args.auto_quantize_checkpoint,
+        **auto_quantize_kwargs,
     )
+    if inputs["search_domain"] == "kv_cache":
+        return language_model
 
     # KV cache quantization is uniform; applied after the LP search.
     kv_cache_quant_cfg = inputs["kv_cache_quant_cfg"]
@@ -598,7 +594,7 @@ def _recipe_is_kv_auto_quantize(recipe: str | None) -> bool:
     loaded_recipe = load_recipe(recipe)
     return (
         isinstance(loaded_recipe, ModelOptAutoQuantizeRecipe)
-        and loaded_recipe.auto_quantize.constraints.kv_effective_bits is not None
+        and loaded_recipe.auto_quantize.constraints.cost_model == "kv_cache"
     )
 
 
@@ -786,7 +782,7 @@ def sparsity_main(
     # Different calibration datasets are also available, e.g., "pile" and "wikipedia"
     # Please also check the docstring for the datasets available
     assert tokenizer is not None and isinstance(
-        tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)
+        tokenizer, PreTrainedTokenizer | PreTrainedTokenizerFast
     ), "The PreTrainedTokenizer must be set"
     calib_dataloader = get_dataset_dataloader(
         dataset_name=args.dataset,
@@ -1279,7 +1275,7 @@ def quantize_main(
     if args.recipe is not None:
         print(f"Use recipe {args.recipe} for quantization")
         recipe = load_recipe(args.recipe)
-        if not isinstance(recipe, (ModelOptPTQRecipe, ModelOptAutoQuantizeRecipe)):
+        if not isinstance(recipe, ModelOptPTQRecipe | ModelOptAutoQuantizeRecipe):
             raise TypeError(
                 f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
                 f"from {args.recipe}"
