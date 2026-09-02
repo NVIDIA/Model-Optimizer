@@ -406,6 +406,23 @@ checkpoint's** quant config verbatim:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
   W4A16, `lm_head` → FP8 W8A16, and the F32 tensors (conv1d, norms) → BF16.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_only-kv_fp8_cast`** is the
+  planned NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with
+  **hybrid attention** — KDA (linear-attention) layers interleaved with NoPE
+  sparse-MLA layers. Routed experts → NVFP4 W4A4; KV cache → FP8 cast;
+  everything else BF16, including the dense MLP, shared experts, router gate,
+  both attention families, the vision tower and `lm_head`. Unlike the other
+  entries here it does **not** mix precisions across component types — it is the
+  general `nvfp4_experts_only-kv_fp8_cast` scheme pinned to this checkpoint, and
+  it captures two model facts instead: `layerwise.enable=false` is *required*
+  because the decoder layers nest under `model.language_model.layers` where
+  `layerwise_calibrate` cannot find them, and the MTP head — inlined as decoder
+  layer 45, which `num_hidden_layers: 45` never instantiates — is never
+  quantized and stays BF16. The `quant_cfg` is deliberately minimal: after
+  `base_disable_all` only the expert and KV entries remain, so the shared
+  `default_disabled_quantizers` unit is not imported (every pattern it disables
+  is already off and none is matched by `*.experts.*`, which needs a literal
+  `.experts.` and so skips `mlp.shared_experts.*`).
 
 *Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
 different component types — or individual layers** — and hardcode the precise
