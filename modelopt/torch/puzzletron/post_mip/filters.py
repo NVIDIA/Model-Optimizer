@@ -315,6 +315,7 @@ def apply_filter(
         )
     ordered_ids = sorted(scores, key=lambda revision_id: (scores[revision_id], revision_id))
     selected = tuple(ordered_ids[: int(config.get("top_k", 1))])
-    for revision_id in ordered_ids[len(selected) :]:
-        excluded[revision_id] = "outside aggregate_rank top_k"
+    for revision_id in ordered_ids:
+        if revision_id not in selected:
+            excluded[revision_id] = "outside aggregate_rank top_k"
     return selected, excluded, scores

@@ -3,7 +3,7 @@
 # Bounded VLM student-versus-teacher evaluation shared by the campaign and the
 # opt-in comparison.
 vlm_quality_evaluation:
-  profile: qwen35_vlm_e2e_full_eval
+  profile: qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2
   reference_checkpoint: ${teacher_dir}
   batch_size: 1
   timeout_seconds: 14400

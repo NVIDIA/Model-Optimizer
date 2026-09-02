@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# VLM admitted-axis campaign execution profile. Candidate and control work is
+# sharded across at most two one-GPU instances. Each retained architecture keeps
+# one sequential optimizer-resume trajectory across cumulative KD milestones.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    convert: {strategy: single, resource: cpu}
+    mip: {strategy: single, resource: cpu}
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}
+    post.candidate-evaluation.online_eval: &candidate_instances {instances: 2}
+    post.candidate-evaluation.best_lm: {strategy: single, resource: cpu}
+    post.candidate-evaluation.materialized: *candidate_instances
+    post.candidate-evaluation.serving: *candidate_instances
+    post.candidate-evaluation.pre_kd_short_v1: *candidate_instances
+    post.candidate-evaluation.kd_64: *candidate_instances
+    post.candidate-evaluation.short_v1_64: *candidate_instances
+    post.candidate-evaluation.kd_128: *candidate_instances
+    post.candidate-evaluation.short_v1_128: *candidate_instances
+    post.candidate-evaluation.kd_256: *candidate_instances
+    post.candidate-evaluation.short_v1_256: *candidate_instances
+    post.candidate-evaluation.selected: {strategy: single, resource: cpu}
+    post.candidate-evaluation.bounded_result: {strategy: single, resource: cpu}
+    post.candidate-evaluation.approve_512: {strategy: single, resource: cpu}
+    post.candidate-evaluation.kd_512: {instances: 1}
+    post.candidate-evaluation.short_v1_512: {instances: 1}
+    post.candidate-evaluation.extended_result: {strategy: single, resource: cpu}
+    post.candidate-evaluation.approve_1024: {strategy: single, resource: cpu}
+    post.candidate-evaluation.kd_1024: {instances: 1}
+    post.candidate-evaluation.short_v1_1024: {instances: 1}
+    post.candidate-evaluation.final_result: {strategy: single, resource: cpu}
+    post.candidate-evaluation.best: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_materialized: &control_instances {instances: 2}
+    post.control-learning-curve.control_pre_kd_short_v1: *control_instances
+    post.control-learning-curve.control_kd_64: *control_instances
+    post.control-learning-curve.control_short_v1_64: *control_instances
+    post.control-learning-curve.control_kd_128: *control_instances
+    post.control-learning-curve.control_short_v1_128: *control_instances
+    post.control-learning-curve.control_kd_256: *control_instances
+    post.control-learning-curve.control_short_v1_256: *control_instances
+    post.control-learning-curve.control_result: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_selected: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_approve_512: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_kd_512: {instances: 1}
+    post.control-learning-curve.control_short_v1_512: {instances: 1}
+    post.control-learning-curve.control_extended_result: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_approve_1024: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_kd_1024: {instances: 1}
+    post.control-learning-curve.control_short_v1_1024: {instances: 1}
+    post.control-learning-curve.control_final_result: {strategy: single, resource: cpu}

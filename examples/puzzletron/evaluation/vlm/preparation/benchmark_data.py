@@ -207,10 +207,14 @@ def _download_range_file(
         repo_type="dataset",
         revision=revision,
     )
-    metadata = get_hf_file_metadata(source_url, token=True)
+    # Public benchmark repositories must remain downloadable on clean workers.
+    # ``token=None`` reuses configured credentials when present and otherwise
+    # falls back to anonymous access; ``token=True`` rejects the latter before
+    # making the metadata request.
+    metadata = get_hf_file_metadata(source_url, token=None)
     if metadata.commit_hash != revision or metadata.size != expected_size:
         raise ValueError(f"remote metadata differs from the pinned file: {filename}")
-    headers = build_hf_headers(token=True)
+    headers = build_hf_headers(token=None)
     download_url = source_url
     if metadata.xet_file_data is None and source_url != metadata.location:
         download_url = metadata.location

@@ -217,6 +217,8 @@ def render_sbatch_script(
     )
     srun_parts = [
         "srun",
+        f"--account={shlex.quote(account)}",
+        f"--job-name={shlex.quote(job_name)}",
         f"--nodes={step_nodes}",
         f"--ntasks={topology.task_count}",
         f"--ntasks-per-node={step_tasks_per_node}",

@@ -221,7 +221,7 @@ def settings(
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
         "reasoning_parser": "qwen3",
-        "log_samples": False,
+        "log_samples": prepared.suite in {"quick", "short", "e2e-full-eval"},
         "model_args": {
             "fps": frame_policy["fps"],
             "max_frame_num": frame_policy["max_frames"],

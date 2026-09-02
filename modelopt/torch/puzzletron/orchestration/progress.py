@@ -65,8 +65,7 @@ _BYPASS_PROBE = re.compile(
     r"(?P<steps>\d+) steps"
 )
 _BYPASS_STEP = re.compile(
-    r"\[bypass/automodel\] step=(?P<current>\d+)/(?P<total>\d+) "
-    r"loss=(?P<loss>[^\s]+)"
+    r"\[bypass/automodel\] step=(?P<current>\d+)/(?P<total>\d+) loss=(?P<loss>[^\s]+)"
 )
 _REPLACEMENT_POOL_READY = re.compile(
     r"\[replacement-pool\] ready workers: (?P<ready>\d+)/(?P<total>\d+)"
@@ -403,7 +402,7 @@ def _post_mip_progress(
     if not isinstance(node_config, Mapping):
         return None
     node_type = str(node_config.get("type") or "")
-    if node_type in {"filter", "manual_filter"}:
+    if node_type in {"filter", "manual_filter", "result_manifest"}:
         return None
 
     input_id = node_config.get("input")

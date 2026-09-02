@@ -191,21 +191,22 @@ def test_range_download_resumes_without_forwarding_credentials_and_verifies_hash
         "hf_hub_url",
         lambda *_args, **_kwargs: "https://huggingface.co/source",
     )
-    monkeypatch.setattr(
-        preparation,
-        "get_hf_file_metadata",
-        lambda *_args, **_kwargs: SimpleNamespace(
+
+    def fake_metadata(*_args, **kwargs):
+        observed["metadata_token"] = kwargs.get("token")
+        return SimpleNamespace(
             commit_hash="revision",
             location="https://example/cdn",
             size=len(payload),
             xet_file_data=None,
-        ),
-    )
-    monkeypatch.setattr(
-        preparation,
-        "build_hf_headers",
-        lambda **_kwargs: {"authorization": "secret", "user-agent": "test"},
-    )
+        )
+
+    def fake_headers(**kwargs):
+        observed["headers_token"] = kwargs.get("token")
+        return {"authorization": "secret", "user-agent": "test"}
+
+    monkeypatch.setattr(preparation, "get_hf_file_metadata", fake_metadata)
+    monkeypatch.setattr(preparation, "build_hf_headers", fake_headers)
 
     def fake_http_get(url, stream, **kwargs):
         observed.update(url=url, **kwargs)
@@ -223,6 +224,8 @@ def test_range_download_resumes_without_forwarding_credentials_and_verifies_hash
     assert report["status"] == "downloaded"
     assert destination.read_bytes() == payload
     assert observed["resume_size"] == 7
+    assert observed["metadata_token"] is None
+    assert observed["headers_token"] is None
     assert observed["headers"] == {"user-agent": "test"}
     assert not partial.exists()
 

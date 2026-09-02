@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,12 +29,14 @@ if TYPE_CHECKING:
     from typing import Any
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import evaluate
+from examples.puzzletron.evaluation.vlm import evaluate, suites
 from modelopt.torch.puzzletron.distributed_eval.storage import atomic_write_json
 
 __all__ = [
     "evaluate_e2e_full_eval_checkpoint",
+    "evaluate_frozen_campaign_checkpoint",
     "evaluate_realworldqa_checkpoint",
+    "evaluate_short_v1_checkpoint",
     "register_profiles",
 ]
 
@@ -46,6 +49,10 @@ _RUNNER_OVERRIDES = frozenset(
         "topology",
     }
 )
+_MANIFEST_SETTINGS = frozenset({"row_manifest", "row_manifest_sha256"})
+_REALWORLDQA_PROFILE = "qwen35_vlm_realworldqa2_prefix2"
+_BOUNDED_REPEATED_PROFILE = "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+_FROZEN_CAMPAIGN_PROFILE = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
 
 
 def _run_profile(
@@ -54,13 +61,38 @@ def _run_profile(
     output_root: str | Path,
     settings: Mapping[str, Any],
     suite: str,
+    require_manifest: bool = False,
 ) -> tuple[argparse.Namespace, dict[str, object], Path]:
     settings = dict(settings)
-    unexpected = set(settings) - _RUNNER_OVERRIDES - {"batch_size", "timeout_seconds"}
+    unexpected = (
+        set(settings) - _RUNNER_OVERRIDES - _MANIFEST_SETTINGS - {"batch_size", "timeout_seconds"}
+    )
     if unexpected:
         raise ValueError(f"unsupported Qwen 3.5 VLM profile settings: {sorted(unexpected)}")
     output_dir = Path(output_root).expanduser().absolute()
     output_dir.mkdir(parents=True, exist_ok=True)
+    row_manifest = settings.pop("row_manifest", None)
+    expected_manifest_sha256 = settings.pop("row_manifest_sha256", None)
+    if require_manifest and (not row_manifest or not expected_manifest_sha256):
+        raise ValueError(
+            "frozen 344-row campaign profile requires row_manifest and row_manifest_sha256"
+        )
+    quick_manifest = Path(row_manifest).expanduser().absolute() if row_manifest else None
+    if quick_manifest is not None:
+        if (
+            not isinstance(expected_manifest_sha256, str)
+            or len(expected_manifest_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_manifest_sha256)
+        ):
+            raise ValueError(
+                "frozen 344-row campaign manifest SHA256 must be 64 lowercase hex characters"
+            )
+        actual_manifest_sha256 = suites.manifest_sha256(suites.load_quick_manifest(quick_manifest))
+        if actual_manifest_sha256 != expected_manifest_sha256:
+            raise ValueError(
+                "frozen 344-row campaign manifest SHA256 differs from the campaign identity: "
+                f"{actual_manifest_sha256} != {expected_manifest_sha256}"
+            )
     args = argparse.Namespace(
         checkpoint=Path(checkpoint_path).expanduser().absolute(),
         output_dir=output_dir,
@@ -69,7 +101,7 @@ def _run_profile(
         seed=42,
         timeout_seconds=settings.pop("timeout_seconds", None),
         hf_home=Path(os.environ["HF_HOME"]) if os.environ.get("HF_HOME") else None,
-        quick_manifest=None,
+        quick_manifest=quick_manifest,
         mmvu_judge_api_type=None,
         mmvu_judge_model=None,
         allow_judge_calls=False,
@@ -97,12 +129,75 @@ def register_profiles() -> None:
     from modelopt.torch.puzzletron.post_mip.runner import register_downstream_evaluation_profile
 
     register_downstream_evaluation_profile(
+        _REALWORLDQA_PROFILE,
+        evaluate_realworldqa_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _BOUNDED_REPEATED_PROFILE,
+        evaluate_e2e_full_eval_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _FROZEN_CAMPAIGN_PROFILE,
+        evaluate_frozen_campaign_checkpoint,
+    )
+    # Deprecated compatibility aliases. New recipes must use explicit task and
+    # row-selection identities above.
+    register_downstream_evaluation_profile(
         "qwen35_vlm_realworldqa",
         evaluate_realworldqa_checkpoint,
     )
     register_downstream_evaluation_profile(
         "qwen35_vlm_e2e_full_eval",
         evaluate_e2e_full_eval_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        "qwen35_vlm_short_v1",
+        evaluate_short_v1_checkpoint,
+    )
+
+
+def evaluate_frozen_campaign_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one checkpoint on the identity-bound frozen campaign rows."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="quick",
+        require_manifest=True,
+    )
+    runs = result["runs"]
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
+    return {
+        **runs[0],
+        "profile_path": str(profile_path),
+        "checkpoint": str(args.checkpoint),
+    }
+
+
+def evaluate_short_v1_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compatibility alias for the explicit frozen-row campaign profile."""
+
+    warnings.warn(
+        f"qwen35_vlm_short_v1 is deprecated; use {_FROZEN_CAMPAIGN_PROFILE}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return evaluate_frozen_campaign_checkpoint(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
     )
 
 

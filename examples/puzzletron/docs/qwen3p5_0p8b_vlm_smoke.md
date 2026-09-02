@@ -205,19 +205,72 @@ deployment image sizes before drawing throughput conclusions.
 
 ## Choose a campaign or quality-comparison route
 
-The routes use the pinned Qwen 3.5 0.8B VLM and the `ffn_intermediate` search
-axis. `full_vlm_smoke.yaml` validates the bounded end-to-end lifecycle.
-`vlm_campaign.yaml` evaluates two FFN candidates with equivalent screening KD
-and multimodal evaluation, ranks them using image-text loss and benchmark
-metrics, and runs longer KD for the selected candidate from its original
-materialized checkpoint. The teacher comparison runs only for the selected
-candidate after that second KD run.
+The routes use the pinned Qwen 3.5 0.8B VLM. The legacy
+`full_vlm_smoke.yaml` compatibility route keeps the portable FFN-only lifecycle
+check. `vlm_admitted_axes_lifecycle_smoke.yaml` enables
+hidden width, FFN, and depth diagnostics, then realizes
+one mixed candidate whose exact MIP parameter count must retain 85–95% of the
+teacher. That candidate continues through physical materialization, checkpoint
+reload, image serving, two-step VLM KD, and image-text evaluation.
+The extended grid uses 64-channel hidden-width alignment so its `960` and `896`
+endpoints pass the same physical materialization validator used by the smoke.
+
+The older `qwen35_vlm_realworldqa`, `qwen35_vlm_e2e_full_eval`, and
+`qwen35_vlm_short_v1` profile names remain registered only as deprecated
+compatibility aliases. New recipes use identities that state the task scope and
+row-selection policy.
+
+`vlm_campaign.yaml` is the expanded admitted-axis search: hidden width,
+heterogeneous FFN width, and depth. It reuses the existing `params-90` MIP
+profile and the established image-text LM-loss `top_k: 2` screening step.
+Serving measurements are recorded for both retained candidates but do not
+affect selection. The `3328` and `3072` FFN widths are separate conservative
+controls; the deeper `2816`, `2432`, `2048`, `1664`, and `1408` values remain
+search bins rather than justified VLM defaults.
+
+Every LM-loss-retained candidate follows one resumable trajectory from the same
+immutable pre-KD materialized checkpoint. AutoModel optimizer state is
+preserved while the cumulative step limit advances through 64, 128, and 256
+updates. Candidate selection happens only after all three checkpoints have been
+evaluated. The selection is an explicit manual gate so the campaign does not
+encode an additional sampling interpretation.
+
+The `3328` and `3072` controls follow their own otherwise identical 64/128/256
+learning curves. Every milestone uses the same
+`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1` profile, exact-row
+manifest path, and required manifest SHA256. The teacher result is
+computed once under that identity and reused for every control, candidate, and
+milestone. Each KD record includes global batch size, cumulative examples,
+non-padding effective tokens from the training log, a padded-token upper bound,
+estimated cumulative GPU-hours, and measured incremental and cumulative
+GPU-hours. The selected bounded result freezes the pre-KD checkpoint identity,
+all three checkpoint paths, metrics, exposure records, teacher identity, and
+row-manifest digest in an immutable learning-curve manifest.
+
+The 512- and 1024-step extensions are not part of the bounded campaign result.
+They are available only for the selected finalist, each behind a separate
+manual approval gate, and resume the same optimizer trajectory if approved.
+They use the same fixed 344-row selection: 64 RealWorldQA rows, 120 MMMU
+validation rows, and 160 MVBench rows under the semantic contract
+`qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1`. The separate eight-task,
+all-rows `qwen35-vlm-judge-free8-all-rows-v1` scope remains an optional later
+run.
+
+Grouped-attention and GDN reductions are disabled. The native Qwen
+`Qwen3NextAttention` backend rejects compact reduced geometry, and its
+CP-aware GDN wrapper has no compact scoring equivalence path. Keep their teacher
+shapes until those backends have equivalent scoring and materialization support.
+`gdn_value_heads_per_group` is additionally irreducible because its teacher
+value is already one.
 
 The opt-in `e2e_vlm_quality_comparison.yaml` route keeps the lifecycle bounded
 and compares its final student with the pinned teacher on deterministic
 RealWorldQA and MMMU subsets. Repetitions are resumable and are reused only
 when checkpoint identity and evaluator artifacts still match. Results include
 student and teacher metrics and their deltas, but no quality gate.
+
+Use `e2e_vlm_quality_comparison_extended.yaml` for the same bounded comparison
+after the expanded admitted-axis smoke candidate.
 
 Run the comparison route with a site-specific runner and a distinct output
 root. This route requires the pinned RealWorldQA and MMMU caches and is
@@ -243,9 +296,11 @@ Run the campaign with the same execution profile and a distinct output root:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_admitted_axes_campaign.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
+export PUZZLETRON_VLM_SHORT_V1_MANIFEST=/path/to/frozen-short-v1.json
+export PUZZLETRON_VLM_SHORT_V1_SHA256=<64-lowercase-hex-digest>
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -253,6 +308,13 @@ python examples/puzzletron/orchestrate.py \
   --execution "$EXECUTION" \
   --stage full --dry-run
 ```
+
+Inspect the compiled stage order, identity inputs, and one-GPU allocation. A
+successful dry run or smoke test is preparation evidence only. Launching this
+real campaign requires separate GPU/scheduler authorization, and the campaign
+is not complete until at least one selected post-KD student has comparable
+64/128/256 scores on the fixed 344-row selection and an immutable
+learning-curve result manifest.
 
 ## Evaluate a saved checkpoint separately
 
@@ -289,7 +351,8 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
 can generate the same route with site-specific settings. Hidden width,
 attention, GDN, embedding width, and depth are available through guided
-customization and `advanced.yaml`, but are outside this campaign.
-Inspect every customized plan with `--dry-run` before launch. See
+customization. Attention and GDN reductions are not included in the tracked
+runtime-validated routes. Inspect every customized plan with `--dry-run` before
+launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

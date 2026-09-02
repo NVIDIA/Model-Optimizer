@@ -219,6 +219,34 @@ def test_post_mip_filter_keeps_direct_launcher(tmp_path: Path):
     assert attempt.task_topology.launcher is TaskLauncher.DIRECT
 
 
+def test_post_mip_result_manifest_is_an_aggregate_only_cpu_node(tmp_path: Path):
+    plan, node = _plan(
+        tmp_path,
+        stage_id="post.params.bounded_result",
+        node_type="result_manifest",
+    )
+    node = replace(
+        node,
+        instances=1,
+        gpus_per_instance=0,
+        gpus_per_node=0,
+        total_gpus=0,
+        distributed=False,
+        resource="cpu",
+    )
+    work_plan = PostMIPAdapter().plan(plan, node)
+    attempt = PostMIPAdapter().command(
+        plan=plan,
+        node=node,
+        item=work_plan.items[0],
+        attempt_id="a1",
+        runner=plan.runner,
+    )
+
+    assert attempt.task_topology.launcher is TaskLauncher.DIRECT
+    assert attempt.command.argv[-1] == "--aggregate"
+
+
 def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkeypatch):
     plan, node = _plan(tmp_path, stage_id="post.params.online_eval", node_type="evaluation")
     plan = replace(
@@ -247,7 +275,7 @@ def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkey
 
     assert commands == [
         (
-            "python",
+            sys.executable,
             str(tmp_path / "examples" / "puzzletron" / "run_post_mip_node.py"),
             "--config",
             plan.experiment_config_path,

@@ -55,7 +55,6 @@ from .stages import (
     configured_stage_ids,
     distributed_stage_ids,
     stage_ids,
-    topological_mapping_items,
 )
 from .vllm_measurements import normalize_vllm_measurements
 
@@ -142,191 +141,27 @@ _DEFAULT_STAGE_STRATEGIES: dict[str, ExecutionStrategy] = {
     "aiperf": ExecutionStrategy.SHARDED,
 }
 
-_POST_MIP_NODE_METADATA: dict[str, dict[str, Any]] = {
-    "filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
-    "manual_filter": {"kind": "selector", "accepts": {"config", "checkpoint"}},
-    "materialize": {
-        "kind": "transformer",
-        "accepts": {"config", "checkpoint"},
-        "output": "checkpoint",
-    },
-    "evaluation": {"kind": "evaluator", "accepts": {"config", "checkpoint"}},
-    "aiperf": {"kind": "evaluator", "accepts": {"checkpoint"}},
-    "global_kd": {
-        "kind": "transformer",
-        "accepts": {"checkpoint"},
-        "output": "checkpoint",
-    },
-    "ptq": {
-        "kind": "transformer",
-        "accepts": {"checkpoint"},
-        "output": "checkpoint",
-        "implemented": False,
-    },
-    "downstream_evaluation": {
-        "kind": "evaluator",
-        "accepts": {"checkpoint"},
-    },
-}
-
 
 def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Compile dependency-light dynamic stage facts for the controller.
+    """Compile canonical dependency-light dynamic stage facts for the controller."""
 
-    Full node/config/artifact validation runs again in the worker through the
-    canonical post-MIP registry. Keeping this pass dependency-light lets plan
-    compilation continue to run on login nodes without importing PyTorch.
-    """
+    if (__package__ or "").startswith("puzzletron_orchestrator"):
+        from puzzletron_orchestrator.post_mip.base import compile_post_mip_flows
+    else:
+        from ..post_mip.base import compile_post_mip_flows
 
-    post_mip = config.get("post_mip") or {}
-    if not isinstance(post_mip, Mapping):
-        raise TypeError("post_mip must be a mapping")
-    if set(post_mip) - {"flows"}:
-        raise ValueError(f"unknown post_mip fields: {sorted(set(post_mip) - {'flows'})}")
-    flows = post_mip.get("flows") or {}
-    if not isinstance(flows, Mapping):
-        raise TypeError("post_mip.flows must be a mapping")
-    compiled: list[dict[str, Any]] = []
-    global_node_ids: set[str] = set()
-    for flow_id, flow_value in flows.items():
-        if not str(flow_id) or any(
-            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-            for character in str(flow_id)
-        ):
-            raise ValueError(f"invalid post-MIP flow ID {flow_id!r}")
-        if not isinstance(flow_value, Mapping):
-            raise TypeError(f"post-MIP flow {flow_id!r} must be a mapping")
-        if set(flow_value) - {"source", "nodes"}:
-            raise ValueError(f"unknown fields in post-MIP flow {flow_id!r}")
-        source = flow_value.get("source") or {}
-        if not isinstance(source, Mapping) or not source.get("run"):
-            raise ValueError(f"post-MIP flow {flow_id!r} must select one source.run")
-        mip_runs = _mapping(_mapping(config.get("mip")).get("runs"))
-        if source["run"] not in mip_runs or mip_runs[source["run"]] is False:
-            raise ValueError(
-                f"post-MIP flow {flow_id!r} selects unknown or disabled MIP run {source['run']!r}"
-            )
-        if set(source) - {"run", "variants", "objectives"}:
-            raise ValueError(f"unknown source fields in post-MIP flow {flow_id!r}")
-        nodes = flow_value.get("nodes") or {}
-        if not isinstance(nodes, Mapping) or not nodes:
-            raise ValueError(f"post-MIP flow {flow_id!r} must contain nodes")
-        prepared_nodes: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
-        for node_id, node_value in nodes.items():
-            if not str(node_id) or any(
-                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-                for character in str(node_id)
-            ):
-                raise ValueError(f"invalid post-MIP node ID {node_id!r}")
-            if not isinstance(node_value, Mapping):
-                raise TypeError(f"post-MIP node {flow_id}.{node_id} must be a mapping")
-            if str(node_id) in global_node_ids:
-                raise ValueError(
-                    f"post-MIP node IDs must be campaign-unique; duplicate {node_id!r}"
-                )
-            global_node_ids.add(str(node_id))
-            node_type = str(node_value.get("type") or "")
-            node_metadata = _POST_MIP_NODE_METADATA.get(node_type)
-            if node_metadata is None:
-                raise ValueError(f"unknown post-MIP node type {node_type!r}")
-            if not node_metadata.get("implemented", True):
-                raise NotImplementedError(
-                    f"post-MIP node type {node_type!r} is declared but not implemented"
-                )
-            prepared_nodes[str(node_id)] = (dict(node_value), dict(node_metadata))
-
-        def dependency_ids(
-            _node_id: str,
-            prepared: tuple[dict[str, Any], dict[str, Any]],
-        ) -> tuple[str, ...]:
-            node_value, _metadata = prepared
-            dependencies = []
-            input_id = str(node_value.get("input", "source"))
-            if input_id != "source":
-                dependencies.append(input_id)
-            model_source = str(node_value.get("model_source", "latest"))
-            if model_source not in {"latest", "origin"}:
-                dependencies.append(model_source)
-            if str(node_value.get("type")) == "filter":
-                references = []
-                if node_value.get("metric"):
-                    references.append(str(node_value["metric"]))
-                for entry in node_value.get("metrics") or ():
-                    if isinstance(entry, Mapping) and entry.get("metric"):
-                        references.append(str(entry["metric"]))
-                for reference in references:
-                    owner, separator, _metric = reference.partition(".")
-                    if separator and owner != "mip":
-                        dependencies.append(owner)
-            return tuple(dependencies)
-
-        stage_by_node = {"source": "mip"}
-        artifact_by_node = {"source": {"config", "checkpoint"}}
-        kind_by_node = {"source": "transformer"}
-        for node_id, prepared in topological_mapping_items(prepared_nodes, dependency_ids):
-            node_value, metadata = prepared
-            node_type = str(node_value["type"])
-            input_id = str(node_value.get("input", "source"))
-            model_source = str(node_value.get("model_source", "latest"))
-            if (
-                model_source not in {"latest", "origin"}
-                and kind_by_node[model_source] != "transformer"
-            ):
-                raise ValueError(f"model_source {model_source!r} is not a transformer node")
-            source_artifacts = (
-                artifact_by_node[input_id]
-                if model_source == "latest"
-                else artifact_by_node["source"]
-                if model_source == "origin"
-                else artifact_by_node[model_source]
-            )
-            dependency_stages = [stage_by_node[input_id]]
-            if model_source not in {"latest", "origin"}:
-                dependency_stages.append(stage_by_node[model_source])
-            if metadata["kind"] != "selector" and not source_artifacts <= metadata["accepts"]:
-                raise ValueError(
-                    f"post-MIP node {flow_id}.{node_id} cannot consume "
-                    f"{sorted(source_artifacts)}; add an explicit materialize node"
-                )
-            if node_type == "filter":
-                references = []
-                if node_value.get("metric"):
-                    references.append(str(node_value["metric"]))
-                for entry in node_value.get("metrics") or ():
-                    if isinstance(entry, Mapping) and entry.get("metric"):
-                        references.append(str(entry["metric"]))
-                for reference in references:
-                    owner, separator, _metric = reference.partition(".")
-                    if not separator or (owner != "mip" and owner not in stage_by_node):
-                        raise ValueError(
-                            f"post-MIP node {flow_id}.{node_id} has invalid or forward "
-                            f"metric reference {reference!r}"
-                        )
-                    if owner != "mip":
-                        dependency_stages.append(stage_by_node[owner])
-            output_artifacts = (
-                {metadata["output"]} if metadata.get("output") else set(artifact_by_node[input_id])
-            )
-            stage_id = f"post.{flow_id}.{node_id}"
-            compiled.append(
-                {
-                    "stage_id": stage_id,
-                    "node_id": str(node_id),
-                    "node_type": node_type,
-                    "parents": tuple(dict.fromkeys(dependency_stages)),
-                    "distributed": metadata["kind"] != "selector",
-                    "default_strategy": (
-                        ExecutionStrategy.SINGLE
-                        if metadata["kind"] == "selector"
-                        else ExecutionStrategy.SHARDED
-                    ),
-                    "config": dict(node_value.get("config") or {}),
-                }
-            )
-            stage_by_node[str(node_id)] = stage_id
-            artifact_by_node[str(node_id)] = output_artifacts
-            kind_by_node[str(node_id)] = str(metadata["kind"])
-    return tuple(compiled)
+    return tuple(
+        {
+            "stage_id": node.stage_id,
+            "node_id": node.node_id,
+            "node_type": node.node_type,
+            "parents": node.dependency_stage_ids,
+            "distributed": node.capabilities.distributed,
+            "default_strategy": ExecutionStrategy(node.capabilities.default_strategy),
+            "config": dict(node.config.get("config") or {}),
+        }
+        for node in compile_post_mip_flows(config)
+    )
 
 
 def _required_mapping(value: Any, *, path: str) -> dict[str, Any]:
