@@ -51,8 +51,10 @@
     "teacher_evaluation_count": 1
   },
   "benchmark_coverage": {
-    "suite": "short-v1",
-    "profile_identity": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
+    "scope": "64 RealWorldQA rows, 120 MMMU validation rows, and 160 MVBench rows from one frozen ordered selection",
+    "evaluation_contract_id": "qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1",
+    "runtime_profile_name": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
+    "evaluator_id": "modelopt-vlm-evaluator@30fa674e68699b00db7582ed151cc078227ba970+lmms-eval@15c32bfec165df13c269ddd3cda03b2ed9137825",
     "row_manifest": {
       "path": "row_manifest.json",
       "row_count": 344,
@@ -426,6 +428,7 @@
   "performance_contract": null,
   "performance_evidence": null,
   "provenance": {
+    "evaluator_id": "modelopt-vlm-evaluator@30fa674e68699b00db7582ed151cc078227ba970+lmms-eval@15c32bfec165df13c269ddd3cda03b2ed9137825",
     "evaluator_source_commit": "30fa674e68699b00db7582ed151cc078227ba970",
     "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
     "generation": {
@@ -460,99 +463,101 @@
     "frozen_rows": "row_manifest.json",
     "source_join": "Match external artifacts by SHA-256, then use architecture ID, milestone, checkpoint identity, and frozen row-selection identity."
   },
-  "artifacts": [
-    {
-      "path": "metrics.csv",
-      "sha256": "c85b092308933f70ad46adae9f06cdf095c2895955fcde9f01a7a0daf20c11d7",
-      "size_bytes": 16919
-    },
-    {
-      "path": "summary.md",
-      "sha256": "2cf014e0022b00a5b933e113ac082c0d559e13eeed15bc64dacd6d067987074d",
-      "size_bytes": 4577
-    },
-    {
-      "path": "row_manifest.json",
-      "sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce",
-      "size_bytes": 58867
-    },
-    {
-      "path": "mvbench_audit.csv",
-      "sha256": "49c4491a4cdf84fff50eead15ceabbe78f4ef1d11342929bb8006b971ffd80f1",
-      "size_bytes": 24431
-    }
-  ],
-  "external_artifacts": [
-    {
-      "id": "exploratory-pre-kd-observations",
-      "sha256": "cb571e6070012e8e817d76484239d0fde187eb2c4ff963266fc03ff1716bf1d8",
-      "size_bytes": 20797
-    },
-    {
-      "id": "exploratory-64-step-observations",
-      "sha256": "e5fcbd44ac510e97078b3d8298603659b5a75e8523f658611788b98b56df740c",
-      "size_bytes": 83914
-    },
-    {
-      "id": "exploratory-128-step-observations",
-      "sha256": "266449cbb5cbe46b146df74478e77e02bd77779776846ac1b4e347ecb4970b35",
-      "size_bytes": 84050
-    },
-    {
-      "id": "exploratory-256-step-observations",
-      "sha256": "74e8a22ada3225ce9de0ed333974ece8f0811520634c9781d5ef8665145c4aea",
-      "size_bytes": 83895
-    },
-    {
-      "id": "controls-pre-kd-observations",
-      "sha256": "e37f010036c41e76f24ca656236060fb38b8dc997aa0162a2c7add8ff61f10fb",
-      "size_bytes": 41998
-    },
-    {
-      "id": "controls-64-step-observations",
-      "sha256": "b6fbbb6081cf7cb56a68418a64c7130bad721f819cc96c6dfb8bf0e9898e811f",
-      "size_bytes": 21100
-    },
-    {
-      "id": "controls-128-step-observations",
-      "sha256": "2befb724fedb67cbd5c13e22ec1e4412f8b7d6c110420af49fe28a295a089a67",
-      "size_bytes": 42258
-    },
-    {
-      "id": "controls-256-step-observations",
-      "sha256": "a918aed0e504c18afed8ec5e2b4d494391363fc942d8731b4679ef437d2c199f",
-      "size_bytes": 42296
-    },
-    {
-      "id": "control-3328-512-step-observations",
-      "sha256": "90d9f65198b172405ebfc4dd8a5bf5796e23c000c0e1b8a62bd3014e7c2901d7",
-      "size_bytes": 21119
-    },
-    {
-      "id": "selected-exploratory-result-manifest",
-      "sha256": "5224cbf9b9fc2e61316aea6694233a4b75950fae630c17474471c60066c96548",
-      "size_bytes": 298734
-    },
-    {
-      "id": "control-3072-result-manifest",
-      "sha256": "d9f04b0f7aae60963c6253abc10d76c09aab0f020ad59b342e5e9df313180a55",
-      "size_bytes": 299270
-    },
-    {
-      "id": "control-3328-result-manifest",
-      "sha256": "e25954c75adee46e77cc3279a48618898f69a728e42861258817390a3801db5f",
-      "size_bytes": 299241
-    },
-    {
-      "id": "control-3328-extended-result-manifest",
-      "sha256": "72a397870ac71a4669689a581fd3318f15da11c2e23d82c03386bbe5c0440b9d",
-      "size_bytes": 506477
-    }
-  ],
+  "artifacts": {
+    "repository": [
+      {
+        "path": "metrics.csv",
+        "sha256": "d6732f0213f950d38b55bc6414ebf90f639822ccbbe8e9f353a707b800363ead",
+        "size_bytes": 40293
+      },
+      {
+        "path": "summary.md",
+        "sha256": "9713a5f724f4d839a2ee607437bdaf10c473a6d4edaee9e3eb6af2bb8065abd8",
+        "size_bytes": 5052
+      },
+      {
+        "path": "row_manifest.json",
+        "sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce",
+        "size_bytes": 58867
+      },
+      {
+        "path": "mvbench_audit.csv",
+        "sha256": "49c4491a4cdf84fff50eead15ceabbe78f4ef1d11342929bb8006b971ffd80f1",
+        "size_bytes": 24431
+      }
+    ],
+    "external": [
+      {
+        "id": "exploratory-pre-kd-observations",
+        "sha256": "cb571e6070012e8e817d76484239d0fde187eb2c4ff963266fc03ff1716bf1d8",
+        "size_bytes": 20797
+      },
+      {
+        "id": "exploratory-64-step-observations",
+        "sha256": "e5fcbd44ac510e97078b3d8298603659b5a75e8523f658611788b98b56df740c",
+        "size_bytes": 83914
+      },
+      {
+        "id": "exploratory-128-step-observations",
+        "sha256": "266449cbb5cbe46b146df74478e77e02bd77779776846ac1b4e347ecb4970b35",
+        "size_bytes": 84050
+      },
+      {
+        "id": "exploratory-256-step-observations",
+        "sha256": "74e8a22ada3225ce9de0ed333974ece8f0811520634c9781d5ef8665145c4aea",
+        "size_bytes": 83895
+      },
+      {
+        "id": "controls-pre-kd-observations",
+        "sha256": "e37f010036c41e76f24ca656236060fb38b8dc997aa0162a2c7add8ff61f10fb",
+        "size_bytes": 41998
+      },
+      {
+        "id": "controls-64-step-observations",
+        "sha256": "b6fbbb6081cf7cb56a68418a64c7130bad721f819cc96c6dfb8bf0e9898e811f",
+        "size_bytes": 21100
+      },
+      {
+        "id": "controls-128-step-observations",
+        "sha256": "2befb724fedb67cbd5c13e22ec1e4412f8b7d6c110420af49fe28a295a089a67",
+        "size_bytes": 42258
+      },
+      {
+        "id": "controls-256-step-observations",
+        "sha256": "a918aed0e504c18afed8ec5e2b4d494391363fc942d8731b4679ef437d2c199f",
+        "size_bytes": 42296
+      },
+      {
+        "id": "control-3328-512-step-observations",
+        "sha256": "90d9f65198b172405ebfc4dd8a5bf5796e23c000c0e1b8a62bd3014e7c2901d7",
+        "size_bytes": 21119
+      },
+      {
+        "id": "selected-exploratory-result-manifest",
+        "sha256": "5224cbf9b9fc2e61316aea6694233a4b75950fae630c17474471c60066c96548",
+        "size_bytes": 298734
+      },
+      {
+        "id": "control-3072-result-manifest",
+        "sha256": "d9f04b0f7aae60963c6253abc10d76c09aab0f020ad59b342e5e9df313180a55",
+        "size_bytes": 299270
+      },
+      {
+        "id": "control-3328-result-manifest",
+        "sha256": "e25954c75adee46e77cc3279a48618898f69a728e42861258817390a3801db5f",
+        "size_bytes": 299241
+      },
+      {
+        "id": "control-3328-extended-result-manifest",
+        "sha256": "72a397870ac71a4669689a581fd3318f15da11c2e23d82c03386bbe5c0440b9d",
+        "size_bytes": 506477
+      }
+    ]
+  },
   "limitations": [
     "The executed candidate-selection policy was bespoke and is superseded; these measurements must not be presented as outputs of the corrected integrated recipe.",
     "A corrected-recipe rerun can select different students.",
-    "The short-v1 evaluation is one fixed 344-row sample without repetitions or confidence intervals; full-v1 evaluation was not run.",
+    "The evaluation is one fixed 344-row selection without repetitions or confidence intervals; the separate eight-task all-rows scope qwen35-vlm-judge-free8-all-rows-v1 was not run.",
     "Attention and GDN remained at teacher geometry, so this is not a full-axis pruning campaign.",
     "The 512-step extension was run only for the FFN-3328 control; no 1024-step milestone was run.",
     "Evaluator-reported MVBench macros can use model-dependent denominators when generations are empty; use fixed_160_accuracy for audited post-KD comparisons. Teacher and pre-KD MVBench remain aggregate-only.",

@@ -2,11 +2,12 @@
 
 Status: successful measurement run, superseded selection policy.
 
-Six student checkpoints were evaluated on the same frozen short-v1 row manifest
-before KD and after 64, 128, and 256 cumulative KD steps. The FFN-3328 control
-was additionally evaluated at 512 steps. Teacher evaluation was performed once
-and reused at every comparison milestone.
-The canonical evaluation profile identity is
+Six student checkpoints were evaluated on the same frozen 344-row manifest (64
+RealWorldQA rows, 120 MMMU validation rows, and 160 MVBench rows) before KD and
+after 64, 128, and 256 cumulative KD steps. The FFN-3328 control was
+additionally evaluated at 512 steps. Teacher evaluation was performed once and
+reused at every comparison milestone. The semantic evaluation contract is
+`qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1`; the runtime profile is
 `qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1`.
 The exact 344-row selection is bundled as `row_manifest.json`; its byte hash
 and the runtime's semantic row-selection identity are recorded separately in
@@ -26,8 +27,8 @@ and the runtime's semantic row-selection identity are recorded separately in
 
 At 256 steps, FFN-3328 is the only student above the teacher on all three
 evaluator-reported metrics. Its separately gated 512-step scores are 0.65625
-RealWorldQA, 0.325 MMMU, and 42.5% MVBench macro, so this short-v1 sample does
-not support extending it past 256 steps.
+RealWorldQA, 0.325 MMMU, and 42.5% MVBench macro, so this fixed 344-row
+evaluation does not support extending it past 256 steps.
 
 The evaluator-reported MVBench macro excludes empty generations from affected
 leaf denominators. `mvbench_audit.csv` records all 20 leaves for each retained
@@ -76,9 +77,15 @@ selection flow. Exact replay of the historical selection requires archived
 runtime source evidence; it is not represented by the corrected repository
 recipe.
 
-The comparison is a single deterministic short-v1 sample without repeated
-sampling or confidence intervals. Full-v1 evaluation was not run. Attention and
+The comparison is one deterministic evaluation of the fixed 344-row selection,
+without repeated sampling or confidence intervals. The separate eight-task
+all-rows scope (`qwen35-vlm-judge-free8-all-rows-v1`) was not run. Attention and
 GDN were fixed at teacher geometry, and this result is not evidence for a
 full-axis campaign. The frozen row manifest is included. External runtime
 manifests and checkpoints are not included; their content hashes provide the
 immutable source-evidence join.
+
+See the [structured record](result_record.json), [tidy metrics](metrics.csv),
+[frozen row manifest](row_manifest.json), and [MVBench denominator
+audit](mvbench_audit.csv). Campaign-level reproduction guidance is in the
+[campaign README](../../README.md).
