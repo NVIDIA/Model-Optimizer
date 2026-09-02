@@ -7,6 +7,7 @@
     "role": "teacher",
     "revision": null,
     "revision_status": "not_retained",
+    "reproduction_status": "not_reproducible",
     "checkpoint_content_fingerprint": "c7aa3305feef58d231544c5df23c89d92d22e187a05926dd27b56bec33a4d355"
   },
   "campaign": {
@@ -96,6 +97,7 @@
   },
   "reproduction": {
     "status": "not_reproducible",
+    "blocked_by": ["model.revision"],
     "prerequisites": [
       "Install the base Puzzletron requirements and the evaluator-specific requirements described in examples/puzzletron/docs/vlm_checkpoint_evaluation.md.",
       "Download the named model and verify its content fingerprint; the exact upstream model revision was not retained. Cache the three datasets at the revisions recorded above; do not add them to Git."
