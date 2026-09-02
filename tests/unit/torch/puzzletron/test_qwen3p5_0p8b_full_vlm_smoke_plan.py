@@ -283,7 +283,7 @@ def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
     assert all(stage.total_gpus == 1 for stage in (*smoke.stages, *regression.stages))
 
 
-def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates(
+def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -307,7 +307,15 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
         "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_",
         "_self_",
     ]
-    assert config["mip"]["runs"]["params-90"] is False
+    candidates = config["mip"]["runs"]["params-90"]
+    assert candidates["constraints"] == {"params": {"max": "90%"}}
+    assert candidates["solver"]["num_solutions"] == 1
+    assert candidates["search_space"] == {
+        "depth": [0, 1, 2],
+        "embedding": [1024, 960, 896],
+        "axes_default": "all",
+        "axes": {"ffn.intermediate_size": "all"},
+    }
     assert config["global_distillation"]["domain"] == "vlm"
     assert config["global_distillation"]["freeze_policy"] == "train_all"
     controls = config["mip"]["runs"]["calibration-controls"]
@@ -321,48 +329,17 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
             "search_space": {"axes": {"ffn.intermediate_size": [3072]}},
         },
     }
-    candidates = config["mip"]["runs"]["multi-axis-candidates"]
-    assert candidates["constraints"] == {"params": {"min": "85%", "max": "95%"}}
-    assert candidates["variants"] == {
-        "retained-95": {"constraints": {"params": {"min": "92.5%", "max": "95%"}}},
-        "retained-90": {"constraints": {"params": {"min": "87.5%", "max": "92.5%"}}},
-        "retained-85": {"constraints": {"params": {"min": "85%", "max": "87.5%"}}},
-    }
-    assert candidates["solver"]["num_solutions"] == 8
-    assert candidates["homogeneous"]["enabled"] is False
-    assert config["post_mip"]["flows"]["candidate-evaluation"]["source"]["run"] == (
-        "multi-axis-candidates"
-    )
-    assert nodes["legal_candidates"] == {
+    assert config["post_mip"]["flows"]["candidate-evaluation"]["source"]["run"] == ("params-90")
+    assert "input" not in nodes["online_eval"]
+    assert nodes["best_lm"] == {
         "type": "filter",
+        "input": "online_eval",
         "mode": "top_k",
-        "metric": "mip.score",
+        "metric": "online_eval.lm_loss",
         "direction": "minimize",
-        "top_k": 24,
+        "top_k": 2,
     }
-    assert nodes["online_eval"]["input"] == "legal_candidates"
-    assert nodes["best_lm"]["top_k"] == 8
-    assert nodes["best_lm"]["origin_variant_quotas"] == {
-        "retained-95": 2,
-        "retained-90": 2,
-        "retained-85": 2,
-    }
-    assert nodes["kd_shortlist"] == {
-        "type": "filter",
-        "input": "serving",
-        "mode": "aggregate_rank",
-        "metrics": [
-            {"metric": "online_eval.lm_loss", "direction": "minimize", "weight": 1.0},
-            {
-                "metric": "serving.images_12.concurrency_4.image_throughput",
-                "direction": "maximize",
-                "weight": 0.25,
-            },
-        ],
-        "top_k": 4,
-        "origin_variant_quotas": {"retained-95": 1, "retained-90": 1, "retained-85": 1},
-    }
-    assert nodes["pre_kd_short_v1"]["input"] == "kd_shortlist"
+    assert nodes["pre_kd_short_v1"]["input"] == "serving"
     assert nodes["kd_64"]["input"] == "pre_kd_short_v1"
     trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
     assert [node["config"]["max_steps"] for node in trajectory_nodes] == [
@@ -496,18 +473,16 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
         stage.stage_id for stage in campaign.stages if stage.stage_id.startswith("post.")
     )
     assert campaign_post_stages[:8] == (
-        "post.candidate-evaluation.legal_candidates",
         "post.candidate-evaluation.online_eval",
         "post.candidate-evaluation.best_lm",
         "post.candidate-evaluation.materialized",
         "post.candidate-evaluation.serving",
-        "post.candidate-evaluation.kd_shortlist",
         "post.candidate-evaluation.pre_kd_short_v1",
         "post.candidate-evaluation.kd_64",
-    )
-    assert campaign_post_stages[8:14] == (
         "post.candidate-evaluation.short_v1_64",
         "post.candidate-evaluation.kd_128",
+    )
+    assert campaign_post_stages[8:12] == (
         "post.candidate-evaluation.short_v1_128",
         "post.candidate-evaluation.kd_256",
         "post.candidate-evaluation.short_v1_256",

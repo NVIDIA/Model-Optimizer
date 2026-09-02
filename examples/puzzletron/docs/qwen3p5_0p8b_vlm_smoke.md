@@ -214,21 +214,20 @@ reload, image serving, two-step VLM KD, and image-text evaluation.
 The extended grid uses 64-channel hidden-width alignment so its `960` and `896`
 endpoints pass the same physical materialization validator used by the smoke.
 
-`vlm_campaign.yaml` is the expanded multi-axis search. It keeps `3328` and
-`3072` FFN widths as conservative controls, then requests eight diverse candidates in each
-of three exact retained-parameter bands: 92.5–95%, 87.5–92.5%, and 85–87.5%.
-These controls and the deeper `2816`, `2432`, `2048`, `1664`, and `1408`
-search bins are hypotheses subject to exact whole-checkpoint parameter accounting.
-In particular, `2816` and `2048` are not justified VLM defaults.
-The candidate ledger deduplicates identical architectures across the bands and
-the first post-MIP filter caps image-loss screening at 24 candidates. At most
-eight checkpoints reach serving, and at most four enter KD. Every retained
-candidate follows one resumable trajectory from the same immutable pre-KD
-materialized checkpoint. AutoModel optimizer state is preserved while the
-cumulative step limit advances through 64, 128, and 256 updates. Candidate
-selection happens only after all three checkpoints have been evaluated. The
-selection is an explicit manual gate so the campaign does not encode a sampling
-interpretation owned by a separate evidence review.
+`vlm_campaign.yaml` is the expanded admitted-axis search: hidden width,
+heterogeneous FFN width, and depth. It reuses the existing `params-90` MIP
+profile and the established image-text LM-loss `top_k: 2` screening step.
+Serving measurements are recorded for both retained candidates but do not
+affect selection. The `3328` and `3072` FFN widths are separate conservative
+controls; the deeper `2816`, `2432`, `2048`, `1664`, and `1408` values remain
+search bins rather than justified VLM defaults.
+
+Every LM-loss-retained candidate follows one resumable trajectory from the same
+immutable pre-KD materialized checkpoint. AutoModel optimizer state is
+preserved while the cumulative step limit advances through 64, 128, and 256
+updates. Candidate selection happens only after all three checkpoints have been
+evaluated. The selection is an explicit manual gate so the campaign does not
+encode an additional sampling interpretation.
 
 The `3328` and `3072` controls follow their own otherwise identical 64/128/256
 learning curves. Every milestone uses the same `qwen35_vlm_short_v1` profile,
@@ -260,7 +259,7 @@ when checkpoint identity and evaluator artifacts still match. Results include
 student and teacher metrics and their deltas, but no quality gate.
 
 Use `e2e_vlm_quality_comparison_extended.yaml` for the same bounded comparison
-after the expanded multi-axis smoke candidate.
+after the expanded admitted-axis smoke candidate.
 
 Run the comparison route with a site-specific runner and a distinct output
 root. This route requires the pinned RealWorldQA and MMMU caches and is

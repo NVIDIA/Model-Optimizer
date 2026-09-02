@@ -5,11 +5,12 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - _self_
 
-# Expanded multi-axis VLM smoke. Width sanity exercises every admitted axis,
-# while the MIP profile realizes one mixed candidate inside the exact 5-15% pruning band
-# for materialization, reload, serving, two-step KD, and image-text evaluation.
+# Expanded admitted-axis VLM lifecycle smoke, not a full-axis campaign. Width
+# sanity exercises hidden width and FFN width, while the MIP profile also
+# realizes one depth-pruned mixed candidate for materialization, reload,
+# serving, two-step KD, and image-text evaluation.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_full_vlm_smoke_extended}
-display_name: Qwen3p5 0.8B expanded multi-axis VLM smoke
+display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM smoke
 
 pruning:
   eval_samples: 8

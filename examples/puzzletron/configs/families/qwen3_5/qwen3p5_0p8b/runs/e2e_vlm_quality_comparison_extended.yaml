@@ -5,9 +5,9 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Deterministic bounded regression for the expanded multi-axis smoke candidate.
+# Deterministic bounded regression for the expanded admitted-axis smoke candidate.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality_comparison_extended}
-display_name: Qwen3p5 0.8B expanded multi-axis VLM quality comparison
+display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM quality comparison
 
 post_mip:
   flows:

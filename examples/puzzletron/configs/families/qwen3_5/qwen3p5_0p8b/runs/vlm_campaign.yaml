@@ -6,11 +6,10 @@ defaults:
   - _self_
 
 # Bounded hidden-width, heterogeneous-FFN, and depth Qwen 3.5 0.8B VLM
-# campaign. Exact MIP parameter accounting admits 5-15% pruning candidates in
-# three retained-parameter bands. The post-MIP ledger deduplicates architectures
-# across bands before image-text screening, serving, one resumable KD learning
-# curve, and frozen-row evaluation. Attention and GDN remain at teacher geometry
-# until the native runtime passes compact-scoring and slicing equivalence gates.
+# campaign. It reuses the established params-90 MIP profile and LM-loss top-k
+# screening policy before serving, one resumable KD learning curve, and
+# frozen-row evaluation. Attention and GDN remain at teacher geometry until the
+# native runtime passes compact-scoring and slicing equivalence gates.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM pruning campaign
 
@@ -33,8 +32,6 @@ replacement_scoring:
 
 mip:
   runs:
-    params-90: false
-
     # Conservative FFN controls calibrate exact checkpoint accounting and enter
     # a dedicated matched post-MIP learning curve. They are not claim-bearing
     # defaults. Likewise, 2816 and 2048 are exploratory search bins, not
@@ -63,31 +60,6 @@ mip:
         max_seconds_per_solution: 300
       homogeneous: {enabled: false}
 
-    multi-axis-candidates:
-      constraints:
-        params: {min: 85%, max: 95%}
-      search_space:
-        depth: [0, 1, 2]
-        embedding: [1024, 960, 896]
-        axes_default: all
-        axes: {ffn.intermediate_size: all}
-      variants:
-        retained-95:
-          constraints:
-            params: {min: 92.5%, max: 95%}
-        retained-90:
-          constraints:
-            params: {min: 87.5%, max: 92.5%}
-        retained-85:
-          constraints:
-            params: {min: 85%, max: 87.5%}
-      solver:
-        backend: auto
-        num_solutions: 8
-        min_hamming_distance: 2
-        max_seconds_per_solution: 300
-      homogeneous: {enabled: false}
-
 global_distillation:
   enabled: false
   domain: vlm
@@ -106,20 +78,12 @@ post_mip:
   flows:
     candidate-evaluation:
       source:
-        run: multi-axis-candidates
+        run: params-90
         variants: all
         objectives: all
       nodes:
-        legal_candidates:
-          type: filter
-          mode: top_k
-          metric: mip.score
-          direction: minimize
-          top_k: 24
-
         online_eval:
           type: evaluation
-          input: legal_candidates
           config:
             eval_samples: 64
             block_size: 512
@@ -130,8 +94,7 @@ post_mip:
           mode: top_k
           metric: online_eval.lm_loss
           direction: minimize
-          top_k: 8
-          origin_variant_quotas: {retained-95: 2, retained-90: 2, retained-85: 2}
+          top_k: 2
 
         materialized:
           type: materialize
@@ -174,23 +137,9 @@ post_mip:
                 - --default-chat-template-kwargs
                 - '{"enable_thinking": false}'
 
-        kd_shortlist:
-          type: filter
-          input: serving
-          mode: aggregate_rank
-          metrics:
-            - metric: online_eval.lm_loss
-              direction: minimize
-              weight: 1.0
-            - metric: serving.images_12.concurrency_4.image_throughput
-              direction: maximize
-              weight: 0.25
-          top_k: 4
-          origin_variant_quotas: {retained-95: 1, retained-90: 1, retained-85: 1}
-
         pre_kd_short_v1:
           type: downstream_evaluation
-          input: kd_shortlist
+          input: serving
           model_source: materialized
           failure_policy: strict
           config: &short_v1_evaluation
