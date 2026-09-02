@@ -56,6 +56,7 @@ from modelopt.torch.export.quant_utils import (
     get_weight_block_size,
     postprocess_state_dict,
     process_layer_quant_config,
+    to_quantized_weight,
 )
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 from modelopt.torch.quantization.config import (
@@ -391,6 +392,23 @@ def test_get_weight_block_size(config, expected_block_size):
 
         else:
             assert block_size == 0
+
+
+def test_to_quantized_weight_int4_partial_block():
+    block_size = 128
+    in_dim = 2 * block_size + 1
+    scales = torch.tensor([[1.0, 2.0, 4.0]] * 4, device="cuda")
+    quantized_values = torch.arange(1, 5, device="cuda")[:, None]
+    weight = scales.repeat_interleave(block_size, dim=-1)[..., :in_dim] * quantized_values
+
+    packed = to_quantized_weight(weight, scales, QUANTIZATION_W4A8_AWQ, block_size=block_size)
+
+    assert packed.shape == (2, in_dim)
+    assert torch.equal(packed[0], torch.full((in_dim,), 0x21, dtype=torch.uint8, device="cuda"))
+    assert torch.equal(packed[1], torch.full((in_dim,), 0x43, dtype=torch.uint8, device="cuda"))
+
+    with pytest.raises(ValueError, match="Expected 3 weight scaling factors"):
+        to_quantized_weight(weight, scales[..., :-1], QUANTIZATION_W4A8_AWQ, block_size=block_size)
 
 
 @pytest.mark.parametrize(

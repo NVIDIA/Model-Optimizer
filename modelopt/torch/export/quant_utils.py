@@ -792,12 +792,19 @@ def process_layer_quant_config(layer_config_dict):
     return per_layer_config
 
 
-def pack_int4_in_uint8(weight, weights_scaling_factor):
+def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     """Packs the INT4 weights into uint8 tensor."""
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
-    block_size = weight.shape[-1] // weights_scaling_factor.shape[-1]
+    if block_size is None or block_size <= 0:
+        raise ValueError(f"Block size must be a positive integer, got {block_size}.")
+    expected_scale_count = (in_dim + block_size - 1) // block_size
+    if weights_scaling_factor.shape[-1] != expected_scale_count:
+        raise ValueError(
+            f"Expected {expected_scale_count} weight scaling factors for input dimension {in_dim} "
+            f"and block size {block_size}, got {weights_scaling_factor.shape[-1]}."
+        )
 
     # Scale, round, and clamp to the signed 4-bit range [-8..7].
     int8_tensor = (
@@ -912,7 +919,7 @@ def to_quantized_weight(
         return (weight / weights_scaling_factor[:, None]).to(torch.float8_e4m3fn)
 
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
-        return pack_int4_in_uint8(weight, weights_scaling_factor)
+        return pack_int4_in_uint8(weight, weights_scaling_factor, block_size)
 
     if quantization in [
         QUANTIZATION_NVFP4,
