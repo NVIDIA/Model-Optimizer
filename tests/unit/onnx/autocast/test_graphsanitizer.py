@@ -14,10 +14,41 @@
 # limitations under the License.
 
 import numpy as np
+import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
+import modelopt.onnx.trt_utils as trt_utils
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
+
+LARGE_EXTERNAL_DATA_BYTES = onnx.checker.MAXIMUM_PROTOBUF + 2048
+
+
+def create_large_external_initializer_model():
+    initializer = TensorProto(
+        name="embedding_weight",
+        data_type=TensorProto.FLOAT,
+        dims=[LARGE_EXTERNAL_DATA_BYTES // (512 * 4), 512],
+        data_location=TensorProto.EXTERNAL,
+    )
+    for key, value in (
+        ("location", "embedding_weight.bin"),
+        ("offset", "0"),
+        ("length", str(LARGE_EXTERNAL_DATA_BYTES)),
+    ):
+        initializer.external_data.add(key=key, value=value)
+
+    index = helper.make_tensor_value_info("index", TensorProto.INT64, [1])
+    output = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 512])
+    gather = helper.make_node(
+        "Gather", [initializer.name, index.name], [output.name], name="gather", axis=0
+    )
+    graph = helper.make_graph(
+        [gather], "large_external_initializer", [index], [output], initializer=[initializer]
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
+    model.ir_version = 10
+    return model
 
 
 def create_layernorm_model(input_shape, epsilon=1e-5, axis=-1, add_scale=True, add_bias=True):
@@ -407,3 +438,53 @@ def test_convert_fp64_no_changes_needed():
     assert sanitizer._convert_fp64_initializers() is False
     assert sanitizer._convert_fp64_io_types() is False
     assert sanitizer._convert_fp64_nodes() is False
+
+
+def test_sanitize_large_external_initializer_metadata(tmp_path):
+    model = create_large_external_initializer_model()
+    assert model.ByteSize() < 1024
+
+    sanitizer = GraphSanitizer(model, min_opset=22, onnx_path=str(tmp_path / "large_external.onnx"))
+    sanitizer.sanitize()
+
+    initializer = sanitizer.model.graph.initializer[0]
+    external_data = {entry.key: entry.value for entry in initializer.external_data}
+    assert initializer.data_location == TensorProto.EXTERNAL
+    assert not initializer.raw_data
+    assert external_data == {
+        "location": "embedding_weight.bin",
+        "offset": "0",
+        "length": str(LARGE_EXTERNAL_DATA_BYTES),
+    }
+    assert [node.op_type for node in sanitizer.model.graph.node] == ["Gather"]
+
+
+def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1])
+    custom_node = helper.make_node("CustomOp", [x.name], [y.name], name="custom")
+    graph = helper.make_graph([custom_node], "custom_graph", [x], [y])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 22)])
+    model_path = tmp_path / "custom.onnx"
+    tensor_info = {"Y": {"dtype": TensorProto.FLOAT, "shape": [1]}}
+    observed = {}
+
+    def get_custom_layers(onnx_path, trt_plugins):
+        observed["onnx_path"] = onnx_path
+        return [custom_node.name], tensor_info
+
+    def infer_types_shapes(model, trt_plugins, all_tensor_info):
+        observed["all_tensor_info"] = all_tensor_info
+        return model
+
+    monkeypatch.setattr(trt_utils, "set_trt_plugin_domain", lambda model, custom_ops: model)
+    monkeypatch.setattr(trt_utils, "get_custom_layers", get_custom_layers)
+    monkeypatch.setattr(trt_utils, "infer_types_shapes_tensorrt", infer_types_shapes)
+
+    sanitizer = GraphSanitizer(model, min_opset=22, onnx_path=str(model_path))
+    sanitizer.find_custom_nodes()
+
+    assert observed == {
+        "onnx_path": str(model_path.resolve()),
+        "all_tensor_info": tensor_info,
+    }

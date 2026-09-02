@@ -18,9 +18,9 @@
 import copy
 import io
 import os
+import sys
 import tempfile
 import uuid
-from collections import defaultdict
 from typing import Any
 
 import numpy as np
@@ -527,50 +527,111 @@ def name_onnx_nodes(graph: onnx.GraphProto) -> bool:
 
 def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelProto, bool]:
     """Duplicate constant tensors if they are shared."""
-    graph = gs.import_onnx(onnx_model)
-    name_dict = defaultdict(lambda: 0)
+    graph = onnx_model.graph
+    initializers = {initializer.name: initializer for initializer in graph.initializer}
+    use_counts = dict.fromkeys(initializers, 0)
+    for node in graph.node:
+        for input_name in node.input:
+            if input_name in use_counts:
+                use_counts[input_name] += 1
 
-    def _get_unique_name(old_name):
-        name_dict[old_name] += 1
-        return old_name + "_" + str(name_dict[old_name])
+    shared_names = {name for name, count in use_counts.items() if count > 1}
+    if not shared_names:
+        return onnx_model, False
 
-    # Get tensors with shared constant inputs
-    tensors = []
-    for node in graph.nodes:
-        for inp_idx, tensor in enumerate(node.inputs):
-            # constant is shared across multiple nodes
-            if isinstance(tensor, Constant) and len(tensor.outputs) > 1:
-                tensors.append({"tensor": tensor, "inp_node": node, "inp_idx": inp_idx})
+    used_names = set(initializers)
+    used_names.update(
+        sparse_initializer.values.name for sparse_initializer in graph.sparse_initializer
+    )
+    for value_info in list(graph.input) + list(graph.output) + list(graph.value_info):
+        used_names.add(value_info.name)
+    for node in graph.node:
+        used_names.update(name for name in node.input if name)
+        used_names.update(name for name in node.output if name)
 
-    # Duplicate shared tensors
-    for tensor_dict in tensors:
-        tensor = tensor_dict["tensor"]
-        new_tensor = Constant(
-            name=_get_unique_name(tensor.name),
-            values=tensor.values,
+    def _get_nested_graphs(node: onnx.NodeProto):
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.GRAPH:
+                yield attribute.g
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                yield from attribute.graphs
+
+    def _find_captured_names(nested_graph: onnx.GraphProto, outer_names: set[str]) -> set[str]:
+        local_names = {value_info.name for value_info in nested_graph.input}
+        local_names.update(initializer.name for initializer in nested_graph.initializer)
+        local_names.update(
+            sparse_initializer.values.name for sparse_initializer in nested_graph.sparse_initializer
         )
-        tensor_dict["inp_node"].inputs[tensor_dict["inp_idx"]] = new_tensor
+        for nested_node in nested_graph.node:
+            local_names.update(name for name in nested_node.output if name)
 
-    onnx_model = gs.export_onnx(graph)
-    is_modified = bool(tensors)
-    return onnx_model, is_modified
+        visible_outer_names = outer_names - local_names
+        captured_names = {
+            output.name for output in nested_graph.output if output.name in visible_outer_names
+        }
+        for nested_node in nested_graph.node:
+            captured_names.update(
+                input_name for input_name in nested_node.input if input_name in visible_outer_names
+            )
+            for child_graph in _get_nested_graphs(nested_node):
+                captured_names.update(_find_captured_names(child_graph, visible_outer_names))
+        return captured_names
+
+    captured_names = set()
+    for node in graph.node:
+        for nested_graph in _get_nested_graphs(node):
+            captured_names.update(_find_captured_names(nested_graph, shared_names))
+
+    next_suffix: dict[str, int] = {}
+
+    def _get_unique_name(old_name: str) -> str:
+        suffix = next_suffix.get(old_name, 1)
+        new_name = f"{old_name}_{suffix}"
+        while new_name in used_names:
+            suffix += 1
+            new_name = f"{old_name}_{suffix}"
+        next_suffix[old_name] = suffix + 1
+        used_names.add(new_name)
+        return new_name
+
+    for node in graph.node:
+        for input_index, input_name in enumerate(node.input):
+            if input_name not in shared_names:
+                continue
+
+            duplicated_initializer = graph.initializer.add()
+            duplicated_initializer.CopyFrom(initializers[input_name])
+            duplicated_initializer.name = _get_unique_name(input_name)
+            node.input[input_index] = duplicated_initializer.name
+
+    removed_initializer_names = shared_names - captured_names
+    for initializer in initializers.values():
+        if initializer.name in removed_initializer_names:
+            graph.initializer.remove(initializer)
+    for graph_input in list(graph.input):
+        if graph_input.name in removed_initializer_names:
+            graph.input.remove(graph_input)
+
+    return onnx_model, True
 
 
-def check_model(model: onnx.ModelProto) -> None:
-    """Checks if the given model is valid."""
-    save_as_external_data = False
+def is_model_too_large_for_protobuf(model: onnx.ModelProto) -> bool:
+    """Return whether a model cannot safely use an in-memory protobuf API."""
     try:
         model_size = model.ByteSize()
     except Exception as e:
         logger.warning(
             "Failed to compute model size with ByteSize (%s). Using external data path.", e
         )
-        save_as_external_data = True
-    else:
-        if model_size <= 0 or model_size > (2 * (1024**3)):
-            save_as_external_data = True
+        return True
 
-    if save_as_external_data:
+    max_model_size = onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b"")
+    return model_size <= 0 or model_size > max_model_size
+
+
+def check_model(model: onnx.ModelProto) -> None:
+    """Checks if the given model is valid."""
+    if is_model_too_large_for_protobuf(model):
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
@@ -1171,19 +1232,7 @@ def infer_types_verification(model: onnx.ModelProto) -> onnx.ModelProto:
 
 def infer_shapes(model: onnx.ModelProto, **kwargs):
     """Infers shapes of the onnx graph, handles large models."""
-    save_as_external_data = False
-    try:
-        model_size = model.ByteSize()
-    except Exception as e:
-        logger.warning(
-            "Failed to compute model size with ByteSize (%s). Using external data path.", e
-        )
-        save_as_external_data = True
-    else:
-        if model_size <= 0 or model_size > (2 * (1024**3)):
-            save_as_external_data = True
-
-    if save_as_external_data:
+    if is_model_too_large_for_protobuf(model):
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]

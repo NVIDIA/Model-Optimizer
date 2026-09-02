@@ -20,6 +20,8 @@ from collections import OrderedDict
 
 import numpy as np
 import onnx
+import polygraphy.backend.onnx as polygraphy_onnx
+import polygraphy.backend.onnxrt as polygraphy_onnxrt
 import pytest
 from onnx import TensorProto, helper
 
@@ -65,6 +67,66 @@ def test_init(simple_model):
     runner = ReferenceRunner(simple_model)
     assert sorted(runner.input_names) == ["X1", "X2"]
     assert isinstance(runner.model, onnx.ModelProto)
+
+
+def test_get_ort_runner_uses_file_when_modified_byte_size_fails(monkeypatch):
+    class ModelWithUnavailableByteSize:
+        def ByteSize(self):  # noqa: N802
+            raise ValueError("model size unavailable")
+
+    modified_model = ModelWithUnavailableByteSize()
+    runner = ReferenceRunner.__new__(ReferenceRunner)
+    runner.providers = ["cpu"]
+    saved = {}
+    session = {}
+
+    def modify_outputs():
+        return modified_model
+
+    def fake_save_onnx(model, path, save_as_external_data=False):
+        saved.update(model=model, path=path, external=save_as_external_data)
+
+    def fake_session_from_onnx(source, providers):
+        session.update(source=source, providers=providers)
+        return "session"
+
+    monkeypatch.setattr(onnx_utils, "check_model_uses_external_data", lambda model: False)
+    monkeypatch.setattr(onnx_utils, "save_onnx", fake_save_onnx)
+    monkeypatch.setattr(
+        polygraphy_onnx,
+        "BytesFromOnnx",
+        lambda model: pytest.fail("Byte serialization should not be used"),
+    )
+    monkeypatch.setattr(polygraphy_onnxrt, "SessionFromOnnx", fake_session_from_onnx)
+    monkeypatch.setattr(polygraphy_onnxrt, "OnnxrtRunner", lambda build_session: build_session)
+
+    runners, model_temp_dir = runner._get_ort_runner(modify_outputs)
+    model_temp_path = model_temp_dir.name
+    try:
+        assert runners == ["session"]
+        assert saved["model"] is modified_model
+        assert saved["external"]
+        assert session == {"source": saved["path"], "providers": ["cpu"]}
+        assert os.path.dirname(saved["path"]) == model_temp_path
+    finally:
+        model_temp_dir.cleanup()
+
+
+def test_run_cleans_model_tempdir_when_input_loading_fails(monkeypatch, reference_runner):
+    model_temp_dir = tempfile.TemporaryDirectory()
+    model_temp_path = model_temp_dir.name
+
+    monkeypatch.setattr(reference_runner, "_get_ort_runner", lambda model: ([], model_temp_dir))
+
+    def fail_to_load_inputs(inputs):
+        raise ValueError("input loading failed")
+
+    monkeypatch.setattr(reference_runner, "_load_inputs", fail_to_load_inputs)
+
+    with pytest.raises(ValueError, match="input loading failed"):
+        reference_runner.run()
+
+    assert not os.path.exists(model_temp_path)
 
 
 def test_run_with_random_inputs(reference_runner):

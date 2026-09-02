@@ -27,6 +27,7 @@ import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
 from modelopt.onnx.autocast.__main__ import get_parser, main
 from modelopt.onnx.autocast.convert import convert_to_f16
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.autocast.logging_config import configure_logging
 
 configure_logging("DEBUG")
@@ -153,6 +154,43 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     onnx.checker.check_model(loaded_model)
 
 
+def test_external_data_is_sanitized_once_before_loading(tmp_path, simple_model, monkeypatch):
+    model_path = tmp_path / "external_model.onnx"
+    onnx.save_model(
+        simple_model,
+        model_path,
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location="external_model.data",
+        size_threshold=0,
+    )
+
+    sanitize_calls = []
+    original_sanitize = GraphSanitizer.sanitize
+
+    def record_sanitize(sanitizer):
+        initializer = sanitizer.model.graph.initializer[0]
+        sanitize_calls.append(
+            (sanitizer.onnx_path, initializer.data_location, bool(initializer.raw_data))
+        )
+        return original_sanitize(sanitizer)
+
+    monkeypatch.setattr(GraphSanitizer, "sanitize", record_sanitize)
+
+    converted_model = convert_to_mixed_precision(
+        onnx_path=str(model_path), keep_io_types=True, data_max=np.inf
+    )
+
+    assert sanitize_calls == [(str(model_path.resolve()), onnx.TensorProto.EXTERNAL, False)]
+    assert all(
+        initializer.data_location != onnx.TensorProto.EXTERNAL
+        for initializer in converted_model.graph.initializer
+    )
+    assert all(not initializer.external_data for initializer in converted_model.graph.initializer)
+    assert all(initializer.raw_data for initializer in converted_model.graph.initializer)
+    onnx.checker.check_model(converted_model)
+
+
 def assert_input_precision(nodes, dtype="float16"):
     for node in nodes:
         for inp in node.inputs:
@@ -213,6 +251,7 @@ def test_conv_resize_conversion(tmp_path):
     assert all(inp.dtype == np.float16 for inp in resize_node.inputs[0:2]), (
         "Resize data and ROI inputs should be FP16"
     )
+    assert resize_node.inputs[1].name != resize_node.inputs[2].name
 
 
 @pytest.mark.parametrize("target_opset", [13, 17, 19, 21])
