@@ -3,7 +3,7 @@
 Evidence status: `teacher_only`. This record contains one completed evaluation
 per path on an identical ordered selection of 344 rows. It contains no student
 result and no repeated measurement. The exact upstream model revision was not
-retained, so the run is not exactly reproducible from the published record.
+retained, so the run is not reproducible from the published record.
 
 ## Results
 

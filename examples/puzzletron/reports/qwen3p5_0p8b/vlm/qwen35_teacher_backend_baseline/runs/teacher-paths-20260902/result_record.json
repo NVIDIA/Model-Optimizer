@@ -95,7 +95,7 @@
     "uncertainty": null
   },
   "reproduction": {
-    "status": "not_exactly_reproducible",
+    "status": "not_reproducible",
     "prerequisites": [
       "Install the base Puzzletron requirements and the evaluator-specific requirements described in examples/puzzletron/docs/vlm_checkpoint_evaluation.md.",
       "Download the named model and verify its content fingerprint; the exact upstream model revision was not retained. Cache the three datasets at the revisions recorded above; do not add them to Git."
