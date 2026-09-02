@@ -480,8 +480,7 @@ def test_short_profile_reruns_stale_completed_repetitions(
             str(hf_home),
         ]
     )
-    profile_identity = {"chat_template_sha256": "first"} if corruption == "profile" else None
-    evaluation.evaluate(args, profile_identity_overrides=profile_identity)
+    evaluation.evaluate(args)
 
     if corruption == "checkpoint":
         (model / "preprocessor_config.json").write_text('{"changed": true}\n')
@@ -490,9 +489,15 @@ def test_short_profile_reruns_stale_completed_repetitions(
     elif corruption == "result":
         (output / "short-repetition-1" / "attempt" / "summary.json").unlink()
     else:
-        profile_identity = {"chat_template_sha256": "second"}
 
-    evaluation.evaluate(args, profile_identity_overrides=profile_identity)
+        def changed_chat_template(_checkpoint_path, output_directory):
+            target = output_directory / "modelopt_qwen35_no_think.jinja"
+            target.write_text("changed template\n")
+            return target
+
+        monkeypatch.setattr(vlm_model, "no_think_chat_template", changed_chat_template)
+
+    evaluation.evaluate(args)
     assert len(calls) == expected_calls
 
 
@@ -917,13 +922,9 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
     output = tmp_path / "output"
     captured = {"invocations": 0}
 
-    def fake_evaluate(args, *, settings_overrides, profile_identity_overrides, preflight_callback):
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
         captured["invocations"] += 1
-        captured.update(
-            args=args,
-            settings_overrides=settings_overrides,
-            profile_identity_overrides=profile_identity_overrides,
-        )
+        captured.update(args=args, settings_overrides=settings_overrides)
         preflight_callback({"profile": suites.EVALUATION_PROFILE, "sample_limit": None})
         runs = []
         score_offset = (captured["invocations"] - 1) * 0.2
@@ -993,7 +994,7 @@ def test_post_mip_prefix100_rejects_different_repetition_metrics(
     monkeypatch,
     tmp_path,
 ):
-    def fake_evaluate(args, *, settings_overrides, profile_identity_overrides, preflight_callback):
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
         return {
             "runs": [
                 {"metrics": {"realworldqa.accuracy": 0.5}, "result_path": "first.json"},

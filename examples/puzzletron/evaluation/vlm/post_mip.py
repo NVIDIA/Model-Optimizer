@@ -121,11 +121,6 @@ def _run_profile(
     result = evaluate(
         args,
         settings_overrides=settings,
-        profile_identity_overrides=(
-            {"chat_template_sha256": template_identity["derived_sha256"]}
-            if template_identity is not None
-            else None
-        ),
         preflight_callback=write_preflight,
     )
     return args, result, profile_path

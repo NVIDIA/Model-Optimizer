@@ -78,6 +78,17 @@ def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
     return {**checkpoint_identity(root), "content_files": files}
 
 
+def _chat_template_sha256(settings: Mapping[str, object]) -> str | None:
+    """Fingerprint a generated chat template that affects model inputs."""
+    model_args = settings.get("model_args")
+    if not isinstance(model_args, Mapping):
+        return None
+    chat_template = model_args.get("chat_template")
+    if not isinstance(chat_template, str):
+        return None
+    return sha256(Path(chat_template).read_bytes()).hexdigest()
+
+
 def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:
     """Fingerprint evaluator outputs needed to reuse a completed repetition."""
     return [
@@ -190,7 +201,6 @@ def evaluate(
     args: argparse.Namespace,
     *,
     settings_overrides: Mapping[str, object] | None = None,
-    profile_identity_overrides: Mapping[str, object] | None = None,
     preflight_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     """Prepare and run one pinned VLM profile invocation."""
@@ -248,7 +258,9 @@ def evaluate(
         "profile_name": report.get("profile_name"),
         "profile_schema": report.get("profile_schema"),
     }
-    profile_identity.update(profile_identity_overrides or {})
+    chat_template_sha256 = _chat_template_sha256(settings)
+    if chat_template_sha256 is not None:
+        profile_identity["chat_template_sha256"] = chat_template_sha256
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
