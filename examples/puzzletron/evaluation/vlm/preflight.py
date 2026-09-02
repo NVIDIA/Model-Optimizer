@@ -84,8 +84,8 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     if profile_task is not None:
         if profile_contract is None:
             raise ValueError("--profile-task requires a versioned evaluation profile")
-        if profile_contract.name != "full-v1":
-            raise ValueError("--profile-task is supported only for full-v1")
+        if profile_contract.name not in {"full-v1", "short-all-native-v1"}:
+            raise ValueError("--profile-task is supported only for full-v1 and short-all-native-v1")
     if profile_task_shard is not None and profile_task is None:
         raise ValueError("--profile-task-shard requires --profile-task")
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
@@ -99,9 +99,14 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
     if profile_contract is not None and profile_contract.exact_rows is not None:
-        quick_manifest = suites.validate_quick_manifest(
-            profile_contract.exact_rows,
+        exact_rows = profile_contract.exact_rows
+        if profile_task is not None:
+            manifest_tasks = cast("dict[str, object]", exact_rows["tasks"])
+            exact_rows = {**exact_rows, "tasks": {profile_task: manifest_tasks[profile_task]}}
+        quick_manifest = suites.validate_exact_rows_manifest(
+            exact_rows,
             expected_revision=str(profile_contract.manifest["lmms_eval_revision"]),
+            expected_tasks=source_tasks,
         )
     elif suite == "quick":
         quick_manifest = suites.load_quick_manifest(args.quick_manifest)
@@ -299,9 +304,7 @@ def _report(
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
         "quick_selected_rows": (
-            suites.QUICK_SELECTED_ROWS
-            if suite in {"quick", "short-v1", "short-native-v1"}
-            else None
+            suites.manifest_selected_rows(quick_manifest) if quick_manifest is not None else None
         ),
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None

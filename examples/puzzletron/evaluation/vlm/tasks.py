@@ -88,15 +88,18 @@ def _write_quick_selection_module(tasks_root: Path, manifest: dict[str, object])
     entries: dict[str, dict[str, object]] = {}
     functions: list[str] = []
     manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
-    for task in suites.QUICK_TASKS:
+    for task in manifest_tasks:
         rows = cast("list[dict[str, object]]", manifest_tasks[task]["rows"])
-        if task == "mvbench":
-            for leaf in suites.MVBENCH_LEAF_TASKS:
-                leaf_task = f"mvbench_{leaf}"
+        if task in {"mvbench", "video_mmmu"}:
+            leaves = (
+                suites.MVBENCH_LEAF_TASKS if task == "mvbench" else suites.VIDEO_MMMU_LEAF_TASKS
+            )
+            for leaf in leaves:
+                leaf_task = f"{task}_{leaf}"
                 selected = [row for row in rows if row["leaf_task"] == leaf_task]
-                key = suites.task_name("mvbench", leaf=leaf)
+                key = suites.task_name(task, leaf=leaf)
                 entries[key] = {
-                    "kind": "mvbench",
+                    "kind": task,
                     "config": leaf,
                     "indices": [row["source_row_index"] for row in selected],
                     "source_ids": [row["source_sample_id"] for row in selected],
@@ -114,7 +117,7 @@ def _write_quick_selection_module(tasks_root: Path, manifest: dict[str, object])
             functions.append(
                 f"def select_{key}(documents):\n    return _select(documents, {key!r})\n"
             )
-    source = f'''"""Generated exact-row selectors for the VLM benchmark quick suite."""
+    source = f'''"""Generated exact-row selectors for a VLM benchmark profile."""
 
 _SELECTIONS = {entries!r}
 
@@ -125,16 +128,18 @@ def _select(documents, name):
     observed = []
     for index in indices:
         if index >= len(documents):
-            raise ValueError(f"quick manifest row {{index}} is outside {{name}}")
+            raise ValueError(f"exact-row manifest row {{index}} is outside {{name}}")
         document = documents[index]
         if selection["kind"] == "realworldqa":
             observed.append(f"test:{{index}}")
         elif selection["kind"] == "mmmu_val":
             observed.append(str(document["id"]))
-        else:
+        elif selection["kind"] in {"mvbench", "video_mmmu"}:
             observed.append(f"{{selection['config']}}:{{index}}")
+        else:
+            observed.append(f"{{selection['kind']}}:{{index}}")
     if observed != selection["source_ids"]:
-        raise ValueError(f"quick manifest source identities drifted for {{name}}")
+        raise ValueError(f"exact-row manifest source identities drifted for {{name}}")
     return documents.select(indices)
 
 
@@ -419,7 +424,7 @@ def prepare(
                     leaves=profile_task_leaves or suites.VIDEO_MMMU_LEAF_TASKS,
                     include_root="tasks/videommmu/{}.yaml",
                     dataset_path=dataset_snapshots[task],
-                    quick_manifest=None,
+                    quick_manifest=quick_manifest,
                 )
             )
             continue

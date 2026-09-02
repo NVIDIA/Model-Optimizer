@@ -29,7 +29,7 @@ the evaluator checkout.
 
 The documented [worker environment](environment_setup.md) installs the same
 requirements file, and startup validates both the installed revision and that
-the checkout has no local changes. To use `short-native-v1`, install
+the checkout has no local changes. To use a native profile, install
 `examples/puzzletron/requirements-vlm-native.txt` after the base requirements.
 That file selects the separately pinned upstream revision containing the native
 Qwen 3.5 backend. Preflight rejects an evaluator revision that does not match
@@ -43,6 +43,7 @@ Use a versioned profile when scores will be compared across checkpoints:
 | --- | --- | --- |
 | `short-v1` | RealWorldQA, MMMU, and MVBench | 344 exact rows; MMMU uses four rows per subject and MVBench uses eight per task |
 | `short-native-v1` | Same rows as `short-v1`, using the native Qwen 3.5 backend | 344 exact rows; native video processing preserves Qwen timestamp metadata |
+| `short-all-native-v1` | All eight judge-free benchmarks, using the native Qwen 3.5 backend | 690 exact rows; retains the 344-row selection and adds 346 rows across the five additional benchmarks |
 | `full-v1` | Eight judge-free image and video benchmarks | Every row from each pinned dataset revision |
 
 All profiles pin the evaluator revision, model family, dataset revisions,
@@ -55,6 +56,12 @@ This ensures short-answer tasks spend their token budget on the scored answer
 instead of hidden reasoning. Preflight reports the profile schema and SHA-256
 contract fingerprint. The fingerprint is also part of the resumable run
 identity, so results from a different contract are not reused.
+
+`short-all-native-v1` balances VideoMMMU across its three task leaves,
+Video-MME across duration and domain, MLVU across task type, and PerceptionTest
+across area and reasoning type. LongVideoBench uses deterministic index-spaced
+rows. This profile is a reproducible regression screen, not a full-benchmark
+quality estimate.
 
 `full-v1` excludes MMVU because complete MMVU evaluation requires an external
 judge. Run MMVU separately through `mmvu-smoke` or the judge-enabled legacy
@@ -82,7 +89,8 @@ frames.
 Evaluation is offline and requires every selected dataset revision to already
 exist under an explicit Hugging Face cache root. Populate the pinned image
 datasets for the selected profile or suite before starting evaluation. The
-example uses `short-v1`:
+repository stores only profile metadata and exact-row selectors; it does not
+store benchmark records or media. The example uses `short-v1`:
 
 ```bash
 export HF_HOME=/path/to/huggingface-cache
@@ -144,14 +152,16 @@ python -m examples.puzzletron.evaluation.vlm.run \
 ```
 
 Replace `short-v1` with `short-native-v1` after installing the native
-requirements, or with `full-v1` after every full-profile dataset and video
-asset has been cached. Use `--preflight-only` before consuming GPU time.
+requirements. Use `short-all-native-v1` after caching all eight judge-free
+benchmarks, or `full-v1` after caching the same datasets for a complete
+generic-vLLM evaluation. Use `--preflight-only` before consuming GPU time.
 
-For a scheduler with a shorter walltime than the complete full profile, run one
-contract task per job with `--profile full-v1 --profile-task TASK`. Every shard
-retains the full profile fingerprint while recording its selected source task in
-the preflight and resumable identity. A complete full-v1 result requires exactly
-one successful shard for each of the eight tasks declared in the manifest.
+For scheduler-safe parallelism, run one contract task per job with either
+`--profile full-v1 --profile-task TASK` or
+`--profile short-all-native-v1 --profile-task TASK`. Every shard retains the
+complete profile fingerprint while recording its selected source task in the
+preflight and resumable identity. A complete result requires exactly one
+successful shard for each of the eight tasks declared in the selected manifest.
 
 Grouped tasks can use multiple batch-1 workers without changing inference
 batching. Add `--profile-task-shard INDEX/COUNT` to `mvbench` or `video_mmmu`,
@@ -192,13 +202,13 @@ command, standard output and error, the raw evaluator result, and normalized
 `modelopt.vlm-evaluation-preflight/v1`. Repeating a run creates new attempt
 directories rather than overwriting previous evidence.
 
-`short-v1` and `full-v1` use the generic vLLM backend. `short-native-v1` loads
-the checkpoint through Transformers with the native Qwen 3.5 wrapper. The
-native route preserves Qwen video timestamp metadata; the generic route
-converts media to generic multimodal messages and does not preserve that
-metadata. The routes also use different pinned evaluator revisions and prompt
-construction, so their scores are backend-specific baselines rather than an
-engine-only comparison.
+`short-v1` and `full-v1` use the generic vLLM backend. `short-native-v1` and
+`short-all-native-v1` load the checkpoint through Transformers with the native
+Qwen 3.5 wrapper. The native route preserves Qwen video timestamp metadata;
+the generic route converts media to generic multimodal messages and does not
+preserve that metadata. The routes also use different pinned evaluator
+revisions and prompt construction, so their scores are backend-specific
+baselines rather than an engine-only comparison.
 
 If preflight fails, address the reported checkpoint, revision, cache, decoder,
 or credential mismatch before retrying. Inspect `stderr.txt` in the attempt

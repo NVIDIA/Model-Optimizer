@@ -1,0 +1,1509 @@
+{
+  "extends": "short-v1",
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "short-all-native-v1",
+  "lmms_eval_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
+  "backend": {
+    "attention_implementation": "sdpa",
+    "enable_thinking": false,
+    "name": "qwen3_5"
+  },
+  "tasks": {
+    "video_mmmu": {
+      "dataset_repository": "lmms-lab/VideoMMMU",
+      "dataset_revision": "d1c35ac933123d79e877b7f1b9506afb0309cf1b",
+      "max_new_tokens": 1024,
+      "scoring_task_config": "tasks/videommmu/video_mmmu.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "adaptation:0",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 13,
+          "source_sample_id": "adaptation:13",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 26,
+          "source_sample_id": "adaptation:26",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 39,
+          "source_sample_id": "adaptation:39",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 52,
+          "source_sample_id": "adaptation:52",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 65,
+          "source_sample_id": "adaptation:65",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 78,
+          "source_sample_id": "adaptation:78",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 91,
+          "source_sample_id": "adaptation:91",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 104,
+          "source_sample_id": "adaptation:104",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 117,
+          "source_sample_id": "adaptation:117",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 130,
+          "source_sample_id": "adaptation:130",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "adaptation:143",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "adaptation:156",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 169,
+          "source_sample_id": "adaptation:169",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 182,
+          "source_sample_id": "adaptation:182",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "adaptation:195",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 208,
+          "source_sample_id": "adaptation:208",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 221,
+          "source_sample_id": "adaptation:221",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 234,
+          "source_sample_id": "adaptation:234",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 247,
+          "source_sample_id": "adaptation:247",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 260,
+          "source_sample_id": "adaptation:260",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 273,
+          "source_sample_id": "adaptation:273",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 286,
+          "source_sample_id": "adaptation:286",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 299,
+          "source_sample_id": "adaptation:299",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 0,
+          "source_sample_id": "comprehension:0",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 13,
+          "source_sample_id": "comprehension:13",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 26,
+          "source_sample_id": "comprehension:26",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 39,
+          "source_sample_id": "comprehension:39",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 52,
+          "source_sample_id": "comprehension:52",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 65,
+          "source_sample_id": "comprehension:65",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 78,
+          "source_sample_id": "comprehension:78",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 91,
+          "source_sample_id": "comprehension:91",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 104,
+          "source_sample_id": "comprehension:104",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 117,
+          "source_sample_id": "comprehension:117",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 130,
+          "source_sample_id": "comprehension:130",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "comprehension:143",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "comprehension:156",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 169,
+          "source_sample_id": "comprehension:169",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 182,
+          "source_sample_id": "comprehension:182",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "comprehension:195",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 208,
+          "source_sample_id": "comprehension:208",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 221,
+          "source_sample_id": "comprehension:221",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 234,
+          "source_sample_id": "comprehension:234",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 247,
+          "source_sample_id": "comprehension:247",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 260,
+          "source_sample_id": "comprehension:260",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 273,
+          "source_sample_id": "comprehension:273",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 286,
+          "source_sample_id": "comprehension:286",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 299,
+          "source_sample_id": "comprehension:299",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 0,
+          "source_sample_id": "perception:0",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 13,
+          "source_sample_id": "perception:13",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 26,
+          "source_sample_id": "perception:26",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 39,
+          "source_sample_id": "perception:39",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 52,
+          "source_sample_id": "perception:52",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 65,
+          "source_sample_id": "perception:65",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 78,
+          "source_sample_id": "perception:78",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 91,
+          "source_sample_id": "perception:91",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 104,
+          "source_sample_id": "perception:104",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 117,
+          "source_sample_id": "perception:117",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 130,
+          "source_sample_id": "perception:130",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "perception:143",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "perception:156",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 169,
+          "source_sample_id": "perception:169",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 182,
+          "source_sample_id": "perception:182",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "perception:195",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 208,
+          "source_sample_id": "perception:208",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 221,
+          "source_sample_id": "perception:221",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 234,
+          "source_sample_id": "perception:234",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 247,
+          "source_sample_id": "perception:247",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 260,
+          "source_sample_id": "perception:260",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 273,
+          "source_sample_id": "perception:273",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 286,
+          "source_sample_id": "perception:286",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 299,
+          "source_sample_id": "perception:299",
+          "leaf_task": "video_mmmu_perception"
+        }
+      ]
+    },
+    "videomme": {
+      "dataset_repository": "lmms-lab/Video-MME",
+      "dataset_revision": "ead1408f75b618502df9a1d8e0950166bf0a2a0b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/videomme/videomme.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "videomme:0"
+        },
+        {
+          "source_row_index": 90,
+          "source_sample_id": "videomme:90"
+        },
+        {
+          "source_row_index": 179,
+          "source_sample_id": "videomme:179"
+        },
+        {
+          "source_row_index": 269,
+          "source_sample_id": "videomme:269"
+        },
+        {
+          "source_row_index": 270,
+          "source_sample_id": "videomme:270"
+        },
+        {
+          "source_row_index": 310,
+          "source_sample_id": "videomme:310"
+        },
+        {
+          "source_row_index": 349,
+          "source_sample_id": "videomme:349"
+        },
+        {
+          "source_row_index": 389,
+          "source_sample_id": "videomme:389"
+        },
+        {
+          "source_row_index": 390,
+          "source_sample_id": "videomme:390"
+        },
+        {
+          "source_row_index": 440,
+          "source_sample_id": "videomme:440"
+        },
+        {
+          "source_row_index": 489,
+          "source_sample_id": "videomme:489"
+        },
+        {
+          "source_row_index": 539,
+          "source_sample_id": "videomme:539"
+        },
+        {
+          "source_row_index": 540,
+          "source_sample_id": "videomme:540"
+        },
+        {
+          "source_row_index": 580,
+          "source_sample_id": "videomme:580"
+        },
+        {
+          "source_row_index": 619,
+          "source_sample_id": "videomme:619"
+        },
+        {
+          "source_row_index": 659,
+          "source_sample_id": "videomme:659"
+        },
+        {
+          "source_row_index": 660,
+          "source_sample_id": "videomme:660"
+        },
+        {
+          "source_row_index": 730,
+          "source_sample_id": "videomme:730"
+        },
+        {
+          "source_row_index": 799,
+          "source_sample_id": "videomme:799"
+        },
+        {
+          "source_row_index": 869,
+          "source_sample_id": "videomme:869"
+        },
+        {
+          "source_row_index": 870,
+          "source_sample_id": "videomme:870"
+        },
+        {
+          "source_row_index": 880,
+          "source_sample_id": "videomme:880"
+        },
+        {
+          "source_row_index": 889,
+          "source_sample_id": "videomme:889"
+        },
+        {
+          "source_row_index": 899,
+          "source_sample_id": "videomme:899"
+        },
+        {
+          "source_row_index": 900,
+          "source_sample_id": "videomme:900"
+        },
+        {
+          "source_row_index": 990,
+          "source_sample_id": "videomme:990"
+        },
+        {
+          "source_row_index": 1079,
+          "source_sample_id": "videomme:1079"
+        },
+        {
+          "source_row_index": 1169,
+          "source_sample_id": "videomme:1169"
+        },
+        {
+          "source_row_index": 1170,
+          "source_sample_id": "videomme:1170"
+        },
+        {
+          "source_row_index": 1210,
+          "source_sample_id": "videomme:1210"
+        },
+        {
+          "source_row_index": 1249,
+          "source_sample_id": "videomme:1249"
+        },
+        {
+          "source_row_index": 1289,
+          "source_sample_id": "videomme:1289"
+        },
+        {
+          "source_row_index": 1290,
+          "source_sample_id": "videomme:1290"
+        },
+        {
+          "source_row_index": 1340,
+          "source_sample_id": "videomme:1340"
+        },
+        {
+          "source_row_index": 1389,
+          "source_sample_id": "videomme:1389"
+        },
+        {
+          "source_row_index": 1439,
+          "source_sample_id": "videomme:1439"
+        },
+        {
+          "source_row_index": 1440,
+          "source_sample_id": "videomme:1440"
+        },
+        {
+          "source_row_index": 1480,
+          "source_sample_id": "videomme:1480"
+        },
+        {
+          "source_row_index": 1519,
+          "source_sample_id": "videomme:1519"
+        },
+        {
+          "source_row_index": 1559,
+          "source_sample_id": "videomme:1559"
+        },
+        {
+          "source_row_index": 1560,
+          "source_sample_id": "videomme:1560"
+        },
+        {
+          "source_row_index": 1630,
+          "source_sample_id": "videomme:1630"
+        },
+        {
+          "source_row_index": 1699,
+          "source_sample_id": "videomme:1699"
+        },
+        {
+          "source_row_index": 1769,
+          "source_sample_id": "videomme:1769"
+        },
+        {
+          "source_row_index": 1770,
+          "source_sample_id": "videomme:1770"
+        },
+        {
+          "source_row_index": 1780,
+          "source_sample_id": "videomme:1780"
+        },
+        {
+          "source_row_index": 1789,
+          "source_sample_id": "videomme:1789"
+        },
+        {
+          "source_row_index": 1799,
+          "source_sample_id": "videomme:1799"
+        },
+        {
+          "source_row_index": 1800,
+          "source_sample_id": "videomme:1800"
+        },
+        {
+          "source_row_index": 1890,
+          "source_sample_id": "videomme:1890"
+        },
+        {
+          "source_row_index": 1979,
+          "source_sample_id": "videomme:1979"
+        },
+        {
+          "source_row_index": 2069,
+          "source_sample_id": "videomme:2069"
+        },
+        {
+          "source_row_index": 2070,
+          "source_sample_id": "videomme:2070"
+        },
+        {
+          "source_row_index": 2110,
+          "source_sample_id": "videomme:2110"
+        },
+        {
+          "source_row_index": 2149,
+          "source_sample_id": "videomme:2149"
+        },
+        {
+          "source_row_index": 2189,
+          "source_sample_id": "videomme:2189"
+        },
+        {
+          "source_row_index": 2190,
+          "source_sample_id": "videomme:2190"
+        },
+        {
+          "source_row_index": 2240,
+          "source_sample_id": "videomme:2240"
+        },
+        {
+          "source_row_index": 2289,
+          "source_sample_id": "videomme:2289"
+        },
+        {
+          "source_row_index": 2339,
+          "source_sample_id": "videomme:2339"
+        },
+        {
+          "source_row_index": 2340,
+          "source_sample_id": "videomme:2340"
+        },
+        {
+          "source_row_index": 2380,
+          "source_sample_id": "videomme:2380"
+        },
+        {
+          "source_row_index": 2419,
+          "source_sample_id": "videomme:2419"
+        },
+        {
+          "source_row_index": 2459,
+          "source_sample_id": "videomme:2459"
+        },
+        {
+          "source_row_index": 2460,
+          "source_sample_id": "videomme:2460"
+        },
+        {
+          "source_row_index": 2530,
+          "source_sample_id": "videomme:2530"
+        },
+        {
+          "source_row_index": 2599,
+          "source_sample_id": "videomme:2599"
+        },
+        {
+          "source_row_index": 2669,
+          "source_sample_id": "videomme:2669"
+        },
+        {
+          "source_row_index": 2670,
+          "source_sample_id": "videomme:2670"
+        },
+        {
+          "source_row_index": 2680,
+          "source_sample_id": "videomme:2680"
+        },
+        {
+          "source_row_index": 2689,
+          "source_sample_id": "videomme:2689"
+        },
+        {
+          "source_row_index": 2699,
+          "source_sample_id": "videomme:2699"
+        }
+      ]
+    },
+    "longvideobench_val_v": {
+      "dataset_repository": "longvideobench/LongVideoBench",
+      "dataset_revision": "60d1c89c1919a198b73be39c2babb213b29d6a5c",
+      "max_new_tokens": 32,
+      "scoring_task_config": "tasks/longvideobench/longvideobench_val_v.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "longvideobench_val_v:0"
+        },
+        {
+          "source_row_index": 20,
+          "source_sample_id": "longvideobench_val_v:20"
+        },
+        {
+          "source_row_index": 40,
+          "source_sample_id": "longvideobench_val_v:40"
+        },
+        {
+          "source_row_index": 60,
+          "source_sample_id": "longvideobench_val_v:60"
+        },
+        {
+          "source_row_index": 80,
+          "source_sample_id": "longvideobench_val_v:80"
+        },
+        {
+          "source_row_index": 100,
+          "source_sample_id": "longvideobench_val_v:100"
+        },
+        {
+          "source_row_index": 120,
+          "source_sample_id": "longvideobench_val_v:120"
+        },
+        {
+          "source_row_index": 140,
+          "source_sample_id": "longvideobench_val_v:140"
+        },
+        {
+          "source_row_index": 160,
+          "source_sample_id": "longvideobench_val_v:160"
+        },
+        {
+          "source_row_index": 179,
+          "source_sample_id": "longvideobench_val_v:179"
+        },
+        {
+          "source_row_index": 199,
+          "source_sample_id": "longvideobench_val_v:199"
+        },
+        {
+          "source_row_index": 219,
+          "source_sample_id": "longvideobench_val_v:219"
+        },
+        {
+          "source_row_index": 239,
+          "source_sample_id": "longvideobench_val_v:239"
+        },
+        {
+          "source_row_index": 259,
+          "source_sample_id": "longvideobench_val_v:259"
+        },
+        {
+          "source_row_index": 279,
+          "source_sample_id": "longvideobench_val_v:279"
+        },
+        {
+          "source_row_index": 299,
+          "source_sample_id": "longvideobench_val_v:299"
+        },
+        {
+          "source_row_index": 319,
+          "source_sample_id": "longvideobench_val_v:319"
+        },
+        {
+          "source_row_index": 339,
+          "source_sample_id": "longvideobench_val_v:339"
+        },
+        {
+          "source_row_index": 359,
+          "source_sample_id": "longvideobench_val_v:359"
+        },
+        {
+          "source_row_index": 379,
+          "source_sample_id": "longvideobench_val_v:379"
+        },
+        {
+          "source_row_index": 399,
+          "source_sample_id": "longvideobench_val_v:399"
+        },
+        {
+          "source_row_index": 419,
+          "source_sample_id": "longvideobench_val_v:419"
+        },
+        {
+          "source_row_index": 439,
+          "source_sample_id": "longvideobench_val_v:439"
+        },
+        {
+          "source_row_index": 459,
+          "source_sample_id": "longvideobench_val_v:459"
+        },
+        {
+          "source_row_index": 479,
+          "source_sample_id": "longvideobench_val_v:479"
+        },
+        {
+          "source_row_index": 499,
+          "source_sample_id": "longvideobench_val_v:499"
+        },
+        {
+          "source_row_index": 518,
+          "source_sample_id": "longvideobench_val_v:518"
+        },
+        {
+          "source_row_index": 538,
+          "source_sample_id": "longvideobench_val_v:538"
+        },
+        {
+          "source_row_index": 558,
+          "source_sample_id": "longvideobench_val_v:558"
+        },
+        {
+          "source_row_index": 578,
+          "source_sample_id": "longvideobench_val_v:578"
+        },
+        {
+          "source_row_index": 598,
+          "source_sample_id": "longvideobench_val_v:598"
+        },
+        {
+          "source_row_index": 618,
+          "source_sample_id": "longvideobench_val_v:618"
+        },
+        {
+          "source_row_index": 638,
+          "source_sample_id": "longvideobench_val_v:638"
+        },
+        {
+          "source_row_index": 658,
+          "source_sample_id": "longvideobench_val_v:658"
+        },
+        {
+          "source_row_index": 678,
+          "source_sample_id": "longvideobench_val_v:678"
+        },
+        {
+          "source_row_index": 698,
+          "source_sample_id": "longvideobench_val_v:698"
+        },
+        {
+          "source_row_index": 718,
+          "source_sample_id": "longvideobench_val_v:718"
+        },
+        {
+          "source_row_index": 738,
+          "source_sample_id": "longvideobench_val_v:738"
+        },
+        {
+          "source_row_index": 758,
+          "source_sample_id": "longvideobench_val_v:758"
+        },
+        {
+          "source_row_index": 778,
+          "source_sample_id": "longvideobench_val_v:778"
+        },
+        {
+          "source_row_index": 798,
+          "source_sample_id": "longvideobench_val_v:798"
+        },
+        {
+          "source_row_index": 818,
+          "source_sample_id": "longvideobench_val_v:818"
+        },
+        {
+          "source_row_index": 837,
+          "source_sample_id": "longvideobench_val_v:837"
+        },
+        {
+          "source_row_index": 857,
+          "source_sample_id": "longvideobench_val_v:857"
+        },
+        {
+          "source_row_index": 877,
+          "source_sample_id": "longvideobench_val_v:877"
+        },
+        {
+          "source_row_index": 897,
+          "source_sample_id": "longvideobench_val_v:897"
+        },
+        {
+          "source_row_index": 917,
+          "source_sample_id": "longvideobench_val_v:917"
+        },
+        {
+          "source_row_index": 937,
+          "source_sample_id": "longvideobench_val_v:937"
+        },
+        {
+          "source_row_index": 957,
+          "source_sample_id": "longvideobench_val_v:957"
+        },
+        {
+          "source_row_index": 977,
+          "source_sample_id": "longvideobench_val_v:977"
+        },
+        {
+          "source_row_index": 997,
+          "source_sample_id": "longvideobench_val_v:997"
+        },
+        {
+          "source_row_index": 1017,
+          "source_sample_id": "longvideobench_val_v:1017"
+        },
+        {
+          "source_row_index": 1037,
+          "source_sample_id": "longvideobench_val_v:1037"
+        },
+        {
+          "source_row_index": 1057,
+          "source_sample_id": "longvideobench_val_v:1057"
+        },
+        {
+          "source_row_index": 1077,
+          "source_sample_id": "longvideobench_val_v:1077"
+        },
+        {
+          "source_row_index": 1097,
+          "source_sample_id": "longvideobench_val_v:1097"
+        },
+        {
+          "source_row_index": 1117,
+          "source_sample_id": "longvideobench_val_v:1117"
+        },
+        {
+          "source_row_index": 1137,
+          "source_sample_id": "longvideobench_val_v:1137"
+        },
+        {
+          "source_row_index": 1157,
+          "source_sample_id": "longvideobench_val_v:1157"
+        },
+        {
+          "source_row_index": 1176,
+          "source_sample_id": "longvideobench_val_v:1176"
+        },
+        {
+          "source_row_index": 1196,
+          "source_sample_id": "longvideobench_val_v:1196"
+        },
+        {
+          "source_row_index": 1216,
+          "source_sample_id": "longvideobench_val_v:1216"
+        },
+        {
+          "source_row_index": 1236,
+          "source_sample_id": "longvideobench_val_v:1236"
+        },
+        {
+          "source_row_index": 1256,
+          "source_sample_id": "longvideobench_val_v:1256"
+        },
+        {
+          "source_row_index": 1276,
+          "source_sample_id": "longvideobench_val_v:1276"
+        },
+        {
+          "source_row_index": 1296,
+          "source_sample_id": "longvideobench_val_v:1296"
+        },
+        {
+          "source_row_index": 1316,
+          "source_sample_id": "longvideobench_val_v:1316"
+        },
+        {
+          "source_row_index": 1336,
+          "source_sample_id": "longvideobench_val_v:1336"
+        }
+      ]
+    },
+    "mlvu_dev": {
+      "dataset_repository": "sy1998/MLVU_dev",
+      "dataset_revision": "96207eb9aa7101e2a495dd147684a7e618c79e12",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/mlvu/mlvu_dev.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "mlvu_dev:0"
+        },
+        {
+          "source_row_index": 39,
+          "source_sample_id": "mlvu_dev:39"
+        },
+        {
+          "source_row_index": 79,
+          "source_sample_id": "mlvu_dev:79"
+        },
+        {
+          "source_row_index": 118,
+          "source_sample_id": "mlvu_dev:118"
+        },
+        {
+          "source_row_index": 157,
+          "source_sample_id": "mlvu_dev:157"
+        },
+        {
+          "source_row_index": 197,
+          "source_sample_id": "mlvu_dev:197"
+        },
+        {
+          "source_row_index": 236,
+          "source_sample_id": "mlvu_dev:236"
+        },
+        {
+          "source_row_index": 275,
+          "source_sample_id": "mlvu_dev:275"
+        },
+        {
+          "source_row_index": 315,
+          "source_sample_id": "mlvu_dev:315"
+        },
+        {
+          "source_row_index": 354,
+          "source_sample_id": "mlvu_dev:354"
+        },
+        {
+          "source_row_index": 355,
+          "source_sample_id": "mlvu_dev:355"
+        },
+        {
+          "source_row_index": 377,
+          "source_sample_id": "mlvu_dev:377"
+        },
+        {
+          "source_row_index": 399,
+          "source_sample_id": "mlvu_dev:399"
+        },
+        {
+          "source_row_index": 421,
+          "source_sample_id": "mlvu_dev:421"
+        },
+        {
+          "source_row_index": 443,
+          "source_sample_id": "mlvu_dev:443"
+        },
+        {
+          "source_row_index": 466,
+          "source_sample_id": "mlvu_dev:466"
+        },
+        {
+          "source_row_index": 488,
+          "source_sample_id": "mlvu_dev:488"
+        },
+        {
+          "source_row_index": 510,
+          "source_sample_id": "mlvu_dev:510"
+        },
+        {
+          "source_row_index": 532,
+          "source_sample_id": "mlvu_dev:532"
+        },
+        {
+          "source_row_index": 554,
+          "source_sample_id": "mlvu_dev:554"
+        },
+        {
+          "source_row_index": 555,
+          "source_sample_id": "mlvu_dev:555"
+        },
+        {
+          "source_row_index": 578,
+          "source_sample_id": "mlvu_dev:578"
+        },
+        {
+          "source_row_index": 601,
+          "source_sample_id": "mlvu_dev:601"
+        },
+        {
+          "source_row_index": 623,
+          "source_sample_id": "mlvu_dev:623"
+        },
+        {
+          "source_row_index": 646,
+          "source_sample_id": "mlvu_dev:646"
+        },
+        {
+          "source_row_index": 669,
+          "source_sample_id": "mlvu_dev:669"
+        },
+        {
+          "source_row_index": 692,
+          "source_sample_id": "mlvu_dev:692"
+        },
+        {
+          "source_row_index": 714,
+          "source_sample_id": "mlvu_dev:714"
+        },
+        {
+          "source_row_index": 737,
+          "source_sample_id": "mlvu_dev:737"
+        },
+        {
+          "source_row_index": 760,
+          "source_sample_id": "mlvu_dev:760"
+        },
+        {
+          "source_row_index": 761,
+          "source_sample_id": "mlvu_dev:761"
+        },
+        {
+          "source_row_index": 800,
+          "source_sample_id": "mlvu_dev:800"
+        },
+        {
+          "source_row_index": 839,
+          "source_sample_id": "mlvu_dev:839"
+        },
+        {
+          "source_row_index": 878,
+          "source_sample_id": "mlvu_dev:878"
+        },
+        {
+          "source_row_index": 917,
+          "source_sample_id": "mlvu_dev:917"
+        },
+        {
+          "source_row_index": 956,
+          "source_sample_id": "mlvu_dev:956"
+        },
+        {
+          "source_row_index": 995,
+          "source_sample_id": "mlvu_dev:995"
+        },
+        {
+          "source_row_index": 1034,
+          "source_sample_id": "mlvu_dev:1034"
+        },
+        {
+          "source_row_index": 1073,
+          "source_sample_id": "mlvu_dev:1073"
+        },
+        {
+          "source_row_index": 1112,
+          "source_sample_id": "mlvu_dev:1112"
+        },
+        {
+          "source_row_index": 1113,
+          "source_sample_id": "mlvu_dev:1113"
+        },
+        {
+          "source_row_index": 1173,
+          "source_sample_id": "mlvu_dev:1173"
+        },
+        {
+          "source_row_index": 1233,
+          "source_sample_id": "mlvu_dev:1233"
+        },
+        {
+          "source_row_index": 1292,
+          "source_sample_id": "mlvu_dev:1292"
+        },
+        {
+          "source_row_index": 1352,
+          "source_sample_id": "mlvu_dev:1352"
+        },
+        {
+          "source_row_index": 1412,
+          "source_sample_id": "mlvu_dev:1412"
+        },
+        {
+          "source_row_index": 1472,
+          "source_sample_id": "mlvu_dev:1472"
+        },
+        {
+          "source_row_index": 1531,
+          "source_sample_id": "mlvu_dev:1531"
+        },
+        {
+          "source_row_index": 1591,
+          "source_sample_id": "mlvu_dev:1591"
+        },
+        {
+          "source_row_index": 1651,
+          "source_sample_id": "mlvu_dev:1651"
+        },
+        {
+          "source_row_index": 1652,
+          "source_sample_id": "mlvu_dev:1652"
+        },
+        {
+          "source_row_index": 1681,
+          "source_sample_id": "mlvu_dev:1681"
+        },
+        {
+          "source_row_index": 1710,
+          "source_sample_id": "mlvu_dev:1710"
+        },
+        {
+          "source_row_index": 1739,
+          "source_sample_id": "mlvu_dev:1739"
+        },
+        {
+          "source_row_index": 1768,
+          "source_sample_id": "mlvu_dev:1768"
+        },
+        {
+          "source_row_index": 1798,
+          "source_sample_id": "mlvu_dev:1798"
+        },
+        {
+          "source_row_index": 1827,
+          "source_sample_id": "mlvu_dev:1827"
+        },
+        {
+          "source_row_index": 1856,
+          "source_sample_id": "mlvu_dev:1856"
+        },
+        {
+          "source_row_index": 1885,
+          "source_sample_id": "mlvu_dev:1885"
+        },
+        {
+          "source_row_index": 1914,
+          "source_sample_id": "mlvu_dev:1914"
+        },
+        {
+          "source_row_index": 1915,
+          "source_sample_id": "mlvu_dev:1915"
+        },
+        {
+          "source_row_index": 1944,
+          "source_sample_id": "mlvu_dev:1944"
+        },
+        {
+          "source_row_index": 1972,
+          "source_sample_id": "mlvu_dev:1972"
+        },
+        {
+          "source_row_index": 2001,
+          "source_sample_id": "mlvu_dev:2001"
+        },
+        {
+          "source_row_index": 2030,
+          "source_sample_id": "mlvu_dev:2030"
+        },
+        {
+          "source_row_index": 2058,
+          "source_sample_id": "mlvu_dev:2058"
+        },
+        {
+          "source_row_index": 2087,
+          "source_sample_id": "mlvu_dev:2087"
+        },
+        {
+          "source_row_index": 2116,
+          "source_sample_id": "mlvu_dev:2116"
+        },
+        {
+          "source_row_index": 2144,
+          "source_sample_id": "mlvu_dev:2144"
+        },
+        {
+          "source_row_index": 2173,
+          "source_sample_id": "mlvu_dev:2173"
+        }
+      ]
+    },
+    "perceptiontest_val_mc": {
+      "dataset_repository": "lmms-lab/PerceptionTest_Val",
+      "dataset_revision": "c5e520d8c4167fb1f135c36e9d6e67312b4f8e6b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/perceptiontest/val/perceptiontest_mc.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "perceptiontest_val_mc:0"
+        },
+        {
+          "source_row_index": 1,
+          "source_sample_id": "perceptiontest_val_mc:1"
+        },
+        {
+          "source_row_index": 3,
+          "source_sample_id": "perceptiontest_val_mc:3"
+        },
+        {
+          "source_row_index": 20,
+          "source_sample_id": "perceptiontest_val_mc:20"
+        },
+        {
+          "source_row_index": 211,
+          "source_sample_id": "perceptiontest_val_mc:211"
+        },
+        {
+          "source_row_index": 544,
+          "source_sample_id": "perceptiontest_val_mc:544"
+        },
+        {
+          "source_row_index": 753,
+          "source_sample_id": "perceptiontest_val_mc:753"
+        },
+        {
+          "source_row_index": 1672,
+          "source_sample_id": "perceptiontest_val_mc:1672"
+        },
+        {
+          "source_row_index": 2310,
+          "source_sample_id": "perceptiontest_val_mc:2310"
+        },
+        {
+          "source_row_index": 2386,
+          "source_sample_id": "perceptiontest_val_mc:2386"
+        },
+        {
+          "source_row_index": 2846,
+          "source_sample_id": "perceptiontest_val_mc:2846"
+        },
+        {
+          "source_row_index": 2894,
+          "source_sample_id": "perceptiontest_val_mc:2894"
+        },
+        {
+          "source_row_index": 3857,
+          "source_sample_id": "perceptiontest_val_mc:3857"
+        },
+        {
+          "source_row_index": 3905,
+          "source_sample_id": "perceptiontest_val_mc:3905"
+        },
+        {
+          "source_row_index": 3957,
+          "source_sample_id": "perceptiontest_val_mc:3957"
+        },
+        {
+          "source_row_index": 4004,
+          "source_sample_id": "perceptiontest_val_mc:4004"
+        },
+        {
+          "source_row_index": 4031,
+          "source_sample_id": "perceptiontest_val_mc:4031"
+        },
+        {
+          "source_row_index": 4053,
+          "source_sample_id": "perceptiontest_val_mc:4053"
+        },
+        {
+          "source_row_index": 4167,
+          "source_sample_id": "perceptiontest_val_mc:4167"
+        },
+        {
+          "source_row_index": 4228,
+          "source_sample_id": "perceptiontest_val_mc:4228"
+        },
+        {
+          "source_row_index": 4994,
+          "source_sample_id": "perceptiontest_val_mc:4994"
+        },
+        {
+          "source_row_index": 5673,
+          "source_sample_id": "perceptiontest_val_mc:5673"
+        },
+        {
+          "source_row_index": 5898,
+          "source_sample_id": "perceptiontest_val_mc:5898"
+        },
+        {
+          "source_row_index": 6414,
+          "source_sample_id": "perceptiontest_val_mc:6414"
+        },
+        {
+          "source_row_index": 6502,
+          "source_sample_id": "perceptiontest_val_mc:6502"
+        },
+        {
+          "source_row_index": 6598,
+          "source_sample_id": "perceptiontest_val_mc:6598"
+        },
+        {
+          "source_row_index": 7494,
+          "source_sample_id": "perceptiontest_val_mc:7494"
+        },
+        {
+          "source_row_index": 8074,
+          "source_sample_id": "perceptiontest_val_mc:8074"
+        },
+        {
+          "source_row_index": 8617,
+          "source_sample_id": "perceptiontest_val_mc:8617"
+        },
+        {
+          "source_row_index": 8763,
+          "source_sample_id": "perceptiontest_val_mc:8763"
+        },
+        {
+          "source_row_index": 8865,
+          "source_sample_id": "perceptiontest_val_mc:8865"
+        },
+        {
+          "source_row_index": 8873,
+          "source_sample_id": "perceptiontest_val_mc:8873"
+        },
+        {
+          "source_row_index": 8981,
+          "source_sample_id": "perceptiontest_val_mc:8981"
+        },
+        {
+          "source_row_index": 9350,
+          "source_sample_id": "perceptiontest_val_mc:9350"
+        },
+        {
+          "source_row_index": 9617,
+          "source_sample_id": "perceptiontest_val_mc:9617"
+        },
+        {
+          "source_row_index": 9749,
+          "source_sample_id": "perceptiontest_val_mc:9749"
+        },
+        {
+          "source_row_index": 10470,
+          "source_sample_id": "perceptiontest_val_mc:10470"
+        },
+        {
+          "source_row_index": 11697,
+          "source_sample_id": "perceptiontest_val_mc:11697"
+        },
+        {
+          "source_row_index": 11745,
+          "source_sample_id": "perceptiontest_val_mc:11745"
+        },
+        {
+          "source_row_index": 11798,
+          "source_sample_id": "perceptiontest_val_mc:11798"
+        },
+        {
+          "source_row_index": 13051,
+          "source_sample_id": "perceptiontest_val_mc:13051"
+        },
+        {
+          "source_row_index": 13244,
+          "source_sample_id": "perceptiontest_val_mc:13244"
+        },
+        {
+          "source_row_index": 13581,
+          "source_sample_id": "perceptiontest_val_mc:13581"
+        },
+        {
+          "source_row_index": 13929,
+          "source_sample_id": "perceptiontest_val_mc:13929"
+        },
+        {
+          "source_row_index": 13999,
+          "source_sample_id": "perceptiontest_val_mc:13999"
+        },
+        {
+          "source_row_index": 14073,
+          "source_sample_id": "perceptiontest_val_mc:14073"
+        },
+        {
+          "source_row_index": 14200,
+          "source_sample_id": "perceptiontest_val_mc:14200"
+        },
+        {
+          "source_row_index": 14884,
+          "source_sample_id": "perceptiontest_val_mc:14884"
+        },
+        {
+          "source_row_index": 15201,
+          "source_sample_id": "perceptiontest_val_mc:15201"
+        },
+        {
+          "source_row_index": 15432,
+          "source_sample_id": "perceptiontest_val_mc:15432"
+        },
+        {
+          "source_row_index": 16191,
+          "source_sample_id": "perceptiontest_val_mc:16191"
+        },
+        {
+          "source_row_index": 16280,
+          "source_sample_id": "perceptiontest_val_mc:16280"
+        },
+        {
+          "source_row_index": 16741,
+          "source_sample_id": "perceptiontest_val_mc:16741"
+        },
+        {
+          "source_row_index": 17109,
+          "source_sample_id": "perceptiontest_val_mc:17109"
+        },
+        {
+          "source_row_index": 17820,
+          "source_sample_id": "perceptiontest_val_mc:17820"
+        },
+        {
+          "source_row_index": 17866,
+          "source_sample_id": "perceptiontest_val_mc:17866"
+        },
+        {
+          "source_row_index": 18478,
+          "source_sample_id": "perceptiontest_val_mc:18478"
+        },
+        {
+          "source_row_index": 18489,
+          "source_sample_id": "perceptiontest_val_mc:18489"
+        },
+        {
+          "source_row_index": 18867,
+          "source_sample_id": "perceptiontest_val_mc:18867"
+        },
+        {
+          "source_row_index": 19021,
+          "source_sample_id": "perceptiontest_val_mc:19021"
+        },
+        {
+          "source_row_index": 19102,
+          "source_sample_id": "perceptiontest_val_mc:19102"
+        },
+        {
+          "source_row_index": 19135,
+          "source_sample_id": "perceptiontest_val_mc:19135"
+        },
+        {
+          "source_row_index": 19137,
+          "source_sample_id": "perceptiontest_val_mc:19137"
+        },
+        {
+          "source_row_index": 19139,
+          "source_sample_id": "perceptiontest_val_mc:19139"
+        }
+      ]
+    }
+  }
+}

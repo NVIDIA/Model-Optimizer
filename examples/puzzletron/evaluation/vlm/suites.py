@@ -22,7 +22,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import contracts, profile
@@ -51,10 +51,12 @@ __all__ = [
     "execution_policy",
     "generation_kwargs",
     "load_quick_manifest",
+    "manifest_selected_rows",
     "manifest_sha256",
     "offline_dataset_snapshot",
     "source_tasks",
     "task_name",
+    "validate_exact_rows_manifest",
     "validate_quick_manifest",
 ]
 
@@ -161,7 +163,7 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     """Resolve the provenance and runtime execution fields for one suite."""
     suite = canonical_suite(suite)
     source_tasks(suite)
-    is_versioned_short = suite in {"short-v1", "short-native-v1"}
+    is_versioned_short = suite in {"short-v1", "short-native-v1", "short-all-native-v1"}
     is_smoke = suite in SMOKE_SUITES or is_versioned_short
     default_timeout_seconds = (
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
@@ -212,28 +214,52 @@ def validate_quick_manifest(
     manifest: object, *, expected_revision: str = checkpoint.LMMS_EVAL_REVISION
 ) -> dict[str, object]:
     """Validate an exact-row quick-suite manifest already loaded in memory."""
-    if not isinstance(manifest, dict):
-        raise ValueError("quick manifest must contain an object")
-    if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
-        raise ValueError("quick manifest schema must be modelopt.vlm-benchmark-quick/v1")
-    if manifest.get("lmms_eval_revision") != expected_revision:
-        raise ValueError("quick manifest lmms_eval_revision differs from the pinned profile")
-    manifest_tasks = manifest.get("tasks")
-    if not isinstance(manifest_tasks, dict) or set(manifest_tasks) != set(QUICK_TASKS):
-        raise ValueError("quick manifest must contain exactly realworldqa, mmmu_val, and mvbench")
+    validated = validate_exact_rows_manifest(
+        manifest,
+        expected_revision=expected_revision,
+        expected_tasks=QUICK_TASKS,
+    )
+    manifest_tasks = cast("dict[str, dict[str, object]]", validated["tasks"])
     for task, expected_count in _QUICK_COUNTS.items():
-        _validate_manifest_task(task, manifest_tasks[task], expected_count)
+        rows = manifest_tasks[task]["rows"]
+        if not isinstance(rows, list) or len(rows) != expected_count:
+            raise ValueError(f"quick manifest {task} must select exactly {expected_count} rows")
+    leaf_counts = Counter(str(row["leaf_task"]) for row in manifest_tasks["mvbench"]["rows"])
+    expected = {f"mvbench_{leaf}": 8 for leaf in MVBENCH_LEAF_TASKS}
+    if leaf_counts != expected:
+        raise ValueError("quick manifest MVBench must select exactly 8 rows per leaf task")
+    return validated
+
+
+def validate_exact_rows_manifest(
+    manifest: object,
+    *,
+    expected_revision: str,
+    expected_tasks: tuple[str, ...],
+) -> dict[str, object]:
+    """Validate a pinned exact-row manifest for a versioned profile."""
+    if not isinstance(manifest, dict):
+        raise ValueError("exact-row manifest must contain an object")
+    if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
+        raise ValueError("exact-row manifest schema must be modelopt.vlm-benchmark-quick/v1")
+    if manifest.get("lmms_eval_revision") != expected_revision:
+        raise ValueError("exact-row manifest lmms_eval_revision differs from the pinned profile")
+    manifest_tasks = manifest.get("tasks")
+    if not isinstance(manifest_tasks, dict) or tuple(manifest_tasks) != expected_tasks:
+        raise ValueError("exact-row manifest tasks differ from the selected profile")
+    for task in expected_tasks:
+        _validate_manifest_task(task, manifest_tasks[task])
     return manifest
 
 
-def _validate_manifest_task(task: str, entry: object, expected_count: int) -> None:
+def _validate_manifest_task(task: str, entry: object) -> None:
     if not isinstance(entry, dict):
-        raise ValueError(f"quick manifest task entry must be an object: {task}")
+        raise ValueError(f"exact-row manifest task entry must be an object: {task}")
     if entry.get("dataset_revision") != profile.VLM_BENCHMARK_DATASETS[task].revision:
-        raise ValueError(f"quick manifest dataset revision differs for {task}")
+        raise ValueError(f"exact-row manifest dataset revision differs for {task}")
     rows = entry.get("rows")
-    if not isinstance(rows, list) or len(rows) != expected_count:
-        raise ValueError(f"quick manifest {task} must select exactly {expected_count} rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"exact-row manifest {task} must select at least one row")
 
     seen: set[tuple[str, int]] = set()
     for row in rows:
@@ -252,31 +278,34 @@ def _validate_manifest_task(task: str, entry: object, expected_count: int) -> No
             raise ValueError(f"quick manifest {task} contains a duplicate source row")
         seen.add(identity)
 
-    if task == "mvbench":
-        leaf_counts = Counter(str(row["leaf_task"]) for row in rows)
-        expected = {f"mvbench_{leaf}": 8 for leaf in MVBENCH_LEAF_TASKS}
-        if leaf_counts != expected:
-            raise ValueError("quick manifest MVBench must select exactly 8 rows per leaf task")
-
 
 def _validate_source_identity(task: str, *, index: int, source_id: str, leaf: object) -> None:
     if task == "realworldqa" and source_id != f"test:{index}":
         raise ValueError("quick manifest RealWorldQA source identity mismatch")
-    if task == "mvbench":
-        expected_leaves = {f"mvbench_{name}" for name in MVBENCH_LEAF_TASKS}
+    if task in {"mvbench", "video_mmmu"}:
+        leaves = MVBENCH_LEAF_TASKS if task == "mvbench" else VIDEO_MMMU_LEAF_TASKS
+        expected_leaves = {f"{task}_{name}" for name in leaves}
         if leaf not in expected_leaves:
-            raise ValueError("quick manifest MVBench row has an invalid leaf_task")
-        config = str(leaf).removeprefix("mvbench_")
+            raise ValueError(f"exact-row manifest {task} row has an invalid leaf_task")
+        config = str(leaf).removeprefix(f"{task}_")
         if source_id != f"{config}:{index}":
-            raise ValueError("quick manifest MVBench source identity mismatch")
+            raise ValueError(f"exact-row manifest {task} source identity mismatch")
+    elif task not in {"realworldqa", "mmmu_val"} and source_id != f"{task}:{index}":
+        raise ValueError(f"exact-row manifest {task} source identity mismatch")
     elif leaf is not None:
-        raise ValueError(f"quick manifest {task} rows must not set leaf_task")
+        raise ValueError(f"exact-row manifest {task} rows must not set leaf_task")
 
 
 def manifest_sha256(manifest: dict[str, object]) -> str:
     """Return the digest of a canonical quick-suite manifest."""
     canonical = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def manifest_selected_rows(manifest: dict[str, object]) -> int:
+    """Return the total number of exact rows selected across all tasks."""
+    manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
+    return sum(len(cast("list[object]", entry["rows"])) for entry in manifest_tasks.values())
 
 
 def offline_dataset_snapshot(hf_home: Path, task: str, revision: str) -> Path:

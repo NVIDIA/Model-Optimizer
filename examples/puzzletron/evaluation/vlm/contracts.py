@@ -34,13 +34,28 @@ __all__ = [
 
 _PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v1"
 _PROFILE_ROOT = Path(__file__).with_name("profiles")
-PROFILE_NAMES = ("short-v1", "short-native-v1", "full-v1")
+PROFILE_NAMES = ("short-v1", "short-native-v1", "short-all-native-v1", "full-v1")
 _PROFILE_TASKS = {
     "short-v1": ("realworldqa", "mmmu_val", "mvbench"),
     "short-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "short-all-native-v1": (
+        "realworldqa",
+        "mmmu_val",
+        "mvbench",
+        "video_mmmu",
+        "videomme",
+        "longvideobench_val_v",
+        "mlvu_dev",
+        "perceptiontest_val_mc",
+    ),
     "full-v1": tuple(task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"),
 }
-_PROFILE_SELECTIONS = {"short-v1": "exact-rows", "short-native-v1": "exact-rows", "full-v1": "all"}
+_PROFILE_SELECTIONS = {
+    "short-v1": "exact-rows",
+    "short-native-v1": "exact-rows",
+    "short-all-native-v1": "exact-rows",
+    "full-v1": "all",
+}
 _PROFILE_BACKENDS = {
     "short-v1": {
         "enable_thinking": False,
@@ -48,6 +63,11 @@ _PROFILE_BACKENDS = {
         "reasoning_parser": "qwen3",
     },
     "short-native-v1": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "short-all-native-v1": {
         "attention_implementation": "sdpa",
         "enable_thinking": False,
         "name": "qwen3_5",
@@ -61,6 +81,7 @@ _PROFILE_BACKENDS = {
 _PROFILE_REVISIONS = {
     "short-v1": checkpoint.LMMS_EVAL_REVISION,
     "short-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "short-all-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
     "full-v1": checkpoint.LMMS_EVAL_REVISION,
 }
 
@@ -133,6 +154,8 @@ def _resolve_manifest(name: str, manifest: object) -> object:
     if not isinstance(base, dict) or "extends" in base:
         raise RuntimeError(f"{name} profile base must be a concrete profile")
     overrides = {key: value for key, value in manifest.items() if key != "extends"}
+    if isinstance(base.get("tasks"), dict) and isinstance(overrides.get("tasks"), dict):
+        overrides["tasks"] = {**base["tasks"], **overrides["tasks"]}
     return {**base, **overrides}
 
 

@@ -543,15 +543,39 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
 def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     short = contracts.load_profile("short-v1")
     short_native = contracts.load_profile("short-native-v1")
+    short_all_native = contracts.load_profile("short-all-native-v1")
     full = contracts.load_profile("full-v1")
 
     assert short.fingerprint == "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177"
     assert short_native.fingerprint == (
         "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35"
     )
+    assert short_all_native.fingerprint == (
+        "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68"
+    )
     assert full.fingerprint == "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a"
     assert short.source_tasks == suites.QUICK_TASKS
     assert short_native.source_tasks == short.source_tasks
+    assert short_all_native.source_tasks == (
+        *short.source_tasks,
+        "video_mmmu",
+        "videomme",
+        "longvideobench_val_v",
+        "mlvu_dev",
+        "perceptiontest_val_mc",
+    )
+    assert {
+        task: len(entry["rows"]) for task, entry in short_all_native.manifest["tasks"].items()
+    } == {
+        "realworldqa": 64,
+        "mmmu_val": 120,
+        "mvbench": 160,
+        "video_mmmu": 72,
+        "videomme": 72,
+        "longvideobench_val_v": 68,
+        "mlvu_dev": 70,
+        "perceptiontest_val_mc": 64,
+    }
     assert short_native.manifest["lmms_eval_revision"] == (
         checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
     )
@@ -575,6 +599,50 @@ def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     path.write_text(json.dumps(exact_rows))
     validated = suites.load_quick_manifest(path)
     assert suites.manifest_sha256(validated)
+
+
+def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
+    contract = contracts.load_profile("short-all-native-v1")
+    exact_rows = contract.exact_rows
+    assert exact_rows is not None
+    validated = suites.validate_exact_rows_manifest(
+        exact_rows,
+        expected_revision=checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+        expected_tasks=contract.source_tasks,
+    )
+
+    tasks._write_quick_selection_module(tmp_path, validated)
+    spec = importlib.util.spec_from_file_location(
+        "short_all_selectors", tmp_path / "modelopt_quick_selection.py"
+    )
+    assert spec is not None and spec.loader is not None
+    selectors = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selectors)
+
+    class Documents:
+        def __init__(self, size):
+            self.size = size
+
+        def __len__(self):
+            return self.size
+
+        def __getitem__(self, _index):
+            return {}
+
+        def select(self, indices):
+            return list(indices)
+
+    tasks_manifest = validated["tasks"]
+    adaptation = [
+        row["source_row_index"]
+        for row in tasks_manifest["video_mmmu"]["rows"]
+        if row["leaf_task"] == "video_mmmu_adaptation"
+    ]
+    assert (
+        selectors.select_modelopt_vlm_benchmark_video_mmmu_adaptation(Documents(300)) == adaptation
+    )
+    videomme = [row["source_row_index"] for row in tasks_manifest["videomme"]["rows"]]
+    assert selectors.select_modelopt_vlm_benchmark_videomme(Documents(2700)) == videomme
 
 
 @pytest.mark.parametrize("name", contracts.PROFILE_NAMES)
@@ -604,6 +672,8 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     assert prepared.report["profile_fingerprint"] == contract.fingerprint
     assert prepared.report["batch_size"] == contract.manifest["batch_size"] == 1
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
+    if name == "short-all-native-v1":
+        assert prepared.report["quick_selected_rows"] == 690
     assert prepared.report["judge_policy"] is None
     assert (prepared.quick_manifest is not None) == name.startswith("short-")
 
@@ -615,6 +685,9 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     )
     assert configured_tasks == tuple(suites.task_name(task) for task in contract.source_tasks)
     assert (task_root / "modelopt_quick_selection.py").exists() == name.startswith("short-")
+    if name == "short-all-native-v1":
+        video_mmmu = task_root / "modelopt_vlm_benchmark_video_mmmu_adaptation.yaml"
+        assert "select_modelopt_vlm_benchmark_video_mmmu_adaptation" in video_mmmu.read_text()
 
 
 def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
@@ -732,6 +805,35 @@ def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_pa
         quick_manifest=prepared.quick_manifest,
     )
     assert configured_tasks == ("modelopt_vlm_benchmark_realworldqa",)
+
+
+def test_short_all_native_profile_task_preserves_exact_rows(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "short-all-native-v1",
+            "--profile-task",
+            "videomme",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+
+    assert prepared.source_tasks == ("videomme",)
+    assert prepared.quick_manifest is not None
+    assert tuple(prepared.quick_manifest["tasks"]) == ("videomme",)
+    assert prepared.report["quick_selected_rows"] == 72
+    assert (
+        prepared.report["profile_fingerprint"]
+        == contracts.load_profile("short-all-native-v1").fingerprint
+    )
 
 
 def test_full_profile_group_shard_partitions_leaves(monkeypatch, tmp_path):
