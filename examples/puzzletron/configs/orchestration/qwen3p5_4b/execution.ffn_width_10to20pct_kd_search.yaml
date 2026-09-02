@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Deprecated compatibility alias. Use execution.ffn_width_10to20pct_kd_search.yaml.
+# Evaluate up to four independent 4B candidates concurrently. Most candidate
+# stages use one GPU per instance; TP2 KD uses two. Selected-student TP2 KD
+# uses two GPUs while the remaining selected-student stages use one.
 execution:
   defaults:
     failure_policy: strict

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Deprecated compatibility alias. Use execution.vlm_lifecycle_smoke.yaml.
+# Two-GPU execution profile for the opt-in 4B lifecycle. The bounded MIP and
+# evaluation stages use one GPU; the global-KD node derives its TP2 request
+# from the experiment configuration.
 execution:
   defaults:
     failure_policy: strict

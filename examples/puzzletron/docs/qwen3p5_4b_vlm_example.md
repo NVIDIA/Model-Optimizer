@@ -9,9 +9,9 @@ The default `mip_vlm_smoke.yaml` route:
 - compiles the complete teacher-plus-seven-width FFN candidate grid and searches both an approximately 20%-pruned parameter target and an analytical weight-plus-KV serving-memory target;
 - stops at MIP without materializing checkpoints, running benchmark evaluation, or starting KD.
 
-The opt-in `full_vlm_smoke.yaml` route continues the selected candidate through image-text evaluation, physical checkpoint materialization, a fresh-process RealWorldQA smoke evaluation, two TP2 VLM KD steps, checkpoint reload, and final image-text evaluation. These limits check integration behavior; they do not establish model quality or performance.
+The opt-in `vlm_lifecycle_smoke.yaml` route continues the selected candidate through image-text evaluation, physical checkpoint materialization, a fresh-process RealWorldQA smoke evaluation, two TP2 VLM KD steps, checkpoint reload, and final image-text evaluation. These limits check integration behavior; they do not establish model quality or performance. The old `full_vlm_smoke.yaml` name remains only as a deprecated compatibility alias.
 
-The extended `vlm_campaign.yaml` route compares roughly 10%, 15%, and 20% FFN-pruning bands. It evaluates the heterogeneous and homogeneous MIP candidates with the same image-text loss, serving, 64-step screening KD, and repeated RealWorldQA/MMMU contract. Aggregate ranking selects one student for 256-step KD and a final matched comparison with the teacher.
+The extended `ffn_width_10to20pct_kd_search.yaml` route compares roughly 10%, 15%, and 20% FFN-pruning bands. It evaluates the heterogeneous and homogeneous MIP candidates with the same image-text loss, serving, 64-step screening KD, and repeated RealWorldQA/MMMU contract. Aggregate ranking selects one student for an exploratory 256-step continuation and a final matched comparison with the teacher. The 256-step value is a configured follow-up budget, not an established convergence threshold or completion requirement. The old `vlm_campaign.yaml` name remains only as a deprecated compatibility alias.
 
 ## Prepare the inputs
 
@@ -57,12 +57,12 @@ The compiled default plan should end at `mip` and request one GPU for every enab
 
 ## Compile the opt-in lifecycle
 
-Use the same dataset and runner with the full experiment. Switch to the 4B
+Use the same dataset and runner with the lifecycle experiment. Switch to the 4B
 execution profile because the KD stage needs two colocated GPUs:
 
 ```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/full_vlm_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.full_vlm_smoke.yaml
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/vlm_lifecycle_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.vlm_lifecycle_smoke.yaml
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -80,8 +80,8 @@ The checked-in CPU tests validate configuration resolution, the full FFN candida
 Use the same prepared dataset and reviewed run packet, then compile the longer campaign separately:
 
 ```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.campaign.yaml
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
