@@ -84,8 +84,8 @@ _PROFILE_BACKENDS = {
 }
 _PROFILE_REVISIONS = {
     "short-v1": checkpoint.LMMS_EVAL_REVISION,
-    "short-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
-    "short-all-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "short-native-v1": checkpoint.LMMS_EVAL_REVISION,
+    "short-all-native-v1": checkpoint.LMMS_EVAL_REVISION,
     "full-v1": checkpoint.LMMS_EVAL_REVISION,
 }
 

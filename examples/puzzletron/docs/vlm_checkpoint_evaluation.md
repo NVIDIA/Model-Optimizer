@@ -16,34 +16,21 @@ For text-only IFEval and GSM8K evaluation, use the separate
 
 ## Prepare the worker environment
 
-Run evaluation in the same worker environment used by Puzzletron. Install
-ModelOpt and the Puzzletron requirements from the repository root:
+Run evaluation in the default Puzzletron worker image described in the
+[worker environment guide](environment_setup.md). The image includes the exact
+upstream `lmms-eval` 0.7.2 source revision recorded in
+`examples/puzzletron/ci_environment.json`, including its native Qwen 3.5 image
+and video backend. No evaluator overlay or separate VLM requirements install is
+needed.
 
-```bash
-python -m pip install -e '.[hf,puzzletron]' \
-  -r examples/puzzletron/requirements.txt
-```
-
-This installs a pinned upstream `lmms-eval` revision that declares version
-0.7.0. It replaces another version already present in the worker image.
-
-Profiles with `native` in their name need one additional installation step:
-
-```bash
-python -m pip install -r examples/puzzletron/requirements-vlm-native.txt
-```
-
-This temporary requirements file installs upstream `lmms-eval` 0.7.1, which
-adds the Qwen 3.5-specific model loader. Neither pinned version is a ModelOpt
-fork. Follow-up work should use the `lmms-eval` version supplied by the worker
-image once both model-loading paths have been validated with it.
-
-Keep the general vLLM and Qwen-specific paths in separate environments because
-they require different `lmms-eval` revisions. If one environment must be
-reused, reinstall `examples/puzzletron/requirements.txt` before running
-`short-v1` or `full-v1`, and reinstall
-`examples/puzzletron/requirements-vlm-native.txt` before running a profile with
-`native` in its name. Preflight rejects the wrong installed revision.
+The image applies one tracked compatibility patch to `lmms-eval`. It removes an
+unused private WandB printer integration, aligns the WandB requirement with
+AutoModel, and replaces the legacy LaTeX parser whose ANTLR pin conflicts with
+Puzzletron's Hydra stack. The maintained replacement provides the same parser
+entry point to the three affected math tasks. Image construction verifies the
+patch checksum, source revision, resulting checkout diff, required native
+backend and task files, and the resolved Python dependency set. Do not replace
+or modify that evaluator checkout inside the worker image.
 
 ## Understand the two execution paths
 
@@ -52,7 +39,7 @@ reused, reinstall `examples/puzzletron/requirements.txt` before running
 | Qwen-specific Transformers | `short-native-v1`, `short-all-native-v1` | Loads the checkpoint directly with the Qwen 3.5 model loader. Video prompts include timestamps for sampled frames. |
 | General vLLM | `short-v1`, `full-v1` | Runs the checkpoint through vLLM and converts inputs to general image and video messages. Video prompts do not include frame timestamps. |
 
-The paths also use different `lmms-eval` revisions and produce different
+Both paths use the same pinned `lmms-eval` revision but produce different
 prompts. Their scores represent the complete paths and do not isolate the
 effect of the inference engine.
 
@@ -223,10 +210,11 @@ logs, raw evaluator output, and normalized metrics in `summary.json`. Repeating
 a run creates another attempt directory instead of overwriting earlier output.
 
 `short-v1` and `full-v1` use the generic vLLM adapter. `short-native-v1` and
-`short-all-native-v1` use the Qwen-specific Transformers adapter. As described
-above, the paths use different evaluator revisions and construct different
-model inputs. Keep the profile name with every score, and do not combine scores
-from the two paths as if only the inference engine changed.
+`short-all-native-v1` use the Qwen-specific Transformers adapter. Both use the
+same pinned evaluator revision but construct different model inputs. Keep the
+profile name with every score, and do not combine scores from the two paths as
+if only the inference engine changed. The recorded preflight report includes
+the backend identity, frame policy, generation policy, and evaluator revision.
 
 If preflight fails, address the reported checkpoint, revision, cache, decoder,
 or credential mismatch before retrying. Inspect `stderr.txt` in the attempt

@@ -38,7 +38,7 @@ def _lmms_eval_root() -> Path:
     locations = spec.submodule_search_locations if spec is not None else None
     if not locations:
         raise RuntimeError(
-            "lmms_eval is not installed; install examples/puzzletron/requirements.txt"
+            "lmms_eval is not installed; run this command in the Puzzletron worker image"
         )
     return Path(next(iter(locations))).absolute()
 
@@ -222,7 +222,7 @@ def _write_video_path_adapter(tasks_root: Path) -> None:
     alias_root = tasks_root / "video_path_aliases"
     checkpoint.write_generated(
         tasks_root / "modelopt_video_paths.py",
-        f'''"""Normalize upstream video paths for the pinned Qwen 3.5 vLLM backend."""
+        f'''"""Normalize upstream video paths for the pinned native Qwen 3.5 backend."""
 
 import hashlib
 import os

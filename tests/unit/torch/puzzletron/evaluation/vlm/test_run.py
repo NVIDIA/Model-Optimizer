@@ -15,6 +15,7 @@
 
 """High-value behavior tests for local VLM evaluation workflows."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -578,10 +579,10 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
 def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {
-        "short-v1": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
-        "short-native-v1": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
-        "short-all-native-v1": "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68",
-        "full-v1": "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a",
+        "short-v1": "3b0803c0deff0873d2c8e0963f1167dfbbf2ef7309b5eb33f089aa2048f6cf91",
+        "short-native-v1": "aca78320b188c4c6f41a7e5ec0017a0c738b98ec797e9f2f6f9f1aabce34dfa7",
+        "short-all-native-v1": "88074cec92cd6aa972cd2e48ddc6adbaa84ab26b24e36be2e3842b71317cdd7e",
+        "full-v1": "5b0849975f65e4bbbdc93d52ff2866d54968f5cc3de6d0928077e3d6ab320e6a",
     }
 
     short = profiles["short-v1"]
@@ -619,7 +620,7 @@ def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
     assert exact_rows is not None
     validated = suites.validate_exact_rows_manifest(
         exact_rows,
-        expected_revision=checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+        expected_revision=checkpoint.LMMS_EVAL_REVISION,
         expected_tasks=contract.source_tasks,
     )
 
@@ -1265,15 +1266,22 @@ def test_native_backend_validation_requires_qwen_vision_utilities(monkeypatch):
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
     requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
-    assert (
-        "-e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
-        f"{checkpoint.LMMS_EVAL_REVISION}#egg=lmms-eval"
-    ) in requirements.splitlines()
+    assert "lmms-eval.git" not in requirements
     assert 'eva-decord==0.6.1; platform_system == "Linux"' in requirements.splitlines()
+    assert "wandb==0.29.0" in requirements.splitlines()
     environment = json.loads(
         (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
     )
     assert environment["lmms_eval"]["commit"] == checkpoint.LMMS_EVAL_REVISION
+    patch = (
+        checkpoint.REPOSITORY_ROOT
+        / "examples/puzzletron/patches"
+        / environment["lmms_eval"]["compatibility_patch"]
+    )
+    assert (
+        hashlib.sha256(patch.read_bytes()).hexdigest()
+        == environment["lmms_eval"]["compatibility_patch_sha256"]
+    )
 
 
 def test_vlm_parser_exposes_only_suite_owned_sample_limits():

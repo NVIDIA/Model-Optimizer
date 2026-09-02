@@ -45,45 +45,40 @@ def test_load_runner_restores_import_state(monkeypatch):
     assert "modelopt.torch.puzzletron.evaluation.lmms" not in sys.modules
 
 
-@pytest.mark.parametrize(
-    "expected",
-    [checkpoint.LMMS_EVAL_REVISION, checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION],
-)
-def test_verify_lmms_eval_revision_accepts_pinned_vcs_install(monkeypatch, expected):
-    provenance = {"vcs_info": {"commit_id": expected}}
+def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
+    provenance = {
+        "url": checkpoint.LMMS_EVAL_SOURCE["repository"],
+        "vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION},
+    }
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
 
-    assert checkpoint.verify_lmms_eval_revision(expected) == expected
+    with pytest.raises(RuntimeError, match="requires a verified editable"):
+        checkpoint.verify_lmms_eval_revision()
 
 
 def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
-    responses = [
-        SimpleNamespace(stdout=f"{checkpoint.LMMS_EVAL_REVISION}\n"),
-        SimpleNamespace(stdout=""),
-    ]
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
-    monkeypatch.setattr(checkpoint.subprocess, "run", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        checkpoint.ci_environment, "verify_installed_vcs_source", lambda _package, _source: None
+    )
 
     assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
 
 
 @pytest.mark.parametrize("distribution_available", [False, True])
 def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(
-    monkeypatch,
-    tmp_path,
-    distribution_available,
+    monkeypatch, tmp_path, distribution_available
 ):
     package = tmp_path / "lmms_eval"
     package.mkdir()
-    responses = [
-        SimpleNamespace(stdout=f"{checkpoint.LMMS_EVAL_REVISION}\n"),
-        SimpleNamespace(stdout=""),
-    ]
+    (tmp_path / ".git").mkdir()
 
     def distribution(_name):
         if not distribution_available:
@@ -96,23 +91,30 @@ def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(
         "find_spec",
         lambda _name: SimpleNamespace(submodule_search_locations=[str(package)]),
     )
-    monkeypatch.setattr(checkpoint.subprocess, "run", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        checkpoint.ci_environment,
+        "verify_vcs_checkout",
+        lambda _checkout, _package, _source: checkpoint.LMMS_EVAL_REVISION,
+    )
 
     assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
 
 
 def test_verify_lmms_eval_revision_rejects_dirty_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
-    responses = [
-        SimpleNamespace(stdout=f"{checkpoint.LMMS_EVAL_REVISION}\n"),
-        SimpleNamespace(stdout=" M task.yaml\n"),
-    ]
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
-    monkeypatch.setattr(checkpoint.subprocess, "run", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(
+        checkpoint.ci_environment,
+        "verify_installed_vcs_source",
+        lambda _package, _source: (_ for _ in ()).throw(
+            RuntimeError("compatibility patch files differ")
+        ),
+    )
 
-    with pytest.raises(RuntimeError, match="contains local changes"):
+    with pytest.raises(RuntimeError, match="compatibility patch files differ"):
         checkpoint.verify_lmms_eval_revision()
 
 
@@ -124,9 +126,15 @@ def test_verify_lmms_eval_revision_rejects_dirty_editable_checkout(monkeypatch, 
     ],
 )
 def test_verify_lmms_eval_revision_rejects_unverifiable_editable_install(monkeypatch, provenance):
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
+    monkeypatch.setattr(
+        checkpoint.ci_environment,
+        "verify_installed_vcs_source",
+        lambda _package, _source: (_ for _ in ()).throw(RuntimeError("source mismatch")),
+    )
 
-    with pytest.raises(RuntimeError, match="found unknown"):
+    with pytest.raises(RuntimeError, match="source mismatch"):
         checkpoint.verify_lmms_eval_revision()

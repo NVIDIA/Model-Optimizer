@@ -35,8 +35,10 @@ ModelOpt, CUDA, the worker container, or the worker virtual environment.
 
 The repository [`Dockerfile`](../Dockerfile) builds the worker image. It
 installs ModelOpt, the pinned vLLM and AutoModel sources, AIPerf, LMMS-Eval,
-the required CUDA extensions, and the teacher-evaluation resources. Do not
-maintain a second set of worker installation commands outside the Dockerfile.
+the required CUDA extensions, and the teacher-evaluation resources. Its
+LMMS-Eval install includes the pinned native Qwen 3.5 image and video backend.
+Do not maintain a second set of worker installation commands or evaluator
+overlays outside the Dockerfile.
 
 Build the Linux amd64 image from the repository root by following the
 [image build and validation guide](worker_image.md). That guide provides the

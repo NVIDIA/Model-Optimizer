@@ -28,8 +28,8 @@ from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, cast
-from urllib.parse import unquote, urlparse
-from urllib.request import url2pathname
+
+from examples.puzzletron import ci_environment
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -37,7 +37,6 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_PREFLIGHT_TIMEOUT_SECONDS",
     "HUGGINGFACE_CREDENTIAL_NAMES",
-    "LMMS_EVAL_QWEN35_NATIVE_REVISION",
     "LMMS_EVAL_REVISION",
     "credential_free_environment",
     "lmms_eval_disabled_judge_environment",
@@ -50,8 +49,11 @@ __all__ = [
 ]
 
 REPOSITORY_ROOT = Path(__file__).absolute().parents[3]
-LMMS_EVAL_REVISION = "15c32bfec165df13c269ddd3cda03b2ed9137825"
-LMMS_EVAL_QWEN35_NATIVE_REVISION = "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56"
+CI_ENVIRONMENT = json.loads(
+    (REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
+)
+LMMS_EVAL_SOURCE = CI_ENVIRONMENT["lmms_eval"]
+LMMS_EVAL_REVISION = LMMS_EVAL_SOURCE["commit"]
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 15 * 60.0
 HUGGINGFACE_CREDENTIAL_NAMES = (
     "HF_TOKEN",
@@ -148,22 +150,29 @@ def positive_float(value: str) -> float:
 
 
 def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> str:
-    """Return the installed VCS revision after matching the requested evaluator pin."""
+    """Return the imported evaluator revision after matching its source and patch pin."""
+    revision = _imported_lmms_eval_revision()
+    if revision is not None:
+        if revision != expected_revision:
+            raise RuntimeError(
+                "installed lmms-eval revision differs from the pinned profile: "
+                f"expected {expected_revision}, found {revision}"
+            )
+        return revision
     try:
         direct_url = importlib.metadata.distribution("lmms-eval").read_text("direct_url.json")
-    except importlib.metadata.PackageNotFoundError:
-        direct_url = None
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError("installed lmms-eval revision provenance is unavailable") from error
     try:
         provenance = json.loads(direct_url) if direct_url is not None else None
     except json.JSONDecodeError as error:
         raise RuntimeError("installed lmms-eval revision provenance is unavailable") from error
-    if provenance is None:
-        revision = _imported_lmms_eval_revision()
-    elif isinstance(provenance, dict):
-        vcs_info = provenance.get("vcs_info")
-        revision = vcs_info.get("commit_id") if isinstance(vcs_info, dict) else None
-        if revision is None:
-            revision = _editable_lmms_eval_revision(provenance)
+    if isinstance(provenance, dict):
+        try:
+            ci_environment.verify_installed_vcs_source("lmms-eval", LMMS_EVAL_SOURCE)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("installed lmms-eval source provenance is unavailable") from error
+        revision = LMMS_EVAL_REVISION
     else:
         revision = None
     if revision != expected_revision:
@@ -174,52 +183,24 @@ def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> st
     return revision
 
 
-def _editable_lmms_eval_revision(provenance: dict[str, object]) -> str | None:
-    """Return the revision of a clean editable Git install, when present."""
-    directory_info = provenance.get("dir_info")
-    if not isinstance(directory_info, dict) or directory_info.get("editable") is not True:
-        return None
-    url = provenance.get("url")
-    if not isinstance(url, str):
-        return None
-    parsed = urlparse(url)
-    if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
-        return None
-    checkout = Path(url2pathname(unquote(parsed.path))).resolve()
-    return _clean_checkout_revision(checkout)
-
-
 def _imported_lmms_eval_revision() -> str | None:
     """Verify a source checkout imported directly through ``PYTHONPATH``."""
     spec = importlib.util.find_spec("lmms_eval")
     locations = tuple(spec.submodule_search_locations or ()) if spec is not None else ()
     if len(locations) != 1:
         return None
-    return _clean_checkout_revision(Path(locations[0]).resolve().parent)
+    checkout = Path(locations[0]).resolve().parent
+    if not (checkout / ".git").exists():
+        return None
+    return _verified_checkout_revision(checkout)
 
 
-def _clean_checkout_revision(checkout: Path) -> str | None:
-    """Return the revision of one clean Git checkout, if it can be verified."""
+def _verified_checkout_revision(checkout: Path) -> str | None:
+    """Return the revision of one source-and-patch verified Git checkout."""
     try:
-        revision = subprocess.run(
-            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout.strip()
-        status = subprocess.run(
-            ["git", "-C", str(checkout), "status", "--porcelain", "--untracked-files=all"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout
+        return ci_environment.verify_vcs_checkout(checkout, "lmms-eval", LMMS_EVAL_SOURCE)
     except (OSError, subprocess.SubprocessError):
         return None
-    if status:
-        raise RuntimeError("installed lmms-eval checkout contains local changes")
-    return revision or None
 
 
 def credential_free_environment(environment: Mapping[str, str]) -> dict[str, str]:

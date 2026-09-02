@@ -1,7 +1,7 @@
 {
   "schema": "modelopt.vlm-evaluation-profile/v1",
   "name": "short-v1",
-  "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+  "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
   "model_family": {
     "architecture": "Qwen3_5ForConditionalGeneration",
     "model_type": "qwen3_5"

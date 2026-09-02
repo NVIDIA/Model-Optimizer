@@ -1,2 +1,0 @@
-# Install after requirements.txt to select the native Qwen 3.5 evaluator profile.
--e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@88b23e2bfa16a1edbc16e9e238ed82130b3a4f56#egg=lmms-eval
