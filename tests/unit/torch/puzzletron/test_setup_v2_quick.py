@@ -545,7 +545,7 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
     smoke_quality = smoke_flow["nodes"]["quality_benchmarks"]["config"]
-    assert smoke_quality["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert smoke_quality["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
     assert smoke_quality["limit"] == 8
     assert "recorded_observation" not in smoke_quality
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
@@ -553,7 +553,7 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert flow_id == "params-90"
     nodes = flow["nodes"]
     quality = nodes["quality_benchmarks"]
-    assert quality["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert quality["config"]["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
     assert "model" not in quality["config"]
     assert "log_samples" not in quality["config"]
     assert "recorded_observation" not in quality["config"]

@@ -65,7 +65,7 @@ def test_recommended_flow_accepts_a_single_concurrency_value():
 
 def test_recommended_multimodal_flow_uses_image_serving_and_vlm_selection():
     comparison = {
-        "profile": "qwen35_vlm_e2e_full_eval",
+        "profile": "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
         "reference_checkpoint": "${teacher_dir}",
     }
 

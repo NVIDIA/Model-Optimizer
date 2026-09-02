@@ -29,6 +29,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import median
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkpoint
@@ -545,14 +546,22 @@ def _aiperf(
         **settings,
     )
     metrics = {}
+    grouped_results: dict[tuple[int, int], list[Any]] = {}
     for result in results:
-        if len(results) == 1:
-            metrics.update(result.metrics)
         image_batch_size = int(result.workload.get("image_batch_size", 0))
-        namespace = f"concurrency_{result.concurrency}"
+        grouped_results.setdefault((image_batch_size, result.concurrency), []).append(result)
+    for (image_batch_size, concurrency), repetitions in grouped_results.items():
+        namespace = f"concurrency_{concurrency}"
         if image_batch_size > 0:
             namespace = f"images_{image_batch_size}.{namespace}"
-        metrics.update({f"{namespace}.{key}": value for key, value in result.metrics.items()})
+        metric_names = set.intersection(*(set(result.metrics) for result in repetitions))
+        aggregated = {
+            name: median(float(result.metrics[name]) for result in repetitions)
+            for name in sorted(metric_names)
+        }
+        if len(results) == 1:
+            metrics.update(aggregated)
+        metrics.update({f"{namespace}.{key}": value for key, value in aggregated.items()})
     return {
         "metrics": metrics,
         "result_paths": [result.raw_artifacts for result in results],

@@ -15,7 +15,9 @@
 
 """Future-stage configuration and artifact-selection contracts."""
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -210,3 +212,61 @@ def test_bounded_map_does_not_queue_work_after_failure():
     with pytest.raises(RuntimeError, match="^stop$"):
         future._bounded_map(fail_first, range(5), max_workers=1)
     assert observed == [0]
+
+
+def test_aiperf_stage_forwards_repeated_measurement_policy(monkeypatch, tmp_path):
+    teacher = tmp_path / "teacher"
+    candidate = tmp_path / "candidates" / "solution_0"
+    teacher.mkdir()
+    candidate.mkdir(parents=True)
+    (teacher / "config.json").write_text("{}")
+    (candidate / "config.json").write_text("{}")
+    evaluation_summary = tmp_path / "evaluation_summary.json"
+    evaluation_summary.write_text(
+        json.dumps([{"checkpoint": str(candidate), "metrics": {"lm_loss": 1.0}}])
+    )
+    calls = []
+
+    def fake_run_aiperf_sweep(checkpoint, **settings):
+        calls.append((checkpoint, settings))
+        return []
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.run_aiperf_sweep",
+        fake_run_aiperf_sweep,
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.write_aiperf_report",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        future,
+        "complete_stage",
+        lambda _config, _manifest, *, outputs: outputs,
+    )
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    config = {
+        "experiment": {"dir": str(tmp_path)},
+        "convert": {"teacher_dir": str(teacher)},
+        "aiperf": {
+            "enabled": True,
+            "solution_checkpoints_dir": str(candidate.parent),
+            "evaluation_summary_path": str(evaluation_summary),
+            "concurrency": [1],
+            "topology": {"gpu_group_size": 1},
+            "warmup_request_count": 8,
+            "warmup_seed": 99,
+            "repetitions": 3,
+            "collect_peak_gpu_memory": True,
+        },
+    }
+
+    outputs = future.aiperf_stage(config, SimpleNamespace())
+
+    assert outputs["result_count"] == 0
+    assert len(calls) == 2
+    for _, settings in calls:
+        assert settings["warmup_request_count"] == 8
+        assert settings["warmup_seed"] == 99
+        assert settings["repetitions"] == 3
+        assert settings["collect_peak_gpu_memory"] is True

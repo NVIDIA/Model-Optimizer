@@ -275,6 +275,7 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
 ) -> None:
     campaign = _compile_campaign(monkeypatch, tmp_path, run_path=CAMPAIGN_PATH)
     config = campaign.experiment_config
+    stages = {stage.stage_id: stage for stage in campaign.stages}
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
     candidates = config["mip"]["runs"]["params-90"]
     assert candidates["constraints"] == {"params": {"max": "90%"}}
@@ -302,6 +303,12 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         "direction": "minimize",
         "top_k": 2,
     }
+    assert nodes["pre_kd_short_v1"]["input"] == "materialized"
+    assert "model_source" not in nodes["pre_kd_short_v1"]
+    assert {node_id for node_id, node in nodes.items() if node["type"] == "aiperf"} == {"serving"}
+    assert nodes["serving"]["input"] == "best"
+    assert nodes["serving"]["config"]["request_count"] == 64
+    assert nodes["serving"]["config"]["warmup_request_count"] == 32
     trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
     assert [node["config"]["max_steps"] for node in trajectory_nodes] == [64, 128, 256, 512, 1024]
     assert {node["trajectory"] for node in trajectory_nodes} == {
@@ -327,6 +334,11 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     assert nodes["selected"]["input"] == "short_v1_256"
     assert nodes["approve_512"]["input"] == "bounded_result"
     assert nodes["approve_1024"]["input"] == "short_v1_512"
+    assert nodes["best"]["input"] == "short_v1_1024"
+    assert stages["post.candidate-evaluation.serving"].parents == (
+        "post.candidate-evaluation.best",
+    )
+    assert stages["post.candidate-evaluation.serving"].total_gpus == 1
     assert [row["steps"] for row in nodes["bounded_result"]["config"]["milestones"]] == [
         64,
         128,

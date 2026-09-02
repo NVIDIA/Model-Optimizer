@@ -223,10 +223,10 @@ row-selection policy.
 `vlm_campaign.yaml` is the expanded admitted-axis search: hidden width,
 heterogeneous FFN width, and depth. It reuses the existing `params-90` MIP
 profile and the established image-text LM-loss `top_k: 2` screening step.
-Serving measurements are recorded for both retained candidates but do not
-affect selection. The `3328` and `3072` FFN widths are separate conservative
-controls; the deeper `2816`, `2432`, `2048`, `1664`, and `1408` values remain
-search bins rather than justified VLM defaults.
+It records serving measurements only for the selected checkpoint after the
+final KD and frozen-row evaluation milestone. The `3328` and `3072` FFN widths
+are separate conservative controls; the deeper `2816`, `2432`, `2048`, `1664`,
+and `1408` values remain search bins rather than justified VLM defaults.
 
 Every LM-loss-retained candidate follows one resumable trajectory from the same
 immutable pre-KD materialized checkpoint. AutoModel optimizer state is
@@ -293,6 +293,12 @@ Inspect the compiled stage order and one-GPU allocation before launch. Then
 omit `--dry-run` to launch or resume the exact same three-input campaign.
 
 Run the campaign with the same execution profile and a distinct output root:
+
+The campaign gives both materialized candidates the same short KD and quality
+screen, then selects one candidate for the longer KD and final quality
+comparison. AIPerf runs only for that final post-KD checkpoint. Each serving
+cell uses 32 warmup requests followed by 64 measured requests. The separate
+MIP runtime estimator remains disabled in this campaign.
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
