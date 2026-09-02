@@ -19,20 +19,22 @@ import base64
 import contextlib
 import inspect
 import json
+import logging
 import os
 import shutil
 import tempfile
 from contextlib import nullcontext
-from itertools import chain
 from typing import Any
 
 import onnx
+import onnxconverter_common.float16 as _f16_module
 import torch
 import torch.nn as nn
 from onnx import ModelProto
+from onnxconverter_common import convert_float_to_float16
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
-from modelopt.onnx.autocast.convert import convert_to_f16, convert_to_fp32
+from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.export import (
     FP8QuantExporter,
     INT4QuantExporter,
@@ -43,9 +45,11 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
+    change_casts_to_fp16,
     check_model_uses_external_data,
     fold_dq_fp32_to_fp16_casts,
     fold_q_fp16_to_fp32_casts,
+    fold_qdq_scale_fp16_to_fp32_casts,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -56,11 +60,34 @@ from modelopt.onnx.utils import (
     remove_redundant_casts,
 )
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
-from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
+
+# Monkey-patch for onnxconverter_common bug in remove_unnecessary_cast_node():
+# cast_node_downstream_dict stores either a single node or a list of nodes, but the
+# downstream-node handling at lines ~770/787 always does `downstream_node.input`,
+# which raises AttributeError("'list' object has no attribute 'input'") when the
+# value is a list (i.e. a Cast output feeds multiple consumers).
+# TODO: Remove this patch once onnxconverter-common ships a fix.
+#   Upstream issue: https://github.com/microsoft/onnxconverter-common/issues/261
+_original_remove_unnecessary_cast_node = _f16_module.remove_unnecessary_cast_node
+
+_logger = logging.getLogger(__name__)
+
+
+def _patched_remove_unnecessary_cast_node(graph):
+    try:
+        _original_remove_unnecessary_cast_node(graph)
+    except AttributeError as e:
+        if "'list' object has no attribute 'input'" in str(e):
+            _logger.debug("Skipping remove_unnecessary_cast_node due to known upstream bug: %s", e)
+        else:
+            raise
+
+
+_f16_module.remove_unnecessary_cast_node = _patched_remove_unnecessary_cast_node
 
 ModelMetadata = dict[str, Any]
 ModelType = Any
@@ -70,16 +97,6 @@ ValueInfoType = Any
 DEFAULT_ONNX_OPSET = 20
 ONNX_EXPORT_OUT_PREFIX = "out"
 TWO_GB = 2 * 1024 * 1024 * 1024
-WEIGHTS_DTYPE_TO_TORCH_DTYPE = {
-    "fp32": torch.float32,
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16,
-}
-WEIGHTS_DTYPE_TO_ONNX_DTYPE = {
-    "fp32": "Float",
-    "fp16": "Half",
-    "bf16": "BFloat16",
-}
 
 
 class OnnxBytes:
@@ -192,61 +209,6 @@ def _to_expected_onnx_type(val: Any) -> Any:
     if isinstance(val, (int, float)):
         return torch.tensor(val).to(type(val))
     return val
-
-
-def _cast_floating_tensors(value: Any, dtype: torch.dtype) -> Any:
-    flat_values, tree_spec = flatten_tree(value)
-    flat_values = [
-        item.to(dtype=dtype)
-        if isinstance(item, torch.Tensor) and item.is_floating_point()
-        else item
-        for item in flat_values
-    ]
-    return tree_spec.generate_pytree(flat_values)
-
-
-def _get_autocast_context(
-    model: nn.Module, flat_input: list[Any], target_dtype: torch.dtype | None
-):
-    if target_dtype not in (torch.float16, torch.bfloat16):
-        return nullcontext()
-
-    for item in flat_input:
-        if isinstance(item, torch.Tensor) and item.is_floating_point():
-            return torch.autocast(device_type=item.device.type, dtype=target_dtype)
-    for tensor in chain(model.parameters(), model.buffers()):
-        if tensor.is_floating_point():
-            return torch.autocast(device_type=tensor.device.type, dtype=target_dtype)
-    for item in flat_input:
-        if isinstance(item, torch.Tensor):
-            return torch.autocast(device_type=item.device.type, dtype=target_dtype)
-    tensor = next(chain(model.parameters(), model.buffers()), None)
-    if tensor is not None:
-        return torch.autocast(device_type=tensor.device.type, dtype=target_dtype)
-    return torch.autocast(device_type="cpu", dtype=target_dtype)
-
-
-@contextlib.contextmanager
-def _override_onnx_quantizer_precision(model: nn.Module, high_precision_dtype: str | None):
-    if high_precision_dtype is None:
-        yield
-        return
-
-    sentinel = object()
-    originals: list[tuple[TensorQuantizer, Any]] = []
-    for module in model.modules():
-        if isinstance(module, TensorQuantizer):
-            original = getattr(module, "_trt_high_precision_dtype", sentinel)
-            originals.append((module, original))
-            module.trt_high_precision_dtype = high_precision_dtype
-    try:
-        yield
-    finally:
-        for quantizer, original in originals:
-            if original is sentinel:
-                del quantizer._trt_high_precision_dtype
-            else:
-                quantizer.trt_high_precision_dtype = original
 
 
 def generate_onnx_input(
@@ -467,15 +429,11 @@ def _disable_fp8_conv_weight_quantizers(model: nn.Module):
             module.weight_quantizer.enable()
 
 
-def quantize_weights(
-    model: nn.Module,
-    onnx_model: onnx.ModelProto,
-    high_precision_dtype: str | None = None,
-) -> onnx.ModelProto:
+def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     """Real quantizes the weights in the onnx model.
 
     Applies weight quantization to an ONNX model based on the quantization scheme detected
-    in the PyTorch model. Supports INT4, NVFP4, MXFP8, FP8, and INT8 quantization formats.
+    in the PyTorch model. Supports INT4, FP4, and MXFP8 quantization formats.
 
     The function performs a four-stage process for each detected quantization type:
     1. Pre-process - Restructure the graph for quantization
@@ -487,7 +445,6 @@ def quantize_weights(
         model (nn.Module): The original PyTorch model used to detect quantization schemes.
             This model should have been quantized using modelopt's quantization APIs.
         onnx_model (onnx.ModelProto): The ONNX model whose weights will be quantized.
-        high_precision_dtype: Optional ONNX scalar type used for the surrounding graph.
 
     Returns:
         onnx.ModelProto: The ONNX model with quantized weights applied. The returned model
@@ -496,7 +453,7 @@ def quantize_weights(
     Notes:
         - Multiple quantization formats can be applied sequentially if the model contains
           different quantization schemes for different layers
-        - The function checks every supported quantization format in the PyTorch model
+        - The function checks for INT4, FP4, and MXFP8 quantization in the PyTorch model
         - Each quantization exporter modifies the ONNX graph in-place before returning
     """
 
@@ -517,7 +474,7 @@ def quantize_weights(
         return onnx_model
 
     for onnx_exporter in onnx_exporters:
-        onnx_model = onnx_exporter.process_model(onnx_model, high_precision_dtype)
+        onnx_model = onnx_exporter.process_model(onnx_model)
 
     return onnx_model
 
@@ -532,7 +489,7 @@ def get_onnx_bytes_and_metadata(
     dynamo_export: bool = False,
     onnx_opset: int = DEFAULT_ONNX_OPSET,
     dq_only: bool = False,
-    weights_dtype: str = "native",
+    weights_dtype: str = "fp32",
 ) -> tuple[bytes, ModelMetadata]:
     """Get onnx model in bytes from input pytorch model together with the input/output of model.
 
@@ -550,11 +507,7 @@ def get_onnx_bytes_and_metadata(
             `torch.onnx.export <https://pytorch.org/docs/stable/onnx.html#torch.onnx.export>`_.
         onnx_opset: The onnx opset version to use for exporting the model.
         dq_only: If True, the exported onnx model is converted to a dq_only model.
-        weights_dtype: Selects the floating-point graph I/O and high-precision Q/DQ boundary
-            dtype. ``native`` preserves the precision produced by the PyTorch export;
-            ``fp32``, ``fp16``, and ``bf16`` force that target while leaving format-native
-            quantized tensors and scales unchanged. Inference inputs supplied to the exported
-            ONNX model must use the selected explicit floating-point dtype.
+        weights_dtype: The dtype of the weights in the onnx model.
 
     Returns:
         bytes: Onnx model in bytes.
@@ -566,24 +519,22 @@ def get_onnx_bytes_and_metadata(
     if not isinstance(model, nn.Module):
         raise ValueError("Only PyTorch model compilation is supported.")
 
-    assert weights_dtype in ["native", "fp32", "fp16", "bf16"], (
-        "weights_dtype must be one of native, fp32, fp16, or bf16"
+    assert weights_dtype in ["fp32", "fp16", "bf16"], (
+        "weights_dtype must be one of fp32, fp16, or bf16"
     )
-    if onnx_load_path and weights_dtype != "native":
-        raise ValueError("weights_dtype must be 'native' when onnx_load_path is provided")
 
     # unwrap DDP and DP models
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
+
+    first_parameter = next(model.parameters(), None)
+    source_weights_dtype = first_parameter.dtype if first_parameter is not None else torch.float32
 
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
     # Floats/ints are tensorized when they are provided, but not tensorized when they are not
     # provided which is somewhat inconsistent (we always tensorize them!)
     named_args, _ = standardize_named_model_args(model, dummy_input)
     named_args = {k: _to_expected_onnx_type(v) for k, v in named_args.items()}
-    target_torch_dtype = WEIGHTS_DTYPE_TO_TORCH_DTYPE.get(weights_dtype)
-    if target_torch_dtype in (torch.float16, torch.bfloat16):
-        named_args = _cast_floating_tensors(named_args, target_torch_dtype)
 
     # Also standardize dummy_input again so we can use it
     dummy_input = tuple(named_args.values())
@@ -600,8 +551,17 @@ def get_onnx_bytes_and_metadata(
     # during inference.
     input_none_names = list(set(tree_spec_input.names) - set(input_names))
 
+    use_torch_autocast = not (
+        is_fp4_quantized(model)
+        or is_mxfp8_quantized(model)
+        or is_fp8_quantized(model)
+        or is_int8_quantized(model)
+        or weights_dtype == "fp32"
+    )
+    autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
+
     # Get output once (we export in inference mode - so also using inference mode here!)
-    with torch.inference_mode(), _get_autocast_context(model, flat_input, target_torch_dtype):
+    with torch.inference_mode(), autocast:
         output = model(*named_args.values())
 
     # Get output tree spec
@@ -636,14 +596,7 @@ def get_onnx_bytes_and_metadata(
     conv_wq_context = (
         _disable_fp8_conv_weight_quantizers(model) if is_fp8_quantized(model) else nullcontext()
     )
-    high_precision_dtype = WEIGHTS_DTYPE_TO_ONNX_DTYPE.get(weights_dtype)
-    with (
-        torch.inference_mode(),
-        _get_autocast_context(model, flat_input, target_torch_dtype),
-        _override_onnx_quantizer_precision(model, high_precision_dtype),
-        quantizer_context,
-        conv_wq_context,
-    ):
+    with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
         if not dynamo_export:
             additional_kwargs["dynamic_axes"] = dynamic_axes
@@ -679,30 +632,50 @@ def get_onnx_bytes_and_metadata(
         tree_spec_input, tree_spec_output, input_none_names, onnx_opt_graph, model
     )
 
-    onnx_opt_graph = quantize_weights(model, onnx_opt_graph, high_precision_dtype)
+    onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype == "fp32":
-        onnx_opt_graph = convert_to_fp32(onnx_opt_graph)
-    elif weights_dtype in ("fp16", "bf16") and not any(
-        (
-            is_int4_quantized(model),
-            is_fp4_quantized(model),
-            is_mxfp8_quantized(model),
-            is_fp8_quantized(model),
-            is_int8_quantized(model),
-        )
-    ):
-        onnx_opt_graph = convert_to_f16(
-            onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
-        )
+    uses_fp8 = is_fp8_quantized(model)
+    uses_other_unsupported_quantizer = (
+        is_int4_quantized(model) or is_mxfp8_quantized(model) or is_int8_quantized(model)
+    )
+    is_bf16_fp8_noop = (
+        weights_dtype == "bf16"
+        and source_weights_dtype == torch.bfloat16
+        and uses_fp8
+        and not uses_other_unsupported_quantizer
+    )
+    if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
+        if uses_other_unsupported_quantizer or uses_fp8:
+            assert weights_dtype == "fp16", (
+                "Converting a quantized ONNX graph to BF16 is not supported yet"
+            )
+            onnx_opt_graph = convert_float_to_float16(
+                onnx_opt_graph,
+                keep_io_types=False,
+                disable_shape_infer=True,
+                check_fp16_ready=False,
+                op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
+            )
+            # Change FP32 cast nodes feeding into Concat/Add to FP16
+            op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
+            onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
+            # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
+            onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
+            # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
+            # MatMul/Add layers under strongly-typed TRT parsing.
+            onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+        else:
+            onnx_opt_graph = convert_to_f16(
+                onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
+            )
 
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # Remove Cast nodes around Q/DQ for optimal TRT fusion
-    if is_fp8_quantized(model) and weights_dtype == "fp16":
+    if is_fp8_quantized(model):
         onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
         onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
 
@@ -713,7 +686,22 @@ def get_onnx_bytes_and_metadata(
     # Must be set after all gs.export_onnx() calls as graphsurgeon resets ir_version
     onnx_opt_graph.ir_version = 10
 
-    _save_onnx_model(onnx_opt_graph, onnx_save_path, model_name)
+    # If the onnx model contains external data store the external tensors in one file and save the onnx model
+    if has_external_data(onnx_save_path):
+        tensor_paths = get_external_tensor_paths(onnx_path)
+        onnx.save_model(
+            onnx_opt_graph,
+            onnx_save_path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{model_name}.onnx_data",
+            size_threshold=1024,
+            convert_attribute=False,
+        )
+        for path in tensor_paths:
+            os.remove(path)
+    else:
+        onnx.save_model(onnx_opt_graph, onnx_save_path)
 
     onnx_bytes = OnnxBytes(onnx_save_path)
 
@@ -735,33 +723,6 @@ def has_external_data(onnx_model_path: str):
     """Check if the onnx model has external data."""
     onnx_model = onnx.load(onnx_model_path, load_external_data=False)
     return check_model_uses_external_data(onnx_model)
-
-
-def _save_onnx_model(onnx_model: onnx.ModelProto, onnx_save_path: str, model_name: str) -> None:
-    model_dir = os.path.dirname(onnx_save_path)
-    if not (has_external_data(onnx_save_path) or onnx_model.ByteSize() >= TWO_GB):
-        onnx.save_model(onnx_model, onnx_save_path)
-        return
-
-    tensor_paths = get_external_tensor_paths(model_dir)
-    external_data_name = f"{model_name}.onnx_data"
-    external_data_path = os.path.join(model_dir, external_data_name)
-    if os.path.exists(external_data_path):
-        os.remove(external_data_path)
-
-    onnx.save_model(
-        onnx_model,
-        onnx_save_path,
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location=external_data_name,
-        size_threshold=1024,
-        convert_attribute=True,
-    )
-    external_data_path = os.path.abspath(external_data_path)
-    for path in tensor_paths:
-        if os.path.abspath(path) != external_data_path and os.path.exists(path):
-            os.remove(path)
 
 
 def create_model_metadata(

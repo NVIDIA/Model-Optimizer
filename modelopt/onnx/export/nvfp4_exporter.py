@@ -318,9 +318,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         return onnx_model
 
     @staticmethod
-    def post_process(
-        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
-    ) -> onnx.ModelProto:
+    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for NVFP4 quantization.
 
         Replaces TRT_FP4QDQ nodes with two DequantizeLinear nodes and handles
@@ -336,60 +334,37 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         value_info_map = {vi.name: vi for vi in graph.value_info}
         graph_inputs = {inp.name for inp in graph.input}
         cast_output_cache: dict[tuple[str, str], str] = {}
-        casted_node_ids: set[int] = set()
 
         def _get_precision_dtype() -> str:
             # Check initializers to determine the precision of the weights
             precision_dtype = "Half"
             for initializer in graph.initializer:
-                if initializer.data_type == onnx.TensorProto.BFLOAT16:
+                if initializer.data_type == 16:
                     precision_dtype = "BFloat16"
                     break  # Assuming all weights are of the same precision
             return precision_dtype
 
-        def _get_linear_consumers(tensor_name: str) -> list[onnx.NodeProto]:
-            nodes_to_visit = list(tensor_consumers.get(tensor_name, []))
-            visited_node_ids = set()
-            linear_consumers = {}
-
-            while nodes_to_visit:
-                node = nodes_to_visit.pop()
-                node_id = id(node)
-                if node_id in visited_node_ids:
-                    continue
-                visited_node_ids.add(node_id)
-
-                if node.op_type in {"Gemm", "MatMul"}:
-                    linear_consumers[node_id] = node
-                elif node.op_type in {"Cast", "Transpose"}:
-                    for output_name in node.output:
-                        nodes_to_visit.extend(tensor_consumers.get(output_name, []))
-
-            assert linear_consumers, f"No Gemm or MatMul consumes {tensor_name}"
-            return list(linear_consumers.values())
-
         def _cast_input_dtypes(node: onnx.NodeProto, precision_dtype: str):
             # Change the input types to match weight precision (precision_dtype)
-            assert node.op_type in {"Gemm", "MatMul"}
+            if node.op_type == "Transpose":
+                maybe_matmul = tensor_consumers[node.output[0]][0]
+                assert maybe_matmul.op_type == "MatMul"
+                node = maybe_matmul
 
             # Create Cast nodes for each input of the target node except bias
             for i, input_name in enumerate(node.input[:2]):
                 cast_output_name = cast_output_cache.get((input_name, precision_dtype))
                 if cast_output_name is None:
-                    cast_output_suffix = {
-                        "Float": "f32",
-                        "Half": "f16",
-                        "BFloat16": "bf16",
-                    }[precision_dtype]
+                    cast_output_suffix = "bf16" if precision_dtype == "BFloat16" else "f16"
                     cast_output_name = f"{input_name}_{cast_output_suffix}"
                     cast_output_cache[(input_name, precision_dtype)] = cast_output_name
 
-                    # Create a Cast node to convert the input to the selected precision
+                    # Create a Cast node to convert the input to FP16/BF16
                     cast_node = onnx.helper.make_node(
                         "Cast",
                         inputs=[input_name],  # Original input of the target node
                         outputs=[cast_output_name],
-                        to=onnx_dtype_map[precision_dtype],
+                        to=onnx_dtype_map[precision_dtype],  # Cast to FP16/BF16
                     )
 
                     # Insert the Cast node into the graph
@@ -398,7 +373,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 # Update the target node input to use the cast node output
                 node.input[i] = cast_output_name
 
-        precision_dtype = high_precision_dtype or _get_precision_dtype()
+        precision_dtype = _get_precision_dtype()
         logger.debug(f"Using precision dtype: {precision_dtype}")
 
         fp4_qdq_nodes = [node for node in graph.node if node.op_type == "TRT_FP4QDQ"]
@@ -441,11 +416,9 @@ class NVFP4QuantExporter(ONNXQuantExporter):
                 block_size,
             )
 
-            # Cast input dtypes for every linear consumer reached through Cast/Transpose wrappers.
-            for linear_node in _get_linear_consumers(node.output[0]):
-                if id(linear_node) not in casted_node_ids:
-                    _cast_input_dtypes(linear_node, precision_dtype)
-                    casted_node_ids.add(id(linear_node))
+            # Cast input dtypes for the next node
+            next_node = tensor_consumers[node.output[0]][0]
+            _cast_input_dtypes(next_node, precision_dtype)
 
         # Remove old initializers
         new_initializers = [

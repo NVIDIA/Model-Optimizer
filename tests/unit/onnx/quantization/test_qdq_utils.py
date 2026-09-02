@@ -30,6 +30,7 @@ from modelopt.onnx.export import (
     NVFP4QuantExporter,
 )
 from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
+from modelopt.onnx.quantization.gs_patching import _export_value_info_proto
 from modelopt.onnx.quantization.qdq_utils import (
     _cast_fp8,
     apply_column_major_transformation,
@@ -172,7 +173,7 @@ def create_test_model_with_cast_nodes():
     return model
 
 
-def create_test_model_with_proj_nodes(graph_dtype=TensorProto.FLOAT):
+def create_test_model_with_proj_nodes():
     """Create a test model with projection nodes to test bias and scale casting."""
     # Create bias tensor
     bias_data = np.random.uniform(-1.0, 1.0, size=(16,)).astype(np.float32)
@@ -182,7 +183,7 @@ def create_test_model_with_proj_nodes(graph_dtype=TensorProto.FLOAT):
     scale_data = np.random.uniform(0.1, 1.0, size=(1,)).astype(np.float32)
     scale_tensor = numpy_helper.from_array(scale_data, "quant_scale")
 
-    input_tensor = helper.make_tensor_value_info("input", graph_dtype, [4, 16])
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, 16])
 
     # Add node (projection bias)
     add_node = helper.make_node(
@@ -201,7 +202,7 @@ def create_test_model_with_proj_nodes(graph_dtype=TensorProto.FLOAT):
         nodes=[add_node, mul_node],
         name="test_graph",
         inputs=[input_tensor],
-        outputs=[helper.make_tensor_value_info("output", graph_dtype, [4, 16])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT, [4, 16])],
         initializer=[bias_tensor, scale_tensor],
     )
 
@@ -397,38 +398,24 @@ class TestQuantizeWeightsToInt4:
         )
         assert any("scale" in input_name for input_name in dq_node.input)
 
-    @pytest.mark.parametrize(
-        ("high_precision_dtype", "onnx_dtype"),
-        [
-            pytest.param(None, TensorProto.FLOAT16, id="legacy"),
-            pytest.param("Float", TensorProto.FLOAT, id="float"),
-            pytest.param("Half", TensorProto.FLOAT16, id="half"),
-            pytest.param("BFloat16", TensorProto.BFLOAT16, id="bfloat16"),
-        ],
-    )
-    def test_projection_bias_and_scale_casting(self, high_precision_dtype, onnx_dtype):
-        """Test projection bias and pre-quant scale target casting."""
-        graph_dtype = TensorProto.FLOAT if high_precision_dtype is None else onnx_dtype
-        model = create_test_model_with_proj_nodes(graph_dtype)
+    def test_projection_bias_and_scale_casting(self):
+        """Test that projection biases and quantization scales are cast to float16."""
+        model = create_test_model_with_proj_nodes()
 
-        quantized_model = (
-            INT4QuantExporter.post_process(model)
-            if high_precision_dtype is None
-            else INT4QuantExporter.post_process(model, high_precision_dtype)
-        )
+        # Run quantization
+        quantized_model = INT4QuantExporter.process_model(model)
 
+        # Verify bias tensor is cast to float16
         bias_tensor = next(
             init for init in quantized_model.graph.initializer if "proj_bias" in init.name
         )
-        assert bias_tensor.data_type == onnx_dtype
+        assert bias_tensor.data_type == TensorProto.FLOAT16
 
+        # Verify quantization scale is cast to float16
         scale_tensor = next(
             init for init in quantized_model.graph.initializer if "quant_scale" in init.name
         )
-        assert scale_tensor.data_type == onnx_dtype
-        onnx.checker.check_model(quantized_model)
-        if high_precision_dtype is not None:
-            onnx.shape_inference.infer_shapes(quantized_model, check_type=True, strict_mode=True)
+        assert scale_tensor.data_type == TensorProto.FLOAT16
 
 
 class TestCastFunctions:
@@ -505,14 +492,19 @@ class TestCastFunctions:
         assert np.all(result == expected_array)
 
 
+def test_graphsurgeon_value_info_accepts_onnx_dtype():
+    tensor = gs.Variable("input", dtype=TensorProto.BFLOAT16, shape=[1])
+    value_info = _export_value_info_proto(tensor, do_type_check=True)
+
+    assert value_info.type.tensor_type.elem_type == TensorProto.BFLOAT16
+
+
 class TestFP8QuantExporter:
     """Test suite for FP8QuantExporter."""
 
     def test_bf16_weights_and_scale_are_compressed(self):
-        weight_data = np.array([[0.25, -0.5], [1.0, -2.0]], dtype=np.float32).astype(
-            ml_dtypes.bfloat16
-        )
-        scale_data = np.array(0.25, dtype=np.float32).astype(ml_dtypes.bfloat16)
+        weight_data = np.array([0.001312255859375], dtype=ml_dtypes.bfloat16)
+        scale_data = np.array(0.00099945068359375, dtype=ml_dtypes.bfloat16)
         weight = gs.Constant("weight", weight_data)
         scale = gs.Constant("linear/weight_quantizer/scale", scale_data)
         quantized = gs.Variable("quantized", dtype=np.uint8, shape=weight_data.shape)
@@ -544,52 +536,13 @@ class TestFP8QuantExporter:
             if initializer.name == "linear/weight_quantizer/fp8_weights"
         )
         assert fp8_weight.data_type == TensorProto.FLOAT8E4M3FN
-        assert fp8_weight.raw_data == bytes.fromhex("38 c0 48 d0")
+        assert fp8_weight.raw_data == b"\x3a"
         output_scale = next(
             initializer
             for initializer in converted_model.graph.initializer
             if initializer.name == scale.name
         )
         assert output_scale.data_type == TensorProto.BFLOAT16
-
-    def test_conv_uses_target_rounded_weights_and_scale(self):
-        weight_data = np.array([0.58945024, -13.944608], dtype=np.float32).reshape(1, 1, 1, 2)
-        input_tensor = gs.Variable("input", dtype=np.float32, shape=[1, 1, 1, 2])
-        output_tensor = gs.Variable("output", dtype=np.float32, shape=[1, 1, 1, 1])
-        conv = gs.Node(
-            op="Conv",
-            name="conv",
-            inputs=[input_tensor, gs.Constant("weight", weight_data)],
-            outputs=[output_tensor],
-        )
-        graph = gs.Graph(nodes=[conv], inputs=[input_tensor], outputs=[output_tensor], opset=23)
-
-        assert FP8QuantExporter._quantize_conv_weights_to_fp8(graph, "BFloat16") == 1
-
-        dq_node = next(node for node in graph.nodes if node.op == "DequantizeLinear")
-        fp8_weights, scale = dq_node.inputs
-        assert scale.values.dtype == ml_dtypes.bfloat16
-        assert dq_node.outputs[0].dtype == ml_dtypes.bfloat16
-        assert fp8_weights._values.tensor.raw_data == bytes([90, 254])
-
-    def test_conv_clamps_target_rounded_zero_scale_before_quantizing(self):
-        weight_data = np.array([1e-6, -2e-6], dtype=np.float32).reshape(1, 1, 1, 2)
-        input_tensor = gs.Variable("input", dtype=np.float16, shape=[1, 1, 1, 2])
-        output_tensor = gs.Variable("output", dtype=np.float16, shape=[1, 1, 1, 1])
-        conv = gs.Node(
-            op="Conv",
-            name="conv",
-            inputs=[input_tensor, gs.Constant("weight", weight_data)],
-            outputs=[output_tensor],
-        )
-        graph = gs.Graph(nodes=[conv], inputs=[input_tensor], outputs=[output_tensor], opset=23)
-
-        assert FP8QuantExporter._quantize_conv_weights_to_fp8(graph, "Half") == 1
-
-        dq_node = next(node for node in graph.nodes if node.op == "DequantizeLinear")
-        fp8_weights, scale = dq_node.inputs
-        assert scale.values == np.finfo(np.float16).smallest_subnormal
-        assert fp8_weights._values.tensor.raw_data == bytes([88, 224])
 
 
 class TestMXFP8QuantExporter:
@@ -641,52 +594,6 @@ class TestMXFP8QuantExporter:
         )
         output_dtype_attr = next(attr for attr in dq_node.attribute if attr.name == "output_dtype")
         assert output_dtype_attr.i == TensorProto.FLOAT16
-
-    @pytest.mark.parametrize(
-        ("high_precision_dtype", "onnx_dtype", "suffix"),
-        [
-            pytest.param(None, TensorProto.FLOAT16, "fp16", id="legacy"),
-            pytest.param("Float", TensorProto.FLOAT, "fp32", id="float"),
-            pytest.param("Half", TensorProto.FLOAT16, "fp16", id="half"),
-            pytest.param("BFloat16", TensorProto.BFLOAT16, "bf16", id="bfloat16"),
-        ],
-    )
-    def test_sqrt_output_cast_uses_target_dtype(self, high_precision_dtype, onnx_dtype, suffix):
-        graph_dtype = TensorProto.FLOAT if high_precision_dtype is None else onnx_dtype
-        input_info = helper.make_tensor_value_info("input", graph_dtype, [2])
-        output_info = helper.make_tensor_value_info("output", graph_dtype, [2])
-        sqrt_node = helper.make_node("Sqrt", inputs=["input"], outputs=["sqrt_output"], name="sqrt")
-        consumer = helper.make_node(
-            "Identity", inputs=["sqrt_output"], outputs=["output"], name="consumer"
-        )
-        model = helper.make_model(
-            helper.make_graph(
-                [sqrt_node, consumer],
-                "sqrt_graph",
-                [input_info],
-                [output_info],
-            )
-        )
-
-        converted_model = (
-            MXFP8QuantExporter.post_process(model)
-            if high_precision_dtype is None
-            else MXFP8QuantExporter.post_process(model, high_precision_dtype)
-        )
-
-        cast_node = next(node for node in converted_model.graph.node if node.op_type == "Cast")
-        cast_to = next(attr.i for attr in cast_node.attribute if attr.name == "to")
-        assert cast_to == onnx_dtype
-        assert cast_node.name == f"sqrt_cast_{suffix}"
-        assert cast_node.input == ["sqrt_output"]
-        assert cast_node.output == [f"sqrt_output_cast_{suffix}"]
-        converted_consumer = next(
-            node for node in converted_model.graph.node if node.name == "consumer"
-        )
-        assert converted_consumer.input == cast_node.output
-        onnx.checker.check_model(converted_model)
-        if high_precision_dtype is not None:
-            onnx.shape_inference.infer_shapes(converted_model, check_type=True, strict_mode=True)
 
     def test_mxfp8_gelu_approximation_update(self):
         """Test that Gelu nodes are updated to use tanh approximation."""
@@ -799,159 +706,6 @@ class TestFP4QDQTo2DQ:
             # Verify Cast nodes are added for input type conversion
             cast_nodes = [node for node in converted_model.graph.node if node.op_type == "Cast"]
             assert len(cast_nodes) >= 1  # At least one cast node should be added
-
-    @pytest.mark.parametrize(
-        ("precision_dtype", "onnx_dtype"),
-        [("Half", TensorProto.FLOAT16), ("BFloat16", TensorProto.BFLOAT16)],
-    )
-    def test_existing_weight_cast_does_not_hide_matmul(self, precision_dtype, onnx_dtype):
-        weight_data = np.linspace(-1.0, 1.0, 8 * 32, dtype=np.float32).reshape(8, 32)
-        weight = numpy_helper.from_array(weight_data, "linear.weight")
-        fp4qdq = helper.make_node(
-            "TRT_FP4QDQ",
-            inputs=[weight.name],
-            outputs=["fp4qdq_output"],
-            name="weight_fp4qdq",
-            block_size=16,
-        )
-        cast = helper.make_node(
-            "Cast",
-            inputs=["fp4qdq_output"],
-            outputs=["weight_cast"],
-            name="weight_cast",
-            to=onnx_dtype,
-        )
-        transpose = helper.make_node(
-            "Transpose",
-            inputs=["weight_cast"],
-            outputs=["weight_transposed"],
-            name="weight_transpose",
-            perm=[1, 0],
-        )
-        matmul = helper.make_node(
-            "MatMul",
-            inputs=["activation", "weight_transposed"],
-            outputs=["output"],
-            name="matmul",
-        )
-        graph = helper.make_graph(
-            [fp4qdq, cast, transpose, matmul],
-            "nvfp4_cast_graph",
-            [helper.make_tensor_value_info("activation", TensorProto.FLOAT, [1, 32])],
-            [helper.make_tensor_value_info("output", onnx_dtype, [1, 8])],
-            [weight],
-            value_info=[
-                helper.make_tensor_value_info("fp4qdq_output", TensorProto.FLOAT, [8, 32]),
-                helper.make_tensor_value_info("weight_cast", onnx_dtype, [8, 32]),
-                helper.make_tensor_value_info("weight_transposed", onnx_dtype, [32, 8]),
-            ],
-        )
-        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 23)])
-
-        converted_model = NVFP4QuantExporter.process_model(model, precision_dtype)
-
-        onnx.shape_inference.infer_shapes(converted_model, check_type=True, strict_mode=True)
-        converted_matmul = next(
-            node for node in converted_model.graph.node if node.op_type == "MatMul"
-        )
-        producer_map = {
-            output: node for node in converted_model.graph.node for output in node.output
-        }
-        assert all(
-            producer_map[input_name].op_type == "Cast"
-            and helper.get_attribute_value(producer_map[input_name].attribute[0]) == onnx_dtype
-            for input_name in converted_matmul.input
-        )
-
-    def test_shared_weight_casts_all_direct_and_wrapped_linear_consumers(self):
-        weight_data = np.linspace(-1.0, 1.0, 32 * 32, dtype=np.float32).reshape(32, 32)
-        weight = numpy_helper.from_array(weight_data, "linear.weight")
-        fp4qdq = helper.make_node(
-            "TRT_FP4QDQ",
-            inputs=[weight.name],
-            outputs=["fp4qdq_output"],
-            name="weight_fp4qdq",
-            block_size=16,
-        )
-        cast = helper.make_node(
-            "Cast",
-            inputs=["fp4qdq_output"],
-            outputs=["weight_cast"],
-            name="weight_cast",
-            to=TensorProto.FLOAT16,
-        )
-        transpose_nodes = [
-            helper.make_node(
-                "Transpose",
-                inputs=["weight_cast"],
-                outputs=[f"weight_transposed_{index}"],
-                name=f"weight_transpose_{index}",
-                perm=[1, 0],
-            )
-            for index in range(2)
-        ]
-        matmul_nodes = [
-            *[
-                helper.make_node(
-                    "MatMul",
-                    inputs=[f"activation_{index}", "fp4qdq_output"],
-                    outputs=[f"output_{index}"],
-                    name=f"matmul_{index}",
-                )
-                for index in range(2)
-            ],
-            *[
-                helper.make_node(
-                    "MatMul",
-                    inputs=[f"activation_{index}", f"weight_transposed_{index - 2}"],
-                    outputs=[f"output_{index}"],
-                    name=f"matmul_{index}",
-                )
-                for index in range(2, 4)
-            ],
-        ]
-        graph = helper.make_graph(
-            [fp4qdq, cast, *transpose_nodes, *matmul_nodes],
-            "nvfp4_fanout_graph",
-            [
-                helper.make_tensor_value_info(f"activation_{index}", TensorProto.FLOAT, [1, 32])
-                for index in range(4)
-            ],
-            [
-                helper.make_tensor_value_info(f"output_{index}", TensorProto.FLOAT16, [1, 32])
-                for index in range(4)
-            ],
-            [weight],
-            value_info=[
-                helper.make_tensor_value_info("fp4qdq_output", TensorProto.FLOAT, [32, 32]),
-                helper.make_tensor_value_info("weight_cast", TensorProto.FLOAT16, [32, 32]),
-                *[
-                    helper.make_tensor_value_info(
-                        f"weight_transposed_{index}", TensorProto.FLOAT16, [32, 32]
-                    )
-                    for index in range(2)
-                ],
-            ],
-        )
-        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 23)])
-
-        converted_model = NVFP4QuantExporter.process_model(model, "Half")
-
-        onnx.shape_inference.infer_shapes(converted_model, check_type=True, strict_mode=True)
-        producer_map = {
-            output: node for node in converted_model.graph.node for output in node.output
-        }
-        converted_matmuls = [
-            node for node in converted_model.graph.node if node.op_type == "MatMul"
-        ]
-        assert len(converted_matmuls) == 4
-        assert all(
-            producer_map[input_name].op_type == "Cast"
-            and helper.get_attribute_value(producer_map[input_name].attribute[0])
-            == TensorProto.FLOAT16
-            for node in converted_matmuls
-            for input_name in node.input
-        )
 
 
 def create_test_model_with_int4_dq_matmul():
@@ -1324,7 +1078,7 @@ class TestColumnMajorTransformation:
         print(f"Transpose nodes: {len(transpose_nodes)}")
 
 
-def _build_model_with_zero_scale_initializer(dq_op_type: str, scale_dtype=np.float16):
+def _build_model_with_zero_scale_initializer(dq_op_type: str):
     """Build an ONNX model whose scale initializer feeds a (Quantize|Dequantize)Linear node.
 
     Mirrors the INT4_AWQ failure mode from NVBug 6110209: scales live in graph initializers
@@ -1333,11 +1087,10 @@ def _build_model_with_zero_scale_initializer(dq_op_type: str, scale_dtype=np.flo
     weight_data = np.random.randint(-8, 8, size=(6, 8), dtype=np.int8)
     weight_tensor = numpy_helper.from_array(weight_data, "weight")
 
-    scale_data = np.array([1e-3, 0.0, 5e-4, 0.0, 0.0, 2e-3], dtype=scale_dtype).reshape(6, 1)
+    scale_data = np.array([1e-3, 0.0, 5e-4, 0.0, 0.0, 2e-3], dtype=np.float16).reshape(6, 1)
     scale_tensor = numpy_helper.from_array(scale_data, "scale")
 
-    high_precision_dtype = helper.np_dtype_to_tensor_dtype(np.dtype(scale_dtype))
-    input_tensor = helper.make_tensor_value_info("input", high_precision_dtype, [None, 6])
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT16, [None, 6])
     dq_node = helper.make_node(
         dq_op_type, inputs=["weight", "scale"], outputs=["dq_output"], name="weight_dq"
     )
@@ -1348,7 +1101,7 @@ def _build_model_with_zero_scale_initializer(dq_op_type: str, scale_dtype=np.flo
         nodes=[dq_node, matmul_node],
         name="test_graph",
         inputs=[input_tensor],
-        outputs=[helper.make_tensor_value_info("output", high_precision_dtype, [None, 8])],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT16, [None, 8])],
         initializer=[weight_tensor, scale_tensor],
     )
     return helper.make_model(graph)
@@ -1358,17 +1111,8 @@ class TestReplaceZeroScaleWithSmallestNonzero:
     """Regression tests for ``replace_zero_scale_with_smallest_nonzero`` (NVBug 6110209)."""
 
     @pytest.mark.parametrize("dq_op_type", ["DequantizeLinear", "TRT_INT4DequantizeLinear"])
-    @pytest.mark.parametrize(
-        ("scale_dtype", "onnx_dtype"),
-        [
-            (np.float16, TensorProto.FLOAT16),
-            (ml_dtypes.bfloat16, TensorProto.BFLOAT16),
-            (np.float32, TensorProto.FLOAT),
-            (np.float64, TensorProto.DOUBLE),
-        ],
-    )
-    def test_zero_scale_initializer_fed_to_dq_is_patched(self, dq_op_type, scale_dtype, onnx_dtype):
-        model = _build_model_with_zero_scale_initializer(dq_op_type, scale_dtype)
+    def test_zero_scale_initializer_fed_to_dq_is_patched(self, dq_op_type):
+        model = _build_model_with_zero_scale_initializer(dq_op_type)
         scale_before = numpy_helper.to_array(
             next(init for init in model.graph.initializer if init.name == "scale")
         )
@@ -1380,14 +1124,7 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         scale_after = numpy_helper.to_array(scale_after_init)
         assert not (scale_after == 0).any()
         assert (scale_after > 0).all()
-        assert scale_after_init.data_type == onnx_dtype
-
-        dtype_info = (
-            ml_dtypes.finfo(scale_dtype)
-            if scale_dtype == ml_dtypes.bfloat16
-            else np.finfo(scale_dtype)
-        )
-        assert (scale_after[scale_before == 0] == dtype_info.smallest_subnormal).all()
+        assert scale_after_init.data_type == TensorProto.FLOAT16
 
     def test_constant_node_scale_path_still_patched(self):
         """Legacy Constant-node QDQ path must continue to be patched."""
@@ -1423,58 +1160,6 @@ class TestReplaceZeroScaleWithSmallestNonzero:
         scale_arr = numpy_helper.to_array(value_attr.t)
         assert not (scale_arr == 0).any()
         assert (scale_arr > 0).all()
-
-    def test_captured_parent_scale_is_patched_without_crossing_child_scope(self):
-        captured_scale = numpy_helper.from_array(
-            np.array(0.0, dtype=ml_dtypes.bfloat16), "captured_scale"
-        )
-        shadowed_scale = numpy_helper.from_array(
-            np.array(0.0, dtype=ml_dtypes.bfloat16), "shadowed_scale"
-        )
-        subgraph = helper.make_graph(
-            [
-                helper.make_node(
-                    "QuantizeLinear",
-                    ["data", "captured_scale"],
-                    ["captured_output"],
-                ),
-                helper.make_node(
-                    "QuantizeLinear",
-                    ["data", "shadowed_scale"],
-                    ["shadowed_output"],
-                ),
-            ],
-            "subgraph",
-            [
-                helper.make_tensor_value_info("data", TensorProto.BFLOAT16, [1]),
-                helper.make_tensor_value_info("shadowed_scale", TensorProto.BFLOAT16, []),
-            ],
-            [
-                helper.make_tensor_value_info("captured_output", TensorProto.UINT8, [1]),
-                helper.make_tensor_value_info("shadowed_output", TensorProto.UINT8, [1]),
-            ],
-        )
-        scoped_node = helper.make_node(
-            "ScopedSubgraph",
-            [],
-            [],
-            domain="test",
-            body=subgraph,
-        )
-        graph = helper.make_graph(
-            [scoped_node],
-            "parent_graph",
-            [],
-            [],
-            [captured_scale, shadowed_scale],
-        )
-        model = helper.make_model(graph)
-
-        patched = replace_zero_scale_with_smallest_nonzero(model)
-
-        scales = {init.name: numpy_helper.to_array(init) for init in patched.graph.initializer}
-        assert scales["captured_scale"] == ml_dtypes.finfo(ml_dtypes.bfloat16).smallest_subnormal
-        assert scales["shadowed_scale"] == 0
 
 
 class TestQdqToDqValidation:

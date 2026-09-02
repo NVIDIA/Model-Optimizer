@@ -143,28 +143,20 @@ class MXFP8QuantExporter(ONNXQuantExporter):
         return onnx_model
 
     @staticmethod
-    def post_process(
-        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
-    ) -> onnx.ModelProto:
+    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for MXFP8 quantization.
 
-        Sets DQ output type and updates GELU nodes to use tanh approximation.
+        Sets DQ output type to FP16 and updates GELU nodes to use tanh approximation.
         """
         logger.info("Post-processing MXFP8 quantized model")
         graph = onnx_model.graph
-        precision_dtype = high_precision_dtype or "Half"
-        precision_suffix = {
-            "Float": "fp32",
-            "Half": "fp16",
-            "BFloat16": "bf16",
-        }[precision_dtype]
 
-        # Set output type of DQ to the graph's high-precision dtype
+        # Set output type of DQ to FP16
         for node in graph.node:
             if node.op_type == "TRT_MXFP8DequantizeLinear":
                 for attr in node.attribute:
                     if attr.name == "output_dtype":
-                        attr.i = onnx_dtype_map[precision_dtype]
+                        attr.i = onnx_dtype_map["Half"]
 
         # Currently only tanh approximation is supported for Gelu
         for node in graph.node:
@@ -174,20 +166,20 @@ class MXFP8QuantExporter(ONNXQuantExporter):
                         attr.s = b"tanh"
                         logger.debug(f"Updated GELU node {node.name} to use tanh approximation")
 
-        # Insert cast to the graph's high-precision dtype after Sqrt nodes
+        # Insert cast to fp16 after Sqrt nodes
         cast_nodes_to_insert = []
         for idx, node in enumerate(graph.node):
             if node.op_type == "Sqrt":
                 sqrt_output = node.output[0]
-                cast_output = f"{sqrt_output}_cast_{precision_suffix}"
+                cast_output = f"{sqrt_output}_cast_fp16"
 
                 # Create Cast node
                 cast_node = onnx.helper.make_node(
                     "Cast",
                     inputs=[sqrt_output],
                     outputs=[cast_output],
-                    to=onnx_dtype_map[precision_dtype],
-                    name=f"{node.name}_cast_{precision_suffix}",
+                    to=onnx_dtype_map["Half"],
+                    name=f"{node.name}_cast_fp16",
                 )
                 cast_nodes_to_insert.append((idx + 1, cast_node))
 
@@ -202,6 +194,6 @@ class MXFP8QuantExporter(ONNXQuantExporter):
         # Insert Cast nodes in reverse order to preserve indices
         for offset, (pos, cast_node) in enumerate(cast_nodes_to_insert):
             graph.node.insert(pos + offset, cast_node)
-            logger.debug(f"Inserted Cast to {precision_dtype} after {cast_node.input[0]}")
+            logger.debug(f"Inserted Cast to FP16 after {cast_node.input[0]}")
 
         return onnx_model

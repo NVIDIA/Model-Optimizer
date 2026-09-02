@@ -65,23 +65,14 @@ def _make_variable(
     return x
 
 
-def _to_onnx_dtype(dtype) -> int:
-    if isinstance(dtype, (int, np.integer)):
-        dtype = int(dtype)
-        onnx.TensorProto.DataType.Name(dtype)
-        return dtype
-    return onnx.helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
-
-
 def _export_tensor_proto(tensor: gs.Constant) -> onnx.TensorProto:
     if isinstance(tensor._values, LazyValues):
         onnx_tensor = tensor._values.tensor
     else:
         # is numpy array.
-        dtype = getattr(tensor, "explicit_dtype", None)
-        if dtype is None:
-            dtype = tensor.values.dtype
-        dtype = _to_onnx_dtype(dtype)
+        dtype = getattr(
+            tensor, "explicit_dtype", onnx.helper.np_dtype_to_tensor_dtype(tensor.values.dtype)
+        )
 
         vals = tensor.values
         if _onnx_supports_int4() and dtype in [onnx.TensorProto.INT4, onnx.TensorProto.UINT4]:
@@ -113,7 +104,11 @@ def _export_value_info_proto(tensor: gs.Variable, do_type_check: bool) -> onnx.V
         dtype = getattr(tensor, "explicit_dtype", None)
         if dtype is None:
             dtype = tensor.dtype
-        dtype = _to_onnx_dtype(dtype)
+        if isinstance(dtype, (int, np.integer)):
+            dtype = int(dtype)
+            onnx.TensorProto.DataType.Name(dtype)
+        else:
+            dtype = onnx.helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
         onnx_tensor = onnx.helper.make_tensor_value_info(tensor.name, dtype, tensor.shape)
     else:
         onnx_tensor = onnx.helper.make_empty_tensor_value_info(tensor.name)

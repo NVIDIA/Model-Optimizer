@@ -25,7 +25,6 @@ import torch
 from onnx_graphsurgeon.ir.tensor import LazyValues
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.qdq_utils import np_dtype_map
 
 from .base_exporter import ONNXQuantExporter
 
@@ -57,7 +56,7 @@ class FP8QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def compress_weights(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-        """Compresses FP32/FP16/BF16 weights to FP8 by folding QDQ nodes to DQ only.
+        """Compresses FP32/FP16 weights to FP8 by folding QDQ nodes to DQ only.
 
         Even though modelopt supports FP8 onnx export, the weights are represented in fp32 + QDQ.
         The storage is therefore very bad. In this function,
@@ -65,7 +64,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         weights in the output model. TRT custom ops are converted to native ONNX DequantizeLinear.
 
         Parameters:
-            onnx_model: ONNX model with FP32/FP16/BF16 weights and TRT_FP8 QDQ nodes.
+            onnx_model: ONNX model with FP32/FP16 weights and TRT_FP8 QDQ nodes.
 
         Returns:
             ONNX model with FP8 weights and native ONNX DQ nodes for weights (QDQ preserved for activations).
@@ -168,9 +167,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         return gs.export_onnx(graph)
 
     @staticmethod
-    def _quantize_conv_weights_to_fp8(
-        graph: gs.Graph, high_precision_dtype: str | None = None
-    ) -> int:
+    def _quantize_conv_weights_to_fp8(graph: gs.Graph) -> int:
         """Add FP8 weight DequantizeLinear for Conv layers with unquantized weights.
 
         Conv weight quantizers are disabled during TorchScript ONNX export because the
@@ -185,7 +182,6 @@ class FP8QuantExporter(ONNXQuantExporter):
 
         Args:
             graph: The onnx-graphsurgeon graph to modify in-place.
-            high_precision_dtype: Optional ONNX scalar type for the DQ scale and output.
 
         Returns:
             Number of Conv weight DQ nodes inserted.
@@ -207,34 +203,13 @@ class FP8QuantExporter(ONNXQuantExporter):
                 continue
 
             torch_weights = _torch_from_numpy(weight_input.values.copy())
-            if high_precision_dtype is not None:
-                scale_dtype = np_dtype_map[high_precision_dtype]
-                target_torch_dtype = _torch_from_numpy(np.empty((), dtype=scale_dtype)).dtype
-                torch_weights = torch_weights.to(target_torch_dtype)
-            else:
-                scale_dtype = np.float16
-
             amax = torch_weights.abs().max().float()
             if amax == 0:
                 continue
-
-            scale_value = (amax / _FP8_E4M3_MAX).item()
-            scale = np.array(scale_value, dtype=scale_dtype)
-            if high_precision_dtype is not None and scale == 0:
-                dtype_info = (
-                    ml_dtypes.finfo(scale_dtype)
-                    if scale_dtype == ml_dtypes.bfloat16
-                    else np.finfo(scale_dtype)
-                )
-                scale = np.array(dtype_info.smallest_subnormal, dtype=scale_dtype)
-            scaled_weights = (
-                torch_weights / _torch_from_numpy(scale)
-                if high_precision_dtype is not None
-                else torch_weights / scale_value
-            )
+            scale_val = (amax / _FP8_E4M3_MAX).item()
 
             # Quantize weights to FP8 (WAR: numpy doesn't support fp8)
-            fp8_data = scaled_weights.to(torch.float8_e4m3fn).view(torch.uint8).numpy()
+            fp8_data = (torch_weights / scale_val).to(torch.float8_e4m3fn).view(torch.uint8).numpy()
             fp8_tensor = onnx.TensorProto()
             fp8_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
             fp8_tensor.dims.extend(fp8_data.shape)
@@ -243,15 +218,13 @@ class FP8QuantExporter(ONNXQuantExporter):
                 node.name + "/weight_quantizer/fp8_weights", LazyValues(fp8_tensor)
             )
 
+            # Scale in FP16 — DQ output type matches scale dtype, must match activation type
             scale_constant = gs.Constant(
                 node.name + "/weight_quantizer/scale",
-                scale,
+                np.array(scale_val, dtype=np.float16),
             )
 
-            dq_output = gs.Variable(
-                node.name + "/weight_quantizer/dq_output",
-                dtype=scale_dtype if high_precision_dtype is not None else None,
-            )
+            dq_output = gs.Variable(node.name + "/weight_quantizer/dq_output")
             dq_node = gs.Node(
                 op="DequantizeLinear",
                 name=node.name + "/weight_quantizer/DequantizeLinear",
@@ -405,7 +378,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         return count
 
     @staticmethod
-    def _insert_qdq_after_softmax(graph: gs.Graph, high_precision_dtype: str | None = None) -> int:
+    def _insert_qdq_after_softmax(graph: gs.Graph) -> int:
         """Insert FP8 Q→DQ on Softmax outputs feeding MatMul (required by TRT MHA fusion).
 
         Softmax output is data-independently bounded to [0, 1], so we use a fixed scale
@@ -427,13 +400,7 @@ class FP8QuantExporter(ONNXQuantExporter):
 
             # Match scale dtype to the graph's current float dtype so TRT stronglyTyped
             # sees consistent Q/DQ types with the surrounding compute.
-            scale_dtype = (
-                np_dtype_map[high_precision_dtype]
-                if high_precision_dtype is not None
-                else softmax_output.dtype
-                if softmax_output.dtype is not None
-                else np.float32
-            )
+            scale_dtype = softmax_output.dtype if softmax_output.dtype is not None else np.float32
             scale_val = np.array(_FP8_E4M3_SOFTMAX_SCALE, dtype=scale_dtype)
             scale_constant = gs.Constant(softmax_node.name + "/softmax_q_scale", scale_val)
             dq_scale_constant = gs.Constant(
@@ -449,10 +416,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             )
 
             q_output = gs.Variable(softmax_node.name + "/q_output")
-            dq_output = gs.Variable(
-                softmax_node.name + "/dq_output",
-                dtype=scale_dtype if high_precision_dtype is not None else softmax_output.dtype,
-            )
+            dq_output = gs.Variable(softmax_node.name + "/dq_output", dtype=softmax_output.dtype)
             q_node = gs.Node(
                 op="QuantizeLinear",
                 name=softmax_node.name + "/QuantizeLinear",
@@ -480,9 +444,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         return count
 
     @staticmethod
-    def post_process(
-        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
-    ) -> onnx.ModelProto:
+    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for FP8 quantization.
 
         Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear,
@@ -526,14 +488,14 @@ class FP8QuantExporter(ONNXQuantExporter):
                 )
 
         # Add FP8 weight DQ for Conv layers that had weight quantizers disabled during export
-        count = FP8QuantExporter._quantize_conv_weights_to_fp8(graph, high_precision_dtype)
+        count = FP8QuantExporter._quantize_conv_weights_to_fp8(graph)
         if count > 0:
             logger.info(f"Inserted FP8 weight DequantizeLinear for {count} Conv nodes")
 
         # Attention-aware rewrites so TRT can fuse DQ into the attention MatMuls.
         n_mul = FP8QuantExporter._move_mul_before_qdq(graph)
         n_t = FP8QuantExporter._move_transpose_before_qdq(graph)
-        n_sm = FP8QuantExporter._insert_qdq_after_softmax(graph, high_precision_dtype)
+        n_sm = FP8QuantExporter._insert_qdq_after_softmax(graph)
         if n_mul or n_t or n_sm:
             logger.info(
                 f"Attention QDQ rewrites: moved {n_mul} Mul, {n_t} Transpose; "
