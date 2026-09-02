@@ -22,6 +22,13 @@ effect. A fixed `test:0` serialization probe produced 59 tokens for the general
 path, 70 for the default Qwen-specific path, and 64 for its empty-system
 ablation. The rendered prompts and token sequences were distinct.
 
+The retained data do not identify why the general vLLM path scored lower on
+MVBench for the 4B model. The corresponding 0.8B scores were 48.1250% for the
+general vLLM path and 50.6250% for the Qwen-specific path. No retained run
+changed only the evaluator revision, runtime adapter, prompt serialization, or
+video timestamps, and the result package has no per-example or per-MVBench-task
+output. A cause therefore cannot be separated from these records.
+
 ## Scope and limitations
 
 - The ordered evaluation contract is
