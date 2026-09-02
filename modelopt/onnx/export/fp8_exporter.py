@@ -17,6 +17,7 @@
 
 import time
 
+import ml_dtypes
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -31,6 +32,13 @@ from .base_exporter import ONNXQuantExporter
 # when using 1/448 as the Q scale (single fixed value — softmax range is data-independent).
 _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
+
+
+def _torch_from_numpy(array: np.ndarray) -> torch.Tensor:
+    """Convert a NumPy array to a PyTorch tensor while preserving BF16 values."""
+    if array.dtype == ml_dtypes.bfloat16:
+        return torch.from_numpy(array.view(np.int16)).view(torch.bfloat16)
+    return torch.from_numpy(array)
 
 
 class FP8QuantExporter(ONNXQuantExporter):
@@ -78,8 +86,8 @@ class FP8QuantExporter(ONNXQuantExporter):
 
                 weights = node.inputs[0]
                 scale = node.inputs[1]
-                torch_weights = torch.from_numpy(weights.values)
-                torch_scale = torch.from_numpy(scale.values)
+                torch_weights = _torch_from_numpy(weights.values)
+                torch_scale = _torch_from_numpy(scale.values)
                 quantizer_name = scale.name.rsplit("/", 1)[0]
                 dq_op = node.outputs[0].outputs[0]
                 if dq_op.op != "TRT_FP8DequantizeLinear":
@@ -194,7 +202,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             if any(out.op == "DequantizeLinear" for out in weight_input.outputs):
                 continue
 
-            torch_weights = torch.from_numpy(weight_input.values.copy())
+            torch_weights = _torch_from_numpy(weight_input.values.copy())
             amax = torch_weights.abs().max().float()
             if amax == 0:
                 continue

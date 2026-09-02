@@ -527,6 +527,9 @@ def get_onnx_bytes_and_metadata(
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
+    first_parameter = next(model.parameters(), None)
+    source_weights_dtype = first_parameter.dtype if first_parameter is not None else torch.float32
+
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
     # Floats/ints are tensorized when they are provided, but not tensorized when they are not
     # provided which is somewhat inconsistent (we always tensorize them!)
@@ -634,14 +637,20 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    if weights_dtype in ["fp16", "bf16"]:
+    target_weights_dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+    }.get(weights_dtype)
+    if target_weights_dtype is not None and target_weights_dtype != source_weights_dtype:
         if (
             is_int4_quantized(model)
             or is_mxfp8_quantized(model)
             or is_fp8_quantized(model)
             or is_int8_quantized(model)
         ):
-            assert weights_dtype == "fp16", "BF16 + MXFP8/INT4 mixed precision is not supported yet"
+            assert weights_dtype == "fp16", (
+                "Converting a quantized ONNX graph to BF16 is not supported yet"
+            )
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
                 keep_io_types=False,

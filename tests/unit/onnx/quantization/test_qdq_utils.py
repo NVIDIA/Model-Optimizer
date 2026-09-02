@@ -15,13 +15,20 @@
 
 import warnings
 
+import ml_dtypes
 import numpy as np
+import onnx
 import onnx_graphsurgeon as gs
 import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
+from modelopt.onnx.export import (
+    FP8QuantExporter,
+    INT4QuantExporter,
+    MXFP8QuantExporter,
+    NVFP4QuantExporter,
+)
 from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
 from modelopt.onnx.quantization.qdq_utils import (
     _cast_fp8,
@@ -482,6 +489,54 @@ class TestCastFunctions:
         assert result.dtype == np.dtype(np.uint8)
         assert result.shape == expected_array.shape
         assert np.all(result == expected_array)
+
+
+class TestFP8QuantExporter:
+    """Test suite for FP8QuantExporter."""
+
+    def test_bf16_weights_and_scale_are_compressed(self):
+        weight_data = np.array([[0.25, -0.5], [1.0, -2.0]], dtype=np.float32).astype(
+            ml_dtypes.bfloat16
+        )
+        scale_data = np.array(0.25, dtype=np.float32).astype(ml_dtypes.bfloat16)
+        weight = gs.Constant("weight", weight_data)
+        scale = gs.Constant("linear/weight_quantizer/scale", scale_data)
+        quantized = gs.Variable("quantized", dtype=np.uint8, shape=weight_data.shape)
+        dequantized = gs.Variable("dequantized", dtype=ml_dtypes.bfloat16, shape=weight_data.shape)
+        graph = gs.Graph(
+            nodes=[
+                gs.Node(
+                    op="TRT_FP8QuantizeLinear",
+                    inputs=[weight, scale],
+                    outputs=[quantized],
+                ),
+                gs.Node(
+                    op="TRT_FP8DequantizeLinear",
+                    inputs=[quantized, scale],
+                    outputs=[dequantized],
+                ),
+            ],
+            outputs=[dequantized],
+            opset=23,
+        )
+
+        converted_model = FP8QuantExporter.compress_weights(gs.export_onnx(graph))
+
+        onnx.checker.check_model(converted_model)
+        assert [node.op_type for node in converted_model.graph.node] == ["DequantizeLinear"]
+        fp8_weight = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == "linear/weight_quantizer/fp8_weights"
+        )
+        assert fp8_weight.data_type == TensorProto.FLOAT8E4M3FN
+        assert fp8_weight.raw_data == bytes.fromhex("38 c0 48 d0")
+        output_scale = next(
+            initializer
+            for initializer in converted_model.graph.initializer
+            if initializer.name == scale.name
+        )
+        assert output_scale.data_type == TensorProto.BFLOAT16
 
 
 class TestMXFP8QuantExporter:
