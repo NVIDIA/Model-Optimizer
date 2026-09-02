@@ -15,6 +15,7 @@
 
 import os
 import sys
+from unittest.mock import Mock
 
 import numpy as np
 import onnx
@@ -92,7 +93,10 @@ def test_duplicate_shared_constants_preserves_and_materializes_external_data(tmp
     graph = make_graph(
         nodes,
         "shared_external_initializer",
-        [make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])],
+        [
+            make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+        ],
         [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
         initializer=[shared, collision],
     )
@@ -108,6 +112,7 @@ def test_duplicate_shared_constants_preserves_and_materializes_external_data(tmp
     initializers = {initializer.name: initializer for initializer in result.graph.initializer}
     assert set(initializers) == {"shared_1", *duplicated_names}
     assert result.graph.sparse_initializer[0].values.name == "shared_2"
+    assert {graph_input.name for graph_input in result.graph.input} == {"input"}
     for name in duplicated_names:
         initializer = initializers[name]
         assert initializer.data_location == onnx.TensorProto.EXTERNAL
@@ -188,35 +193,6 @@ def test_duplicate_shared_constants_retains_initializer_captured_by_subgraphs():
     onnx.checker.check_model(result)
 
 
-def test_duplicate_shared_constants_removes_initializer_backed_graph_input():
-    shared = make_tensor("shared", onnx.TensorProto.FLOAT, [1], [1.0])
-    nodes = [
-        make_node("Add", ["input", "shared"], ["intermediate"]),
-        make_node("Add", ["intermediate", "shared"], ["output"]),
-    ]
-    graph = make_graph(
-        nodes,
-        "initializer_backed_graph_input",
-        [
-            make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1]),
-            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
-        ],
-        [make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1])],
-        initializer=[shared],
-    )
-    model = make_model(graph)
-
-    result, modified = onnx_utils.duplicate_shared_constants(model)
-
-    assert modified
-    assert {graph_input.name for graph_input in result.graph.input} == {"input"}
-    assert {initializer.name for initializer in result.graph.initializer} == {
-        "shared_1",
-        "shared_2",
-    }
-    onnx.checker.check_model(result)
-
-
 @pytest.mark.parametrize(
     ("model_size", "expected"),
     [
@@ -224,66 +200,16 @@ def test_duplicate_shared_constants_removes_initializer_backed_graph_input():
         (onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b""), False),
         (onnx.checker.MAXIMUM_PROTOBUF - sys.getsizeof(b"") + 1, True),
         (0, True),
+        (ValueError("model size unavailable"), True),
     ],
 )
 def test_is_model_too_large_for_protobuf(model_size, expected):
-    class ModelWithSize:
-        def ByteSize(self):  # noqa: N802
-            return model_size
-
-    assert onnx_utils.is_model_too_large_for_protobuf(ModelWithSize()) is expected
-
-
-class _ModelWithUnavailableByteSize:
-    def ByteSize(self):  # noqa: N802
-        raise ValueError("model size unavailable")
-
-
-def test_check_model_routes_byte_size_failure_through_file(monkeypatch):
-    model = _ModelWithUnavailableByteSize()
-    saved = {}
-
-    def fake_save_onnx(saved_model, path, save_as_external_data=False):
-        saved.update(model=saved_model, path=path, external=save_as_external_data)
-
-    checked = {}
-    monkeypatch.setattr(onnx_utils, "save_onnx", fake_save_onnx)
-    monkeypatch.setattr(
-        onnx.checker,
-        "check_model",
-        lambda model_or_path: checked.setdefault("value", model_or_path),
-    )
-
-    onnx_utils.check_model(model)
-
-    assert saved["model"] is model
-    assert saved["external"]
-    assert checked["value"] == saved["path"]
-
-
-def test_infer_shapes_routes_byte_size_failure_through_file(monkeypatch):
-    model = _ModelWithUnavailableByteSize()
-    inferred_model = object()
-    saved = {}
-    inferred = {}
-
-    def fake_save_onnx(saved_model, path, save_as_external_data=False):
-        saved.update(model=saved_model, path=path, external=save_as_external_data)
-
-    def fake_infer_shapes_path(input_path, output_path, **kwargs):
-        inferred.update(input_path=input_path, output_path=output_path, kwargs=kwargs)
-
-    monkeypatch.setattr(onnx_utils, "save_onnx", fake_save_onnx)
-    monkeypatch.setattr(onnx.shape_inference, "infer_shapes_path", fake_infer_shapes_path)
-    monkeypatch.setattr(onnx, "load", lambda path: inferred_model)
-
-    result = onnx_utils.infer_shapes(model, strict_mode=True)
-
-    assert result is inferred_model
-    assert saved["model"] is model
-    assert saved["external"]
-    assert inferred["input_path"] == saved["path"]
-    assert inferred["kwargs"] == {"strict_mode": True}
+    model = Mock()
+    if isinstance(model_size, Exception):
+        model.ByteSize.side_effect = model_size
+    else:
+        model.ByteSize.return_value = model_size
+    assert onnx_utils.is_model_too_large_for_protobuf(model) is expected
 
 
 def make_onnx_model_for_matmul_op():

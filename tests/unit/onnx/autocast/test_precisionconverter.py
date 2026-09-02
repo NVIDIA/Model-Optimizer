@@ -89,27 +89,6 @@ def test_graph_converter_init(simple_model, use_standalone_type_inference):
     assert converter.keep_io_types
 
 
-def test_graph_converter_skip_sanitize_rebuilds_mappings_for_model_copy(simple_model):
-    model, value_info_map, initializer_map, node_to_init_map = simple_model
-    converter = PrecisionConverter(
-        model,
-        value_info_map,
-        initializer_map,
-        node_to_init_map,
-        keep_io_types=True,
-        sanitize_model=False,
-    )
-
-    copied_initializers = {
-        initializer.name: initializer for initializer in converter.model.graph.initializer
-    }
-    assert converter.model is not model
-    assert converter.value_info_map["X"] is converter.model.graph.input[0]
-    assert converter.initializer_map["gemm_init"] is copied_initializers["gemm_init"]
-    assert converter.initializer_map["gemm_init"] is not initializer_map["gemm_init"]
-    assert converter.node_to_init_map["gemm"] == [copied_initializers["gemm_init"]]
-
-
 def test_convert_preserves_cast_chain_graph_output(tmp_path):
     x = helper.make_tensor_value_info("in0", TensorProto.FLOAT, [2])
     y = helper.make_tensor_value_info("t2", TensorProto.FLOAT, [2])

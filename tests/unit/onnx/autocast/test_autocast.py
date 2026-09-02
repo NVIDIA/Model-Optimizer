@@ -154,7 +154,9 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     onnx.checker.check_model(loaded_model)
 
 
-def test_external_data_is_sanitized_once_before_loading(tmp_path, simple_model, monkeypatch):
+def test_convert_external_data_sanitizes_once_and_materializes_initializers(
+    tmp_path, simple_model, monkeypatch
+):
     model_path = tmp_path / "external_model.onnx"
     onnx.save_model(
         simple_model,
@@ -177,17 +179,14 @@ def test_external_data_is_sanitized_once_before_loading(tmp_path, simple_model, 
 
     monkeypatch.setattr(GraphSanitizer, "sanitize", record_sanitize)
 
-    converted_model = convert_to_mixed_precision(
-        onnx_path=str(model_path), keep_io_types=True, data_max=np.inf
-    )
+    converted_model = convert_to_mixed_precision(onnx_path=str(model_path), data_max=np.inf)
 
     assert sanitize_calls == [(str(model_path.resolve()), onnx.TensorProto.EXTERNAL, False)]
-    assert all(
-        initializer.data_location != onnx.TensorProto.EXTERNAL
-        for initializer in converted_model.graph.initializer
-    )
-    assert all(not initializer.external_data for initializer in converted_model.graph.initializer)
-    assert all(initializer.raw_data for initializer in converted_model.graph.initializer)
+    for initializer in converted_model.graph.initializer:
+        assert initializer.data_location != onnx.TensorProto.EXTERNAL
+        assert not initializer.external_data
+        assert initializer.raw_data
+        assert initializer.data_type == onnx.TensorProto.FLOAT16
     onnx.checker.check_model(converted_model)
 
 
@@ -237,11 +236,6 @@ def test_conv_resize_conversion(tmp_path):
     # Convert the model
     converted_model = convert_to_mixed_precision(onnx_path=onnx_path)
 
-    # Output model should be produced in the same tmp_path
-    output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
-    onnx.save(converted_model, output_onnx_path)
-
-    # Load the output model
     graph = gs.import_onnx(converted_model)
 
     # Check that Resize is correctly converted:

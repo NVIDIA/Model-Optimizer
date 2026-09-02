@@ -17,6 +17,7 @@ import json
 import os
 import tempfile
 from collections import OrderedDict
+from unittest.mock import Mock
 
 import numpy as np
 import onnx
@@ -69,64 +70,52 @@ def test_init(simple_model):
     assert isinstance(runner.model, onnx.ModelProto)
 
 
-def test_get_ort_runner_uses_file_when_modified_byte_size_fails(monkeypatch):
-    class ModelWithUnavailableByteSize:
-        def ByteSize(self):  # noqa: N802
-            raise ValueError("model size unavailable")
+def test_get_ort_runner_uses_file_when_modified_byte_size_fails(monkeypatch, reference_runner):
+    modified_model = Mock()
+    modified_model.ByteSize.side_effect = ValueError("model size unavailable")
+    check_external_data = Mock(return_value=False)
+    save_onnx = Mock()
+    bytes_from_onnx = Mock(side_effect=AssertionError("Byte serialization should not be used"))
+    session_from_onnx = Mock(return_value="session")
+    onnxrt_runner = Mock(return_value="runner")
 
-    modified_model = ModelWithUnavailableByteSize()
-    runner = ReferenceRunner.__new__(ReferenceRunner)
-    runner.providers = ["cpu"]
-    saved = {}
-    session = {}
+    monkeypatch.setattr(onnx_utils, "check_model_uses_external_data", check_external_data)
+    monkeypatch.setattr(onnx_utils, "save_onnx", save_onnx)
+    monkeypatch.setattr(polygraphy_onnx, "BytesFromOnnx", bytes_from_onnx)
+    monkeypatch.setattr(polygraphy_onnxrt, "SessionFromOnnx", session_from_onnx)
+    monkeypatch.setattr(polygraphy_onnxrt, "OnnxrtRunner", onnxrt_runner)
 
-    def modify_outputs():
-        return modified_model
+    runners, model_temp_dir = reference_runner._get_ort_runner(lambda: modified_model)
 
-    def fake_save_onnx(model, path, save_as_external_data=False):
-        saved.update(model=model, path=path, external=save_as_external_data)
-
-    def fake_session_from_onnx(source, providers):
-        session.update(source=source, providers=providers)
-        return "session"
-
-    monkeypatch.setattr(onnx_utils, "check_model_uses_external_data", lambda model: False)
-    monkeypatch.setattr(onnx_utils, "save_onnx", fake_save_onnx)
-    monkeypatch.setattr(
-        polygraphy_onnx,
-        "BytesFromOnnx",
-        lambda model: pytest.fail("Byte serialization should not be used"),
-    )
-    monkeypatch.setattr(polygraphy_onnxrt, "SessionFromOnnx", fake_session_from_onnx)
-    monkeypatch.setattr(polygraphy_onnxrt, "OnnxrtRunner", lambda build_session: build_session)
-
-    runners, model_temp_dir = runner._get_ort_runner(modify_outputs)
-    model_temp_path = model_temp_dir.name
-    try:
-        assert runners == ["session"]
-        assert saved["model"] is modified_model
-        assert saved["external"]
-        assert session == {"source": saved["path"], "providers": ["cpu"]}
-        assert os.path.dirname(saved["path"]) == model_temp_path
-    finally:
-        model_temp_dir.cleanup()
+    assert model_temp_dir is not None
+    with model_temp_dir as model_temp_path:
+        save_onnx.assert_called_once()
+        model_path = save_onnx.call_args.args[1]
+        assert runners == ["runner"]
+        assert os.path.dirname(model_path) == model_temp_path
+        check_external_data.assert_called_once_with(modified_model)
+        modified_model.ByteSize.assert_called_once_with()
+        save_onnx.assert_called_once_with(modified_model, model_path, save_as_external_data=True)
+        bytes_from_onnx.assert_not_called()
+        session_from_onnx.assert_called_once_with(model_path, providers=reference_runner.providers)
+        onnxrt_runner.assert_called_once_with("session")
 
 
 def test_run_cleans_model_tempdir_when_input_loading_fails(monkeypatch, reference_runner):
-    model_temp_dir = tempfile.TemporaryDirectory()
-    model_temp_path = model_temp_dir.name
-
-    monkeypatch.setattr(reference_runner, "_get_ort_runner", lambda model: ([], model_temp_dir))
-
-    def fail_to_load_inputs(inputs):
-        raise ValueError("input loading failed")
-
-    monkeypatch.setattr(reference_runner, "_load_inputs", fail_to_load_inputs)
+    model_temp_dir = Mock()
+    monkeypatch.setattr(
+        reference_runner, "_get_ort_runner", Mock(return_value=([], model_temp_dir))
+    )
+    monkeypatch.setattr(
+        reference_runner,
+        "_load_inputs",
+        Mock(side_effect=ValueError("input loading failed")),
+    )
 
     with pytest.raises(ValueError, match="input loading failed"):
         reference_runner.run()
 
-    assert not os.path.exists(model_temp_path)
+    model_temp_dir.cleanup.assert_called_once_with()
 
 
 def test_run_with_random_inputs(reference_runner):
