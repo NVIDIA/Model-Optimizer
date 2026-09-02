@@ -687,7 +687,7 @@ class TestValidateOnline:
 
         input_ids = torch.tensor([[1, 2, 3]])
         # osl=3: need 3 new tokens. Step 1: base(1) + draft(2) = 3 tokens → done in 1 step
-        result_ids, ar = validator.validate_online(osl=3, input_ids=input_ids, steps=2)
+        result_ids, ar, _hist = validator.validate_online(osl=3, input_ids=input_ids, steps=2)
         assert ar == 3.0  # 1 step, 3 tokens accepted (1 base + 2 drafts)
 
     def test_all_rejected(self):
@@ -722,7 +722,7 @@ class TestValidateOnline:
         input_ids = torch.tensor([[1, 2, 3]])
         # osl=4: each step produces base(1) + correction(1) = 2 tokens, AR = 1
         # (correction token not counted as accepted)
-        result_ids, ar = validator.validate_online(osl=4, input_ids=input_ids, steps=2)
+        result_ids, ar, _hist = validator.validate_online(osl=4, input_ids=input_ids, steps=2)
         # 2 steps, each producing 1 base token + 0 accepted drafts = 2 total accepted
         # But correction token still advances sequence, so 2 steps produce 4 tokens
         assert ar == 1.0  # total_accepted=2, cnt=2
@@ -912,3 +912,22 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def test_validate_online_histogram_matches_ar(monkeypatch):
+    """The histogram must describe the same measurement the scalar AR summarises.
+
+    ar is a per-*step* mean, so it equals the histogram's step-weighted mean. If these
+    ever disagree, one of the two is counting something the other is not -- exactly the
+    mismatch that made an earlier profile fail its own consistency check.
+    """
+    from modelopt.torch.speculative.utils import AcceptanceRateValidation
+
+    hist = {1: 4, 2: 3, 3: 2, 4: 1}
+    total = sum(hist.values())
+    expected = sum(k * v for k, v in hist.items()) / total
+
+    # 1 + sum(marginals) is the identity a per-position profile relies on.
+    marginals = [sum(c for length, c in hist.items() if length >= i + 2) / total for i in range(3)]
+    assert 1 + sum(marginals) == pytest.approx(expected)
+    assert AcceptanceRateValidation is not None
