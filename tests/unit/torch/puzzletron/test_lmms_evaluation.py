@@ -184,6 +184,31 @@ def test_command_maps_checkpoint_and_vllm_topology(tmp_path):
     assert timeout == 123
 
 
+def test_command_maps_checkpoint_for_native_qwen35_backend(tmp_path):
+    argv, _, _ = lmms._build_command(
+        {
+            "model": "qwen3_5",
+            "checkpoint_arg": "pretrained",
+            "tasks": ["mvbench"],
+            "model_args": {
+                "device": "cuda",
+                "enable_thinking": False,
+                "fps": 2,
+                "max_frames": 32,
+            },
+        },
+        checkpoint="/ckpts/candidate",
+        output_path=tmp_path / "results",
+    )
+
+    model_args = argv[argv.index("--model_args") + 1]
+    assert argv[:5] == [sys.executable, "-m", "lmms_eval", "--model", "qwen3_5"]
+    assert "pretrained=/ckpts/candidate" in model_args
+    assert "enable_thinking=False" in model_args
+    assert "max_frames=32" in model_args
+    assert "tensor_parallel_size" not in model_args
+
+
 def test_command_forwards_unowned_model_and_evaluator_options(tmp_path):
     argv, _, _ = lmms._build_command(
         {
@@ -306,8 +331,15 @@ def test_command_rejects_reserved_model_args_setting(tmp_path, model_args, expec
 @pytest.mark.parametrize(
     ("settings", "expected"),
     [
-        ({"model": "hf"}, "settings.model must be 'vllm'"),
-        ({"checkpoint_arg": "pretrained"}, "settings.checkpoint_arg must be 'model'"),
+        ({"model": "hf"}, "settings.model must be one of"),
+        (
+            {"checkpoint_arg": "pretrained"},
+            "settings.checkpoint_arg must be 'model' for model 'vllm'",
+        ),
+        (
+            {"model": "qwen3_5", "topology": {"gpu_group_size": 1}},
+            "settings.topology is supported only for model 'vllm'",
+        ),
     ],
 )
 def test_command_rejects_unsupported_backend_contract(tmp_path, settings, expected):

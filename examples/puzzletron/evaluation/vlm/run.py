@@ -25,11 +25,14 @@ from pathlib import Path
 __all__ = ["evaluate"]
 
 REPOSITORY_ROOT = Path(__file__).absolute().parents[4]
+SCRIPT_DIRECTORY = str(Path(__file__).absolute().parent)
+if SCRIPT_DIRECTORY in sys.path:
+    sys.path.remove(SCRIPT_DIRECTORY)
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.puzzletron.evaluation import checkpoint  # noqa: E402
-from examples.puzzletron.evaluation.vlm import suites  # noqa: E402
+from examples.puzzletron.evaluation.vlm import contracts, profile, suites  # noqa: E402
 from examples.puzzletron.evaluation.vlm.evaluator import evaluate  # noqa: E402
 
 
@@ -38,6 +41,20 @@ def _checkpoint_directory(value: str) -> Path:
     if not checkpoint_path.is_dir():
         raise argparse.ArgumentTypeError(f"checkpoint is not a local directory: {checkpoint_path}")
     return checkpoint_path
+
+
+def _profile_task_shard(value: str) -> tuple[int, int]:
+    """Parse a zero-based INDEX/COUNT task-group shard."""
+    try:
+        index_text, count_text = value.split("/", maxsplit=1)
+        index, count = int(index_text), int(count_text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("profile task shard must be INDEX/COUNT") from error
+    if count <= 0 or index < 0 or index >= count:
+        raise argparse.ArgumentTypeError(
+            "profile task shard requires COUNT > 0 and 0 <= INDEX < COUNT"
+        )
+    return index, count
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -58,19 +75,39 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Root directory for isolated per-attempt artifacts.",
     )
-    parser.add_argument(
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--profile",
+        choices=contracts.PROFILE_NAMES,
+        default=None,
+        help="Versioned reproducibility contract for checkpoint-independent evaluation.",
+    )
+    selection.add_argument(
         "--suite",
         choices=(
             "short",
             "quick",
             suites.TASK_PREFIX100_REPEAT2_SUITE,
-            "e2e-full-eval",
+            *suites.DEPRECATED_SUITE_ALIASES,
             "adapter-smoke",
             *suites.SINGLE_TASK_SMOKE_SUITES,
             "full",
         ),
         default="short",
-        help="Pinned Qwen 3.5 0.8B VLM benchmark suite.",
+        help="Pinned Qwen 3.5 VLM benchmark suite.",
+    )
+    parser.add_argument(
+        "--profile-task",
+        choices=profile.VLM_BENCHMARK_TASKS,
+        default=None,
+        help="Run one task from a versioned profile for scheduler-safe sharding.",
+    )
+    parser.add_argument(
+        "--profile-task-shard",
+        type=_profile_task_shard,
+        default=None,
+        metavar="INDEX/COUNT",
+        help="Run one zero-based leaf shard of a grouped full-profile task.",
     )
     parser.add_argument("--batch-size", type=checkpoint.positive_int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -127,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = evaluate(args)
         if args.preflight_only:
-            result = {"preflight": result["preflight"]}
+            result = {"schema": result["schema"], "preflight": result["preflight"]}
     except Exception as error:
         payload = {
             "error": type(error).__name__,

@@ -83,6 +83,7 @@ _RESERVED_EXTRA_ARG_FLAGS = frozenset(
         "--tasks",
     }
 )
+_BACKEND_CHECKPOINT_ARGS = {"qwen3_5": "pretrained", "vllm": "model"}
 DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS = 3600.0
 _PROCESS_CLEANUP_TIMEOUT_SECONDS = 10.0
 _PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.1
@@ -240,15 +241,21 @@ def _model_arg_string(values: Mapping[str, Any]) -> str:
     return ",".join(parts)
 
 
-def _merge_model_args(settings: Mapping[str, Any], checkpoint: str) -> str:
+def _merge_model_args(settings: Mapping[str, Any], checkpoint: str, *, model: str) -> str:
     raw = settings.get("model_args")
-    checkpoint_arg = str(settings.get("checkpoint_arg", "model"))
-    if checkpoint_arg != "model":
-        raise ValueError("evaluation settings.checkpoint_arg must be 'model'")
+    expected_checkpoint_arg = _BACKEND_CHECKPOINT_ARGS[model]
+    checkpoint_arg = str(settings.get("checkpoint_arg", expected_checkpoint_arg))
+    if checkpoint_arg != expected_checkpoint_arg:
+        raise ValueError(
+            f"evaluation settings.checkpoint_arg must be {expected_checkpoint_arg!r} "
+            f"for model {model!r}"
+        )
     topology = dict(settings.get("topology") or {})
+    if topology and model != "vllm":
+        raise ValueError("evaluation settings.topology is supported only for model 'vllm'")
     canonical_topology = normalize_vllm_topology(topology) if topology else {}
     reserved_fields = frozenset(
-        key for key in (checkpoint_arg, *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS) if key
+        (*_BACKEND_CHECKPOINT_ARGS.values(), *_RESERVED_TOPOLOGY_MODEL_ARG_FIELDS)
     )
     derived: dict[str, Any] = {checkpoint_arg: checkpoint}
     if canonical_topology:
@@ -329,14 +336,15 @@ def _build_command(
     """Build a deterministic lmms-eval CLI invocation for one local checkpoint."""
 
     model = str(settings.get("model", "vllm"))
-    if model != "vllm":
-        raise ValueError("evaluation settings.model must be 'vllm'")
+    if model not in _BACKEND_CHECKPOINT_ARGS:
+        supported = ", ".join(sorted(_BACKEND_CHECKPOINT_ARGS))
+        raise ValueError(f"evaluation settings.model must be one of: {supported}")
     argv = [
         *_command_prefix(settings),
         "--model",
         model,
         "--model_args",
-        _merge_model_args(settings, checkpoint),
+        _merge_model_args(settings, checkpoint, model=model),
         "--tasks",
         ",".join(_configured_tasks(settings)),
         "--batch_size",
