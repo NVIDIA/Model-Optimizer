@@ -416,6 +416,16 @@ def test_to_quantized_weight_int4_block_size(quantization):
         to_quantized_weight(partial_weight, scales, quantization, block_size=block_size)
 
 
+@pytest.mark.parametrize("quantization", [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ])
+@pytest.mark.parametrize("block_size", [None, 0, -1, 2.0])
+def test_to_quantized_weight_invalid_int4_block_size(quantization, block_size):
+    weight = torch.ones((4, 4), device="cuda")
+    scales = torch.ones((4, 2), device="cuda")
+
+    with pytest.raises(ValueError, match="Block size must be a positive integer"):
+        to_quantized_weight(weight, scales, quantization, block_size=block_size)
+
+
 @pytest.mark.parametrize(
     ("config", "maxbound", "expected_amax"),
     [

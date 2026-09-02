@@ -797,7 +797,7 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     out_dim = weight.shape[-2]
     assert out_dim % 2 == 0, f"Cannot pack weight. Out dimension {out_dim} is not an even number."
     in_dim = weight.shape[-1]
-    if block_size is None or block_size <= 0:
+    if not isinstance(block_size, int) or block_size <= 0:
         raise ValueError(f"Block size must be a positive integer, got {block_size}.")
     if in_dim % block_size != 0:
         raise NotImplementedError(
