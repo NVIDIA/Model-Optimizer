@@ -54,8 +54,10 @@
     "suite": "short-v1",
     "profile_identity": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
     "row_manifest": {
+      "path": "row_manifest.json",
       "row_count": 344,
-      "sha256": "c088a0421497c34592a1fe7828cbb93a399744e7e29ec4b098206cde04906326"
+      "selection_identity_sha256": "c088a0421497c34592a1fe7828cbb93a399744e7e29ec4b098206cde04906326",
+      "file_sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce"
     },
     "tasks": [
       {
@@ -77,6 +79,13 @@
     "sampling_method": "one frozen row manifest reused for teacher and every student milestone"
   },
   "quality_evidence": {
+    "mvbench_denominator_audit": {
+      "path": "mvbench_audit.csv",
+      "scope": "all 19 retained post-KD evaluations across 20 leaves and 160 selected rows",
+      "reported_metric": "leaf-macro accuracy with empty generations excluded from affected leaf denominators",
+      "comparable_metric": "fixed_160_accuracy with empty generations scored incorrect",
+      "teacher_and_pre_kd_status": "retained only as reported aggregates because raw per-leaf samples were unavailable"
+    },
     "teacher": {
       "evaluation_count": 1,
       "metrics": {
@@ -448,18 +457,29 @@
     "quality_evaluator": "../../../../../../evaluation/vlm/run.py",
     "corrected_recipe_status": "reproducible from repository configuration",
     "historical_selection_status": "partial: exact selection requires archived external runtime evidence; the corrected repository recipe intentionally does not encode the superseded heuristics",
-    "source_join": "Match external artifacts by SHA-256, then use architecture ID, milestone, checkpoint identity, and frozen row-manifest identity."
+    "frozen_rows": "row_manifest.json",
+    "source_join": "Match external artifacts by SHA-256, then use architecture ID, milestone, checkpoint identity, and frozen row-selection identity."
   },
   "artifacts": [
     {
       "path": "metrics.csv",
-      "sha256": "4b57d639c5562a6440a6e9320182b224f552e04b91963777257c0c02765ffc7e",
-      "size_bytes": 13663
+      "sha256": "c85b092308933f70ad46adae9f06cdf095c2895955fcde9f01a7a0daf20c11d7",
+      "size_bytes": 16919
     },
     {
       "path": "summary.md",
-      "sha256": "0197b86cb2119c0c8852c1bd010d80655c7507c6f6826b5e1738adea1d0899ea",
-      "size_bytes": 3717
+      "sha256": "2cf014e0022b00a5b933e113ac082c0d559e13eeed15bc64dacd6d067987074d",
+      "size_bytes": 4577
+    },
+    {
+      "path": "row_manifest.json",
+      "sha256": "b29625345a932b8e514e7911e7ec98a28302b886ae1e1d831cbb6db026b224ce",
+      "size_bytes": 58867
+    },
+    {
+      "path": "mvbench_audit.csv",
+      "sha256": "49c4491a4cdf84fff50eead15ceabbe78f4ef1d11342929bb8006b971ffd80f1",
+      "size_bytes": 24431
     }
   ],
   "external_artifacts": [
@@ -535,7 +555,8 @@
     "The short-v1 evaluation is one fixed 344-row sample without repetitions or confidence intervals; full-v1 evaluation was not run.",
     "Attention and GDN remained at teacher geometry, so this is not a full-axis pruning campaign.",
     "The 512-step extension was run only for the FFN-3328 control; no 1024-step milestone was run.",
-    "External runtime manifests and checkpoints are not included in this repository record and are joined only through immutable hashes.",
+    "Evaluator-reported MVBench macros can use model-dependent denominators when generations are empty; use fixed_160_accuracy for audited post-KD comparisons. Teacher and pre-KD MVBench remain aggregate-only.",
+    "The exact frozen row-selection manifest is bundled; external runtime manifests and checkpoints are joined through immutable hashes.",
     "Effective-token values use the runtime training-objective counter and can exceed examples multiplied by maximum sample length."
   ]
 }

@@ -28,4 +28,8 @@ until compact and physically sliced reload equivalence is admitted.
 
 The run leaf follows the provisional
 `modelopt.puzzletron-result-record/v1` contract. Runtime manifests are retained
-as external source evidence and referenced only by immutable hashes.
+as external source evidence and referenced only by immutable hashes. The exact
+frozen row-selection manifest is bundled in the run leaf so the evaluation
+sample itself is independently inspectable. The run leaf also includes a
+per-leaf MVBench denominator audit and fixed-160 post-KD scores because the
+evaluator-reported macro can exclude empty generations.
