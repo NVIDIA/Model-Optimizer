@@ -82,6 +82,21 @@ def test_non_profile_json_is_rejected(tmp_path, exporter, payload):
         exporter.write_speculation_profile(out, src)
 
 
+def test_malformed_json_is_rejected(tmp_path, exporter):
+    """A truncated or corrupt file must fail on the parser, not slip through.
+
+    Distinct from the cases above: those are valid JSON of the wrong shape, this one
+    never parses. A half-written profile from an interrupted run is the realistic way
+    to hit it.
+    """
+    src = tmp_path / "truncated.json"
+    src.write_text('{"schema_version": "1.0", "conditional_accept_rates": [0.8,')
+    out = tmp_path / "export"
+    out.mkdir()
+    with pytest.raises(json.JSONDecodeError):
+        exporter.write_speculation_profile(out, src)
+
+
 def test_schema_version_is_not_pinned(tmp_path, exporter):
     """Producers own the schema; pinning a version here would create a second source
     of truth that drifts. A future version must pass through untouched."""
