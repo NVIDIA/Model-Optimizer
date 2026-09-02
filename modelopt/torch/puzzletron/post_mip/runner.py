@@ -53,6 +53,14 @@ __all__ = [
 _DOWNSTREAM_EVALUATION_PROFILES: dict[str, Callable[..., dict[str, Any]]] = {}
 
 
+def _checkpoint_fingerprint(checkpoint: str | Path) -> str:
+    """Return the content-bound checkpoint fingerprint used by evaluation identities."""
+
+    from ..distributed_eval.config import checkpoint_identity
+
+    return str(checkpoint_identity(checkpoint)["fingerprint"])
+
+
 def register_downstream_evaluation_profile(
     name: str,
     evaluator: Callable[..., dict[str, Any]],
@@ -591,6 +599,7 @@ def _downstream_evaluation(
     if reference_checkpoint is None:
         return candidate
 
+    reference_checkpoint_fingerprint = _checkpoint_fingerprint(reference_checkpoint)
     if reference_once:
         if not reference_cache_id:
             raise ValueError("reference_once requires reference_cache_id")
@@ -599,8 +608,9 @@ def _downstream_evaluation(
             raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
         cache_identity = stable_hash(
             {
-                "checkpoint": str(reference_checkpoint),
+                "checkpoint_fingerprint": reference_checkpoint_fingerprint,
                 "profile": profile,
+                "evaluator_revision": evaluator_revision,
                 "settings": settings,
             },
             prefix="post_mip_reference_evaluation",
@@ -654,6 +664,7 @@ def _downstream_evaluation(
         evaluator_revision=evaluator_revision,
         settings=settings,
         candidate=candidate,
+        reference_checkpoint_fingerprint=reference_checkpoint_fingerprint,
     )
     observation_comparison, observation_metrics = _compare_recorded_observation(
         recorded_observation,
@@ -759,12 +770,9 @@ def _downstream_evaluation_identity(
     evaluator_revision: Any,
     settings: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    reference_checkpoint_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Bind one comparison to its checkpoint, KD, data, and evaluator contract."""
-
-    # Import lazily because the dependency-light orchestration controller must
-    # not load the full runtime configuration stack on a login node.
-    from ..distributed_eval.config import checkpoint_identity
 
     profile_identity = None
     profile_path = candidate.get("profile_path")
@@ -808,12 +816,11 @@ def _downstream_evaluation_identity(
     }
     return canonicalize(
         {
-            "candidate_checkpoint_fingerprint": checkpoint_identity(source.artifact["checkpoint"])[
-                "fingerprint"
-            ],
-            "reference_checkpoint_fingerprint": checkpoint_identity(reference_checkpoint)[
-                "fingerprint"
-            ],
+            "candidate_checkpoint_fingerprint": _checkpoint_fingerprint(
+                source.artifact["checkpoint"]
+            ),
+            "reference_checkpoint_fingerprint": reference_checkpoint_fingerprint
+            or _checkpoint_fingerprint(reference_checkpoint),
             "architecture_id": source.architecture_id,
             "kd": {
                 "producer_node": source.producer_node,
@@ -951,7 +958,7 @@ def _global_kd(
                 "exposure.estimated_cumulative_gpu_hours": float(
                     exposure["estimated_cumulative_gpu_hours"]
                 ),
-                "exposure.actual_incremental_gpu_hours": elapsed_gpu_hours,
+                "exposure.actual_incremental_gpu_hours": incremental_gpu_hours,
                 "exposure.actual_cumulative_gpu_hours": float(
                     exposure["actual_cumulative_gpu_hours"]
                 ),
@@ -1131,6 +1138,61 @@ def _aggregate_result_manifest(
     pre_kd_source = str(settings["pre_kd_source"])
     pre_kd_evaluation = str(settings["pre_kd_evaluation"])
     observations = []
+    expected_profile = str(settings["profile"])
+    expected_manifest_sha256 = str(settings["row_manifest_sha256"])
+    expected_reference_fingerprint = _checkpoint_fingerprint(settings["reference_checkpoint"])
+
+    def evaluation_contract(identity: Any, *, label: str) -> dict[str, Any]:
+        if not isinstance(identity, Mapping):
+            raise RuntimeError(f"{label} evaluation identity must be a mapping")
+        evaluator = identity.get("evaluator")
+        if not isinstance(evaluator, Mapping):
+            raise RuntimeError(f"{label} evaluation identity is missing evaluator")
+        if not evaluator.get("revision"):
+            raise RuntimeError(f"{label} evaluation identity is missing evaluator revision")
+        evaluator_settings = evaluator.get("settings")
+        resolved_profile = evaluator.get("resolved_profile")
+        if not isinstance(evaluator_settings, Mapping) or not isinstance(resolved_profile, Mapping):
+            raise RuntimeError(
+                f"{label} evaluation identity is missing evaluator settings or resolved profile"
+            )
+        required_profile_fields = {
+            "profile",
+            "suite",
+            "lmms_eval_revision",
+            "source_tasks",
+            "dataset_revisions",
+            "frame_policy",
+            "generation_policy",
+            "sample_limit",
+            "quick_manifest_sha256",
+            "repetitions",
+        }
+        missing = required_profile_fields - resolved_profile.keys()
+        if missing:
+            raise RuntimeError(
+                f"{label} evaluation identity resolved profile is missing {sorted(missing)}"
+            )
+        if evaluator.get("profile") != expected_profile:
+            raise RuntimeError(f"{label} evaluation profile differs from the result contract")
+        if evaluator_settings.get("row_manifest_sha256") != expected_manifest_sha256:
+            raise RuntimeError(f"{label} evaluator row manifest differs from the result contract")
+        if resolved_profile.get("quick_manifest_sha256") != expected_manifest_sha256:
+            raise RuntimeError(f"{label} resolved row manifest differs from the result contract")
+        if identity.get("reference_checkpoint_fingerprint") != expected_reference_fingerprint:
+            raise RuntimeError(f"{label} reference checkpoint differs from the result contract")
+        return canonicalize(
+            {
+                "reference_checkpoint_fingerprint": identity["reference_checkpoint_fingerprint"],
+                "evaluator": {
+                    "profile": evaluator["profile"],
+                    "revision": evaluator.get("revision"),
+                    "settings": evaluator_settings,
+                    "resolved_profile": resolved_profile,
+                },
+            }
+        )
+
     for revision_id in input_set.revision_ids:
         revision = ledger.revisions[revision_id]
         pre_kd = ledger.source_revision(revision_id, pre_kd_source)
@@ -1144,6 +1206,8 @@ def _aggregate_result_manifest(
         pre_kd_comparison = json.loads(
             Path(pre_kd_evaluation_observation.artifacts["comparison_path"]).read_text()
         )
+        pre_kd_identity = pre_kd_comparison.get("identity")
+        expected_evaluation_contract = evaluation_contract(pre_kd_identity, label="pre-KD")
         milestones = []
         for milestone in settings["milestones"]:
             kd_observation = ledger._observation_for_revision(str(milestone["kd"]), revision_id)
@@ -1160,6 +1224,16 @@ def _aggregate_result_manifest(
                     f"{milestone['evaluation']!r} for {revision.architecture_id}"
                 )
             kd_revision = ledger.revisions[kd_observation.output_revision_id]
+            milestone_identity = json.loads(
+                Path(evaluation_observation.artifacts["comparison_path"]).read_text()
+            ).get("identity")
+            milestone_contract = evaluation_contract(
+                milestone_identity, label=f"{int(milestone['steps'])}-step"
+            )
+            if milestone_contract != expected_evaluation_contract:
+                raise RuntimeError(
+                    f"{int(milestone['steps'])}-step evaluation contract differs from pre-KD"
+                )
             milestones.append(
                 {
                     "steps": int(milestone["steps"]),
@@ -1170,9 +1244,7 @@ def _aggregate_result_manifest(
                     "evaluation_metrics": evaluation_observation.metrics,
                     "kd_artifacts": kd_observation.artifacts,
                     "evaluation_artifacts": evaluation_observation.artifacts,
-                    "evaluation_identity": json.loads(
-                        Path(evaluation_observation.artifacts["comparison_path"]).read_text()
-                    )["identity"],
+                    "evaluation_identity": milestone_identity,
                 }
             )
         payload = {
@@ -1186,7 +1258,7 @@ def _aggregate_result_manifest(
                 "evaluation_node": pre_kd_evaluation,
                 "evaluation_metrics": pre_kd_evaluation_observation.metrics,
                 "evaluation_artifacts": pre_kd_evaluation_observation.artifacts,
-                "evaluation_identity": pre_kd_comparison["identity"],
+                "evaluation_identity": pre_kd_identity,
             },
             "evaluation_identity": {
                 "profile": settings.get("profile"),

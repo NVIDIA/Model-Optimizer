@@ -256,7 +256,7 @@ post_mip:
         selected:
           type: manual_filter
           input: short_v1_256
-          prompt: Select one 256-step finalist using the separately owned short-v1 interpretation.
+          prompt: Select one 256-step finalist using the separately owned fixed 344-row interpretation.
 
         bounded_result:
           type: result_manifest
@@ -458,7 +458,7 @@ post_mip:
         control_selected:
           type: manual_filter
           input: control_result
-          prompt: Select one 256-step conservative-control finalist using the frozen short-v1 curve.
+          prompt: Select one 256-step conservative-control finalist using the fixed 344-row curve.
 
         control_approve_512:
           type: manual_filter

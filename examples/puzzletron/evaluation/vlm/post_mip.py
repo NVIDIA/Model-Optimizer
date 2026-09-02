@@ -79,11 +79,13 @@ def _run_profile(
             or len(expected_manifest_sha256) != 64
             or any(character not in "0123456789abcdef" for character in expected_manifest_sha256)
         ):
-            raise ValueError("short-v1 row manifest SHA256 must be 64 lowercase hex characters")
+            raise ValueError(
+                "frozen 344-row campaign manifest SHA256 must be 64 lowercase hex characters"
+            )
         actual_manifest_sha256 = suites.manifest_sha256(suites.load_quick_manifest(quick_manifest))
         if actual_manifest_sha256 != expected_manifest_sha256:
             raise ValueError(
-                "short-v1 row manifest SHA256 differs from the campaign identity: "
+                "frozen 344-row campaign manifest SHA256 differs from the campaign identity: "
                 f"{actual_manifest_sha256} != {expected_manifest_sha256}"
             )
     args = argparse.Namespace(
@@ -165,7 +167,7 @@ def evaluate_frozen_campaign_checkpoint(
     )
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
-        raise RuntimeError("pinned VLM short-v1 profile returned an invalid run count")
+        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
     return {
         **runs[0],
         "profile_path": str(profile_path),

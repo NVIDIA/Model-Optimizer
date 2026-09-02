@@ -250,7 +250,11 @@ row-manifest digest in an immutable learning-curve manifest.
 The 512- and 1024-step extensions are not part of the bounded campaign result.
 They are available only for the selected finalist, each behind a separate
 manual approval gate, and resume the same optimizer trajectory if approved.
-They use the same frozen short-v1 rows. Full-v1 remains a later optional run.
+They use the same fixed 344-row selection: 64 RealWorldQA rows, 120 MMMU
+validation rows, and 160 MVBench rows under the semantic contract
+`qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1`. The separate eight-task,
+all-rows `qwen35-vlm-judge-free8-all-rows-v1` scope remains an optional later
+run.
 
 Grouped-attention and GDN reductions are disabled. The native Qwen
 `Qwen3NextAttention` backend rejects compact reduced geometry, and its
@@ -309,7 +313,8 @@ Inspect the compiled stage order, identity inputs, and one-GPU allocation. A
 successful dry run or smoke test is preparation evidence only. Launching this
 real campaign requires separate GPU/scheduler authorization, and the campaign
 is not complete until at least one selected post-KD student has comparable
-64/128/256 short-v1 scores and an immutable learning-curve result manifest.
+64/128/256 scores on the fixed 344-row selection and an immutable
+learning-curve result manifest.
 
 ## Evaluate a saved checkpoint separately
 

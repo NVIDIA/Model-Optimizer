@@ -304,52 +304,6 @@ def test_aggregate_rank_combines_directions_and_breaks_ties_by_revision(tmp_path
     }
 
 
-def test_aggregate_rank_preserves_requested_origin_variants(tmp_path):
-    ledger = _ledger(
-        tmp_path,
-        {
-            "revision-a": {"loss": 1.0},
-            "revision-b": {"loss": 2.0},
-            "revision-c": {"loss": 3.0},
-            "revision-d": {"loss": 4.0},
-        },
-    )
-    variants = {
-        "architecture-a": "retained-95",
-        "architecture-b": "retained-95",
-        "architecture-c": "retained-90",
-        "architecture-d": "retained-85",
-    }
-    for architecture_id, variant_id in variants.items():
-        ledger.architectures[architecture_id].origins = [{"variant_id": variant_id}]
-
-    selected, excluded, _scores = apply_filter(
-        ledger,
-        tuple(ledger.revisions),
-        {
-            "mode": "aggregate_rank",
-            "metrics": [{"metric": "serving.loss", "direction": "minimize"}],
-            "top_k": 4,
-            "origin_variant_quotas": {"retained-95": 1, "retained-90": 1, "retained-85": 1},
-        },
-    )
-
-    assert selected == ("revision-a", "revision-c", "revision-d", "revision-b")
-    assert excluded == {}
-
-
-def test_origin_variant_quotas_cannot_exceed_top_k():
-    with pytest.raises(ValueError, match="cannot exceed top_k"):
-        validate_filter_config(
-            {
-                "mode": "aggregate_rank",
-                "metrics": [{"metric": "serving.loss"}],
-                "top_k": 2,
-                "origin_variant_quotas": {"retained-95": 1, "retained-90": 1, "retained-85": 1},
-            }
-        )
-
-
 @pytest.mark.parametrize("metric", ["output_token_throughput", "mip.score"])
 def test_sweep_selection_requires_a_node_qualified_metric(metric):
     with pytest.raises(ValueError, match="node-qualified"):

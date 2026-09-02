@@ -57,11 +57,10 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
     mode = str(config.get("mode") or "")
     common = {"type", "input", "model_source", "failure_policy", "config", "mode"}
     allowed = {
-        "top_k": common
-        | {"metric", "direction", "top_k", "best_selection_mode", "origin_variant_quotas"},
+        "top_k": common | {"metric", "direction", "top_k", "best_selection_mode"},
         "threshold": common | {"metric", "min", "max"},
         "pareto": common | {"metrics"},
-        "aggregate_rank": common | {"metrics", "top_k", "origin_variant_quotas"},
+        "aggregate_rank": common | {"metrics", "top_k"},
     }
     if mode not in allowed:
         raise ValueError("filter.mode must be top_k, threshold, pareto, or aggregate_rank")
@@ -108,20 +107,6 @@ def validate_filter_config(config: Mapping[str, Any]) -> None:
         _metric_entries(config)
         if mode == "aggregate_rank" and int(config.get("top_k", 1)) < 1:
             raise ValueError("aggregate_rank.top_k must be positive")
-    quotas = config.get("origin_variant_quotas")
-    if quotas is not None:
-        if not isinstance(quotas, Mapping) or not quotas:
-            raise TypeError("origin_variant_quotas must be a non-empty mapping")
-        if any(
-            not str(variant)
-            or isinstance(quota, bool)
-            or not str(quota).isdigit()
-            or int(quota) < 1
-            for variant, quota in quotas.items()
-        ):
-            raise ValueError("origin_variant_quotas values must be positive integers")
-        if sum(int(quota) for quota in quotas.values()) > int(config["top_k"]):
-            raise ValueError("origin_variant_quotas cannot exceed top_k")
 
 
 def filter_metric_references(config: Mapping[str, Any]) -> tuple[str, ...]:
@@ -141,41 +126,6 @@ def _origin_kind(ledger: CandidateLedger, revision_id: str) -> str:
     while revision.parent_revision_id is not None:
         revision = ledger.revisions[revision.parent_revision_id]
     return str(revision.artifact.get("kind", "heterogeneous"))
-
-
-def _origin_variants(ledger: CandidateLedger, revision_id: str) -> frozenset[str]:
-    revision = ledger.revisions[revision_id]
-    architecture = ledger.architectures[revision.architecture_id]
-    return frozenset(
-        str(origin["variant_id"])
-        for origin in architecture.origins
-        if origin.get("variant_id") is not None
-    )
-
-
-def _select_with_origin_variant_quotas(
-    ledger: CandidateLedger,
-    ordered_ids: Sequence[str],
-    *,
-    top_k: int,
-    quotas: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
-    if not quotas:
-        return tuple(ordered_ids[:top_k])
-    selected: list[str] = []
-    for variant, quota in quotas.items():
-        eligible = [
-            revision_id
-            for revision_id in ordered_ids
-            if revision_id not in selected and str(variant) in _origin_variants(ledger, revision_id)
-        ]
-        selected.extend(eligible[: int(quota)])
-    selected.extend(
-        revision_id
-        for revision_id in ordered_ids
-        if revision_id not in selected and len(selected) < top_k
-    )
-    return tuple(selected)
 
 
 def _ordered_metric_rows(
@@ -284,12 +234,7 @@ def apply_filter(
             kept = {revision_id for _value, revision_id in kept_rows}
             selected = tuple(revision_id for _value, revision_id in rows if revision_id in kept)
         else:
-            selected = _select_with_origin_variant_quotas(
-                ledger,
-                [revision_id for _value, revision_id in rows],
-                top_k=int(top_k),
-                quotas=config.get("origin_variant_quotas"),
-            )
+            selected = tuple(revision_id for _value, revision_id in rows[: int(top_k)])
         for _value, revision_id in rows:
             if revision_id not in selected:
                 excluded[revision_id] = "outside top_k"
@@ -369,12 +314,8 @@ def apply_filter(
             weight for _rank, weight in weighted_ranks
         )
     ordered_ids = sorted(scores, key=lambda revision_id: (scores[revision_id], revision_id))
-    selected = _select_with_origin_variant_quotas(
-        ledger,
-        ordered_ids,
-        top_k=int(config.get("top_k", 1)),
-        quotas=config.get("origin_variant_quotas"),
-    )
-    for revision_id in ordered_ids[len(selected) :]:
-        excluded[revision_id] = "outside aggregate_rank top_k"
+    selected = tuple(ordered_ids[: int(config.get("top_k", 1))])
+    for revision_id in ordered_ids:
+        if revision_id not in selected:
+            excluded[revision_id] = "outside aggregate_rank top_k"
     return selected, excluded, scores
