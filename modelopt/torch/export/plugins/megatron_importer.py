@@ -331,10 +331,10 @@ class GPTModelImporter:
         state_dict = module.state_dict()
 
         assert module.num_gemms == num_local_experts, (
-            "num_gemms must be equal to num_local_experts in TEGroupedMLP"
+            "num_gemms must be equal to num_local_experts in TEGroupedLinear"
         )
         # init_expert_id is the global index of this rank's first local expert.
-        # TEGroupedMLP stores weights as weight0..weight{num_local-1} locally, so we
+        # TEGroupedLinear stores weights as weight0..weight{num_local-1} locally, so we
         # map global expert_id -> local slot (expert_id - init_expert_id).
         for local_id in range(num_local_experts):
             global_expert_id = init_expert_id + local_id

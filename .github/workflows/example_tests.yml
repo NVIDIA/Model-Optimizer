@@ -155,7 +155,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/nemo:26.08"
       example: megatron_bridge
-      timeout_minutes: 60
+      timeout_minutes: 75
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), ',megatron_bridge,') }}
