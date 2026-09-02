@@ -187,3 +187,45 @@ def test_empty_histogram_does_not_claim_a_measurement():
     out = {"Conditional_Acceptance_Rate": {}, "Joint_Acceptance_Rate": {}, "Average_AL": 0.0}
     profile = build_profile(out, num_speculative_tokens=3, method="eagle3")
     assert profile["marginal_accept_rates"] == [0.0, 0.0, 0.0]
+
+
+def test_non_finite_rates_are_rejected():
+    """NaN does not fail loudly in a consumer -- it produces nonsense acceptance.
+
+    dynamo feeds these to rng.random_bool(); vLLM expects a survival function. Neither
+    validates, so the boundary check has to be here.
+    """
+    out = _acceptance_out_from_histogram({1: 50, 2: 50})
+    out["Joint_Acceptance_Rate"] = {1: 1.0, 2: float("nan")}
+    with pytest.raises(ValueError, match="finite"):
+        build_profile(out, num_speculative_tokens=2, method="eagle3")
+
+
+def test_out_of_range_rates_are_rejected():
+    out = _acceptance_out_from_histogram({1: 50, 2: 50})
+    out["Joint_Acceptance_Rate"] = {1: 1.0, 2: 1.7}
+    with pytest.raises(ValueError, match="probability"):
+        build_profile(out, num_speculative_tokens=2, method="eagle3")
+
+
+def test_empty_measurement_is_not_marked_measured():
+    """measured=true on zero observations would advertise a draft that accepts
+    nothing, which reads identically to a genuinely terrible draft."""
+    out = {"Conditional_Acceptance_Rate": {}, "Joint_Acceptance_Rate": {}, "Average_AL": 0.0}
+    assert build_profile(out, num_speculative_tokens=3)["measured"] is False
+
+
+def test_block_verification_withholds_the_vectors():
+    """Block verification accepts or rejects a drafted block jointly, so it does not
+    produce a longest-prefix distribution. Publishing the vectors anyway would invite
+    a consumer to read them as if it did."""
+    out = _acceptance_out_from_histogram({1: 40, 2: 30, 3: 30})
+    out["Average_AL"] = 1.9
+    profile = build_profile(
+        out, num_speculative_tokens=3, method="dflash", verification_method="block"
+    )
+    assert profile["conditional_accept_rates"] is None
+    assert profile["marginal_accept_rates"] is None
+    assert "longest-prefix" in profile["vectors_unavailable_reason"]
+    # The histogram and mean still describe something real and are kept.
+    assert profile["acceptance_length_histogram"]
