@@ -38,6 +38,7 @@ search_space:
 mip:
   runs:
     params-80: false
+    memory-85: false
     ffn-candidates:
       search_space:
         depth: [0]

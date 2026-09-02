@@ -79,14 +79,20 @@ def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
 
 
 def _chat_template_sha256(settings: Mapping[str, object]) -> str | None:
-    """Fingerprint a generated chat template that affects model inputs."""
+    """Fingerprint a file-backed or inline chat template that affects model inputs."""
     model_args = settings.get("model_args")
     if not isinstance(model_args, Mapping):
         return None
     chat_template = model_args.get("chat_template")
     if not isinstance(chat_template, str):
         return None
-    return sha256(Path(chat_template).read_bytes()).hexdigest()
+    try:
+        template_path = Path(chat_template)
+        content = template_path.read_bytes() if template_path.is_file() else chat_template.encode()
+    except OSError:
+        # Inline Jinja can exceed filesystem path limits or contain path-invalid characters.
+        content = chat_template.encode()
+    return sha256(content).hexdigest()
 
 
 def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:

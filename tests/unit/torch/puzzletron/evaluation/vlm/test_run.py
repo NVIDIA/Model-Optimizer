@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
 
@@ -115,6 +116,19 @@ def test_no_think_template_rejects_unsafe_checkpoint_expression(tmp_path):
 
     with pytest.raises(ValueError, match="chat template is invalid"):
         vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
+
+
+def test_chat_template_fingerprint_accepts_file_and_inline_content(tmp_path):
+    content = "{% if messages %}{{ messages[0]['content'] }}{% endif %}"
+    template_path = tmp_path / "chat_template.jinja"
+    template_path.write_text(content)
+    expected = sha256(content.encode()).hexdigest()
+
+    assert (
+        evaluator._chat_template_sha256({"model_args": {"chat_template": str(template_path)}})
+        == expected
+    )
+    assert evaluator._chat_template_sha256({"model_args": {"chat_template": content}}) == expected
 
 
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):

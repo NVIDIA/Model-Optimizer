@@ -312,6 +312,9 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     candidates = config["mip"]["runs"]["ffn-candidates"]
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
 
+    assert tuple(config["mip"]["runs"]) == ("params-80", "memory-85", "ffn-candidates")
+    assert config["mip"]["runs"]["params-80"] is False
+    assert config["mip"]["runs"]["memory-85"] is False
     assert candidates["variants"] == {
         "width-7168": {
             "constraints": {"params": {"max": "92%"}},
@@ -402,6 +405,9 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     assert stages["post.candidate-evaluation.screening_kd"].total_gpus == 8
     assert all(stages[stage_id].gpus_per_node == 8 for stage_id in candidate_stages)
     assert stages["post.candidate-evaluation.global_kd"].total_gpus == 2
+    execution = load_execution_config(CAMPAIGN_EXECUTION_PATH)
+    assert execution["stages"]["width_importance"] == {"strategy": "single"}
+    assert "depth_importance" not in execution["stages"]
 
 
 def test_qwen3p5_4b_legacy_campaign_alias_resolves_to_named_search(

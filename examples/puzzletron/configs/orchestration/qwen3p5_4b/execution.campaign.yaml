@@ -10,7 +10,7 @@ execution:
     # candidate instances. Partial-node stages request only their active GPUs.
     gpus_per_node: 8
   stages:
-    depth_importance: {strategy: single}
+    width_importance: {strategy: single}
     replacement_scoring: {strategy: single}
     post.candidate-evaluation.online_eval: &candidate_instances {instances: 4}
     post.candidate-evaluation.materialized: *candidate_instances

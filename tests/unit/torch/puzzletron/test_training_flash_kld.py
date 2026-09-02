@@ -342,6 +342,16 @@ def _tp_teacher_projection_job(_rank: int, _size: int) -> None:
     assert actual.placements == reference_logits.placements
     torch.testing.assert_close(actual.full_tensor(), F.linear(full_hidden, full_weight))
 
+    replicated_reference_logits = distribute_tensor(torch.empty(3, 8), student_mesh, (Replicate(),))
+    replicated_actual = _project_teacher_hidden_on_reference_mesh(
+        full_hidden.clone(),
+        teacher.lm_head,
+        replicated_reference_logits,
+    )
+    assert replicated_actual.device_mesh is student_mesh
+    assert replicated_actual.placements == (Replicate(),)
+    torch.testing.assert_close(replicated_actual.full_tensor(), F.linear(full_hidden, full_weight))
+
     sharded_hidden = distribute_tensor(full_hidden, teacher_mesh, (Shard(-1),))
     sharded_actual = _project_teacher_hidden_on_reference_mesh(
         sharded_hidden,
