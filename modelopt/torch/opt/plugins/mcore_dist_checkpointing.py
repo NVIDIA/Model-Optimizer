@@ -183,6 +183,24 @@ def _load_extra_state_from_sharded_checkpoint(
             module.set_extra_state(extra_state_dict_no_prefix[key])
 
 
+def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
+    """Create scalar amax placeholders for TE grouped experts absent on the save rank."""
+    for module in model.modules():
+        if not hasattr(module, "num_gemms") or not hasattr(module, "weight_quantizer"):
+            continue
+        reference_tensor = next(module.parameters(), None)
+        if reference_tensor is None:
+            continue
+        for gemm_idx in range(module.num_gemms):
+            quantizer = module.weight_quantizer[gemm_idx]
+            quantizers = quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
+            for tensor_quantizer in quantizers:
+                if tensor_quantizer.amax is None:
+                    tensor_quantizer.amax = torch.empty(
+                        1, device=reference_tensor.device, dtype=reference_tensor.dtype
+                    )
+
+
 def restore_sharded_modelopt_state(
     model: list[torch.nn.Module],
     checkpoint_name: str | Path,
@@ -238,3 +256,4 @@ def restore_sharded_modelopt_state(
     model[0] = mto.restore_from_modelopt_state(model[0], common_modelopt_state)
 
     _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)
+    _initialize_grouped_weight_amax_for_restore(model[0])

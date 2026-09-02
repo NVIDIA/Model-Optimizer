@@ -916,6 +916,13 @@ if HAS_TE:
             self.linear_fc1._parallel_state = self.parallel_state
             self.linear_fc2._parallel_state = self.parallel_state
 
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            """Save per-expert quantizer state as globally named singleton shards."""
+            if metadata is None:
+                metadata = {}
+            metadata["singleton_local_shards"] = True
+            return super().sharded_state_dict(prefix, sharded_offsets, metadata)
+
     @QuantModuleRegistry.register({TEDotProductAttention: "TEDotProductAttention"})
     class _QuantTEDotProductAttention(QuantModule):
         """Quantized version of TEDotProductAttention for Megatron models with KV cache quantization.

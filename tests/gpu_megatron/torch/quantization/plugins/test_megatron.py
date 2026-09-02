@@ -15,7 +15,6 @@
 
 import copy
 import math
-import re
 import sys
 import types
 from contextlib import nullcontext
@@ -38,7 +37,9 @@ from _test_utils.torch.megatron.utils import (
     get_batch,
     get_forward,
     initialize_for_megatron,
+    load_distributed_checkpoint,
     run_mcore_inference,
+    save_distributed_checkpoint,
     sharded_state_dict_test_helper,
 )
 from _test_utils.torch.misc import set_seed
@@ -52,6 +53,7 @@ from _test_utils.torch.quantization.quantize_common import (
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
+    get_expert_model_parallel_rank,
     get_tensor_model_parallel_group,
 )
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
@@ -62,6 +64,10 @@ from megatron.core.transformer.moe.router import TopKRouter
 import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    restore_sharded_modelopt_state,
+    save_sharded_modelopt_state,
+)
 from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBaseSearcher
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
@@ -1090,100 +1096,125 @@ def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
     )
 
 
-def _te_grouped_expert_identity_from_sharded_state(module):
-    """Return {local_key: (global_expert_idx, num_global_experts)} for per-expert amax shards.
-
-    The grouped linear must give each fused expert the same global identity the weights use:
-    the dict key keeps the local expert index (maps to the local buffer on restore) while the
-    ShardedTensor carries the global expert offset. Called with sharded_offsets=() so the expert
-    axis is the (only) prepended axis at index 0.
-    """
-    sharded_sd = module.sharded_state_dict(prefix="", sharded_offsets=(), metadata=None)
-    identity = {}
-    for key, sh_ten in sharded_sd.items():
-        if re.match(r"weight_quantizer\.\d+\..*_amax$", key):
-            assert sh_ten.prepend_axis_num >= 1, f"{key}: expected a prepended expert axis"
-            identity[key] = (int(sh_ten.global_offset[0]), int(sh_ten.global_shape[0]))
-    return identity
+def _set_te_grouped_weight_amax(model, ep_rank, num_local_experts):
+    """Give every local expert a distinct amax derived from its global expert index."""
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                if leaf._amax is not None:
+                    leaf._amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
 
 
-def _test_te_grouped_sharded_state_dict_global_expert_identity_helper(
-    tp_size, ep_size, quant_cfg, rank, size
+def _assert_te_grouped_weight_amax(model, expected_amax):
+    for linear in model.modules():
+        if not isinstance(linear, _QuantMegatronTEGroupedLinear):
+            continue
+        for local_expert_idx in range(linear.num_gemms):
+            quantizer = linear.weight_quantizer[local_expert_idx]
+            leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
+            for leaf in leaves:
+                assert leaf._amax is not None
+                assert torch.equal(
+                    leaf._amax, torch.full_like(leaf._amax, expected_amax[local_expert_idx])
+                )
+
+
+def _test_te_grouped_sharded_state_dict_reshard_helper(
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+    checkpoint_path,
+    rank,
+    size,
 ):
-    """Per-expert quantizer amax must persist all num_global_experts across EP.
-
-    With EP>1 the base linear emitted ``weight_quantizer.{local_i}._amax`` at the local index with
-    no expert offset, so every rank wrote identical keys and torch_dist dedup collapsed them to a
-    single rank's experts. Assert each rank's fused experts now carry distinct global identities so
-    the union across ranks covers every global expert.
-    """
+    """Round-trip TEGroupedMLP amax through a topology change."""
+    num_experts = 4
+    save_num_local_experts = num_experts // save_ep_size
     initialize_for_megatron(
-        tensor_model_parallel_size=tp_size,
-        expert_model_parallel_size=ep_size,
+        tensor_model_parallel_size=save_tp_size,
+        expert_model_parallel_size=save_ep_size,
         seed=SEED,
     )
-    num_experts = 4
-    num_local = num_experts // ep_size
 
-    te_grouped = _gpt_model_provider(
-        tp_size=tp_size,
-        ep_size=ep_size,
+    source = _gpt_model_provider(
+        tp_size=save_tp_size,
+        ep_size=save_ep_size,
         hidden_size=32,
         moe_grouped_gemm=True,
         transformer_impl="transformer_engine",
         num_moe_experts=num_experts,
     )
-    forward = get_forward(te_grouped, batch_size=8)
-    for module in te_grouped.modules():
+    forward = get_forward(source, batch_size=8)
+    for module in source.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
-    mtq.quantize(te_grouped, quant_cfg, forward)
+    mtq.quantize(source, mtq.NVFP4_DEFAULT_CFG, forward)
+    _set_te_grouped_weight_amax(source, get_expert_model_parallel_rank(), save_num_local_experts)
+    save_distributed_checkpoint(checkpoint_path, source)
+    save_sharded_modelopt_state([source], checkpoint_path)
+    torch.distributed.barrier()
+    del source
+    destroy_model_parallel()
 
-    grouped_linears = [
-        m for m in te_grouped.modules() if isinstance(m, _QuantMegatronTEGroupedLinear)
-    ]
-    assert grouped_linears, "No grouped quant linears found"
-
-    expected_global = {rank * num_local + i for i in range(num_local)}
-    for linear in grouped_linears:
-        # Give each expert a distinct amax so a value mix-up would also be observable.
-        for i in range(linear.num_gemms):
-            wq = linear.weight_quantizer[i]
-            leaves = list(wq) if isinstance(wq, SequentialQuantizer) else [wq]
-            for leaf in leaves:
-                if hasattr(leaf, "_amax") and leaf._amax is not None:
-                    leaf._amax.fill_(1.0 + rank * num_local + i)
-
-        identity = _te_grouped_expert_identity_from_sharded_state(linear)
-        # One entry per local expert per amax buffer; dict keys keep the LOCAL index.
-        local_keys = {int(re.search(r"weight_quantizer\.(\d+)\.", k).group(1)) for k in identity}
-        assert local_keys == set(range(num_local)), (
-            f"Expected local expert keys {set(range(num_local))}, got {local_keys}"
-        )
-        # ShardedTensor global identity: this rank owns experts {rank*num_local + i}.
-        local_global = {gidx for gidx, _ in identity.values()}
-        assert local_global == expected_global, (
-            f"rank {rank}: expected global experts {expected_global}, got {local_global}"
-        )
-        assert all(total == num_experts for _, total in identity.values()), (
-            f"num_global_experts should be {num_experts}, got {identity}"
-        )
-
-    # Gather the global expert indices across all EP ranks: the union must cover every expert.
-    gathered = [None] * size
-    torch.distributed.all_gather_object(gathered, sorted(expected_global))
-    union = set()
-    for part in gathered:
-        union.update(part)
-    assert union == set(range(num_experts)), (
-        f"Union of global experts across EP ranks should be {set(range(num_experts))}, got {union}"
+    initialize_for_megatron(
+        tensor_model_parallel_size=load_tp_size,
+        expert_model_parallel_size=load_ep_size,
+        seed=SEED,
     )
+    target = _gpt_model_provider(
+        tp_size=load_tp_size,
+        ep_size=load_ep_size,
+        hidden_size=32,
+        moe_grouped_gemm=True,
+        transformer_impl="transformer_engine",
+        num_moe_experts=num_experts,
+    )
+    target_models = [target]
+    restore_sharded_modelopt_state(target_models, checkpoint_path)
+    target = target_models[0]
+    load_distributed_checkpoint(checkpoint_path, target)
+    load_num_local_experts = num_experts // load_ep_size
+    expected_amax = tuple(
+        range(
+            1 + get_expert_model_parallel_rank() * load_num_local_experts,
+            1 + (get_expert_model_parallel_rank() + 1) * load_num_local_experts,
+        )
+    )
+    _assert_te_grouped_weight_amax(target, expected_amax)
 
 
-@pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG])
-def test_te_grouped_sharded_state_dict_global_expert_identity(dist_workers_size_2, quant_cfg):
+@pytest.mark.parametrize(
+    (
+        "save_tp_size",
+        "save_ep_size",
+        "load_tp_size",
+        "load_ep_size",
+    ),
+    [(1, 2, 1, 1), (1, 1, 1, 2), (1, 1, 2, 1), (2, 1, 1, 1)],
+    ids=["ep-downsize", "ep-upsize", "tp-upsize", "tp-downsize"],
+)
+def test_te_grouped_sharded_state_dict_reshard(
+    dist_workers_size_2,
+    tmp_path,
+    save_tp_size,
+    save_ep_size,
+    load_tp_size,
+    load_ep_size,
+):
     dist_workers_size_2.run(
-        partial(_test_te_grouped_sharded_state_dict_global_expert_identity_helper, 1, 2, quant_cfg)
+        partial(
+            _test_te_grouped_sharded_state_dict_reshard_helper,
+            save_tp_size,
+            save_ep_size,
+            load_tp_size,
+            load_ep_size,
+            tmp_path,
+        )
     )
 
 
