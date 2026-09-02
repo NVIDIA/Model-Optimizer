@@ -23,10 +23,34 @@ index 89978777..57a31642 100644
 @@ -55,2 +40,0 @@ class WandbLogger:
 -        self.printer = get_wandb_printer()
 -
+diff --git a/lmms_eval/tasks/emma/utils.py b/lmms_eval/tasks/emma/utils.py
+index 001d70c8..d90a88fe 100644
+--- a/lmms_eval/tasks/emma/utils.py
++++ b/lmms_eval/tasks/emma/utils.py
+@@ -8 +8 @@ import yaml
+-from latex2sympy2 import latex2sympy
++from latex2sympy2_extended import latex2sympy
+diff --git a/lmms_eval/tasks/mathvision/eval_utils.py b/lmms_eval/tasks/mathvision/eval_utils.py
+index d6c2f767..5a1ff197 100644
+--- a/lmms_eval/tasks/mathvision/eval_utils.py
++++ b/lmms_eval/tasks/mathvision/eval_utils.py
+@@ -6 +6 @@ from math import *
+-from latex2sympy2 import latex2sympy
++from latex2sympy2_extended import latex2sympy
+diff --git a/lmms_eval/tasks/stare/utils.py b/lmms_eval/tasks/stare/utils.py
+index 3c1c16c3..2cb9ee18 100644
+--- a/lmms_eval/tasks/stare/utils.py
++++ b/lmms_eval/tasks/stare/utils.py
+@@ -8 +8 @@ import yaml
+-from latex2sympy2 import latex2sympy
++from latex2sympy2_extended import latex2sympy
 diff --git a/pyproject.toml b/pyproject.toml
-index 5aa0ea1a..85341c0e 100755
+index 5aa0ea1a..04627758 100755
 --- a/pyproject.toml
 +++ b/pyproject.toml
+@@ -59 +59 @@ dependencies = [
+-    "latex2sympy2",
++    "latex2sympy2-extended==1.11.0",
 @@ -66 +66 @@ dependencies = [
 -    "wandb==0.25.0",
 +    "wandb>=0.28.0,<0.30",

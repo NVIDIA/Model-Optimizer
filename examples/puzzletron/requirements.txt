@@ -1,15 +1,16 @@
 accelerate==1.14.0
-aiohttp>=3.9,<4
+aiohttp==3.14.3
+antlr4-python3-runtime==4.9.3
 av==15.1.0
 datasets==5.0.1
 decord==0.6.0; platform_system != "Darwin" and platform_system != "Linux"
 eva-decord==0.6.1; platform_system == "Linux"
 eva-decord; platform_system == "Darwin" and python_version < "3.12"
 huggingface-hub==1.29.0
-math-verify
+math-verify==0.9.0
 openai==3.6.0
 qwen-vl-utils==0.0.14
-ray
+ray==2.58.0
 wandb==0.29.0
 # The Dockerfile installs the patched native lmms-eval source recorded in
 # ci_environment.json after resolving this shared worker requirement set.

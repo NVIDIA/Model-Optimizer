@@ -17,12 +17,14 @@ upstream `lmms-eval` 0.7.2 source revision recorded in
 and video backend. No evaluator overlay or separate VLM requirements install is
 needed.
 
-The image applies one tracked compatibility patch to `lmms-eval` dependency
-metadata so its WandB requirement agrees with AutoModel. The patch does not
-change evaluator code. Image construction verifies the patch checksum, source
-revision, resulting checkout diff, required native backend and task files, and
-the resolved Python dependency set. Do not replace or modify that evaluator
-checkout inside the worker image.
+The image applies one tracked compatibility patch to `lmms-eval`. It removes an
+unused private WandB printer integration, aligns the WandB requirement with
+AutoModel, and replaces the legacy LaTeX parser whose ANTLR pin conflicts with
+Puzzletron's Hydra stack. The maintained replacement provides the same parser
+entry point to the three affected math tasks. Image construction verifies the
+patch checksum, source revision, resulting checkout diff, required native
+backend and task files, and the resolved Python dependency set. Do not replace
+or modify that evaluator checkout inside the worker image.
 
 ## Choose a suite
 

@@ -26,6 +26,7 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     dockerfile = (puzzletron_root / "Dockerfile").read_text()
+    requirements = (puzzletron_root / "requirements.txt").read_text().splitlines()
 
     base_image = environment["gpu_image"]["base_image"]
     assert re.fullmatch(r"nvidia/cuda:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}", base_image)
@@ -40,6 +41,8 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     assert "for module in" in dockerfile
     assert "nltk.data.find" in dockerfile
     assert ".lmms_eval.required_paths[]" in dockerfile
+    for package in ("aiohttp", "antlr4-python3-runtime", "math-verify", "ray"):
+        assert f"{package}=={environment[package]}" in requirements
 
     vcs_sources = [
         environment["lmms_eval"],
@@ -87,7 +90,7 @@ def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_p
     assert 'test "$(git -C /tmp/mamba-ssm rev-parse HEAD)" = \\' in dockerfile
 
 
-def test_lmms_eval_compatibility_patch_removes_private_wandb_api(project_root_path):
+def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_root_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     dockerfile = (puzzletron_root / "Dockerfile").read_text()
@@ -116,11 +119,22 @@ def test_lmms_eval_compatibility_patch_removes_private_wandb_api(project_root_pa
         "-    printer = get_printer(Settings()._jupyter)",
         "-    return printer",
         "-        self.printer = get_wandb_printer()",
+        "-from latex2sympy2 import latex2sympy",
+        "+from latex2sympy2_extended import latex2sympy",
+        "-from latex2sympy2 import latex2sympy",
+        "+from latex2sympy2_extended import latex2sympy",
+        "-from latex2sympy2 import latex2sympy",
+        "+from latex2sympy2_extended import latex2sympy",
+        '-    "latex2sympy2",',
+        '+    "latex2sympy2-extended==1.11.0",',
         '-    "wandb==0.25.0",',
         '+    "wandb>=0.28.0,<0.30",',
     ]
     assert lmms_source["compatibility_patch_files"] == [
         "lmms_eval/loggers/wandb_logger.py",
+        "lmms_eval/tasks/emma/utils.py",
+        "lmms_eval/tasks/mathvision/eval_utils.py",
+        "lmms_eval/tasks/stare/utils.py",
         "pyproject.toml",
     ]
     assert lmms_source["compatibility_patch_context_lines"] == 0

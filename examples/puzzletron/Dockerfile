@@ -71,8 +71,9 @@ RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
     python -m pip install "transformers==$(pin transformers)"
 
 # Install the native Qwen 3.5 evaluator in the shared worker environment. The
-# tracked patch removes lmms-eval's unused private WandB printer integration
-# and reconciles its dependency metadata with AutoModel's required range.
+# tracked patch removes lmms-eval's unused private WandB printer integration,
+# reconciles its WandB range with AutoModel, and replaces the legacy LaTeX
+# parser whose ANTLR pin conflicts with Puzzletron's Hydra stack.
 RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
     lmms_patch="$(pin lmms_eval.compatibility_patch)" && \
     echo "$(pin lmms_eval.compatibility_patch_sha256)  /opt/puzzletron/patches/${lmms_patch}" | \
