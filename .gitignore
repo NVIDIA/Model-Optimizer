@@ -38,6 +38,7 @@ venv/
 # Machine-local Puzzletron paths
 /nv-internal/
 /docs/superpowers/
+/puzzle_runs/
 
 # Linters
 **/.mypy_cache

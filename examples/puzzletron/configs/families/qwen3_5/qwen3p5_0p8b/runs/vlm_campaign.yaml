@@ -5,12 +5,14 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - _self_
 
-# Bounded multi-axis Qwen 3.5 0.8B VLM campaign. Exact MIP parameter accounting
-# admits 5-15% pruning candidates in three retained-parameter bands. The
-# post-MIP ledger deduplicates architectures across bands before image-text
-# screening, serving, one resumable KD learning curve, and frozen-row evaluation.
+# Bounded hidden-width, heterogeneous-FFN, and depth Qwen 3.5 0.8B VLM
+# campaign. Exact MIP parameter accounting admits 5-15% pruning candidates in
+# three retained-parameter bands. The post-MIP ledger deduplicates architectures
+# across bands before image-text screening, serving, one resumable KD learning
+# curve, and frozen-row evaluation. Attention and GDN remain at teacher geometry
+# until the native runtime passes compact-scoring and slicing equivalence gates.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
-display_name: Qwen3p5 0.8B expanded multi-axis VLM pruning campaign
+display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM pruning campaign
 
 pruning:
   experiment_id: qwen35_0p8b_vlm_multi_axis_campaign
