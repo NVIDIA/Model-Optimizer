@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -47,7 +48,14 @@ class PreparedSuite:
 
 def prepare(args: argparse.Namespace) -> PreparedSuite:
     """Validate model, task, dataset, media, and judge inputs for one suite."""
-    suite = args.suite or "short"
+    requested_suite = args.suite or "short"
+    suite = suites.canonical_suite(requested_suite)
+    if suite != requested_suite:
+        warnings.warn(
+            f"VLM suite {requested_suite!r} is deprecated; use {suite!r}",
+            FutureWarning,
+            stacklevel=2,
+        )
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
     source_tasks = suites.source_tasks(suite)
@@ -221,7 +229,7 @@ def settings(
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
         "reasoning_parser": "qwen3",
-        "log_samples": prepared.suite in {"quick", "short", "e2e-full-eval"},
+        "log_samples": prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE},
         "model_args": {
             "fps": frame_policy["fps"],
             "max_frame_num": frame_policy["max_frames"],

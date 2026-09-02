@@ -33,9 +33,11 @@ from examples.puzzletron.evaluation.vlm import evaluate, suites
 from modelopt.torch.puzzletron.distributed_eval.storage import atomic_write_json
 
 __all__ = [
+    "TASK_PREFIX100_REPEAT2_PROFILE",
     "evaluate_e2e_full_eval_checkpoint",
     "evaluate_frozen_campaign_checkpoint",
     "evaluate_realworldqa_checkpoint",
+    "evaluate_realworldqa_mmmu_prefix100_checkpoint",
     "evaluate_short_v1_checkpoint",
     "register_profiles",
 ]
@@ -52,6 +54,7 @@ _RUNNER_OVERRIDES = frozenset(
 _MANIFEST_SETTINGS = frozenset({"row_manifest", "row_manifest_sha256"})
 _REALWORLDQA_PROFILE = "qwen35_vlm_realworldqa2_prefix2"
 _BOUNDED_REPEATED_PROFILE = "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+TASK_PREFIX100_REPEAT2_PROFILE = _BOUNDED_REPEATED_PROFILE
 _FROZEN_CAMPAIGN_PROFILE = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
 
 
@@ -134,7 +137,7 @@ def register_profiles() -> None:
     )
     register_downstream_evaluation_profile(
         _BOUNDED_REPEATED_PROFILE,
-        evaluate_e2e_full_eval_checkpoint,
+        evaluate_realworldqa_mmmu_prefix100_checkpoint,
     )
     register_downstream_evaluation_profile(
         _FROZEN_CAMPAIGN_PROFILE,
@@ -221,19 +224,19 @@ def evaluate_realworldqa_checkpoint(
     return {**runs[0], "profile_path": str(profile_path)}
 
 
-def evaluate_e2e_full_eval_checkpoint(
+def evaluate_realworldqa_mmmu_prefix100_checkpoint(
     checkpoint_path: str | Path,
     *,
     output_root: str | Path,
     settings: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Run and average the repeated, bounded final-evaluation contract."""
+    """Run and average the two-task prefix-100 profile repeated twice."""
 
     args, result, profile_path = _run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
-        suite="e2e-full-eval",
+        suite=suites.TASK_PREFIX100_REPEAT2_SUITE,
     )
     runs = result["runs"]
     if (
@@ -250,19 +253,41 @@ def evaluate_e2e_full_eval_checkpoint(
         for name in sorted(metric_names)
     }
     result_paths = [str(item["result_path"]) for item in runs]
-    summary_path = args.output_dir / "e2e_full_eval_summary.json"
+    summary_path = args.output_dir / "realworldqa_mmmu_prefix100_repeat2_summary.json"
     atomic_write_json(
         summary_path,
         {
             "checkpoint": str(args.checkpoint),
             "metrics": metrics,
+            "profile": _BOUNDED_REPEATED_PROFILE,
             "result_paths": result_paths,
             "suite": args.suite,
         },
     )
     return {
         "metrics": metrics,
+        "profile": _BOUNDED_REPEATED_PROFILE,
         "profile_path": str(profile_path),
         "result_path": str(summary_path),
         "run_result_paths": result_paths,
     }
+
+
+def evaluate_e2e_full_eval_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compatibility alias for the explicit two-task prefix-100 profile."""
+
+    warnings.warn(
+        f"qwen35_vlm_e2e_full_eval is deprecated; use {_BOUNDED_REPEATED_PROFILE}",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return evaluate_realworldqa_mmmu_prefix100_checkpoint(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+    )

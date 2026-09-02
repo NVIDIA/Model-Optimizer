@@ -15,6 +15,7 @@
 
 """Tests for Puzzletron AIPerf context-capacity handling."""
 
+import asyncio
 import importlib.machinery
 import importlib.util
 import json
@@ -30,15 +31,65 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _clean_subprocess_environment,
     _exact_length_extra_inputs,
     _parse_export,
+    _PeakGpuMemorySampler,
     _prepare_vllm_checkpoint,
     _profile_command,
+    _resolve_executable,
+    _run_profile_command_async,
     _server_max_model_len,
     _topology_vllm_args,
     _vllm_server_command,
     run_aiperf_sweep,
 )
+from modelopt.torch.puzzletron.benchmarks.provenance import (
+    artifact_sha256,
+    benchmark_result_fingerprint,
+)
 
 # Subprocess environment and request sizing
+
+
+def test_profile_command_terminates_child_when_cancelled(monkeypatch):
+    class FakeProcess:
+        returncode = None
+        killed = False
+
+        async def wait(self):
+            if not self.killed:
+                await asyncio.Future()
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def cancel_profile():
+        task = asyncio.create_task(_run_profile_command_async(["aiperf"], timeout=60, env={}))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_profile())
+
+    assert process.killed
+    assert process.returncode == -9
+
+
+def test_resolve_executable_uses_program_specific_configuration_hint(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.shutil.which", lambda *_args, **_kwargs: None
+    )
+
+    with pytest.raises(FileNotFoundError, match="Cannot find executable vllm; add vLLM to PATH"):
+        _resolve_executable("vllm", configuration_hint="add vLLM to PATH")
 
 
 def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch):
@@ -555,6 +606,155 @@ def test_parse_export_preserves_interactivity_and_energy_metrics(tmp_path):
     assert metrics["image_latency_p95_ms"] == 50.0
 
 
+def test_peak_gpu_memory_sampler_tracks_device_peaks_and_releases_nvml(monkeypatch):
+    class PollOnce:
+        def __init__(self):
+            self.calls = 0
+
+        def wait(self, _timeout):
+            self.calls += 1
+            return self.calls > 1
+
+        def set(self):
+            pass
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+        def join(self):
+            pass
+
+    samples = {"index-0": iter((100, 300, 150)), "uuid-GPU-test": iter((200, 400, 180))}
+    shutdowns = []
+    pynvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: shutdowns.append(True),
+        nvmlDeviceGetHandleByIndex=lambda index: f"index-{index}",
+        nvmlDeviceGetHandleByUUID=lambda uuid: f"uuid-{uuid}",
+        nvmlDeviceGetMemoryInfo=lambda handle: SimpleNamespace(used=next(samples[handle])),
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+    monkeypatch.setattr("modelopt.torch.puzzletron.benchmarks.aiperf.Thread", ImmediateThread)
+
+    sampler = _PeakGpuMemorySampler("0,GPU-test", interval_seconds=3600)
+    sampler._stop = PollOnce()
+
+    with sampler:
+        assert sampler.metrics == {
+            "peak_gpu_memory_bytes": 700.0,
+            "peak_gpu_memory_bytes_per_gpu_max": 400.0,
+        }
+
+    assert sampler.metrics == {
+        "peak_gpu_memory_bytes": 700.0,
+        "peak_gpu_memory_bytes_per_gpu_max": 400.0,
+    }
+    assert shutdowns == [True]
+
+
+def test_peak_gpu_memory_sampler_propagates_polling_failure_during_join(monkeypatch):
+    class PollOnce:
+        def __init__(self):
+            self.calls = 0
+
+        def wait(self, _timeout):
+            self.calls += 1
+            return self.calls > 1
+
+        def set(self):
+            pass
+
+    class FailingOnJoinThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            pass
+
+        def join(self):
+            self.target()
+
+    memory_calls = 0
+    shutdowns = []
+
+    def sample_memory(_handle):
+        nonlocal memory_calls
+        memory_calls += 1
+        if memory_calls == 2:
+            raise RuntimeError("NVML polling failed")
+        return SimpleNamespace(used=100)
+
+    pynvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: shutdowns.append(True),
+        nvmlDeviceGetHandleByIndex=lambda index: index,
+        nvmlDeviceGetMemoryInfo=sample_memory,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+    monkeypatch.setattr("modelopt.torch.puzzletron.benchmarks.aiperf.Thread", FailingOnJoinThread)
+    sampler = _PeakGpuMemorySampler("0", interval_seconds=3600)
+    sampler._stop = PollOnce()
+
+    with pytest.raises(RuntimeError, match="peak GPU memory sampling failed"), sampler:
+        pass
+
+    assert shutdowns == [True]
+
+
+def test_peak_gpu_memory_sampler_releases_nvml_when_sampling_fails(monkeypatch):
+    shutdowns = []
+
+    def fail_memory_info(_handle):
+        raise RuntimeError("NVML failed")
+
+    pynvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: shutdowns.append(True),
+        nvmlDeviceGetHandleByIndex=lambda index: index,
+        nvmlDeviceGetMemoryInfo=fail_memory_info,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+
+    with (
+        pytest.raises(RuntimeError, match="NVML failed"),
+        _PeakGpuMemorySampler("0", interval_seconds=3600),
+    ):
+        pass
+
+    assert shutdowns == [True]
+
+
+def test_peak_gpu_memory_sampler_preserves_workload_error_when_final_sample_fails(monkeypatch):
+    samples = iter((100, RuntimeError("final sample failed")))
+    shutdowns = []
+
+    def sample_memory(_handle):
+        sample = next(samples)
+        if isinstance(sample, BaseException):
+            raise sample
+        return SimpleNamespace(used=sample)
+
+    pynvml = SimpleNamespace(
+        nvmlInit=lambda: None,
+        nvmlShutdown=lambda: shutdowns.append(True),
+        nvmlDeviceGetHandleByIndex=lambda index: index,
+        nvmlDeviceGetMemoryInfo=sample_memory,
+    )
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+
+    with (
+        pytest.raises(ValueError, match="workload failed"),
+        _PeakGpuMemorySampler("0", interval_seconds=3600),
+    ):
+        raise ValueError("workload failed")
+
+    assert shutdowns == [True]
+
+
 def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeypatch, tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -568,6 +768,14 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         )
     )
     (checkpoint / "preprocessor_config.json").write_text("{}")
+    aiperf_executable = tmp_path / "aiperf"
+    vllm_executable = tmp_path / "vllm"
+    aiperf_executable.write_text("#!/bin/sh\n")
+    vllm_executable.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.shutil.which",
+        lambda name, **_kwargs: str(vllm_executable) if name == "vllm" else None,
+    )
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf._descriptor_vllm_args",
         lambda _checkpoint, **_kwargs: [],
@@ -584,12 +792,21 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         "modelopt.torch.puzzletron.benchmarks.aiperf._stop_process_group",
         lambda *_args, **_kwargs: None,
     )
+    server_starts = []
+
+    def fake_popen(*_args, **_kwargs):
+        server_starts.append(True)
+        return SimpleNamespace()
+
     monkeypatch.setattr(
         "modelopt.torch.puzzletron.benchmarks.aiperf.subprocess.Popen",
-        lambda *_args, **_kwargs: SimpleNamespace(),
+        fake_popen,
     )
 
+    commands = []
+
     def fake_run(command, **_kwargs):
+        commands.append(command)
         artifact_dir = Path(command[command.index("--artifact-dir") + 1])
         image_batch_size = int(command[command.index("--image-batch-size") + 1])
         (artifact_dir / "profile_export_aiperf.json").write_text(
@@ -606,33 +823,141 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf.subprocess.run",
+        "modelopt.torch.puzzletron.benchmarks.aiperf._run_profile_command",
         fake_run,
     )
-
-    results = run_aiperf_sweep(
-        checkpoint,
-        artifact_dir=tmp_path / "artifacts",
-        concurrencies=(1,),
-        input_tokens=100,
-        output_tokens=80,
-        gpu_ids="0",
-        topology={"gpu_group_size": 1, "server_context_overhead_tokens": 16384},
-        request_counts={1: 1},
-        executable=Path("/opt/aiperf/bin/aiperf"),
-        endpoint_type="chat",
-        image_batch_sizes=(1, 6, 12),
-        image_width_mean=1280,
-        image_height_mean=720,
-        gpu_telemetry=None,
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.checkpoint_identity",
+        lambda _checkpoint: {"serialized_size_bytes": 1024, "parameter_count": 128},
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.hardware_identity",
+        lambda _gpu_ids: {"gpus": [{"name": "test-gpu"}]},
+    )
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.software_identity",
+        lambda: {
+            "packages": {"vllm": "test"},
+            "source_manifests": {"modelopt_benchmarks": "test", "vllm": "test"},
+        },
     )
 
-    assert [result.workload["image_batch_size"] for result in results] == [1, 6, 12]
+    class FakePeakMemorySampler:
+        def __init__(self, _gpu_ids):
+            self.metrics = {
+                "peak_gpu_memory_bytes": 768.0,
+                "peak_gpu_memory_bytes_per_gpu_max": 768.0,
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._PeakGpuMemorySampler",
+        FakePeakMemorySampler,
+    )
+
+    def run_sweep():
+        return run_aiperf_sweep(
+            checkpoint,
+            artifact_dir=tmp_path / "artifacts",
+            concurrencies=(1,),
+            input_tokens=100,
+            output_tokens=80,
+            gpu_ids="0",
+            topology={
+                "gpu_group_size": 1,
+                "server_context_overhead_tokens": 16384,
+                "env": {"VLLM_USE_V1": "0"},
+            },
+            request_counts={1: 1},
+            warmup_request_count=2,
+            warmup_seed=99,
+            repetitions=2,
+            collect_peak_gpu_memory=True,
+            executable=aiperf_executable,
+            endpoint_type="chat",
+            extra_inputs={"min_tokens": 80},
+            image_batch_sizes=(1, 6, 12),
+            image_width_mean=1280,
+            image_height_mean=720,
+            gpu_telemetry=None,
+        )
+
+    results = run_sweep()
+
+    assert [result.workload["image_batch_size"] for result in results] == [1, 1, 6, 6, 12, 12]
+    assert [result.repetition for result in results] == [0, 1, 0, 1, 0, 1]
     assert len({result.workload_id for result in results}) == 3
-    assert len({result.cache_identity for result in results}) == 3
+    assert len({result.cache_identity for result in results}) == 6
+    assert [command[command.index("--request-count") + 1] for command in commands].count("2") == 3
+    warmup_commands = [
+        command for command in commands if command[command.index("--request-count") + 1] == "2"
+    ]
+    assert all(command[command.index("--random-seed") + 1] == "99" for command in warmup_commands)
+    assert all(result.metrics["peak_gpu_memory_bytes"] == 768.0 for result in results)
+    assert all(result.checkpoint_identity["serialized_size_bytes"] == 1024 for result in results)
+    assert all(result.hardware_identity["gpus"][0]["name"] == "test-gpu" for result in results)
+    assert all(result.measurement_contract["warmup_request_count"] == 2 for result in results)
+    assert all(result.measurement_contract["warmup_seed"] == 99 for result in results)
+    assert all(
+        result.measurement_contract["extra_inputs"] == {"min_tokens": 80} for result in results
+    )
+    assert all(
+        result.measurement_contract["server_contract"]["env"] == {"VLLM_USE_V1": "0"}
+        for result in results
+    )
+    assert all(
+        result.result_fingerprint == benchmark_result_fingerprint(result.model_dump(mode="json"))
+        for result in results
+    )
     assert all(
         f"images_{result.workload['image_batch_size']}" in result.raw_artifacts["profile"]
+        and f"repetition_{result.repetition:02d}" in result.raw_artifacts["profile"]
         for result in results
+    )
+
+    command_count = len(commands)
+    cached_results = run_sweep()
+    assert len(commands) == command_count
+    assert len(server_starts) == 1
+    assert [result.result_fingerprint for result in cached_results] == [
+        result.result_fingerprint for result in results
+    ]
+
+    stale_export = Path(results[0].raw_artifacts["profile"])
+    stale_export.write_text("{}")
+    refreshed_export_results = run_sweep()
+    assert len(server_starts) == 2
+    assert len(commands) == command_count + 2
+    assert refreshed_export_results[0].raw_artifact_sha256["profile"] == artifact_sha256(
+        refreshed_export_results[0].raw_artifacts["profile"]
+    )
+
+    stale_metadata = stale_export.with_name("puzzletron_aiperf_result.json")
+    stale_payload = json.loads(stale_metadata.read_text())
+    stale_payload["result_fingerprint"] = "corrupt"
+    stale_metadata.write_text(json.dumps(stale_payload))
+
+    refreshed_results = run_sweep()
+    assert len(server_starts) == 3
+    assert len(commands) == command_count + 4
+    assert refreshed_results[0].result_fingerprint != "corrupt"
+    assert all(
+        result.result_fingerprint == benchmark_result_fingerprint(result.model_dump(mode="json"))
+        for result in refreshed_results
+    )
+
+    stale_metadata.write_text("{")
+    recovered_results = run_sweep()
+    assert len(server_starts) == 4
+    assert len(commands) == command_count + 6
+    assert all(
+        result.result_fingerprint == benchmark_result_fingerprint(result.model_dump(mode="json"))
+        for result in recovered_results
     )
 
 
@@ -657,6 +982,41 @@ def test_multimodal_sweep_rejects_an_empty_image_workload_axis(monkeypatch, tmp_
             topology={"gpu_group_size": 1},
             image_batch_sizes=(),
         )
+    assert not artifact_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"warmup_request_count": -1}, "nonnegative"),
+        ({"concurrencies": (2,), "warmup_request_count": 1}, "largest measured concurrency"),
+        ({"repetitions": 0}, "positive"),
+    ],
+)
+def test_aiperf_sweep_rejects_invalid_warmup_and_repetition_policy(
+    monkeypatch, tmp_path, overrides, match
+):
+    checkpoint = tmp_path / "checkpoint"
+    artifact_dir = tmp_path / "artifacts"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf._prepare_vllm_checkpoint",
+        lambda *_args, **_kwargs: pytest.fail("checkpoint preparation must follow validation"),
+    )
+    settings = {
+        "artifact_dir": artifact_dir,
+        "concurrencies": (1,),
+        "input_tokens": 100,
+        "output_tokens": 80,
+        "gpu_ids": "0",
+        "topology": {"gpu_group_size": 1},
+        **overrides,
+    }
+
+    with pytest.raises(ValueError, match=match):
+        run_aiperf_sweep(checkpoint, **settings)
+
     assert not artifact_dir.exists()
 
 

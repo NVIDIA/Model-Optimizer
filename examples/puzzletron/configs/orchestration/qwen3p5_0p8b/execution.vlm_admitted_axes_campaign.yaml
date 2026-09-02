@@ -17,7 +17,7 @@ execution:
     post.candidate-evaluation.online_eval: &candidate_instances {instances: 2}
     post.candidate-evaluation.best_lm: {strategy: single, resource: cpu}
     post.candidate-evaluation.materialized: *candidate_instances
-    post.candidate-evaluation.serving: *candidate_instances
+    post.candidate-evaluation.serving: {instances: 1}
     post.candidate-evaluation.pre_kd_short_v1: *candidate_instances
     post.candidate-evaluation.kd_64: *candidate_instances
     post.candidate-evaluation.short_v1_64: *candidate_instances

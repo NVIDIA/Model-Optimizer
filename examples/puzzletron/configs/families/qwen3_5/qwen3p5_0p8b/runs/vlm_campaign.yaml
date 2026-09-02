@@ -6,10 +6,11 @@ defaults:
   - _self_
 
 # Bounded hidden-width, heterogeneous-FFN, and depth Qwen 3.5 0.8B VLM
-# campaign. It reuses the established params-90 MIP profile and LM-loss top-k
-# screening policy before serving, one resumable KD learning curve, and
-# frozen-row evaluation. Attention and GDN remain at teacher geometry until the
-# native runtime passes compact-scoring and slicing equivalence gates.
+# campaign. It reuses the established params-90 MIP profile, LM-loss top-k
+# screening, one resumable KD learning curve, frozen-row evaluation, and a
+# serving benchmark for the final selected checkpoint. Attention and GDN remain
+# at teacher geometry until the native runtime passes compact-scoring and
+# slicing equivalence gates.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B hidden-width, FFN, and depth VLM pruning campaign
 
@@ -100,47 +101,9 @@ post_mip:
           type: materialize
           input: best_lm
 
-        serving:
-          type: aiperf
-          input: materialized
-          config:
-            endpoint_type: chat
-            input_tokens: 100
-            output_tokens: 80
-            image_batch_sizes: [1, 6, 12]
-            image_width_mean: 1280
-            image_height_mean: 720
-            concurrency: [1, 4]
-            request_count: 24
-            extra_inputs: {min_tokens: 80}
-            use_server_token_count: true
-            seed: 42
-            readiness_timeout: 600
-            benchmark_timeout: 1800
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
-              server_context_overhead_tokens: 16384
-              extra_vllm_args:
-                - -cc.cudagraph_mode=NONE
-                - --no-enable-flashinfer-autotune
-                - --gpu-memory-utilization
-                - "0.5"
-                - --reasoning-parser
-                - qwen3
-                - --default-chat-template-kwargs
-                - '{"enable_thinking": false}'
-
         pre_kd_short_v1:
           type: downstream_evaluation
-          input: serving
-          model_source: materialized
+          input: materialized
           failure_policy: strict
           config: &short_v1_evaluation
             profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
@@ -344,6 +307,45 @@ post_mip:
           metric: short_v1_1024.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
           direction: maximize
           top_k: 1
+
+        serving:
+          type: aiperf
+          input: best
+          config:
+            endpoint_type: chat
+            input_tokens: 100
+            output_tokens: 80
+            image_batch_sizes: [1, 6, 12]
+            image_width_mean: 1280
+            image_height_mean: 720
+            concurrency: [1, 4]
+            request_count: 64
+            warmup_request_count: 32
+            repetitions: 3
+            extra_inputs: {min_tokens: 80}
+            use_server_token_count: true
+            seed: 42
+            readiness_timeout: 600
+            benchmark_timeout: 1800
+            topology:
+              tensor_parallel_size: 1
+              pipeline_parallel_size: 1
+              data_parallel_size: 1
+              prefill_context_parallel_size: 1
+              decode_context_parallel_size: 1
+              enable_expert_parallel: false
+              distributed_executor_backend: mp
+              gpu_group_size: 1
+              server_context_overhead_tokens: 16384
+              extra_vllm_args:
+                - -cc.cudagraph_mode=NONE
+                - --no-enable-flashinfer-autotune
+                - --gpu-memory-utilization
+                - "0.5"
+                - --reasoning-parser
+                - qwen3
+                - --default-chat-template-kwargs
+                - '{"enable_thinking": false}'
 
     control-learning-curve:
       source:

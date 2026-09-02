@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import importlib.util
 import json
@@ -29,13 +30,22 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Any, Iterable, cast
 
 from ..identity import stable_hash
 from ..orchestration.mesh import normalize_vllm_topology
+from .provenance import (
+    artifact_sha256,
+    benchmark_result_fingerprint,
+    checkpoint_identity,
+    executable_identity,
+    hardware_identity,
+    software_identity,
+)
 from .schema import BenchmarkResult
 
 if TYPE_CHECKING:
@@ -44,6 +54,85 @@ if TYPE_CHECKING:
 __all__ = ["run_aiperf_benchmark", "run_aiperf_sweep"]
 
 _CHECKPOINT_PREPARE_LOCK = Lock()
+
+
+class _PeakGpuMemorySampler:
+    """Poll total memory used on the explicitly visible devices."""
+
+    def __init__(self, gpu_ids: str, *, interval_seconds: float = 0.05) -> None:
+        try:
+            import pynvml  # Optional locally, required when peak-memory collection is requested.
+        except ImportError as error:
+            raise RuntimeError("peak GPU memory collection requires nvidia-ml-py") from error
+        self._pynvml = pynvml
+        self._interval_seconds = interval_seconds
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self._thread_error: BaseException | None = None
+        self._peaks: list[int] = []
+        pynvml.nvmlInit()
+        try:
+            self._handles = [
+                (
+                    pynvml.nvmlDeviceGetHandleByIndex(int(raw_id))
+                    if raw_id.isdigit()
+                    else pynvml.nvmlDeviceGetHandleByUUID(raw_id)
+                )
+                for raw_id in (value.strip() for value in gpu_ids.split(",") if value.strip())
+            ]
+        except BaseException:
+            pynvml.nvmlShutdown()
+            raise
+        if not self._handles:
+            pynvml.nvmlShutdown()
+            raise ValueError("peak GPU memory collection requires explicit GPU IDs")
+        self._peaks = [0] * len(self._handles)
+
+    def _sample(self) -> None:
+        for index, handle in enumerate(self._handles):
+            used = int(self._pynvml.nvmlDeviceGetMemoryInfo(handle).used)
+            self._peaks[index] = max(self._peaks[index], used)
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.wait(self._interval_seconds):
+                self._sample()
+        except BaseException as error:
+            self._thread_error = error
+            self._stop.set()
+
+    def __enter__(self) -> _PeakGpuMemorySampler:
+        try:
+            self._sample()
+            self._thread = Thread(target=self._run, name="aiperf-peak-memory", daemon=True)
+            self._thread.start()
+        except BaseException:
+            self._pynvml.nvmlShutdown()
+            raise
+        return self
+
+    def __exit__(self, exc_type: object, *_exc_info: object) -> None:
+        self._stop.set()
+        sampling_error = None
+        try:
+            if self._thread is not None:
+                self._thread.join()
+            sampling_error = self._thread_error
+            try:
+                self._sample()
+            except BaseException as error:
+                sampling_error = sampling_error or error
+            if sampling_error is not None and exc_type is None:
+                raise RuntimeError("peak GPU memory sampling failed") from sampling_error
+        finally:
+            self._pynvml.nvmlShutdown()
+
+    @property
+    def metrics(self) -> dict[str, float]:
+        return {
+            "peak_gpu_memory_bytes": float(sum(self._peaks)),
+            "peak_gpu_memory_bytes_per_gpu_max": float(max(self._peaks)),
+        }
 
 
 def _prepare_vllm_checkpoint(
@@ -267,12 +356,17 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _resolve_executable(executable: str | Path) -> Path:
-    """Resolve AIPerf without requiring it in Puzzletron's training venv."""
+def _resolve_executable(
+    executable: str | Path,
+    *,
+    search_path: str | None = None,
+    configuration_hint: str = "set AIPERF_EXECUTABLE",
+) -> Path:
+    """Resolve a serving command without requiring it in Puzzletron's training venv."""
     value = Path(executable)
     if value.name != str(executable) or value.is_absolute():
         return value.resolve()
-    discovered = shutil.which(str(executable))
+    discovered = shutil.which(str(executable), path=search_path)
     if discovered:
         return Path(discovered).resolve()
     if str(executable) == "aiperf":
@@ -280,7 +374,7 @@ def _resolve_executable(executable: str | Path) -> Path:
         sibling = engineering_root / "aiperf" / ".venv" / "bin" / "aiperf"
         if sibling.is_file():
             return sibling.resolve()
-    raise FileNotFoundError(f"Cannot find AIPerf executable {executable!s}; set AIPERF_EXECUTABLE")
+    raise FileNotFoundError(f"Cannot find executable {executable!s}; {configuration_hint}")
 
 
 def _profile_command(
@@ -526,6 +620,53 @@ def _aiperf_subprocess_environment(
     return resolved
 
 
+async def _run_profile_command_async(
+    command: list[str], *, timeout: float, env: dict[str, str]
+) -> None:
+    process = await asyncio.create_subprocess_exec(*command, env=env)
+    try:
+        try:
+            returncode = await asyncio.wait_for(process.wait(), timeout=timeout)
+        except TimeoutError as error:
+            raise subprocess.TimeoutExpired(command, timeout) from error
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def _run_profile_command(command: list[str], *, timeout: float, env: dict[str, str]) -> None:
+    """Run one validated AIPerf argv list without a shell."""
+
+    asyncio.run(_run_profile_command_async(command, timeout=timeout, env=env))
+
+
+def _raw_artifacts_match(result: BenchmarkResult, export: Path) -> bool:
+    """Verify immutable per-run evidence before reusing cached metrics."""
+
+    if result.raw_artifacts.get("profile") != str(export):
+        return False
+    digests = result.raw_artifact_sha256
+    if not digests or "profile" not in digests:
+        return False
+    for name, expected in digests.items():
+        raw_path = result.raw_artifacts.get(name)
+        if raw_path is None:
+            return False
+        path = Path(raw_path)
+        try:
+            if not path.is_file() or artifact_sha256(path) != expected:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def run_aiperf_sweep(
     checkpoint_dir: str | Path,
     *,
@@ -536,6 +677,10 @@ def run_aiperf_sweep(
     gpu_ids: str,
     topology: dict[str, Any],
     request_counts: dict[int, int] | None = None,
+    warmup_request_count: int = 0,
+    warmup_seed: int | None = None,
+    repetitions: int = 1,
+    collect_peak_gpu_memory: bool = False,
     solution_id: str = "unknown",
     profile_id: str = "unknown",
     topology_id: str | None = None,
@@ -562,6 +707,12 @@ def run_aiperf_sweep(
         raise ValueError("AIPerf concurrencies must be non-empty and unique")
     if any(value < 1 for value in concurrency_values):
         raise ValueError(f"AIPerf concurrencies must be positive: {concurrency_values}")
+    if warmup_request_count < 0:
+        raise ValueError("AIPerf warmup_request_count must be nonnegative")
+    if warmup_request_count and warmup_request_count < max(concurrency_values):
+        raise ValueError("AIPerf warmup_request_count must cover the largest measured concurrency")
+    if repetitions < 1:
+        raise ValueError("AIPerf repetitions must be positive")
     image_batch_values = (
         (0,) if image_batch_sizes is None else tuple(int(value) for value in image_batch_sizes)
     )
@@ -583,10 +734,13 @@ def run_aiperf_sweep(
         value: int((request_counts or {}).get(value, max(32, 4 * value)))
         for value in concurrency_values
     }
+    resolved_warmup_seed = seed if warmup_seed is None else int(warmup_seed)
     architecture_id = stable_hash(
         json.loads((checkpoint_dir / "config.json").read_text()),
         prefix="aiperf_architecture",
     )
+    checkpoint_provenance = checkpoint_identity(checkpoint_dir)
+    hardware_provenance = hardware_identity(gpu_ids)
     canonical_topology = _canonical_topology(topology)
     descriptor_args = _descriptor_vllm_args(checkpoint_dir, multimodal=multimodal)
     server_contract = {
@@ -594,6 +748,7 @@ def run_aiperf_sweep(
         "server_context_overhead_tokens": topology.get("server_context_overhead_tokens"),
         "descriptor_args": descriptor_args,
         "extra_vllm_args": tuple(str(arg) for arg in topology.get("extra_vllm_args", ())),
+        "env": {str(key): str(value) for key, value in (topology.get("env") or {}).items()},
         "max_image_batch_size": max(image_batch_values),
         "image_width_mean": image_width_mean,
         "image_height_mean": image_height_mean,
@@ -624,14 +779,55 @@ def run_aiperf_sweep(
     )
     for key, value in (topology.get("env") or {}).items():
         env[str(key)] = str(value)
+    vllm_executable = _resolve_executable(
+        "vllm",
+        search_path=env.get("PATH"),
+        configuration_hint="add vLLM to PATH",
+    )
+    server_cmd[0] = str(vllm_executable)
+    software_provenance = software_identity()
+    software_provenance["aiperf_executable"] = executable_identity(executable)
+    software_provenance["vllm_executable"] = executable_identity(
+        vllm_executable, distribution_name=None
+    )
+    cache_provenance_complete = (
+        all(
+            identity.get("sha256") != "unavailable"
+            for identity in (
+                software_provenance["aiperf_executable"],
+                software_provenance["vllm_executable"],
+            )
+        )
+        and software_provenance["source_manifests"]["vllm"] != "unavailable"
+    )
     aiperf_env = _aiperf_subprocess_environment(
         env,
         allow_aiperf_v011_online_tokenizer_resolution=(
             allow_aiperf_v011_online_tokenizer_resolution
         ),
     )
-    cached: dict[tuple[int, int], BenchmarkResult] = {}
-    missing: list[tuple[int, int, dict[str, int], str, Path, list[str], str]] = []
+    measurement_contract = {
+        "endpoint_type": endpoint_type,
+        "warmup_request_count": warmup_request_count,
+        "warmup_seed": resolved_warmup_seed,
+        "repetitions": repetitions,
+        "request_counts": request_counts,
+        "seed": seed,
+        "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
+        "use_server_token_count": use_server_token_count,
+        "gpu_telemetry": gpu_telemetry,
+        "collect_peak_gpu_memory": collect_peak_gpu_memory,
+        "readiness_timeout": readiness_timeout,
+        "benchmark_timeout": benchmark_timeout,
+        "trust_remote_code": trust_remote_code,
+        "allow_aiperf_v011_online_tokenizer_resolution": (
+            allow_aiperf_v011_online_tokenizer_resolution
+        ),
+        "server_contract": server_contract,
+        "revisions": revisions,
+    }
+    cached: dict[tuple[int, int, int], BenchmarkResult] = {}
+    missing: list[tuple[int, int, int, dict[str, int], str, Path, list[str], str]] = []
     for image_batch_size in image_batch_values:
         for concurrency in concurrency_values:
             workload = {
@@ -642,73 +838,87 @@ def run_aiperf_sweep(
                 "image_height_mean": image_height_mean if image_batch_size else 0,
             }
             workload_id = stable_hash(workload, prefix="aiperf_workload")
-            run_dir = artifact_dir / f"concurrency_{concurrency}"
+            cell_dir = artifact_dir / f"concurrency_{concurrency}"
             if image_batch_size > 0:
-                run_dir = artifact_dir / f"images_{image_batch_size}" / f"concurrency_{concurrency}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            command = _profile_command(
-                executable=executable,
-                model_name=model_name,
-                port=port,
-                endpoint_type=endpoint_type,
-                concurrency=concurrency,
-                request_count=request_counts[concurrency],
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                tokenizer_dir=tokenizer_dir,
-                artifact_dir=run_dir,
-                seed=seed,
-                extra_inputs=extra_inputs,
-                use_server_token_count=use_server_token_count,
-                gpu_telemetry=gpu_telemetry,
-                image_batch_size=image_batch_size,
-                image_width_mean=image_width_mean if image_batch_size else 0,
-                image_height_mean=image_height_mean if image_batch_size else 0,
-            )
-            cache_identity = stable_hash(
-                {
-                    "architecture_id": architecture_id,
-                    "solution_id": solution_id,
-                    "profile_id": profile_id,
-                    "server_contract": server_contract,
-                    "workload": workload,
-                    "concurrency": concurrency,
-                    "request_count": request_counts[concurrency],
-                    "endpoint_type": endpoint_type,
-                    "extra_inputs": _exact_length_extra_inputs(extra_inputs, output_tokens),
-                    "use_server_token_count": use_server_token_count,
-                    "trust_remote_code": trust_remote_code,
-                    "allow_aiperf_v011_online_tokenizer_resolution": (
-                        allow_aiperf_v011_online_tokenizer_resolution
-                    ),
-                    "revisions": revisions,
-                },
-                prefix="aiperf_result",
-            )
-            metadata_path = run_dir / "puzzletron_aiperf_result.json"
-            export = run_dir / "profile_export_aiperf.json"
-            if metadata_path.is_file() and export.is_file():
-                result = BenchmarkResult(**json.loads(metadata_path.read_text()))
-                if result.cache_identity == cache_identity:
-                    cached[(image_batch_size, concurrency)] = result
-                    continue
-            missing.append(
-                (
-                    image_batch_size,
-                    concurrency,
-                    workload,
-                    workload_id,
-                    run_dir,
-                    command,
-                    cache_identity,
+                cell_dir = (
+                    artifact_dir / f"images_{image_batch_size}" / f"concurrency_{concurrency}"
                 )
-            )
+            for repetition in range(repetitions):
+                run_dir = (
+                    cell_dir if repetitions == 1 else cell_dir / f"repetition_{repetition:02d}"
+                )
+                run_dir.mkdir(parents=True, exist_ok=True)
+                command = _profile_command(
+                    executable=executable,
+                    model_name=model_name,
+                    port=port,
+                    endpoint_type=endpoint_type,
+                    concurrency=concurrency,
+                    request_count=request_counts[concurrency],
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    tokenizer_dir=tokenizer_dir,
+                    artifact_dir=run_dir,
+                    seed=seed + repetition,
+                    extra_inputs=extra_inputs,
+                    use_server_token_count=use_server_token_count,
+                    gpu_telemetry=gpu_telemetry,
+                    image_batch_size=image_batch_size,
+                    image_width_mean=image_width_mean if image_batch_size else 0,
+                    image_height_mean=image_height_mean if image_batch_size else 0,
+                )
+                cache_identity = stable_hash(
+                    {
+                        "architecture_id": architecture_id,
+                        "solution_id": solution_id,
+                        "profile_id": profile_id,
+                        "checkpoint_identity": checkpoint_provenance,
+                        "hardware_identity": hardware_provenance,
+                        "software_identity": software_provenance,
+                        "measurement_contract": measurement_contract,
+                        "workload": workload,
+                        "concurrency": concurrency,
+                        "repetition": repetition,
+                    },
+                    prefix="aiperf_result",
+                )
+                metadata_path = run_dir / "puzzletron_aiperf_result.json"
+                export = run_dir / "profile_export_aiperf.json"
+                if metadata_path.is_file() and export.is_file():
+                    try:
+                        result_payload = json.loads(metadata_path.read_text())
+                        result = BenchmarkResult(**result_payload)
+                    except (OSError, TypeError, ValueError):
+                        pass
+                    else:
+                        expected_fingerprint = benchmark_result_fingerprint(result_payload)
+                        if (
+                            result.cache_identity == cache_identity
+                            and result.result_fingerprint == expected_fingerprint
+                            and cache_provenance_complete
+                            and _raw_artifacts_match(result, export)
+                        ):
+                            cached[(image_batch_size, concurrency, repetition)] = result
+                            continue
+                missing.append(
+                    (
+                        image_batch_size,
+                        concurrency,
+                        repetition,
+                        workload,
+                        workload_id,
+                        run_dir,
+                        command,
+                        cache_identity,
+                    )
+                )
 
     if not missing:
         return [
-            cached[(image_batch_size, concurrency)]
+            cached[(image_batch_size, concurrency, repetition)]
             for image_batch_size in image_batch_values
             for concurrency in concurrency_values
+            for repetition in range(repetitions)
         ]
 
     with server_log.open("a", encoding="utf-8") as log:
@@ -722,26 +932,62 @@ def run_aiperf_sweep(
         )
         try:
             _wait_for_health(f"http://127.0.0.1:{port}/health", server, readiness_timeout)
+            warmed_cells: set[tuple[int, int]] = set()
             for (
                 image_batch_size,
                 concurrency,
+                repetition,
                 workload,
                 workload_id,
                 run_dir,
                 command,
                 cache_identity,
             ) in missing:
+                cell = (image_batch_size, concurrency)
+                if warmup_request_count and cell not in warmed_cells:
+                    cell_dir = run_dir.parent if repetitions > 1 else run_dir
+                    with tempfile.TemporaryDirectory(prefix=".warmup-", dir=cell_dir) as directory:
+                        warmup_command = _profile_command(
+                            executable=executable,
+                            model_name=model_name,
+                            port=port,
+                            endpoint_type=endpoint_type,
+                            concurrency=concurrency,
+                            request_count=warmup_request_count,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            tokenizer_dir=tokenizer_dir,
+                            artifact_dir=Path(directory),
+                            seed=resolved_warmup_seed,
+                            extra_inputs=extra_inputs,
+                            use_server_token_count=use_server_token_count,
+                            gpu_telemetry=None,
+                            image_batch_size=image_batch_size,
+                            image_width_mean=image_width_mean if image_batch_size else 0,
+                            image_height_mean=image_height_mean if image_batch_size else 0,
+                        )
+                        _run_profile_command(
+                            warmup_command,
+                            timeout=benchmark_timeout,
+                            env=aiperf_env,
+                        )
+                    warmed_cells.add(cell)
                 started_at = datetime.now(timezone.utc)
-                subprocess.run(  # nosec B603
-                    command,
-                    check=True,
-                    timeout=benchmark_timeout,
-                    env=aiperf_env,
+                memory_context: AbstractContextManager[_PeakGpuMemorySampler | None] = (
+                    _PeakGpuMemorySampler(gpu_ids) if collect_peak_gpu_memory else nullcontext(None)
                 )
+                with memory_context as memory_sampler:
+                    _run_profile_command(
+                        command,
+                        timeout=benchmark_timeout,
+                        env=aiperf_env,
+                    )
                 export = run_dir / "profile_export_aiperf.json"
                 if not export.is_file():
                     raise FileNotFoundError(f"AIPerf did not produce {export}")
                 metrics, failures = _parse_export(export)
+                if memory_sampler is not None:
+                    metrics.update(memory_sampler.metrics)
                 # Server-reported chat prompt counts include the rendered chat
                 # template, while input_tokens describes the synthetic message.
                 exact_input_length = endpoint_type != "chat" or not use_server_token_count
@@ -764,6 +1010,11 @@ def run_aiperf_sweep(
                 jsonl = run_dir / "profile_export.jsonl"
                 if jsonl.is_file():
                     raw_artifacts["requests"] = str(jsonl)
+                raw_artifact_sha256 = {
+                    name: artifact_sha256(path)
+                    for name, path in raw_artifacts.items()
+                    if name != "server_log"
+                }
                 result = BenchmarkResult(
                     architecture_id=architecture_id,
                     checkpoint_dir=str(checkpoint_dir),
@@ -771,32 +1022,41 @@ def run_aiperf_sweep(
                     profile_id=profile_id,
                     topology_id=topology_id,
                     workload_id=workload_id,
+                    repetition=repetition,
                     gpu_count=int(canonical_topology["gpu_count"]),
                     cache_identity=cache_identity,
                     topology=canonical_topology,
                     workload=workload,
                     concurrency=concurrency,
                     metrics=metrics,
+                    measurement_contract=measurement_contract,
+                    checkpoint_identity=checkpoint_provenance,
+                    hardware_identity=hardware_provenance,
+                    software_identity=software_provenance,
                     failures=failures,
                     raw_artifacts=raw_artifacts,
+                    raw_artifact_sha256=raw_artifact_sha256,
                     command=tuple(command),
                     started_at=started_at,
                 )
-                result_payload = (
-                    result.model_dump(mode="json")
-                    if hasattr(result, "model_dump")
-                    else json.loads(result.json())
+                result_payload = cast("Any", result).model_dump(mode="json")
+                result = cast("Any", result).model_copy(
+                    update={
+                        "result_fingerprint": benchmark_result_fingerprint(result_payload),
+                    }
                 )
+                result_payload = cast("Any", result).model_dump(mode="json")
                 (run_dir / "puzzletron_aiperf_result.json").write_text(
                     json.dumps(result_payload, indent=2, sort_keys=True) + "\n"
                 )
-                cached[(image_batch_size, concurrency)] = result
+                cached[(image_batch_size, concurrency, repetition)] = result
         finally:
             _stop_process_group(server)
     return [
-        cached[(image_batch_size, concurrency)]
+        cached[(image_batch_size, concurrency, repetition)]
         for image_batch_size in image_batch_values
         for concurrency in concurrency_values
+        for repetition in range(repetitions)
     ]
 
 

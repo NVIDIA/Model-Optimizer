@@ -1,0 +1,188 @@
+{
+  "schema": "modelopt.puzzletron-result-record/v1",
+  "record_id": "qwen35-vlm-post-mip-ffn2048-exclusive-w32-v2",
+  "evidence_status": "preliminary",
+  "model": {
+    "family": "qwen3p5_0p8b",
+    "modality": "vlm",
+    "teacher": {
+      "model_id": "teacher",
+      "repository": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17"
+    },
+    "student": {
+      "model_id": "student-smoke-ffn2048-p90",
+      "description": "pre-distillation FFN-2048 materialized checkpoint",
+      "checkpoint_stage": "pre_kd"
+    }
+  },
+  "campaign": {
+    "id": "qwen35_vlm_smoke",
+    "result_role": "historical_pre_kd_comparison",
+    "maintained_policy": "AIPerf runs on the selected final post-KD checkpoint",
+    "recorded_policy": "AIPerf ran on the pre-KD student"
+  },
+  "run": {
+    "id": "exclusive_w32_v2",
+    "collected_on": "2026-09-01",
+    "status": "success",
+    "serving_observations": 128,
+    "gpu_slots_per_cell": 8
+  },
+  "pruning": {
+    "axis": "language FFN intermediate size",
+    "scope": "every language-model layer",
+    "teacher_value": 3584,
+    "student_value": 2048,
+    "parameter_counts": null
+  },
+  "knowledge_distillation": {
+    "student_checkpoint_stage": "pre_kd",
+    "cumulative_steps": 0
+  },
+  "evaluation": {
+    "evaluation_contract_id": "qwen35-vlm-rwqa100-mmmu100-prefix100-repeat2-v1",
+    "runtime_profile": "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
+    "tasks": [
+      {
+        "name": "RealWorldQA",
+        "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+        "available_rows": null,
+        "selected_rows": 100,
+        "selection": "first 100 rows"
+      },
+      {
+        "name": "MMMU validation",
+        "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+        "available_rows": null,
+        "selected_rows": 100,
+        "selection": "first 100 rows"
+      }
+    ],
+    "repetitions": 2,
+    "repetitions_reuse_identical_rows": true,
+    "row_selection_identity_sha256": null,
+    "row_manifest_sha256": null,
+    "generation": {
+      "do_sample": false,
+      "temperature": 0,
+      "seed": 42
+    },
+    "evaluator": {
+      "implementation": "lmms-eval",
+      "revision": "15c32bfec165df13c269ddd3cda03b2ed9137825"
+    }
+  },
+  "quality_evidence": {
+    "results": [
+      {
+        "model_id": "teacher",
+        "checkpoint_stage": "teacher",
+        "realworldqa": 0.6,
+        "mmmu": 0.35
+      },
+      {
+        "model_id": "student-smoke-ffn2048-p90",
+        "checkpoint_stage": "pre_kd",
+        "kd_steps": 0,
+        "realworldqa": 0.19,
+        "mmmu": 0.24
+      }
+    ]
+  },
+  "performance_evidence": {
+    "adapter": "AIPerf chat endpoint backed by vLLM",
+    "metric": "output_token_throughput",
+    "unit": "tokens_per_second",
+    "workload": {
+      "input_tokens": 100,
+      "output_tokens": 80,
+      "image_width": 1280,
+      "image_height": 720,
+      "image_counts": [1, 6, 12],
+      "concurrency": [1, 4],
+      "warmup_request_count": 32,
+      "measured_request_counts": [64, 256],
+      "prefix_caching": false,
+      "thinking": false
+    },
+    "topology": {
+      "accelerator": "NVIDIA H100 80GB HBM3",
+      "accelerator_count": 8,
+      "allocation": "one exclusive node",
+      "workers": "one model server and AIPerf client per accelerator"
+    },
+    "comparison": {
+      "pairing": "same GPU slot; different synthetic request streams",
+      "placement": "teacher and student placements swapped across phases",
+      "delta_formula": "For each GPU slot: 100 * (student_throughput / teacher_throughput - 1). student_delta_percent is the mean of the eight per-slot differences, not the difference calculated from teacher_mean and student_mean.",
+      "interval": {
+        "type": "descriptive_node_conditional_t_interval",
+        "level": 0.95,
+        "critical_value": 2.364624251,
+        "degrees_of_freedom": 7,
+        "formula": "mean(delta_percent) +/- critical_value * sample_standard_deviation(delta_percent) / sqrt(8)"
+      }
+    },
+    "results": [
+      {"request_count": 64, "image_count": 1, "concurrency": 1, "teacher_mean": 93.78348129618817, "student_mean": 94.98255661859301, "student_delta_percent": 1.2822878973251892, "student_delta_node_conditional_t_interval95_percent": [0.5598772552224591, 2.0046985394279195]},
+      {"request_count": 64, "image_count": 1, "concurrency": 4, "teacher_mean": 348.1818546540807, "student_mean": 353.26831247142997, "student_delta_percent": 1.4812553664019525, "student_delta_node_conditional_t_interval95_percent": [0.24606951277760558, 2.7164412200262995]},
+      {"request_count": 64, "image_count": 6, "concurrency": 1, "teacher_mean": 69.10924314970289, "student_mean": 69.9096539827224, "student_delta_percent": 1.1699482025480725, "student_delta_node_conditional_t_interval95_percent": [0.005329125949009583, 2.3345672791471355]},
+      {"request_count": 64, "image_count": 6, "concurrency": 4, "teacher_mean": 199.78927708493964, "student_mean": 204.51828060226552, "student_delta_percent": 2.4194946072868344, "student_delta_node_conditional_t_interval95_percent": [-0.991779239448312, 5.830768454021981]},
+      {"request_count": 64, "image_count": 12, "concurrency": 1, "teacher_mean": 50.22017802206594, "student_mean": 50.552390611760764, "student_delta_percent": 0.6674613821347417, "student_delta_node_conditional_t_interval95_percent": [-0.1967054707780348, 1.5316282350475183]},
+      {"request_count": 64, "image_count": 12, "concurrency": 4, "teacher_mean": 134.94660785055413, "student_mean": 135.0380214922698, "student_delta_percent": 0.07081141188201023, "student_delta_node_conditional_t_interval95_percent": [-1.0086826968284868, 1.1503055205925072]},
+      {"request_count": 256, "image_count": 6, "concurrency": 1, "teacher_mean": 66.60694693752019, "student_mean": 67.87353705421121, "student_delta_percent": 1.9393545306539015, "student_delta_node_conditional_t_interval95_percent": [0.26674204974702453, 3.6119670115607785]},
+      {"request_count": 256, "image_count": 6, "concurrency": 4, "teacher_mean": 194.17697929721626, "student_mean": 199.05118418544595, "student_delta_percent": 2.5322735141526276, "student_delta_node_conditional_t_interval95_percent": [0.7890036055634846, 4.27554342274177]}
+    ]
+  },
+  "provenance": {
+    "software": {
+      "python": "3.12.3",
+      "torch": "2.11.0+cu129",
+      "aiperf": "0.12.0",
+      "vllm": "0.1.dev17514+ga056958c7.cu129"
+    },
+    "checkpoint_content_manifests": {
+      "teacher_sha256": "c12e9f035fedfc94474f179ca4e7b67d7f588d1ecdddc417582a31d50a046146",
+      "student_sha256": "1cb3688738aff8596e15ae4d7ab73212d25325836ea71752b4088b3840e20634",
+      "recorded_during": "quality evaluation after serving"
+    }
+  },
+  "reproduction": {
+    "campaign_config": "../../../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml",
+    "campaign_config_relationship": "successor_not_execution_equivalent",
+    "campaign_guide": "../../../../../../docs/qwen3p5_0p8b_vlm_smoke.md",
+    "serving_recipe": "recipe.json",
+    "observations": "observations.csv",
+    "exact_launcher_retained": false
+  },
+  "artifacts": {
+    "repository": [
+      {"path": "summary.md", "sha256": "da98c1e181307ae3b56fc68c93b08b245adbedd2c66a2b42498ede5db76b71bb"},
+      {"path": "metrics.csv", "sha256": "0f1f56ad17d6b0d3aec9eb54cb1daf9d822c249a4276a54192a586483762bff3"},
+      {"path": "observations.csv", "sha256": "e97d6511c5c714d1e67ee361a3694ef6130658b30fb1ca8a231c01d8ee010b3b"},
+      {"path": "recipe.json", "sha256": "ba449e3388341a468a76d7b8c0c527983e4f4b0f1ef6bd4a4ce0b1af6fa52632"}
+    ],
+    "external": [
+      {"id": "aiperf-aggregate-r64", "role": "serving aggregate", "byte_size": null, "sha256": "1c4e47b2584adb79aa703a9c3177700c372136d6895d97c08b21bf47538e7bba"},
+      {"id": "aiperf-aggregate-r256", "role": "serving aggregate", "byte_size": null, "sha256": "0db29fa6c2832ec282580ff872f845ac1b321a2379ae9b7528ba64a2df4796e4"},
+      {"id": "quality-teacher-repetition-1", "role": "quality evaluator result", "byte_size": null, "sha256": "16cfb5b5ba91dd6596b31fed39dfee69e652ef5ab61d39599233e4d5cbe84989"},
+      {"id": "quality-teacher-repetition-2", "role": "quality evaluator result", "byte_size": null, "sha256": "02823d5a6b368389bcfc8f697707a86bcfcd35e58d66f4eba25f37e34f49d20d"},
+      {"id": "quality-student-repetition-1", "role": "quality evaluator result", "byte_size": null, "sha256": "14ffd7d2010dafe02238ce1298f26b451ab6810f965f2a860a99d630a26d48df"},
+      {"id": "quality-student-repetition-2", "role": "quality evaluator result", "byte_size": null, "sha256": "48eb6ba4020d844c2c9786b452b974bd87e17c124b3df8be7b32e732d006938e"}
+    ]
+  },
+  "limitations": [
+    "The quality scores use fixed first-100 subsets rather than complete benchmarks.",
+    "The ordered row-selection identity and an exact row manifest were not retained.",
+    "Complete benchmark row counts and quality-evaluation prompt serialization settings were not retained.",
+    "Separate quality results for each deterministic repetition were not retained.",
+    "External artifact byte sizes and availability locations were not retained.",
+    "Parameter counts and reduction were not retained.",
+    "All serving measurements came from one node allocation and are not independent temporal replications.",
+    "Teacher and student measurements used different synthetic request streams; comparisons are matched only by GPU slot.",
+    "The 256-request measurements cover only the six-image workload.",
+    "Serving recorded checkpoint paths but not content hashes. Quality evaluation later used checkpoints at the same paths, so byte-for-byte identity across runs cannot be proven.",
+    "The maintained campaign config is a successor recipe and does not reproduce this historical pre-KD measurement placement."
+  ]
+}
