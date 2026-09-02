@@ -394,21 +394,26 @@ def test_get_weight_block_size(config, expected_block_size):
             assert block_size == 0
 
 
-def test_to_quantized_weight_int4_partial_block():
+@pytest.mark.parametrize("quantization", [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ])
+def test_to_quantized_weight_int4_block_size(quantization):
     block_size = 128
-    in_dim = 2 * block_size + 1
-    scales = torch.tensor([[1.0, 2.0, 4.0]] * 4, device="cuda")
+    in_dim = 2 * block_size
+    scales = torch.tensor([[1.0, 2.0]] * 4, device="cuda")
     quantized_values = torch.arange(1, 5, device="cuda")[:, None]
-    weight = scales.repeat_interleave(block_size, dim=-1)[..., :in_dim] * quantized_values
+    weight = scales.repeat_interleave(block_size, dim=-1) * quantized_values
 
-    packed = to_quantized_weight(weight, scales, QUANTIZATION_W4A8_AWQ, block_size=block_size)
+    packed = to_quantized_weight(weight, scales, quantization, block_size=block_size)
 
     assert packed.shape == (2, in_dim)
     assert torch.equal(packed[0], torch.full((in_dim,), 0x21, dtype=torch.uint8, device="cuda"))
     assert torch.equal(packed[1], torch.full((in_dim,), 0x43, dtype=torch.uint8, device="cuda"))
 
-    with pytest.raises(ValueError, match="Expected 3 weight scaling factors"):
-        to_quantized_weight(weight, scales[..., :-1], QUANTIZATION_W4A8_AWQ, block_size=block_size)
+    with pytest.raises(ValueError, match="Expected 2 weight scaling factors"):
+        to_quantized_weight(weight, scales[..., :-1], quantization, block_size=block_size)
+
+    partial_weight = torch.cat((weight, quantized_values), dim=-1)
+    with pytest.raises(NotImplementedError, match="partial blocks are not supported"):
+        to_quantized_weight(partial_weight, scales, quantization, block_size=block_size)
 
 
 @pytest.mark.parametrize(

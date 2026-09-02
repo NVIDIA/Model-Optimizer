@@ -799,7 +799,12 @@ def pack_int4_in_uint8(weight, weights_scaling_factor, block_size):
     in_dim = weight.shape[-1]
     if block_size is None or block_size <= 0:
         raise ValueError(f"Block size must be a positive integer, got {block_size}.")
-    expected_scale_count = (in_dim + block_size - 1) // block_size
+    if in_dim % block_size != 0:
+        raise NotImplementedError(
+            f"Cannot pack weight with input dimension {in_dim} and block size {block_size}: "
+            "partial blocks are not supported."
+        )
+    expected_scale_count = in_dim // block_size
     if weights_scaling_factor.shape[-1] != expected_scale_count:
         raise ValueError(
             f"Expected {expected_scale_count} weight scaling factors for input dimension {in_dim} "
