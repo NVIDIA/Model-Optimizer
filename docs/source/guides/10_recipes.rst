@@ -519,11 +519,14 @@ General PTQ recipes are model-agnostic and apply to any supported architecture:
 Model-specific recipes
 ----------------------
 
-Model-specific recipes are tuned for a particular Hugging Face ``model_type``
-(or a specific released model) and live under
-``huggingface/<model_type>/[<specific_model>/]<task>/``. See
+Model-specific recipes come in two tiers: architecture recipes keyed by a
+Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
+checkpoint mirrors keyed by a model-hub path under
+``models/<org>/<model_id>/<task>/``. See
 `modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
-for the layout convention and recipe-lookup order.
+and
+`modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
+for the layout conventions and recipe-lookup order.
 
 .. list-table::
    :header-rows: 1
@@ -531,7 +534,7 @@ for the layout convention and recipe-lookup order.
 
    * - Recipe path
      - Description
-   * - ``huggingface/step3p5/Step3.5-Flash/ptq/nvfp4-mlp-only``
+   * - ``models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
    * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
      - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
@@ -686,8 +689,12 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
    |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
-   +-- huggingface/                # Model-specific recipes
+   +-- huggingface/                # Architecture-specific recipes (by model_type)
    |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   |       +-- <task>/
+   |           +-- <recipe>.yaml
+   +-- models/                     # Checkpoint-specific recipes (by model-hub path)
+   |   +-- <org>/<model_id>/       # see modelopt_recipes/models/README.md
    |       +-- <task>/
    |           +-- <recipe>.yaml
    +-- configs/                    # Reusable config snippets (imported via $import)

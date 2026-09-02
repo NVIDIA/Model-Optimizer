@@ -1,0 +1,56 @@
+# Nemotron-3.5-Lightning-30B-A3B (MoE) pruning to 3B active via Megatron-Bridge (4 GPUs), then vLLM gen.
+#
+# Slurm:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/mbridge_prune.yaml --yes
+# Local:  uv run launch.py --yaml examples/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16/mbridge_prune.yaml hf_local=/mnt/hf-local --yes
+
+# NOTE: sized for fast CI; bump for production, e.g. --calib_num_samples 1024 --seq_length 8192 --top_k 10.
+#       May need to reduce batch size if running out of memory at large seq_length.
+job_name: Nemotron-3.5-Lightning-30B-A3B_mbridge_prune
+pipeline:
+  note: "Prune Nemotron-3.5-Lightning-30B-A3B -> 3B active (Megatron-Bridge) with MMLU gate, then vLLM gen"
+
+  global_vars:
+    # Per-run scratch (fresh cicd_<id> dir) so each run prunes fresh
+    output_dir: /scratchspace/Nemotron-3.5-Lightning-30B-A3B-Pruned-A3.0B
+
+  # 1) Prune and export as a HF checkpoint.
+  # --score_lower_bound fails the job if the pruned model's MMLU drops below the floor.
+  task_0:
+    environment:
+      - LAUNCH_SCRIPT: torchrun --nproc_per_node 4
+    inline: >-
+      $LAUNCH_SCRIPT modules/Model-Optimizer/examples/megatron_bridge/prune_minitron.py
+      --hf_model_name_or_path nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+      --trust_remote_code
+      --pp_size 4
+      --calib_batch_size 8
+      --calib_num_samples 256
+      --seq_length 512
+      --prune_target_active_params 3e9
+      --prune_target_params 24e9
+      --prune_score_func mmlu_10pct_bs32
+      --max_width_pruning 0.30
+      --max_depth_pruning 0.15
+      --hparams_to_skip num_attention_heads
+      --top_k 5
+      --score_lower_bound 0.58
+      --output_hf_path <<global_vars.output_dir>>
+    slurm_config: &sc
+      _factory_: "slurm_factory"
+      container: nvcr.io/nvidia/nemo:26.08
+      modelopt_install_path: /opt/venv/lib/python3.12/site-packages/modelopt
+      docker_user: root
+      nodes: 1
+      ntasks_per_node: 4
+      gpus_per_node: 4
+
+  # 2) vLLM sanity generation on the pruned checkpoint.
+  task_1:
+    inline: >-
+      python modules/Model-Optimizer/examples/megatron_bridge/generate_vllm.py
+      --model <<global_vars.output_dir>>
+      --trust_remote_code
+      --tensor_parallel_size 4
+    slurm_config:
+      <<: *sc
+      ntasks_per_node: 1

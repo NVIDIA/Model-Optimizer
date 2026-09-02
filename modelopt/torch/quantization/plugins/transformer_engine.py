@@ -16,6 +16,7 @@
 """Support quantization for Transformer Engine layers."""
 
 import inspect
+import os
 import warnings
 
 import torch
@@ -27,10 +28,12 @@ from packaging.version import Version
 
 from modelopt.torch.quantization.utils import replace_function
 
-from ..nn import QuantModuleRegistry
+from ..nn import GroupedQuantizer, QuantModuleRegistry, SequentialQuantizer, TensorQuantizer
 from .custom import _ParallelLinear
 
 _TE_VERSION = Version(te.__version__)
+
+_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV = "MODELOPT_TEGROUPED_COMPILE_WEIGHT_LOOP"
 
 
 def _assert_te_fp8_enabled():
@@ -46,6 +49,13 @@ def _assert_te_fp8_enabled():
             )
     except ImportError:
         pass  # Older TE versions may not have this API
+
+
+def _is_calibrating(quantizer):
+    """Return whether a tensor or sequential quantizer is collecting calibration stats."""
+    if isinstance(quantizer, SequentialQuantizer):
+        return any(getattr(q, "_if_calib", False) for q in quantizer)
+    return getattr(quantizer, "_if_calib", False)
 
 
 @QuantModuleRegistry.register({te.pytorch.Linear: "te_Linear"})
@@ -137,8 +147,28 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after setup.
         delattr(self, "weight")
 
-        # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
-        # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
+        # Each fused expert gets its own weight quantizer (independent amax), stored in a
+        # GroupedQuantizer (an nn.ModuleList) surfaced as ``weight_quantizer.{i}`` so the
+        # fused-experts name normalizer maps them to ``*weight_quantizer`` and the stock configs
+        # apply. This replaces the single shared weight quantizer ``super()._setup()`` installed.
+        self.weight_quantizer = GroupedQuantizer(
+            *(TensorQuantizer() for _ in range(self.num_gemms))
+        )
+
+        # Compile only the per-expert quantizer loop. The surrounding TE grouped GEMM remains
+        # eager, and the opt-in flag leaves the default execution path unchanged.
+        if os.getenv(_COMPILE_TEGROUPED_WEIGHT_LOOP_ENV, "0") == "1":
+            quantizers = tuple(self.weight_quantizer)
+
+            def quantize_weights(*weights):
+                return tuple(quantizer(weight) for quantizer, weight in zip(quantizers, weights))
+
+            self._compiled_weight_quantizer_loop = torch.compile(
+                quantize_weights,
+                backend="inductor",
+                fullgraph=False,
+                mode="reduce-overhead",
+            )
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
@@ -150,12 +180,80 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after post_restore.
         delattr(self, "weight")
 
+        # Preserve the loaded (calibrated) per-expert amax. Recomputing via max_calibrate
+        # replaces MSE/static-calibrated (and QAD-frozen) amax with max|W|, which corrupts
+        # static recipes on export and overwrites frozen amax on every QAD resume. Only
+        # re-calibrate a quantizer whose loaded amax is shape-INCOMPATIBLE with its weight
+        # (a genuine TP/EP change between save and restore); otherwise keep it as-is.
+        # weight_quantizer is a GroupedQuantizer (one per expert) after _setup; guard defensively.
+        if not isinstance(self.weight_quantizer, GroupedQuantizer):
+            return
+
+        from modelopt.torch.quantization.model_calib import max_calibrate
+
+        for i in range(self.num_gemms):
+            weight_i = getattr(self, f"weight{i}", None)
+            if weight_i is None:
+                continue
+            if weight_i.device.type != "cuda":
+                continue  # export loads weights on CPU; the fp4 dry-run needs CUDA — keep loaded amax
+            wq_i = self.weight_quantizer[i]
+            q = wq_i[0] if isinstance(wq_i, SequentialQuantizer) else wq_i
+            if not hasattr(q, "_amax") or q._amax is None:
+                continue
+            prev_fake = getattr(q, "_fake_quant", True)
+            q._fake_quant = True
+            try:
+                wq_i(weight_i)  # dry-run: succeeds iff the loaded amax fits this weight
+                shape_ok = True
+            except Exception as e:
+                # Only a genuine amax/weight shape mismatch (a TP/EP change between save and
+                # restore) may fall through to the max|W| recompute below. A CUDA/OOM/device or
+                # any other error must NOT be silently turned into a recompute -- that would
+                # discard the stored MSE/static/QAD amax this block exists to preserve. Re-raise
+                # anything that is not clearly a shape mismatch.
+                msg = str(e).lower()
+                is_shape_mismatch = (
+                    isinstance(e, RuntimeError)
+                    and any(
+                        k in msg for k in ("size", "shape", "must match", "broadcast", "dimension")
+                    )
+                    and not any(k in msg for k in ("cuda", "out of memory", "device-side", "nccl"))
+                )
+                if not is_shape_mismatch:
+                    raise
+                shape_ok = False
+            finally:
+                q._fake_quant = prev_fake
+            if shape_ok:
+                continue  # loaded amax is valid -> keep it, do NOT recompute
+            # Recompute is lossy for static recipes; never do it silently.
+            warnings.warn(
+                f"{type(self).__name__}: restored amax {tuple(q._amax.shape)} for expert {i} "
+                f"weight_quantizer is shape-incompatible with weight {tuple(weight_i.shape)} "
+                f"(likely a TP/EP change); recomputing as max|W| and discarding the stored "
+                f"MSE/static/QAD amax for this expert."
+            )
+            wq_i.reset_amax()
+            max_calibrate(wq_i, lambda wq, w=weight_i: wq(w), distributed_sync=False)
+
     def iter_weights_for_calibration(self):
         """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights."""
+        grouped = isinstance(self.weight_quantizer, GroupedQuantizer)
         for i in range(self.num_gemms):
             weight_i = getattr(self, f"weight{i}", None)
             if weight_i is not None:
-                yield weight_i, self.weight_quantizer
+                yield weight_i, (self.weight_quantizer[i] if grouped else self.weight_quantizer)
+
+    def fold_weight(self, keep_attrs: bool = False):
+        """Fold each grouped weight with its corresponding fake-quant quantizer."""
+        quantizer_weights: dict[TensorQuantizer, list[torch.Tensor]] = {}
+        for weight, quantizer in self.iter_weights_for_calibration():
+            if isinstance(quantizer, TensorQuantizer) and quantizer.fake_quant:
+                quantizer_weights.setdefault(quantizer, []).append(weight)
+
+        for quantizer, weights in quantizer_weights.items():
+            self._fold_weight_quantizer(quantizer, weights, keep_attrs)
 
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
@@ -184,8 +282,23 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
         new_args = list(args)
         new_args[inp_pos] = self.input_quantizer(args[inp_pos])
-        for i in range(weights_start, weights_start + num_gemms):
-            new_args[i] = self.weight_quantizer(args[i])
+        weights = tuple(args[weights_start : weights_start + num_gemms])
+        # Calibration mutates collector state and must stay outside Inductor/CUDAGraph capture.
+        grouped = isinstance(self.weight_quantizer, GroupedQuantizer)
+        use_compiled_loop = (
+            grouped
+            and hasattr(self, "_compiled_weight_quantizer_loop")
+            and not any(_is_calibrating(quantizer) for quantizer in self.weight_quantizer)
+        )
+        if use_compiled_loop:
+            quantized_weights = self._compiled_weight_quantizer_loop(*weights)
+        else:
+            quantized_weights = tuple(
+                (self.weight_quantizer[gemm_idx] if grouped else self.weight_quantizer)(weight)
+                for gemm_idx, weight in enumerate(weights)
+            )
+        for gemm_idx, quantized_weight in enumerate(quantized_weights):
+            new_args[weights_start + gemm_idx] = quantized_weight
         output = getattr(package, func_name)(*new_args)
         # TE 2.15+ returns `(out, new_workspaces)`; TE <= 2.14 returns just `out`.
         # Only the activation tensor participates in output quantization.
