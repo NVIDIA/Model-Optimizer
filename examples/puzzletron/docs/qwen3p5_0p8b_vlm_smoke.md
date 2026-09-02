@@ -297,8 +297,9 @@ Run the campaign with the same execution profile and a distinct output root:
 The campaign gives both materialized candidates the same short KD and quality
 screen, then selects one candidate for the longer KD and final quality
 comparison. AIPerf runs only for that final post-KD checkpoint. Each serving
-cell uses 32 warmup requests followed by 64 measured requests. The separate
-MIP runtime estimator remains disabled in this campaign.
+cell has three repetitions; every repetition uses 32 warmup requests followed
+by 64 measured requests. The separate MIP runtime estimator remains disabled
+in this campaign.
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml

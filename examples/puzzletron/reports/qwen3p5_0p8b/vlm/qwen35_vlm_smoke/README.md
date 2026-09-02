@@ -11,8 +11,8 @@ values, study conditions, limitations, structured record, and recorded recipe.
 
 The maintained
 [campaign config](../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml)
-runs AIPerf only after candidate screening and final KD, with 32 warmup and 64
-measured requests per serving cell. Follow the
+runs AIPerf only after candidate screening and final KD, with three repetitions
+of 32 warmup and 64 measured requests per serving cell. Follow the
 [campaign guide](../../../../docs/qwen3p5_0p8b_vlm_smoke.md) to configure,
 inspect, and run it. The maintained route does not reproduce this historical
 pre-KD study, its eight-GPU placement swap, or its 256-request cells.

@@ -33,6 +33,7 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _PeakGpuMemorySampler,
     _prepare_vllm_checkpoint,
     _profile_command,
+    _resolve_executable,
     _server_max_model_len,
     _topology_vllm_args,
     _vllm_server_command,
@@ -44,6 +45,15 @@ from modelopt.torch.puzzletron.benchmarks.provenance import (
 )
 
 # Subprocess environment and request sizing
+
+
+def test_resolve_executable_uses_program_specific_configuration_hint(monkeypatch):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.aiperf.shutil.which", lambda *_args, **_kwargs: None
+    )
+
+    with pytest.raises(FileNotFoundError, match="Cannot find executable vllm; add vLLM to PATH"):
+        _resolve_executable("vllm", configuration_hint="add vLLM to PATH")
 
 
 def test_aiperf_server_environment_installs_vllm_torch_compatibility(monkeypatch):
@@ -777,7 +787,7 @@ def test_multimodal_sweep_keeps_image_workloads_and_cache_paths_distinct(monkeyp
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(
-        "modelopt.torch.puzzletron.benchmarks.aiperf.subprocess.run",
+        "modelopt.torch.puzzletron.benchmarks.aiperf._run_profile_command",
         fake_run,
     )
     monkeypatch.setattr(

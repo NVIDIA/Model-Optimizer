@@ -115,7 +115,7 @@
     "comparison": {
       "pairing": "same GPU slot; different synthetic request streams",
       "placement": "teacher and student placements swapped across phases",
-      "delta_formula": "100 * (student_throughput / teacher_throughput - 1)",
+      "delta_formula": "For each GPU slot: 100 * (student_throughput / teacher_throughput - 1). student_delta_percent is the mean of the eight per-slot differences, not the difference calculated from teacher_mean and student_mean.",
       "interval": {
         "type": "descriptive_node_conditional_t_interval",
         "level": 0.95,

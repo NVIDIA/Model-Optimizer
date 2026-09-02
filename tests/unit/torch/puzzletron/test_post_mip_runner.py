@@ -354,9 +354,10 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
             SimpleNamespace(
                 concurrency=8,
                 workload={"image_batch_size": 12},
-                metrics={},
+                metrics={"output_token_throughput": throughput},
                 raw_artifacts={},
             )
+            for throughput in (10.0, 14.0)
         ]
 
     monkeypatch.setattr(
@@ -408,7 +409,10 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     assert "minimum_request_count" not in captured
     assert "requests_per_concurrency" not in captured
     assert "best_selection_mode" not in captured
-    assert result["metrics"] == {}
+    assert result["metrics"] == {
+        "output_token_throughput": 12.0,
+        "images_12.concurrency_8.output_token_throughput": 12.0,
+    }
 
 
 def test_downstream_evaluation_delegates_to_generic_checkpoint_evaluator(monkeypatch, tmp_path):

@@ -326,6 +326,7 @@ post_mip:
             concurrency: [1, 4]
             request_count: 64
             warmup_request_count: 32
+            repetitions: 3
             extra_inputs: {min_tokens: 80}
             use_server_token_count: true
             seed: 42

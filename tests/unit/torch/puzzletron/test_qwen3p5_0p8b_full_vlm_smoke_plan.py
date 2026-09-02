@@ -309,6 +309,7 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     assert nodes["serving"]["input"] == "best"
     assert nodes["serving"]["config"]["request_count"] == 64
     assert nodes["serving"]["config"]["warmup_request_count"] == 32
+    assert nodes["serving"]["config"]["repetitions"] == 3
     trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
     assert [node["config"]["max_steps"] for node in trajectory_nodes] == [64, 128, 256, 512, 1024]
     assert {node["trajectory"] for node in trajectory_nodes} == {

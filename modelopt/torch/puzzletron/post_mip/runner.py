@@ -559,7 +559,7 @@ def _aiperf(
             name: median(float(result.metrics[name]) for result in repetitions)
             for name in sorted(metric_names)
         }
-        if len(results) == 1:
+        if len(grouped_results) == 1:
             metrics.update(aggregated)
         metrics.update({f"{namespace}.{key}": value for key, value in aggregated.items()})
     return {

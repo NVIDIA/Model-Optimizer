@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.metadata
 import importlib.util
 import json
@@ -355,8 +356,13 @@ def _package_version(name: str) -> str:
         return "unknown"
 
 
-def _resolve_executable(executable: str | Path, *, search_path: str | None = None) -> Path:
-    """Resolve AIPerf without requiring it in Puzzletron's training venv."""
+def _resolve_executable(
+    executable: str | Path,
+    *,
+    search_path: str | None = None,
+    configuration_hint: str = "set AIPERF_EXECUTABLE",
+) -> Path:
+    """Resolve a serving command without requiring it in Puzzletron's training venv."""
     value = Path(executable)
     if value.name != str(executable) or value.is_absolute():
         return value.resolve()
@@ -368,7 +374,7 @@ def _resolve_executable(executable: str | Path, *, search_path: str | None = Non
         sibling = engineering_root / "aiperf" / ".venv" / "bin" / "aiperf"
         if sibling.is_file():
             return sibling.resolve()
-    raise FileNotFoundError(f"Cannot find AIPerf executable {executable!s}; set AIPERF_EXECUTABLE")
+    raise FileNotFoundError(f"Cannot find executable {executable!s}; {configuration_hint}")
 
 
 def _profile_command(
@@ -614,6 +620,26 @@ def _aiperf_subprocess_environment(
     return resolved
 
 
+async def _run_profile_command_async(
+    command: list[str], *, timeout: float, env: dict[str, str]
+) -> None:
+    process = await asyncio.create_subprocess_exec(*command, env=env)
+    try:
+        returncode = await asyncio.wait_for(process.wait(), timeout=timeout)
+    except TimeoutError as error:
+        process.kill()
+        await process.wait()
+        raise subprocess.TimeoutExpired(command, timeout) from error
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
+def _run_profile_command(command: list[str], *, timeout: float, env: dict[str, str]) -> None:
+    """Run one validated AIPerf argv list without a shell."""
+
+    asyncio.run(_run_profile_command_async(command, timeout=timeout, env=env))
+
+
 def _raw_artifacts_match(result: BenchmarkResult, export: Path) -> bool:
     """Verify immutable per-run evidence before reusing cached metrics."""
 
@@ -747,7 +773,11 @@ def run_aiperf_sweep(
     )
     for key, value in (topology.get("env") or {}).items():
         env[str(key)] = str(value)
-    vllm_executable = _resolve_executable("vllm", search_path=env.get("PATH"))
+    vllm_executable = _resolve_executable(
+        "vllm",
+        search_path=env.get("PATH"),
+        configuration_hint="add vLLM to PATH",
+    )
     server_cmd[0] = str(vllm_executable)
     software_provenance = software_identity()
     software_provenance["aiperf_executable"] = executable_identity(executable)
@@ -930,9 +960,8 @@ def run_aiperf_sweep(
                             image_width_mean=image_width_mean if image_batch_size else 0,
                             image_height_mean=image_height_mean if image_batch_size else 0,
                         )
-                        subprocess.run(  # nosec B603
+                        _run_profile_command(
                             warmup_command,
-                            check=True,
                             timeout=benchmark_timeout,
                             env=aiperf_env,
                         )
@@ -942,9 +971,8 @@ def run_aiperf_sweep(
                     _PeakGpuMemorySampler(gpu_ids) if collect_peak_gpu_memory else nullcontext(None)
                 )
                 with memory_context as memory_sampler:
-                    subprocess.run(  # nosec B603
+                    _run_profile_command(
                         command,
-                        check=True,
                         timeout=benchmark_timeout,
                         env=aiperf_env,
                     )
