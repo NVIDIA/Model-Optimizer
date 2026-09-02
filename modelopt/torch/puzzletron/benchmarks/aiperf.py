@@ -625,11 +625,17 @@ async def _run_profile_command_async(
 ) -> None:
     process = await asyncio.create_subprocess_exec(*command, env=env)
     try:
-        returncode = await asyncio.wait_for(process.wait(), timeout=timeout)
-    except TimeoutError as error:
-        process.kill()
-        await process.wait()
-        raise subprocess.TimeoutExpired(command, timeout) from error
+        try:
+            returncode = await asyncio.wait_for(process.wait(), timeout=timeout)
+        except TimeoutError as error:
+            raise subprocess.TimeoutExpired(command, timeout) from error
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
     if returncode:
         raise subprocess.CalledProcessError(returncode, command)
 

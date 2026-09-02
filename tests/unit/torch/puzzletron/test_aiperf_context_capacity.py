@@ -15,6 +15,7 @@
 
 """Tests for Puzzletron AIPerf context-capacity handling."""
 
+import asyncio
 import importlib.machinery
 import importlib.util
 import json
@@ -34,6 +35,7 @@ from modelopt.torch.puzzletron.benchmarks.aiperf import (
     _prepare_vllm_checkpoint,
     _profile_command,
     _resolve_executable,
+    _run_profile_command_async,
     _server_max_model_len,
     _topology_vllm_args,
     _vllm_server_command,
@@ -45,6 +47,40 @@ from modelopt.torch.puzzletron.benchmarks.provenance import (
 )
 
 # Subprocess environment and request sizing
+
+
+def test_profile_command_terminates_child_when_cancelled(monkeypatch):
+    class FakeProcess:
+        returncode = None
+        killed = False
+
+        async def wait(self):
+            if not self.killed:
+                await asyncio.Future()
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def cancel_profile():
+        task = asyncio.create_task(_run_profile_command_async(["aiperf"], timeout=60, env={}))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_profile())
+
+    assert process.killed
+    assert process.returncode == -9
 
 
 def test_resolve_executable_uses_program_specific_configuration_hint(monkeypatch):
