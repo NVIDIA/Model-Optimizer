@@ -1266,7 +1266,7 @@ class GPTModelExporter:
                 self._state_dict[up_proj_key] = val.detach().clone()
 
     def _grouped_mlp_packing(self, module, prefix, parallel_config=None, is_mtp=False):
-        """Pack TEGroupedMLP experts into one ``[num_experts, out, in]`` tensor (Qwen3.5 layout).
+        """Pack TEGroupedLinear experts into one ``[num_experts, out, in]`` tensor (Qwen3.5 layout).
 
         Reuses the per-expert path for the EP gather and per-expert quantizers, then stacks by
         global expert id and re-quantizes once with the max scale, as ``_pack_name_remapping`` does.
@@ -1345,7 +1345,7 @@ class GPTModelExporter:
         quantize=True,
         record_quant_config=True,
     ):
-        """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
+        """Export TEGroupedLinear weight0..weight{N-1} as one HF-style entry per expert.
 
         ``quantize=False`` emits unquantized weights alongside the scales, which
         ``_grouped_mlp_packing`` needs so it can quantize once over the stacked tensor.
@@ -1370,7 +1370,7 @@ class GPTModelExporter:
         )
         if grouped_wq is not None and num_experts > len(grouped_wq):
             warn_rank_0(
-                f"TEGroupedMLP has {num_experts} local experts but only {len(grouped_wq)} "
+                f"TEGroupedLinear has {num_experts} local experts but only {len(grouped_wq)} "
                 f"per-expert weight quantizers; experts >= {len(grouped_wq)} reuse expert "
                 f"{len(grouped_wq) - 1}'s scales (TP/EP-mismatch fallback)."
             )
@@ -1416,11 +1416,11 @@ class GPTModelExporter:
             )
             if missing_flag.item() != 0:
                 raise ValueError(
-                    f"TEGroupedMLP missing expert weights on at least one EP rank "
+                    f"TEGroupedLinear missing expert weights on at least one EP rank "
                     f"(local missing on rank {ep_rank}: {local_missing})"
                 )
         elif local_missing:
-            raise ValueError(f"TEGroupedMLP missing expert weights: {local_missing}")
+            raise ValueError(f"TEGroupedLinear missing expert weights: {local_missing}")
 
         # Per expert, temporarily assign weight = weight{i} and, for the per-expert
         # quantizer layout (GroupedQuantizer), swap in that expert's own TensorQuantizer,
@@ -1499,7 +1499,7 @@ class GPTModelExporter:
 
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
-        # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
+        # a TEGroupedLinear layer share qformat/block_size, so local values apply globally.
         if seen_qformat is not None and record_quant_config:
             assert seen_block_size is not None
             num_total_experts = num_experts * ep_size

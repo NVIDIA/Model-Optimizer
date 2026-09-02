@@ -20,6 +20,9 @@
     enable: false
   - quantizer_name: '*linear_attn.conv1d*'
     enable: false
+  # Megatron-Core names the GatedDeltaNet block ``self_attention``; HF calls it ``linear_attn``.
+  - quantizer_name: '*self_attention.conv1d*'
+    enable: false
   - quantizer_name: '*linear_attn.in_proj_a*'
     enable: false
   - quantizer_name: '*linear_attn.in_proj_b*'
@@ -27,9 +30,6 @@
   - quantizer_name: '*lm_head*'
     enable: false
   - quantizer_name: '*mixer.conv1d*'
-    enable: false
-  # Megatron-Core names the GatedDeltaNet block ``self_attention``; HF calls it ``linear_attn``.
-  - quantizer_name: '*self_attention.conv1d*'
     enable: false
   - quantizer_name: '*mlp.gate.*'
     enable: false
