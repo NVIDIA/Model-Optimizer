@@ -149,10 +149,15 @@ def positive_float(value: str) -> float:
     return parsed
 
 
-def verify_lmms_eval_revision() -> str:
+def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> str:
     """Return the imported evaluator revision after matching its source and patch pin."""
     revision = _imported_lmms_eval_revision()
     if revision is not None:
+        if revision != expected_revision:
+            raise RuntimeError(
+                "installed lmms-eval revision differs from the pinned profile: "
+                f"expected {expected_revision}, found {revision}"
+            )
         return revision
     try:
         direct_url = importlib.metadata.distribution("lmms-eval").read_text("direct_url.json")
@@ -170,8 +175,11 @@ def verify_lmms_eval_revision() -> str:
         revision = LMMS_EVAL_REVISION
     else:
         revision = None
-    if revision != LMMS_EVAL_REVISION:
-        raise RuntimeError("installed lmms-eval revision provenance is unavailable")
+    if revision != expected_revision:
+        raise RuntimeError(
+            "installed lmms-eval revision differs from the pinned profile: "
+            f"expected {expected_revision}, found {revision or 'unknown'}"
+        )
     return revision
 
 

@@ -1,0 +1,1589 @@
+{
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "short-v1",
+  "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+  "model_family": {
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "model_type": "qwen3_5"
+  },
+  "backend": {
+    "enable_thinking": false,
+    "name": "vllm",
+    "reasoning_parser": "qwen3"
+  },
+  "preprocessing": {
+    "fps": 2,
+    "max_frames": 32,
+    "video_reader": "decord"
+  },
+  "generation": {
+    "do_sample": false,
+    "temperature": 0
+  },
+  "seed": 42,
+  "repetitions": 1,
+  "batch_size": 1,
+  "selection": "exact-rows",
+  "tasks": {
+    "realworldqa": {
+      "dataset_repository": "lmms-lab/RealWorldQA",
+      "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/realworldqa/realworldqa.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "test:0"
+        },
+        {
+          "source_row_index": 1,
+          "source_sample_id": "test:1"
+        },
+        {
+          "source_row_index": 2,
+          "source_sample_id": "test:2"
+        },
+        {
+          "source_row_index": 3,
+          "source_sample_id": "test:3"
+        },
+        {
+          "source_row_index": 4,
+          "source_sample_id": "test:4"
+        },
+        {
+          "source_row_index": 5,
+          "source_sample_id": "test:5"
+        },
+        {
+          "source_row_index": 6,
+          "source_sample_id": "test:6"
+        },
+        {
+          "source_row_index": 7,
+          "source_sample_id": "test:7"
+        },
+        {
+          "source_row_index": 8,
+          "source_sample_id": "test:8"
+        },
+        {
+          "source_row_index": 9,
+          "source_sample_id": "test:9"
+        },
+        {
+          "source_row_index": 10,
+          "source_sample_id": "test:10"
+        },
+        {
+          "source_row_index": 11,
+          "source_sample_id": "test:11"
+        },
+        {
+          "source_row_index": 12,
+          "source_sample_id": "test:12"
+        },
+        {
+          "source_row_index": 13,
+          "source_sample_id": "test:13"
+        },
+        {
+          "source_row_index": 14,
+          "source_sample_id": "test:14"
+        },
+        {
+          "source_row_index": 15,
+          "source_sample_id": "test:15"
+        },
+        {
+          "source_row_index": 16,
+          "source_sample_id": "test:16"
+        },
+        {
+          "source_row_index": 17,
+          "source_sample_id": "test:17"
+        },
+        {
+          "source_row_index": 18,
+          "source_sample_id": "test:18"
+        },
+        {
+          "source_row_index": 19,
+          "source_sample_id": "test:19"
+        },
+        {
+          "source_row_index": 20,
+          "source_sample_id": "test:20"
+        },
+        {
+          "source_row_index": 21,
+          "source_sample_id": "test:21"
+        },
+        {
+          "source_row_index": 22,
+          "source_sample_id": "test:22"
+        },
+        {
+          "source_row_index": 23,
+          "source_sample_id": "test:23"
+        },
+        {
+          "source_row_index": 24,
+          "source_sample_id": "test:24"
+        },
+        {
+          "source_row_index": 25,
+          "source_sample_id": "test:25"
+        },
+        {
+          "source_row_index": 26,
+          "source_sample_id": "test:26"
+        },
+        {
+          "source_row_index": 27,
+          "source_sample_id": "test:27"
+        },
+        {
+          "source_row_index": 28,
+          "source_sample_id": "test:28"
+        },
+        {
+          "source_row_index": 29,
+          "source_sample_id": "test:29"
+        },
+        {
+          "source_row_index": 30,
+          "source_sample_id": "test:30"
+        },
+        {
+          "source_row_index": 31,
+          "source_sample_id": "test:31"
+        },
+        {
+          "source_row_index": 32,
+          "source_sample_id": "test:32"
+        },
+        {
+          "source_row_index": 33,
+          "source_sample_id": "test:33"
+        },
+        {
+          "source_row_index": 34,
+          "source_sample_id": "test:34"
+        },
+        {
+          "source_row_index": 35,
+          "source_sample_id": "test:35"
+        },
+        {
+          "source_row_index": 36,
+          "source_sample_id": "test:36"
+        },
+        {
+          "source_row_index": 37,
+          "source_sample_id": "test:37"
+        },
+        {
+          "source_row_index": 38,
+          "source_sample_id": "test:38"
+        },
+        {
+          "source_row_index": 39,
+          "source_sample_id": "test:39"
+        },
+        {
+          "source_row_index": 40,
+          "source_sample_id": "test:40"
+        },
+        {
+          "source_row_index": 41,
+          "source_sample_id": "test:41"
+        },
+        {
+          "source_row_index": 42,
+          "source_sample_id": "test:42"
+        },
+        {
+          "source_row_index": 43,
+          "source_sample_id": "test:43"
+        },
+        {
+          "source_row_index": 44,
+          "source_sample_id": "test:44"
+        },
+        {
+          "source_row_index": 45,
+          "source_sample_id": "test:45"
+        },
+        {
+          "source_row_index": 46,
+          "source_sample_id": "test:46"
+        },
+        {
+          "source_row_index": 47,
+          "source_sample_id": "test:47"
+        },
+        {
+          "source_row_index": 48,
+          "source_sample_id": "test:48"
+        },
+        {
+          "source_row_index": 49,
+          "source_sample_id": "test:49"
+        },
+        {
+          "source_row_index": 50,
+          "source_sample_id": "test:50"
+        },
+        {
+          "source_row_index": 51,
+          "source_sample_id": "test:51"
+        },
+        {
+          "source_row_index": 52,
+          "source_sample_id": "test:52"
+        },
+        {
+          "source_row_index": 53,
+          "source_sample_id": "test:53"
+        },
+        {
+          "source_row_index": 54,
+          "source_sample_id": "test:54"
+        },
+        {
+          "source_row_index": 55,
+          "source_sample_id": "test:55"
+        },
+        {
+          "source_row_index": 56,
+          "source_sample_id": "test:56"
+        },
+        {
+          "source_row_index": 57,
+          "source_sample_id": "test:57"
+        },
+        {
+          "source_row_index": 58,
+          "source_sample_id": "test:58"
+        },
+        {
+          "source_row_index": 59,
+          "source_sample_id": "test:59"
+        },
+        {
+          "source_row_index": 60,
+          "source_sample_id": "test:60"
+        },
+        {
+          "source_row_index": 61,
+          "source_sample_id": "test:61"
+        },
+        {
+          "source_row_index": 62,
+          "source_sample_id": "test:62"
+        },
+        {
+          "source_row_index": 63,
+          "source_sample_id": "test:63"
+        }
+      ]
+    },
+    "mmmu_val": {
+      "dataset_repository": "lmms-lab/MMMU",
+      "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+      "max_new_tokens": 128,
+      "scoring_task_config": "tasks/mmmu/mmmu_val.yaml",
+      "rows": [
+        {
+          "source_row_index": 0,
+          "source_sample_id": "validation_Accounting_1"
+        },
+        {
+          "source_row_index": 7,
+          "source_sample_id": "validation_Accounting_8"
+        },
+        {
+          "source_row_index": 15,
+          "source_sample_id": "validation_Accounting_16"
+        },
+        {
+          "source_row_index": 22,
+          "source_sample_id": "validation_Accounting_23"
+        },
+        {
+          "source_row_index": 30,
+          "source_sample_id": "validation_Agriculture_1"
+        },
+        {
+          "source_row_index": 37,
+          "source_sample_id": "validation_Agriculture_8"
+        },
+        {
+          "source_row_index": 45,
+          "source_sample_id": "validation_Agriculture_16"
+        },
+        {
+          "source_row_index": 52,
+          "source_sample_id": "validation_Agriculture_23"
+        },
+        {
+          "source_row_index": 60,
+          "source_sample_id": "validation_Architecture_and_Engineering_1"
+        },
+        {
+          "source_row_index": 67,
+          "source_sample_id": "validation_Architecture_and_Engineering_8"
+        },
+        {
+          "source_row_index": 75,
+          "source_sample_id": "validation_Architecture_and_Engineering_16"
+        },
+        {
+          "source_row_index": 82,
+          "source_sample_id": "validation_Architecture_and_Engineering_23"
+        },
+        {
+          "source_row_index": 90,
+          "source_sample_id": "validation_Art_1"
+        },
+        {
+          "source_row_index": 97,
+          "source_sample_id": "validation_Art_8"
+        },
+        {
+          "source_row_index": 105,
+          "source_sample_id": "validation_Art_16"
+        },
+        {
+          "source_row_index": 112,
+          "source_sample_id": "validation_Art_23"
+        },
+        {
+          "source_row_index": 120,
+          "source_sample_id": "validation_Art_Theory_1"
+        },
+        {
+          "source_row_index": 127,
+          "source_sample_id": "validation_Art_Theory_8"
+        },
+        {
+          "source_row_index": 135,
+          "source_sample_id": "validation_Art_Theory_16"
+        },
+        {
+          "source_row_index": 142,
+          "source_sample_id": "validation_Art_Theory_23"
+        },
+        {
+          "source_row_index": 150,
+          "source_sample_id": "validation_Basic_Medical_Science_1"
+        },
+        {
+          "source_row_index": 157,
+          "source_sample_id": "validation_Basic_Medical_Science_8"
+        },
+        {
+          "source_row_index": 165,
+          "source_sample_id": "validation_Basic_Medical_Science_16"
+        },
+        {
+          "source_row_index": 172,
+          "source_sample_id": "validation_Basic_Medical_Science_23"
+        },
+        {
+          "source_row_index": 180,
+          "source_sample_id": "validation_Biology_1"
+        },
+        {
+          "source_row_index": 187,
+          "source_sample_id": "validation_Biology_8"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "validation_Biology_16"
+        },
+        {
+          "source_row_index": 202,
+          "source_sample_id": "validation_Biology_23"
+        },
+        {
+          "source_row_index": 210,
+          "source_sample_id": "validation_Chemistry_1"
+        },
+        {
+          "source_row_index": 217,
+          "source_sample_id": "validation_Chemistry_8"
+        },
+        {
+          "source_row_index": 225,
+          "source_sample_id": "validation_Chemistry_16"
+        },
+        {
+          "source_row_index": 232,
+          "source_sample_id": "validation_Chemistry_23"
+        },
+        {
+          "source_row_index": 240,
+          "source_sample_id": "validation_Clinical_Medicine_1"
+        },
+        {
+          "source_row_index": 247,
+          "source_sample_id": "validation_Clinical_Medicine_8"
+        },
+        {
+          "source_row_index": 255,
+          "source_sample_id": "validation_Clinical_Medicine_16"
+        },
+        {
+          "source_row_index": 262,
+          "source_sample_id": "validation_Clinical_Medicine_23"
+        },
+        {
+          "source_row_index": 270,
+          "source_sample_id": "validation_Computer_Science_1"
+        },
+        {
+          "source_row_index": 277,
+          "source_sample_id": "validation_Computer_Science_8"
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "validation_Computer_Science_16"
+        },
+        {
+          "source_row_index": 292,
+          "source_sample_id": "validation_Computer_Science_23"
+        },
+        {
+          "source_row_index": 300,
+          "source_sample_id": "validation_Design_1"
+        },
+        {
+          "source_row_index": 307,
+          "source_sample_id": "validation_Design_8"
+        },
+        {
+          "source_row_index": 315,
+          "source_sample_id": "validation_Design_16"
+        },
+        {
+          "source_row_index": 322,
+          "source_sample_id": "validation_Design_23"
+        },
+        {
+          "source_row_index": 330,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_1"
+        },
+        {
+          "source_row_index": 337,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_8"
+        },
+        {
+          "source_row_index": 345,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_16"
+        },
+        {
+          "source_row_index": 352,
+          "source_sample_id": "validation_Diagnostics_and_Laboratory_Medicine_23"
+        },
+        {
+          "source_row_index": 360,
+          "source_sample_id": "validation_Economics_1"
+        },
+        {
+          "source_row_index": 367,
+          "source_sample_id": "validation_Economics_8"
+        },
+        {
+          "source_row_index": 375,
+          "source_sample_id": "validation_Economics_16"
+        },
+        {
+          "source_row_index": 382,
+          "source_sample_id": "validation_Economics_23"
+        },
+        {
+          "source_row_index": 390,
+          "source_sample_id": "validation_Electronics_1"
+        },
+        {
+          "source_row_index": 397,
+          "source_sample_id": "validation_Electronics_8"
+        },
+        {
+          "source_row_index": 405,
+          "source_sample_id": "validation_Electronics_16"
+        },
+        {
+          "source_row_index": 412,
+          "source_sample_id": "validation_Electronics_23"
+        },
+        {
+          "source_row_index": 420,
+          "source_sample_id": "validation_Energy_and_Power_1"
+        },
+        {
+          "source_row_index": 427,
+          "source_sample_id": "validation_Energy_and_Power_8"
+        },
+        {
+          "source_row_index": 435,
+          "source_sample_id": "validation_Energy_and_Power_16"
+        },
+        {
+          "source_row_index": 442,
+          "source_sample_id": "validation_Energy_and_Power_23"
+        },
+        {
+          "source_row_index": 450,
+          "source_sample_id": "validation_Finance_1"
+        },
+        {
+          "source_row_index": 457,
+          "source_sample_id": "validation_Finance_8"
+        },
+        {
+          "source_row_index": 465,
+          "source_sample_id": "validation_Finance_16"
+        },
+        {
+          "source_row_index": 472,
+          "source_sample_id": "validation_Finance_23"
+        },
+        {
+          "source_row_index": 480,
+          "source_sample_id": "validation_Geography_1"
+        },
+        {
+          "source_row_index": 487,
+          "source_sample_id": "validation_Geography_8"
+        },
+        {
+          "source_row_index": 495,
+          "source_sample_id": "validation_Geography_16"
+        },
+        {
+          "source_row_index": 502,
+          "source_sample_id": "validation_Geography_23"
+        },
+        {
+          "source_row_index": 510,
+          "source_sample_id": "validation_History_1"
+        },
+        {
+          "source_row_index": 517,
+          "source_sample_id": "validation_History_8"
+        },
+        {
+          "source_row_index": 525,
+          "source_sample_id": "validation_History_16"
+        },
+        {
+          "source_row_index": 532,
+          "source_sample_id": "validation_History_23"
+        },
+        {
+          "source_row_index": 540,
+          "source_sample_id": "validation_Literature_1"
+        },
+        {
+          "source_row_index": 547,
+          "source_sample_id": "validation_Literature_8"
+        },
+        {
+          "source_row_index": 555,
+          "source_sample_id": "validation_Literature_16"
+        },
+        {
+          "source_row_index": 562,
+          "source_sample_id": "validation_Literature_23"
+        },
+        {
+          "source_row_index": 570,
+          "source_sample_id": "validation_Manage_1"
+        },
+        {
+          "source_row_index": 577,
+          "source_sample_id": "validation_Manage_8"
+        },
+        {
+          "source_row_index": 585,
+          "source_sample_id": "validation_Manage_16"
+        },
+        {
+          "source_row_index": 592,
+          "source_sample_id": "validation_Manage_23"
+        },
+        {
+          "source_row_index": 600,
+          "source_sample_id": "validation_Marketing_1"
+        },
+        {
+          "source_row_index": 607,
+          "source_sample_id": "validation_Marketing_8"
+        },
+        {
+          "source_row_index": 615,
+          "source_sample_id": "validation_Marketing_16"
+        },
+        {
+          "source_row_index": 622,
+          "source_sample_id": "validation_Marketing_23"
+        },
+        {
+          "source_row_index": 630,
+          "source_sample_id": "validation_Materials_1"
+        },
+        {
+          "source_row_index": 637,
+          "source_sample_id": "validation_Materials_8"
+        },
+        {
+          "source_row_index": 645,
+          "source_sample_id": "validation_Materials_16"
+        },
+        {
+          "source_row_index": 652,
+          "source_sample_id": "validation_Materials_23"
+        },
+        {
+          "source_row_index": 660,
+          "source_sample_id": "validation_Math_1"
+        },
+        {
+          "source_row_index": 667,
+          "source_sample_id": "validation_Math_8"
+        },
+        {
+          "source_row_index": 675,
+          "source_sample_id": "validation_Math_16"
+        },
+        {
+          "source_row_index": 682,
+          "source_sample_id": "validation_Math_23"
+        },
+        {
+          "source_row_index": 690,
+          "source_sample_id": "validation_Mechanical_Engineering_1"
+        },
+        {
+          "source_row_index": 697,
+          "source_sample_id": "validation_Mechanical_Engineering_8"
+        },
+        {
+          "source_row_index": 705,
+          "source_sample_id": "validation_Mechanical_Engineering_16"
+        },
+        {
+          "source_row_index": 712,
+          "source_sample_id": "validation_Mechanical_Engineering_23"
+        },
+        {
+          "source_row_index": 720,
+          "source_sample_id": "validation_Music_1"
+        },
+        {
+          "source_row_index": 727,
+          "source_sample_id": "validation_Music_8"
+        },
+        {
+          "source_row_index": 735,
+          "source_sample_id": "validation_Music_16"
+        },
+        {
+          "source_row_index": 742,
+          "source_sample_id": "validation_Music_23"
+        },
+        {
+          "source_row_index": 750,
+          "source_sample_id": "validation_Pharmacy_1"
+        },
+        {
+          "source_row_index": 757,
+          "source_sample_id": "validation_Pharmacy_8"
+        },
+        {
+          "source_row_index": 765,
+          "source_sample_id": "validation_Pharmacy_16"
+        },
+        {
+          "source_row_index": 772,
+          "source_sample_id": "validation_Pharmacy_23"
+        },
+        {
+          "source_row_index": 780,
+          "source_sample_id": "validation_Physics_1"
+        },
+        {
+          "source_row_index": 787,
+          "source_sample_id": "validation_Physics_8"
+        },
+        {
+          "source_row_index": 795,
+          "source_sample_id": "validation_Physics_16"
+        },
+        {
+          "source_row_index": 802,
+          "source_sample_id": "validation_Physics_23"
+        },
+        {
+          "source_row_index": 810,
+          "source_sample_id": "validation_Psychology_1"
+        },
+        {
+          "source_row_index": 817,
+          "source_sample_id": "validation_Psychology_8"
+        },
+        {
+          "source_row_index": 825,
+          "source_sample_id": "validation_Psychology_16"
+        },
+        {
+          "source_row_index": 832,
+          "source_sample_id": "validation_Psychology_23"
+        },
+        {
+          "source_row_index": 840,
+          "source_sample_id": "validation_Public_Health_1"
+        },
+        {
+          "source_row_index": 847,
+          "source_sample_id": "validation_Public_Health_8"
+        },
+        {
+          "source_row_index": 855,
+          "source_sample_id": "validation_Public_Health_16"
+        },
+        {
+          "source_row_index": 862,
+          "source_sample_id": "validation_Public_Health_23"
+        },
+        {
+          "source_row_index": 870,
+          "source_sample_id": "validation_Sociology_1"
+        },
+        {
+          "source_row_index": 877,
+          "source_sample_id": "validation_Sociology_8"
+        },
+        {
+          "source_row_index": 885,
+          "source_sample_id": "validation_Sociology_16"
+        },
+        {
+          "source_row_index": 892,
+          "source_sample_id": "validation_Sociology_23"
+        }
+      ]
+    },
+    "mvbench": {
+      "dataset_repository": "OpenGVLab/MVBench",
+      "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/mvbench/mvbench.yaml",
+      "rows": [
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 0,
+          "source_sample_id": "action_sequence:0"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 1,
+          "source_sample_id": "action_sequence:1"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 2,
+          "source_sample_id": "action_sequence:2"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 3,
+          "source_sample_id": "action_sequence:3"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 4,
+          "source_sample_id": "action_sequence:4"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 5,
+          "source_sample_id": "action_sequence:5"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 6,
+          "source_sample_id": "action_sequence:6"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 7,
+          "source_sample_id": "action_sequence:7"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 0,
+          "source_sample_id": "moving_count:0"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 1,
+          "source_sample_id": "moving_count:1"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 2,
+          "source_sample_id": "moving_count:2"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 3,
+          "source_sample_id": "moving_count:3"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 4,
+          "source_sample_id": "moving_count:4"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 5,
+          "source_sample_id": "moving_count:5"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 6,
+          "source_sample_id": "moving_count:6"
+        },
+        {
+          "leaf_task": "mvbench_moving_count",
+          "source_row_index": 7,
+          "source_sample_id": "moving_count:7"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 0,
+          "source_sample_id": "action_prediction:0"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 1,
+          "source_sample_id": "action_prediction:1"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 2,
+          "source_sample_id": "action_prediction:2"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 3,
+          "source_sample_id": "action_prediction:3"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 4,
+          "source_sample_id": "action_prediction:4"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 5,
+          "source_sample_id": "action_prediction:5"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 6,
+          "source_sample_id": "action_prediction:6"
+        },
+        {
+          "leaf_task": "mvbench_action_prediction",
+          "source_row_index": 7,
+          "source_sample_id": "action_prediction:7"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 0,
+          "source_sample_id": "episodic_reasoning:0"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 1,
+          "source_sample_id": "episodic_reasoning:1"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 2,
+          "source_sample_id": "episodic_reasoning:2"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 3,
+          "source_sample_id": "episodic_reasoning:3"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 4,
+          "source_sample_id": "episodic_reasoning:4"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 5,
+          "source_sample_id": "episodic_reasoning:5"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 6,
+          "source_sample_id": "episodic_reasoning:6"
+        },
+        {
+          "leaf_task": "mvbench_episodic_reasoning",
+          "source_row_index": 7,
+          "source_sample_id": "episodic_reasoning:7"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 0,
+          "source_sample_id": "action_antonym:0"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 1,
+          "source_sample_id": "action_antonym:1"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 2,
+          "source_sample_id": "action_antonym:2"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 3,
+          "source_sample_id": "action_antonym:3"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 4,
+          "source_sample_id": "action_antonym:4"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 5,
+          "source_sample_id": "action_antonym:5"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 6,
+          "source_sample_id": "action_antonym:6"
+        },
+        {
+          "leaf_task": "mvbench_action_antonym",
+          "source_row_index": 7,
+          "source_sample_id": "action_antonym:7"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 0,
+          "source_sample_id": "action_count:0"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 1,
+          "source_sample_id": "action_count:1"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 2,
+          "source_sample_id": "action_count:2"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 3,
+          "source_sample_id": "action_count:3"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 4,
+          "source_sample_id": "action_count:4"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 5,
+          "source_sample_id": "action_count:5"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 6,
+          "source_sample_id": "action_count:6"
+        },
+        {
+          "leaf_task": "mvbench_action_count",
+          "source_row_index": 7,
+          "source_sample_id": "action_count:7"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 0,
+          "source_sample_id": "scene_transition:0"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 1,
+          "source_sample_id": "scene_transition:1"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 2,
+          "source_sample_id": "scene_transition:2"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 3,
+          "source_sample_id": "scene_transition:3"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 4,
+          "source_sample_id": "scene_transition:4"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 5,
+          "source_sample_id": "scene_transition:5"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 6,
+          "source_sample_id": "scene_transition:6"
+        },
+        {
+          "leaf_task": "mvbench_scene_transition",
+          "source_row_index": 7,
+          "source_sample_id": "scene_transition:7"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 0,
+          "source_sample_id": "object_shuffle:0"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 1,
+          "source_sample_id": "object_shuffle:1"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 2,
+          "source_sample_id": "object_shuffle:2"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 3,
+          "source_sample_id": "object_shuffle:3"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 4,
+          "source_sample_id": "object_shuffle:4"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 5,
+          "source_sample_id": "object_shuffle:5"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 6,
+          "source_sample_id": "object_shuffle:6"
+        },
+        {
+          "leaf_task": "mvbench_object_shuffle",
+          "source_row_index": 7,
+          "source_sample_id": "object_shuffle:7"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 0,
+          "source_sample_id": "object_existence:0"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 1,
+          "source_sample_id": "object_existence:1"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 2,
+          "source_sample_id": "object_existence:2"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 3,
+          "source_sample_id": "object_existence:3"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 4,
+          "source_sample_id": "object_existence:4"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 5,
+          "source_sample_id": "object_existence:5"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 6,
+          "source_sample_id": "object_existence:6"
+        },
+        {
+          "leaf_task": "mvbench_object_existence",
+          "source_row_index": 7,
+          "source_sample_id": "object_existence:7"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 0,
+          "source_sample_id": "fine_grained_pose:0"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 1,
+          "source_sample_id": "fine_grained_pose:1"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 2,
+          "source_sample_id": "fine_grained_pose:2"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 3,
+          "source_sample_id": "fine_grained_pose:3"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 4,
+          "source_sample_id": "fine_grained_pose:4"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 5,
+          "source_sample_id": "fine_grained_pose:5"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 6,
+          "source_sample_id": "fine_grained_pose:6"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_pose",
+          "source_row_index": 7,
+          "source_sample_id": "fine_grained_pose:7"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 0,
+          "source_sample_id": "unexpected_action:0"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 1,
+          "source_sample_id": "unexpected_action:1"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 2,
+          "source_sample_id": "unexpected_action:2"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 3,
+          "source_sample_id": "unexpected_action:3"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 4,
+          "source_sample_id": "unexpected_action:4"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 5,
+          "source_sample_id": "unexpected_action:5"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 6,
+          "source_sample_id": "unexpected_action:6"
+        },
+        {
+          "leaf_task": "mvbench_unexpected_action",
+          "source_row_index": 7,
+          "source_sample_id": "unexpected_action:7"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 0,
+          "source_sample_id": "moving_direction:0"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 1,
+          "source_sample_id": "moving_direction:1"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 2,
+          "source_sample_id": "moving_direction:2"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 3,
+          "source_sample_id": "moving_direction:3"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 4,
+          "source_sample_id": "moving_direction:4"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 5,
+          "source_sample_id": "moving_direction:5"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 6,
+          "source_sample_id": "moving_direction:6"
+        },
+        {
+          "leaf_task": "mvbench_moving_direction",
+          "source_row_index": 7,
+          "source_sample_id": "moving_direction:7"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 0,
+          "source_sample_id": "state_change:0"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 1,
+          "source_sample_id": "state_change:1"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 2,
+          "source_sample_id": "state_change:2"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 3,
+          "source_sample_id": "state_change:3"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 4,
+          "source_sample_id": "state_change:4"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 5,
+          "source_sample_id": "state_change:5"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 6,
+          "source_sample_id": "state_change:6"
+        },
+        {
+          "leaf_task": "mvbench_state_change",
+          "source_row_index": 7,
+          "source_sample_id": "state_change:7"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 0,
+          "source_sample_id": "object_interaction:0"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 1,
+          "source_sample_id": "object_interaction:1"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 2,
+          "source_sample_id": "object_interaction:2"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 3,
+          "source_sample_id": "object_interaction:3"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 4,
+          "source_sample_id": "object_interaction:4"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 5,
+          "source_sample_id": "object_interaction:5"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 6,
+          "source_sample_id": "object_interaction:6"
+        },
+        {
+          "leaf_task": "mvbench_object_interaction",
+          "source_row_index": 7,
+          "source_sample_id": "object_interaction:7"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 0,
+          "source_sample_id": "character_order:0"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 1,
+          "source_sample_id": "character_order:1"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 2,
+          "source_sample_id": "character_order:2"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 3,
+          "source_sample_id": "character_order:3"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 4,
+          "source_sample_id": "character_order:4"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 5,
+          "source_sample_id": "character_order:5"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 6,
+          "source_sample_id": "character_order:6"
+        },
+        {
+          "leaf_task": "mvbench_character_order",
+          "source_row_index": 7,
+          "source_sample_id": "character_order:7"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 0,
+          "source_sample_id": "action_localization:0"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 1,
+          "source_sample_id": "action_localization:1"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 2,
+          "source_sample_id": "action_localization:2"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 3,
+          "source_sample_id": "action_localization:3"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 4,
+          "source_sample_id": "action_localization:4"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 5,
+          "source_sample_id": "action_localization:5"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 6,
+          "source_sample_id": "action_localization:6"
+        },
+        {
+          "leaf_task": "mvbench_action_localization",
+          "source_row_index": 7,
+          "source_sample_id": "action_localization:7"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 0,
+          "source_sample_id": "counterfactual_inference:0"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 1,
+          "source_sample_id": "counterfactual_inference:1"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 2,
+          "source_sample_id": "counterfactual_inference:2"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 3,
+          "source_sample_id": "counterfactual_inference:3"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 4,
+          "source_sample_id": "counterfactual_inference:4"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 5,
+          "source_sample_id": "counterfactual_inference:5"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 6,
+          "source_sample_id": "counterfactual_inference:6"
+        },
+        {
+          "leaf_task": "mvbench_counterfactual_inference",
+          "source_row_index": 7,
+          "source_sample_id": "counterfactual_inference:7"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 0,
+          "source_sample_id": "fine_grained_action:0"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 1,
+          "source_sample_id": "fine_grained_action:1"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 2,
+          "source_sample_id": "fine_grained_action:2"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 3,
+          "source_sample_id": "fine_grained_action:3"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 4,
+          "source_sample_id": "fine_grained_action:4"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 5,
+          "source_sample_id": "fine_grained_action:5"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 6,
+          "source_sample_id": "fine_grained_action:6"
+        },
+        {
+          "leaf_task": "mvbench_fine_grained_action",
+          "source_row_index": 7,
+          "source_sample_id": "fine_grained_action:7"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 0,
+          "source_sample_id": "moving_attribute:0"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 1,
+          "source_sample_id": "moving_attribute:1"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 2,
+          "source_sample_id": "moving_attribute:2"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 3,
+          "source_sample_id": "moving_attribute:3"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 4,
+          "source_sample_id": "moving_attribute:4"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 5,
+          "source_sample_id": "moving_attribute:5"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 6,
+          "source_sample_id": "moving_attribute:6"
+        },
+        {
+          "leaf_task": "mvbench_moving_attribute",
+          "source_row_index": 7,
+          "source_sample_id": "moving_attribute:7"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 0,
+          "source_sample_id": "egocentric_navigation:0"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 1,
+          "source_sample_id": "egocentric_navigation:1"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 2,
+          "source_sample_id": "egocentric_navigation:2"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 3,
+          "source_sample_id": "egocentric_navigation:3"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 4,
+          "source_sample_id": "egocentric_navigation:4"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 5,
+          "source_sample_id": "egocentric_navigation:5"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 6,
+          "source_sample_id": "egocentric_navigation:6"
+        },
+        {
+          "leaf_task": "mvbench_egocentric_navigation",
+          "source_row_index": 7,
+          "source_sample_id": "egocentric_navigation:7"
+        }
+      ]
+    }
+  }
+}

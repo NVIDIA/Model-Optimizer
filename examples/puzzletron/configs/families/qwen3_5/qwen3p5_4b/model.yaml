@@ -1,0 +1,45 @@
+# @package _global_
+
+# Runnable public Hugging Face repository ID; this is not a placeholder.
+input_hf_model_path: Qwen/Qwen3.5-4B
+
+model_info:
+  # Immutable public identity used by the maintained 4B VLM smoke.
+  hf_repo: Qwen/Qwen3.5-4B
+  hf_revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  model_type: qwen3_5
+  architectures: [Qwen3_5ForConditionalGeneration]
+  num_hidden_layers: 32
+  hidden_size: 2560
+  intermediate_size: 9216
+  num_attention_heads: 16
+  num_key_value_heads: 4
+  head_dim: 256
+  vocab_size: 248320
+  tie_word_embeddings: true
+  max_position_embeddings: 262144
+  mtp_num_hidden_layers: 1
+  layer_counts:
+    linear_attention: 24
+    full_attention: 8
+  mamba:
+    linear_key_head_dim: 128
+    linear_num_key_heads: 16
+    linear_num_value_heads: 32
+    linear_value_head_dim: 128
+    linear_conv_kernel_dim: 4
+
+model:
+  revision: ${model_info.hf_revision}
+
+# Span light through roughly 20% whole-model pruning with aligned FFN widths.
+# Broader axes belong in opt-in campaign configurations.
+pruning:
+  intermediate_size_list: [8704, 8192, 7168, 6144, 5632, 5120, 4608]
+
+search_space:
+  axes:
+    ffn_intermediate:
+      enabled: true
+      teacher_value: 9216
+      values: [8704, 8192, 7168, 6144, 5632, 5120, 4608]

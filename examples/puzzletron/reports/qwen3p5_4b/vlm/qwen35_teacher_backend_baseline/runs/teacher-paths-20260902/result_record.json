@@ -1,0 +1,130 @@
+{
+  "schema": "modelopt.puzzletron-result-record/v1",
+  "record_id": "qwen3p5-4b-vlm-teacher-paths-20260902",
+  "evidence_status": "teacher_only",
+  "model": {
+    "id": "Qwen/Qwen3.5-4B",
+    "role": "teacher",
+    "revision": null,
+    "revision_status": "not_retained",
+    "reproduction_status": "not_reproducible",
+    "checkpoint_content_fingerprint": "c7aa3305feef58d231544c5df23c89d92d22e187a05926dd27b56bec33a4d355"
+  },
+  "campaign": {
+    "id": "qwen35_teacher_backend_baseline",
+    "modality": "vlm",
+    "objective": "Retain Qwen 3.5 teacher references for two evaluator paths."
+  },
+  "run": {
+    "id": "teacher-paths-20260902",
+    "recorded_date": "2026-09-02",
+    "completed_scope": "RealWorldQA 64 rows, MMMU 120 rows, and MVBench 160 rows once per evaluation path; RealWorldQA 64 rows once for the empty-system ablation",
+    "repetitions_per_condition": 1,
+    "identical_rows_across_paths": true
+  },
+  "provenance": {
+    "execution_source_revision": null,
+    "checkpoint_stage": "teacher",
+    "decoding": {
+      "do_sample": false,
+      "temperature": 0,
+      "seed": 42,
+      "batch_size": 1
+    },
+    "multimodal_preprocessing": {
+      "video_reader": "decord",
+      "fps": 2,
+      "max_frames": 32
+    }
+  },
+  "evaluation": {
+    "evaluation_contract_id": "qwen35-vlm-short-v1-exact-rows-v1",
+    "selection_method": "fixed ordered rows",
+    "row_selection_identity_sha256": "eaf88430a43e05da2de74775957a3b4707601920affa95cd5074864bba3abaed",
+    "row_selection_identity_method": "SHA-256 of canonical JSON containing evaluation_contract_id and an ordered tasks object with each dataset repository, revision, and row list",
+    "tasks": [
+      {"id": "realworldqa", "dataset_repository": "lmms-lab/RealWorldQA", "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c", "complete_rows": null, "selected_rows": 64},
+      {"id": "mmmu_val", "dataset_repository": "lmms-lab/MMMU", "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47", "complete_rows": null, "selected_rows": 120},
+      {"id": "mvbench", "dataset_repository": "OpenGVLab/MVBench", "dataset_revision": "a776e554280b99b70f00cc3eacd69a65e0727efc", "complete_rows": null, "selected_rows": 160}
+    ],
+    "conditions": [
+      {
+        "id": "generic-vllm-default",
+        "runtime_profile": "short-v1",
+        "profile_fingerprint_sha256": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
+        "profile_fingerprint_relation": "validated_successor",
+        "profile_fingerprint_relation_note": "The checked-in profile preserves the recorded evaluator, row, adapter, preprocessing, generation, and batch settings; the exact execution source revision was not retained.",
+        "row_manifest_sha256": null,
+        "evaluator_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+        "runtime_adapter": "vllm",
+        "prompt_serialization": "Puzzletron no-thinking template normalized into generic multimodal messages without a system message",
+        "probe_token_count_test_0": 59,
+        "video_timestamp_behavior": "sampled-frame timestamps omitted"
+      },
+      {
+        "id": "qwen-native-default",
+        "runtime_profile": "short-native-v1",
+        "profile_fingerprint_sha256": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
+        "profile_fingerprint_relation": "retained_execution_identity",
+        "profile_fingerprint_relation_note": "The fingerprint was retained with the completed Qwen-specific evaluation record.",
+        "row_manifest_sha256": "2b787b681463c474aacffe1d56c9c69f3c2f9d670d4576bdbdadc927e96edd50",
+        "evaluator_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
+        "runtime_adapter": "qwen3_5 Transformers",
+        "prompt_serialization": "Qwen-specific image and video messages with the adapter's default system-message behavior",
+        "probe_token_count_test_0": 70,
+        "video_timestamp_behavior": "sampled-frame timestamps included"
+      },
+      {
+        "id": "qwen-native-empty-system",
+        "runtime_profile": null,
+        "profile_fingerprint_sha256": null,
+        "profile_fingerprint_relation": "unavailable",
+        "profile_fingerprint_relation_note": "This prompt ablation was not represented by a checked-in versioned profile.",
+        "scope": "realworldqa only",
+        "row_manifest_sha256": "2b787b681463c474aacffe1d56c9c69f3c2f9d670d4576bdbdadc927e96edd50",
+        "evaluator_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
+        "runtime_adapter": "qwen3_5 Transformers",
+        "prompt_serialization": "Qwen-specific messages with an explicit empty system-message content field",
+        "probe_token_count_test_0": 64,
+        "video_timestamp_behavior": "not applicable to the image-only ablation"
+      }
+    ]
+  },
+  "quality_evidence": {
+    "metrics_file": "metrics.csv",
+    "claim_boundary": "Preliminary evaluation-path teacher references only; the differences are not an inference-engine causal comparison.",
+    "uncertainty": null
+  },
+  "reproduction": {
+    "status": "not_reproducible",
+    "blocked_by": ["model.revision"],
+    "prerequisites": [
+      "Install the base Puzzletron requirements and the evaluator-specific requirements described in examples/puzzletron/docs/vlm_checkpoint_evaluation.md.",
+      "Download the named model and verify its content fingerprint; the exact upstream model revision was not retained. Cache the three datasets at the revisions recorded above; do not add them to Git."
+    ],
+    "generic_command": "python -m examples.puzzletron.evaluation.vlm.run --checkpoint /path/to/checkpoint --output-dir /path/to/results/generic --hf-home /path/to/hf-cache --profile short-v1",
+    "qwen_specific_command": "python -m examples.puzzletron.evaluation.vlm.run --checkpoint /path/to/checkpoint --output-dir /path/to/results/qwen-specific --hf-home /path/to/hf-cache --profile short-native-v1",
+    "empty_system_ablation_command": null
+  },
+  "artifacts": {
+    "repository": [
+      {"path": "examples/puzzletron/evaluation/vlm/profiles/short-v1.json", "sha256": "a6e09d0ece6ffb0e03963bc7ebf68991c4a7c64bc1dc83911960492d75e21ede", "role": "generic path profile source"},
+      {"path": "examples/puzzletron/evaluation/vlm/profiles/short-native-v1.json", "sha256": "d4e312a8885d0d24958ec08a9df481fd0ca73bcc93cae5e13fc563f0a2f772c4", "role": "Qwen-specific profile overlay"}
+    ],
+    "external": [
+      {"logical_id": "qwen3p5-4b-generic-vllm-default-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"},
+      {"logical_id": "qwen3p5-4b-qwen-native-default-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"},
+      {"logical_id": "qwen3p5-4b-qwen-native-empty-system-raw-evaluator-export", "role": "raw evaluator export", "sha256": null, "byte_size": null, "availability": "not_published"}
+    ]
+  },
+  "limitations": [
+    "No identity-matched student result is present.",
+    "Every condition was executed once; no repeated-run uncertainty is available.",
+    "The two paths differ in evaluator revision, adapter, prompt serialization, and video timestamp policy.",
+    "Correct-count numerators and uncertainty estimates were not retained as first-class fields.",
+    "Complete benchmark sizes at the pinned dataset revisions were not retained.",
+    "The exact model revision, generic-path row-manifest byte hash, execution source revision, accelerator topology, and per-condition GPU-hours were not retained.",
+    "External artifact checksums and byte sizes were not retained.",
+    "The empty-system ablation has no checked-in versioned runtime profile or sanitized reproduction command."
+  ]
+}

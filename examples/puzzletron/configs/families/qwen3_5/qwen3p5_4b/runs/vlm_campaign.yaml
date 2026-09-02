@@ -1,0 +1,6 @@
+# @package _global_
+
+# Deprecated compatibility alias. Use ffn_width_10to20pct_kd_search.
+defaults:
+  - ffn_width_10to20pct_kd_search
+  - _self_

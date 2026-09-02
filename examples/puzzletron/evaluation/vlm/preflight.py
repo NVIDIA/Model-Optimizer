@@ -19,16 +19,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import argparse
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import model, profile, suites, tasks
+from examples.puzzletron.evaluation.vlm import contracts, model, profile, suites, tasks
 
 __all__ = ["PreparedSuite", "prepare", "settings"]
 
@@ -38,34 +37,49 @@ class PreparedSuite:
     """Validated local inputs and policy for one VLM suite execution."""
 
     suite: str
+    source_tasks: tuple[str, ...]
+    profile_task_leaves: tuple[str, ...] | None
     dataset_snapshots: dict[str, Path]
     quick_manifest: dict[str, object] | None
     hf_home: Path
     judge_env: dict[str, str]
     execution_policy: suites.ExecutionPolicy
+    profile_contract: contracts.ProfileContract | None
     report: dict[str, object]
 
 
+def _backend_policy(
+    profile_contract: contracts.ProfileContract | None,
+) -> dict[str, object]:
+    """Return the selected profile's backend contract or the legacy default."""
+    if profile_contract is None:
+        return {"name": "vllm"}
+    return cast("dict[str, object]", profile_contract.manifest["backend"])
+
+
 def prepare(args: argparse.Namespace) -> PreparedSuite:
-    """Validate model, task, dataset, media, and judge inputs for one suite."""
-    requested_suite = args.suite or "short"
-    suite = suites.canonical_suite(requested_suite)
-    if suite != requested_suite:
-        warnings.warn(
-            f"VLM suite {requested_suite!r} is deprecated; use {suite!r}",
-            FutureWarning,
-            stacklevel=2,
-        )
+    """Resolve and validate everything needed before model loading starts."""
+    profile_name = getattr(args, "profile", None)
+    profile_contract = contracts.load_profile(profile_name) if profile_name is not None else None
+    suite, source_tasks, profile_task_leaves = _resolve_task_selection(args, profile_contract)
     model.verify_checkpoint(args.checkpoint, profile="VLM benchmark")
 
-    source_tasks = suites.source_tasks(suite)
     execution_policy = suites.execution_policy(suite, timeout_seconds=args.timeout_seconds)
     revisions = {task: profile.VLM_BENCHMARK_DATASETS[task].revision for task in source_tasks}
-    quick_manifest = suites.load_quick_manifest(args.quick_manifest) if suite == "quick" else None
-    if suite != "quick" and args.quick_manifest is not None:
-        raise ValueError("--quick-manifest is valid only for the quick suite")
+    row_manifest = _row_manifest(
+        args,
+        suite,
+        source_tasks,
+        profile_contract,
+        profile_task_leaves=profile_task_leaves,
+    )
 
-    lmms_eval_revision = checkpoint.verify_lmms_eval_revision()
+    expected_lmms_eval_revision = (
+        str(profile_contract.manifest["lmms_eval_revision"])
+        if profile_contract is not None
+        else checkpoint.LMMS_EVAL_REVISION
+    )
+    lmms_eval_revision = checkpoint.verify_lmms_eval_revision(expected_lmms_eval_revision)
     for task in source_tasks:
         tasks.task_config(profile.VLM_BENCHMARK_DATASETS[task].task_config)
 
@@ -82,21 +96,119 @@ def prepare(args: argparse.Namespace) -> PreparedSuite:
         source_tasks=source_tasks,
         revisions=revisions,
         dataset_snapshots=dataset_snapshots,
-        quick_manifest=quick_manifest,
+        quick_manifest=row_manifest,
         hf_home=hf_home,
         judge_policy=judge_policy,
         lmms_eval_revision=lmms_eval_revision,
         execution_policy=execution_policy,
+        profile_contract=profile_contract,
+        profile_task_leaves=profile_task_leaves,
     )
     return PreparedSuite(
         suite=suite,
+        source_tasks=source_tasks,
+        profile_task_leaves=profile_task_leaves,
         dataset_snapshots=dataset_snapshots,
-        quick_manifest=quick_manifest,
+        quick_manifest=row_manifest,
         hf_home=hf_home,
         judge_env=judge_env,
         execution_policy=execution_policy,
+        profile_contract=profile_contract,
         report=report,
     )
+
+
+def _resolve_task_selection(
+    args: argparse.Namespace,
+    profile_contract: contracts.ProfileContract | None,
+) -> tuple[str, tuple[str, ...], tuple[str, ...] | None]:
+    """Resolve the canonical suite, selected tasks, and optional group shard."""
+    requested_suite = (
+        profile_contract.name if profile_contract is not None else args.suite or "short"
+    )
+    suite = suites.canonical_suite(requested_suite)
+    if profile_contract is not None:
+        if args.seed != profile_contract.manifest["seed"]:
+            raise ValueError("--seed cannot override a versioned evaluation profile")
+        if args.batch_size != profile_contract.manifest["batch_size"]:
+            raise ValueError("--batch-size cannot override a versioned evaluation profile")
+
+    profile_task = getattr(args, "profile_task", None)
+    profile_task_shard = getattr(args, "profile_task_shard", None)
+    if profile_task is not None:
+        if profile_contract is None:
+            raise ValueError("--profile-task requires a versioned evaluation profile")
+        if profile_contract.name not in {"full-v1", "short-all-native-v1"}:
+            raise ValueError("--profile-task is supported only for full-v1 and short-all-native-v1")
+    if profile_task_shard is not None and profile_task is None:
+        raise ValueError("--profile-task-shard requires --profile-task")
+
+    source_tasks = suites.source_tasks(suite)
+    if profile_task is not None:
+        if profile_task not in source_tasks:
+            raise ValueError(f"--profile-task is not part of {suite}: {profile_task}")
+        source_tasks = (profile_task,)
+    return suite, source_tasks, _profile_task_leaves(profile_task, profile_task_shard)
+
+
+def _row_manifest(
+    args: argparse.Namespace,
+    suite: str,
+    source_tasks: tuple[str, ...],
+    profile_contract: contracts.ProfileContract | None,
+    *,
+    profile_task_leaves: tuple[str, ...] | None,
+) -> dict[str, object] | None:
+    """Load the exact-row selection used by a profile or the legacy quick suite."""
+    if profile_contract is not None:
+        if args.quick_manifest is not None:
+            raise ValueError("--quick-manifest cannot override a versioned evaluation profile")
+        exact_rows = profile_contract.exact_rows
+        if exact_rows is None:
+            return None
+        profile_task = getattr(args, "profile_task", None)
+        if profile_task is not None:
+            manifest_tasks = cast("dict[str, object]", exact_rows["tasks"])
+            task_entry = cast("dict[str, object]", manifest_tasks[profile_task])
+            if profile_task_leaves is not None:
+                selected_leaves = {f"{profile_task}_{leaf}" for leaf in profile_task_leaves}
+                rows = cast("list[dict[str, object]]", task_entry["rows"])
+                task_entry = {
+                    **task_entry,
+                    "rows": [row for row in rows if row.get("leaf_task") in selected_leaves],
+                }
+            exact_rows = {**exact_rows, "tasks": {profile_task: task_entry}}
+        return suites.validate_exact_rows_manifest(
+            exact_rows,
+            expected_revision=str(profile_contract.manifest["lmms_eval_revision"]),
+            expected_tasks=source_tasks,
+        )
+    if suite == "quick":
+        return suites.load_quick_manifest(args.quick_manifest)
+    if args.quick_manifest is not None:
+        raise ValueError("--quick-manifest is valid only for the quick suite")
+    return None
+
+
+def _profile_task_leaves(
+    profile_task: str | None, shard: tuple[int, int] | None
+) -> tuple[str, ...] | None:
+    """Resolve a grouped profile task's deterministic leaf partition."""
+    if shard is None:
+        return None
+    if profile_task is None:
+        raise ValueError("--profile-task-shard requires --profile-task")
+    leaves = {
+        "mvbench": suites.MVBENCH_LEAF_TASKS,
+        "video_mmmu": suites.VIDEO_MMMU_LEAF_TASKS,
+    }.get(profile_task)
+    if leaves is None:
+        raise ValueError("--profile-task-shard supports only mvbench and video_mmmu")
+    index, count = shard
+    selected = leaves[index::count]
+    if not selected:
+        raise ValueError("--profile-task-shard selects no task leaves")
+    return selected
 
 
 def _hf_home(configured: Path | None) -> Path:
@@ -176,23 +288,53 @@ def _report(
     judge_policy: dict[str, object] | None,
     lmms_eval_revision: str,
     execution_policy: suites.ExecutionPolicy,
+    profile_contract: contracts.ProfileContract | None,
+    profile_task_leaves: tuple[str, ...] | None,
 ) -> dict[str, object]:
+    profile_task_shard = getattr(args, "profile_task_shard", None)
+    backend = _backend_policy(profile_contract)
+    model_backend = str(backend["name"])
     return {
+        "schema": "modelopt.vlm-evaluation-preflight/v1",
         "profile": suites.EVALUATION_PROFILE,
+        "profile_name": profile_contract.name if profile_contract is not None else None,
+        "profile_schema": (
+            profile_contract.manifest["schema"] if profile_contract is not None else None
+        ),
+        "profile_fingerprint": (
+            profile_contract.fingerprint if profile_contract is not None else None
+        ),
         "suite": suite,
         "checkpoint": str(args.checkpoint),
         "lmms_eval_revision": lmms_eval_revision,
-        "model_backend": "qwen3_5",
-        "backend_limitations": [],
+        "model_backend": model_backend,
+        "backend_limitations": (
+            ["generic vLLM video messages do not preserve native Qwen 3.5 timestamps"]
+            if model_backend == "vllm"
+            else []
+        ),
         "source_tasks": list(source_tasks),
+        "profile_task": getattr(args, "profile_task", None),
+        "profile_task_shard": (
+            {
+                "index": profile_task_shard[0],
+                "count": profile_task_shard[1],
+                "leaves": list(profile_task_leaves or ()),
+            }
+            if profile_task_shard is not None
+            else None
+        ),
         "dataset_revisions": revisions,
         "dataset_snapshots": {task: str(snapshot) for task, snapshot in dataset_snapshots.items()},
         "hf_home": str(hf_home),
         "frame_policy": execution_policy["frame"],
         "generation_policy": execution_policy["generation"],
+        "batch_size": args.batch_size,
         "sample_limit": execution_policy["limit"],
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "quick_selected_rows": suites.QUICK_SELECTED_ROWS if suite == "quick" else None,
+        "quick_selected_rows": (
+            suites.manifest_selected_rows(quick_manifest) if quick_manifest is not None else None
+        ),
         "judge_free_mmvu_rows": (
             [row[0] for row in suites.MMVU_SMOKE_ROWS] if suite == "mmvu-smoke" else None
         ),
@@ -214,24 +356,21 @@ def settings(
     prepared: PreparedSuite,
 ) -> dict[str, object]:
     """Build shared runner settings for a validated VLM suite."""
-    _verify_video_reader(prepared.suite)
+    _verify_video_reader(prepared.source_tasks)
     execution_policy = prepared.execution_policy
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
-    return {
-        "model": "qwen3_5",
-        "checkpoint_arg": "pretrained",
+    backend = _backend_policy(prepared.profile_contract)
+    model_backend = str(backend["name"])
+    _verify_backend_dependencies(model_backend)
+    common = {
+        "model": model_backend,
         "tasks": ",".join(configured_tasks),
         "limit": execution_policy["limit"],
         "batch_size": args.batch_size,
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
         "log_samples": prepared.suite in {"quick", "short", suites.TASK_PREFIX100_REPEAT2_SUITE},
-        "model_args": {
-            "enable_thinking": generation_policy["enable_thinking"],
-            "fps": frame_policy["fps"],
-            "max_frames": frame_policy["max_frames"],
-        },
         "gen_kwargs": {
             "temperature": generation_policy["temperature"],
             "do_sample": generation_policy["do_sample"],
@@ -246,16 +385,48 @@ def settings(
         },
         "extra_args": ["--include_path", str(tasks_root)],
     }
+    if model_backend == "qwen3_5":
+        return {
+            **common,
+            "checkpoint_arg": "pretrained",
+            "model_args": {
+                "attn_implementation": backend["attention_implementation"],
+                "device": "cuda",
+                "device_map": "cuda",
+                "enable_thinking": backend["enable_thinking"],
+                "fps": frame_policy["fps"],
+                "max_frames": frame_policy["max_frames"],
+            },
+        }
+    chat_template = model.no_think_chat_template(args.checkpoint, tasks_root)
+    return {
+        **common,
+        "checkpoint_arg": "model",
+        "reasoning_parser": backend.get("reasoning_parser", "qwen3"),
+        "model_args": {
+            "chat_template": str(chat_template),
+            "fps": frame_policy["fps"],
+            "max_frame_num": frame_policy["max_frames"],
+        },
+    }
 
 
-def _verify_video_reader(suite: str) -> None:
+def _verify_video_reader(source_tasks: tuple[str, ...]) -> None:
     """Fail before evaluation when a selected video task has no decord reader."""
     video_selected = any(
-        profile.VLM_BENCHMARK_DATASETS[task].media_dir is not None
-        for task in suites.source_tasks(suite)
+        profile.VLM_BENCHMARK_DATASETS[task].media_dir is not None for task in source_tasks
     )
     if video_selected and importlib.util.find_spec("decord") is None:
         raise RuntimeError(
             "video evaluation requires an installed decord-compatible reader; install one "
             "supported by this Python and platform, or use the supported Puzzletron environment"
+        )
+
+
+def _verify_backend_dependencies(model_backend: str) -> None:
+    """Fail before native Qwen evaluation when its vision utilities are unavailable."""
+    if model_backend == "qwen3_5" and importlib.util.find_spec("qwen_vl_utils") is None:
+        raise RuntimeError(
+            "native Qwen 3.5 evaluation requires qwen-vl-utils; install the native VLM "
+            "requirements or use the supported Puzzletron environment"
         )

@@ -20,12 +20,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from collections import Counter
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from examples.puzzletron.evaluation import checkpoint
-from examples.puzzletron.evaluation.vlm import profile
+from examples.puzzletron.evaluation.vlm import contracts, profile
 
 __all__ = [
     "ADAPTER_SMOKE_TASKS",
@@ -36,6 +37,7 @@ __all__ = [
     "EVALUATION_PROFILE",
     "MMVU_SMOKE_ROWS",
     "MVBENCH_LEAF_TASKS",
+    "PROFILE_NAMES",
     "QUICK_SELECTED_ROWS",
     "QUICK_TASKS",
     "SHORT_TASKS",
@@ -50,15 +52,22 @@ __all__ = [
     "execution_policy",
     "generation_kwargs",
     "load_quick_manifest",
+    "manifest_selected_rows",
     "manifest_sha256",
     "offline_dataset_snapshot",
     "source_tasks",
     "task_name",
+    "validate_exact_rows_manifest",
+    "validate_quick_manifest",
 ]
 
 EVALUATION_PROFILE = "qwen35-vlm-benchmarks"
 TASK_PREFIX100_REPEAT2_SUITE = "realworldqa-mmmu-prefix100-repeat2"
-DEPRECATED_SUITE_ALIASES = {"e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE}
+DEPRECATED_SUITE_ALIASES = {
+    "e2e-full-eval": TASK_PREFIX100_REPEAT2_SUITE,
+    "realworldqa-mmmu-prefix100-x2": TASK_PREFIX100_REPEAT2_SUITE,
+}
+PROFILE_NAMES = contracts.PROFILE_NAMES
 ALL_TASKS = profile.VLM_BENCHMARK_TASKS
 SHORT_TASKS = ("realworldqa", "mmmu_val")
 QUICK_TASKS = ("realworldqa", "mmmu_val", "mvbench")
@@ -122,7 +131,6 @@ class FramePolicy(TypedDict):
 class GenerationPolicy(TypedDict):
     """Generation fields shared by provenance and execution."""
 
-    enable_thinking: bool
     temperature: int
     do_sample: bool
 
@@ -137,9 +145,24 @@ class ExecutionPolicy(TypedDict):
     timeout_seconds: float
 
 
+def canonical_suite(suite: str) -> str:
+    """Return the explicit suite name used in reports and run identities."""
+    canonical = DEPRECATED_SUITE_ALIASES.get(suite)
+    if canonical is None:
+        return suite
+    warnings.warn(
+        f"{suite} is deprecated; use {canonical}",
+        FutureWarning,
+        stacklevel=2,
+    )
+    return canonical
+
+
 def source_tasks(suite: str) -> tuple[str, ...]:
     """Return the upstream task names selected by a VLM suite."""
     suite = canonical_suite(suite)
+    if suite in PROFILE_NAMES:
+        return contracts.load_profile(suite).source_tasks
     if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE}:
         return SHORT_TASKS
     if suite == "quick":
@@ -157,33 +180,28 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     """Resolve the provenance and runtime execution fields for one suite."""
     suite = canonical_suite(suite)
     source_tasks(suite)
-    is_smoke = suite in SMOKE_SUITES
+    is_versioned_short = suite in contracts.SHORT_PROFILE_NAMES
+    is_smoke = suite in SMOKE_SUITES or is_versioned_short
     default_timeout_seconds = (
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS
     )
+    if suite == "realworldqa-smoke":
+        limit = 2
+    elif is_smoke and not is_versioned_short:
+        limit = 8
+    elif suite == TASK_PREFIX100_REPEAT2_SUITE:
+        limit = 100
+    else:
+        limit = None
     return {
         "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
-        "generation": {"enable_thinking": False, "temperature": 0, "do_sample": False},
-        "limit": (
-            2
-            if suite == "realworldqa-smoke"
-            else 8
-            if is_smoke
-            else 100
-            if suite == TASK_PREFIX100_REPEAT2_SUITE
-            else None
-        ),
+        "generation": {"temperature": 0, "do_sample": False},
+        "limit": limit,
         "repetitions": 2 if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE} else 1,
         "timeout_seconds": (
             timeout_seconds if timeout_seconds is not None else default_timeout_seconds
         ),
     }
-
-
-def canonical_suite(suite: str) -> str:
-    """Resolve a deprecated suite alias to its explicit canonical identity."""
-
-    return DEPRECATED_SUITE_ALIASES.get(suite, suite)
 
 
 def task_name(task: str, *, leaf: str | None = None) -> str:
@@ -200,28 +218,59 @@ def load_quick_manifest(path: Path | None) -> dict[str, object]:
         manifest = json.loads(path.expanduser().absolute().read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"quick manifest is unreadable: {path}") from error
-    if not isinstance(manifest, dict):
-        raise ValueError("quick manifest must contain an object")
-    if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
-        raise ValueError("quick manifest schema must be modelopt.vlm-benchmark-quick/v1")
-    if manifest.get("lmms_eval_revision") != checkpoint.LMMS_EVAL_REVISION:
-        raise ValueError("quick manifest lmms_eval_revision differs from the pinned profile")
-    manifest_tasks = manifest.get("tasks")
-    if not isinstance(manifest_tasks, dict) or set(manifest_tasks) != set(QUICK_TASKS):
-        raise ValueError("quick manifest must contain exactly realworldqa, mmmu_val, and mvbench")
+    return validate_quick_manifest(manifest)
+
+
+def validate_quick_manifest(
+    manifest: object, *, expected_revision: str = checkpoint.LMMS_EVAL_REVISION
+) -> dict[str, object]:
+    """Validate an exact-row quick-suite manifest already loaded in memory."""
+    validated = validate_exact_rows_manifest(
+        manifest,
+        expected_revision=expected_revision,
+        expected_tasks=QUICK_TASKS,
+    )
+    manifest_tasks = cast("dict[str, dict[str, object]]", validated["tasks"])
     for task, expected_count in _QUICK_COUNTS.items():
-        _validate_manifest_task(task, manifest_tasks[task], expected_count)
+        rows = manifest_tasks[task]["rows"]
+        if not isinstance(rows, list) or len(rows) != expected_count:
+            raise ValueError(f"quick manifest {task} must select exactly {expected_count} rows")
+    leaf_counts = Counter(str(row["leaf_task"]) for row in manifest_tasks["mvbench"]["rows"])
+    expected = {f"mvbench_{leaf}": 8 for leaf in MVBENCH_LEAF_TASKS}
+    if leaf_counts != expected:
+        raise ValueError("quick manifest MVBench must select exactly 8 rows per leaf task")
+    return validated
+
+
+def validate_exact_rows_manifest(
+    manifest: object,
+    *,
+    expected_revision: str,
+    expected_tasks: tuple[str, ...],
+) -> dict[str, object]:
+    """Validate a pinned exact-row manifest for a versioned profile."""
+    if not isinstance(manifest, dict):
+        raise ValueError("exact-row manifest must contain an object")
+    if manifest.get("schema") != "modelopt.vlm-benchmark-quick/v1":
+        raise ValueError("exact-row manifest schema must be modelopt.vlm-benchmark-quick/v1")
+    if manifest.get("lmms_eval_revision") != expected_revision:
+        raise ValueError("exact-row manifest lmms_eval_revision differs from the pinned profile")
+    manifest_tasks = manifest.get("tasks")
+    if not isinstance(manifest_tasks, dict) or tuple(manifest_tasks) != expected_tasks:
+        raise ValueError("exact-row manifest tasks differ from the selected profile")
+    for task in expected_tasks:
+        _validate_manifest_task(task, manifest_tasks[task])
     return manifest
 
 
-def _validate_manifest_task(task: str, entry: object, expected_count: int) -> None:
+def _validate_manifest_task(task: str, entry: object) -> None:
     if not isinstance(entry, dict):
-        raise ValueError(f"quick manifest task entry must be an object: {task}")
+        raise ValueError(f"exact-row manifest task entry must be an object: {task}")
     if entry.get("dataset_revision") != profile.VLM_BENCHMARK_DATASETS[task].revision:
-        raise ValueError(f"quick manifest dataset revision differs for {task}")
+        raise ValueError(f"exact-row manifest dataset revision differs for {task}")
     rows = entry.get("rows")
-    if not isinstance(rows, list) or len(rows) != expected_count:
-        raise ValueError(f"quick manifest {task} must select exactly {expected_count} rows")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError(f"exact-row manifest {task} must select at least one row")
 
     seen: set[tuple[str, int]] = set()
     for row in rows:
@@ -240,31 +289,34 @@ def _validate_manifest_task(task: str, entry: object, expected_count: int) -> No
             raise ValueError(f"quick manifest {task} contains a duplicate source row")
         seen.add(identity)
 
-    if task == "mvbench":
-        leaf_counts = Counter(str(row["leaf_task"]) for row in rows)
-        expected = {f"mvbench_{leaf}": 8 for leaf in MVBENCH_LEAF_TASKS}
-        if leaf_counts != expected:
-            raise ValueError("quick manifest MVBench must select exactly 8 rows per leaf task")
-
 
 def _validate_source_identity(task: str, *, index: int, source_id: str, leaf: object) -> None:
     if task == "realworldqa" and source_id != f"test:{index}":
         raise ValueError("quick manifest RealWorldQA source identity mismatch")
-    if task == "mvbench":
-        expected_leaves = {f"mvbench_{name}" for name in MVBENCH_LEAF_TASKS}
+    if task in {"mvbench", "video_mmmu"}:
+        leaves = MVBENCH_LEAF_TASKS if task == "mvbench" else VIDEO_MMMU_LEAF_TASKS
+        expected_leaves = {f"{task}_{name}" for name in leaves}
         if leaf not in expected_leaves:
-            raise ValueError("quick manifest MVBench row has an invalid leaf_task")
-        config = str(leaf).removeprefix("mvbench_")
+            raise ValueError(f"exact-row manifest {task} row has an invalid leaf_task")
+        config = str(leaf).removeprefix(f"{task}_")
         if source_id != f"{config}:{index}":
-            raise ValueError("quick manifest MVBench source identity mismatch")
+            raise ValueError(f"exact-row manifest {task} source identity mismatch")
+    elif task not in {"realworldqa", "mmmu_val"} and source_id != f"{task}:{index}":
+        raise ValueError(f"exact-row manifest {task} source identity mismatch")
     elif leaf is not None:
-        raise ValueError(f"quick manifest {task} rows must not set leaf_task")
+        raise ValueError(f"exact-row manifest {task} rows must not set leaf_task")
 
 
 def manifest_sha256(manifest: dict[str, object]) -> str:
     """Return the digest of a canonical quick-suite manifest."""
     canonical = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def manifest_selected_rows(manifest: dict[str, object]) -> int:
+    """Return the total number of exact rows selected across all tasks."""
+    manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
+    return sum(len(cast("list[object]", entry["rows"])) for entry in manifest_tasks.values())
 
 
 def offline_dataset_snapshot(hf_home: Path, task: str, revision: str) -> Path:

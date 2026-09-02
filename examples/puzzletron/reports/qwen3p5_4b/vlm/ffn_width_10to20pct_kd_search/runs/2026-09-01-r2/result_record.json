@@ -1,0 +1,482 @@
+{
+  "schema": "modelopt.puzzletron-result-record/v1",
+  "record_id": "qwen3p5_4b-vlm-ffn_width_10to20pct_kd_search-2026-09-01-r2",
+  "evidence_status": "preliminary",
+  "model": {
+    "repository": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "architecture": "Qwen3_5ForConditionalGeneration",
+    "teacher_parameters": 5295564288,
+    "teacher_checkpoint_fingerprint_sha256": null
+  },
+  "campaign": {
+    "id": "qwen35-4b-vlm-ffn-width-10to20pct-kd-search-20260901-r2",
+    "model": "qwen3p5_4b",
+    "modality": "vlm",
+    "method": "structured_ffn_width_pruning_with_kd",
+    "search_scope": {
+      "axis": "language_ffn_intermediate_size",
+      "parameter_reduction_bands_percent": [10, 15, 20]
+    }
+  },
+  "run": {
+    "id": "2026-09-01-r2",
+    "recorded_at": "2026-09-02",
+    "completed_scope": [
+      "mip",
+      "materialization",
+      "serving_screen",
+      "64_step_tp2_kd",
+      "post_kd_loss_screen",
+      "qwen35-vlm-rwqa100-mmmu100-prefix100-x2-v1"
+    ],
+    "configured_but_not_run": [
+      "exploratory_256_step_finalist_kd",
+      "final_64_sample_loss_evaluation",
+      "final_bounded_teacher_comparison"
+    ]
+  },
+  "provenance": {
+    "calibration_data": {
+      "repository": "nvidia/Nemotron-VLM-Dataset-v2",
+      "revision": "51f4f4d219315c3283950994d4eb3d7fc30aa87b",
+      "selected_rows": 64,
+      "subset_counts": {
+        "sparsetables": 22,
+        "plotqa_cot": 21,
+        "wiki_en": 21
+      },
+      "rejected_rows": 0,
+      "manifest_sha256": "0a6d8958202a426dccc43b2886efa56c5f4745d8e8a0dc74aecc9fba6fb9a8f8",
+      "samples_sha256": "5f865fb14ec57d2737ee60cb395aa87bf1f9b67ee365ffd5f3bd96efa63ab9cf"
+    },
+    "code": {
+      "execution_revision": null,
+      "reproduction_revision": null,
+      "checked_in_relationship": "validated_successor",
+      "note": "The checked-in source contains the executed campaign behavior, but the exact runtime Git revision was not retained."
+    },
+    "configuration": {
+      "experiment": {
+        "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
+        "packaged_sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a",
+        "execution_equivalent_sha256": "c4e6be62bf55980d23d20a12f35e11261d8dffbe59a1f457c7bccec6cc84ec06",
+        "relationship": "canonical_profile_alias_and_comments_only"
+      },
+      "execution": {
+        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+        "sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce"
+      },
+      "runner_template": {
+        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+        "sha256": "f3450eaa14acdb28316ec7aeddcbe8a212bc0ced09c64cf16d97ca7a33ea8191",
+        "relationship": "illustrative_placeholder"
+      }
+    }
+  },
+  "reproduction": {
+    "guide": "examples/puzzletron/reports/qwen3p5_4b/vlm/ffn_width_10to20pct_kd_search/README.md",
+    "dry_run_command": [
+      "python",
+      "examples/puzzletron/orchestrate.py",
+      "--experiment",
+      "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
+      "--runner",
+      "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+      "--execution",
+      "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+      "--stage",
+      "full",
+      "--dry-run"
+    ],
+    "launch_command": [
+      "python",
+      "examples/puzzletron/orchestrate.py",
+      "--experiment",
+      "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
+      "--runner",
+      "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+      "--execution",
+      "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+      "--stage",
+      "full"
+    ],
+    "prerequisites": [
+      "Replace every runner-template placeholder with a reviewed site contract.",
+      "Make the pinned model and dataset revisions available to every worker.",
+      "Verify generated scheduler requests and resource topology before launch.",
+      "Use a new run root unless resuming the exact same hashed inputs."
+    ]
+  },
+  "artifacts": {
+    "repository": [
+      {
+        "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
+        "role": "validated_successor_experiment_recipe",
+        "sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a"
+      },
+      {
+        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
+        "role": "execution_recipe",
+        "sha256": "07d460e2894259c43bc4cc446dedd2ad5a27020f92c9de6724ca502e88f823ce"
+      },
+      {
+        "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/runner.slurm.yaml",
+        "role": "illustrative_runner_template",
+        "sha256": "f3450eaa14acdb28316ec7aeddcbe8a212bc0ced09c64cf16d97ca7a33ea8191"
+      }
+    ],
+    "external": [
+      {
+        "artifact_id": "qwen35-4b-vlm-campaign-20260901-r2:mip-manifest",
+        "role": "runtime_manifest_source_evidence",
+        "sha256": "3add8ef7c75f9dca634b5d856437f6176963679495b6c4dd4cafabd1ed1dec51",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_405fd428ca9a80e8:online-eval-summary",
+        "role": "pre_kd_loss_summary",
+        "sha256": "45445fe54c99563334080ca4e845b9dc8244682c430756396b182c858c8dae49",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_2b1b1e6c1c148dca:materialization-summary",
+        "role": "materialized_checkpoint_summary",
+        "sha256": "fc89906dba6eae61e81b824b060e9f6e966b8edd7fb56e837a02c942d2a4ed84",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_88db50d1a89078d4:serving-summary",
+        "role": "serving_screen_summary",
+        "sha256": "5a5cfe07064b6c6e5e09ec7734562994cf522b1956cafbb7271fde29726226b6",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_75b78b7093bbd22e:kd-summary",
+        "role": "canonical_64_step_tp2_kd_summary",
+        "sha256": "557797a30317cf3b45be2b58c3c48bd01c8a39d932d0cfb8aba455c28cfef90f",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_75b78b7093bbd22e:kd-observations",
+        "role": "canonical_64_step_tp2_kd_observations",
+        "sha256": "867e1c8b81f04f5adc1fd0baa664bdff079d1850dc4af92d82fb66df1355674e",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_75b78b7093bbd22e:architecture_7160bc27bcdc6149:consolidated",
+        "role": "post_kd_student_checkpoint_tree",
+        "sha256": "b806b549aa280c9a37d4521578b54fd0133d3f2f1abdc0c8d50fd7ee4c89bd4c",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_75b78b7093bbd22e:architecture_26e8c2778b31ebe5:consolidated",
+        "role": "post_kd_student_checkpoint_tree",
+        "sha256": "34fec8d221bc8460e12c0beab6c3c5a7d18a158e6b54c96385bfdf89258e9205",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_75b78b7093bbd22e:architecture_56b7819afaa7918f:consolidated",
+        "role": "post_kd_student_checkpoint_tree",
+        "sha256": "7f617ec834c41c48b9b3aa47026d2bb8dc4ba814f41413202d142659464b0060",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_6553c52e143d139f:post-kd-loss-summary",
+        "role": "post_kd_loss_summary",
+        "sha256": "e54b24d0f9ffe01a6f50b48cb8b878489700907bde55aa6a3dc1e60429e5f0ad",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_1bae37523252d605:quality-summary",
+        "role": "post_kd_downstream_summary",
+        "sha256": "bdf1c325a05b986ee577403f3fb77d7d625487d6ee3296e928c6103d11e78bec",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "post_mip_execution_1bae37523252d605:quality-observations",
+        "role": "post_kd_downstream_observations",
+        "sha256": "2301fc276caa4725c9198777f9e7a35b9f99c6678c8d8cf475d88ba81e7ed08c",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "teacher-qwen35-vlm-e2e-full-v2-no-thinking:result",
+        "role": "teacher_downstream_result",
+        "sha256": "dbe759ec1dfc9e5b07c0de8315ea2c0bb7ee9bf363d7ead0cbad8d46e62354f6",
+        "byte_size": null
+      },
+      {
+        "artifact_id": "teacher-qwen35-vlm-e2e-full-v2-no-thinking:summary",
+        "role": "teacher_downstream_summary",
+        "sha256": "e5b07aa2f5cf6b578e6f633816d072f55c02752c7452bef38e1ac8e2065a9973",
+        "byte_size": null
+      }
+    ]
+  },
+  "pruning": {
+    "axis": "language_ffn_intermediate_size",
+    "teacher_width": 9216,
+    "layer_count": 32,
+    "layer_order": "language_model_layer_index_0_through_31",
+    "candidates": [
+      {
+        "architecture_id": "architecture_7160bc27bcdc6149",
+        "origin_labels": ["heterogeneous", "homogeneous"],
+        "deduplicated_physical_student": true,
+        "parameters": 4792247808,
+        "parameter_reduction_percent": 9.5045,
+        "uniform_language_ffn_intermediate_size": 7168
+      },
+      {
+        "architecture_id": "architecture_26e8c2778b31ebe5",
+        "origin_labels": ["heterogeneous", "homogeneous"],
+        "deduplicated_physical_student": true,
+        "parameters": 4540589568,
+        "parameter_reduction_percent": 14.2567,
+        "uniform_language_ffn_intermediate_size": 6144
+      },
+      {
+        "architecture_id": "architecture_56b7819afaa7918f",
+        "origin_labels": ["heterogeneous", "homogeneous"],
+        "deduplicated_physical_student": true,
+        "parameters": 4288931328,
+        "parameter_reduction_percent": 19.009,
+        "uniform_language_ffn_intermediate_size": 5120
+      }
+    ],
+    "comparison_boundary": "The two origin labels collapsed to the same three physical uniform-width students; no homogeneous-versus-heterogeneous quality comparison is available."
+  },
+  "knowledge_distillation": {
+    "evidence_status": "completed_valid",
+    "checkpoint_stage": "post_kd",
+    "cumulative_steps": 64,
+    "examples": null,
+    "effective_tokens": null,
+    "optimizer_trajectory": null,
+    "dataset_rows": 64,
+    "local_batch_size": 1,
+    "global_batch_size": 1,
+    "shuffle_training_data": true,
+    "seed": 1111,
+    "validation_seed": 445,
+    "vision_tower": "frozen",
+    "activation_checkpointing": true,
+    "pixel_cap": null,
+    "topology": {
+      "tensor_parallel_size": 2,
+      "context_parallel_size": 1,
+      "pipeline_parallel_size": 1,
+      "expert_parallel_size": 1,
+      "data_parallel_shard_size": 1,
+      "data_parallel_replicate_size": 1,
+      "sequence_parallel": false
+    },
+    "objectives": {
+      "main_ce": {"weight": 1.0},
+      "main_kd": {"weight": 1.0, "chunk_size": 64},
+      "mtp_ce": {"weight": 1.0},
+      "mtp_kd": {"weight": 1.0, "chunk_size": 64}
+    },
+    "gpu_hours": null,
+    "checkpoint_fingerprint_algorithm": "SHA-256 of concatenated sha256sum lines for every regular file, using ./-prefixed relative paths sorted bytewise in the C locale."
+  },
+  "evaluation": {
+    "evaluation_contract_id": "qwen35-vlm-rwqa100-mmmu100-prefix100-x2-v1",
+    "runtime_profile": null,
+    "canonical_runtime_profile": "qwen35_vlm_realworldqa_mmmu_prefix100_x2",
+    "deprecated_runtime_profile_aliases": ["qwen35_vlm_e2e_full_eval"],
+    "suite": "realworldqa-mmmu-prefix100-x2",
+    "evaluator": "lmms-eval",
+    "evaluator_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "adapter": null,
+    "tasks": {
+      "realworldqa": {
+        "repository": "lmms-lab/RealWorldQA",
+        "revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+        "complete_benchmark_size": null,
+        "selected_size": 100
+      },
+      "mmmu_val": {
+        "repository": "lmms-lab/MMMU",
+        "revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+        "complete_benchmark_size": null,
+        "selected_size": 100
+      }
+    },
+    "selection_method": "prefix_first_n",
+    "row_order": "evaluator_dataset_order",
+    "row_selection_identity_sha256": null,
+    "row_manifest_sha256": null,
+    "repetitions": 2,
+    "repetitions_reused_identical_rows": true,
+    "aggregation": "mean_of_two_identical_deterministic_repetitions",
+    "prompt_contract": {
+      "reasoning_mode": "disabled",
+      "chat_template_identity_sha256": null
+    },
+    "decoding": {
+      "temperature": 0,
+      "do_sample": false
+    },
+    "multimodal_input_policy": {
+      "max_images_per_prompt": 12,
+      "max_model_len": 16384
+    },
+    "runtime": {
+      "dtype": "bfloat16",
+      "batch_size": 1,
+      "tensor_parallel_size": 1,
+      "gpu_memory_utilization": 0.7
+    }
+  },
+  "quality_evidence": {
+    "teacher": {
+      "realworldqa_exact_match": 0.7,
+      "realworldqa_stderr": 0.046056618647183814,
+      "mmmu_accuracy": 0.42
+    },
+    "students": [
+      {
+        "architecture_id": "architecture_7160bc27bcdc6149",
+        "checkpoint_fingerprint_sha256": "b806b549aa280c9a37d4521578b54fd0133d3f2f1abdc0c8d50fd7ee4c89bd4c",
+        "pre_kd": {
+          "lm_loss": 0.7106947503883522,
+          "kl_divergence": 0.08225044006264566,
+          "teacher_top1_agreement": 0.9574962808922897,
+          "downstream": null
+        },
+        "post_kd": {
+          "lm_loss": 0.2757558576753478,
+          "kl_divergence": 0.1584947480818971,
+          "teacher_top1_agreement": 0.9352470965529771,
+          "realworldqa_exact_match": 0.74,
+          "realworldqa_stderr": 0.0440844002276808,
+          "mmmu_accuracy": 0.33
+        },
+        "delta_vs_teacher": {
+          "realworldqa_exact_match": 0.04,
+          "mmmu_accuracy": -0.09
+        }
+      },
+      {
+        "architecture_id": "architecture_26e8c2778b31ebe5",
+        "checkpoint_fingerprint_sha256": "34fec8d221bc8460e12c0beab6c3c5a7d18a158e6b54c96385bfdf89258e9205",
+        "pre_kd": {
+          "lm_loss": 0.6234789986126956,
+          "kl_divergence": 0.1319814527291674,
+          "teacher_top1_agreement": 0.9430907117016141,
+          "downstream": null
+        },
+        "post_kd": {
+          "lm_loss": 0.3352115614746168,
+          "kl_divergence": 0.16880379196228956,
+          "teacher_top1_agreement": 0.9287619207899488,
+          "realworldqa_exact_match": 0.56,
+          "realworldqa_stderr": 0.04988876515698589,
+          "mmmu_accuracy": 0.37
+        },
+        "delta_vs_teacher": {
+          "realworldqa_exact_match": -0.14,
+          "mmmu_accuracy": -0.05
+        }
+      },
+      {
+        "architecture_id": "architecture_56b7819afaa7918f",
+        "checkpoint_fingerprint_sha256": "7f617ec834c41c48b9b3aa47026d2bb8dc4ba814f41413202d142659464b0060",
+        "pre_kd": {
+          "lm_loss": 0.6183735333659057,
+          "kl_divergence": 0.20424875003824816,
+          "teacher_top1_agreement": 0.9209672423946992,
+          "downstream": null
+        },
+        "post_kd": {
+          "lm_loss": 0.23811581555370429,
+          "kl_divergence": 0.24804774389821968,
+          "teacher_top1_agreement": 0.921555715343435,
+          "realworldqa_exact_match": 0.71,
+          "realworldqa_stderr": 0.045604802157206824,
+          "mmmu_accuracy": 0.29
+        },
+        "delta_vs_teacher": {
+          "realworldqa_exact_match": 0.01,
+          "mmmu_accuracy": -0.13
+        }
+      }
+    ],
+    "selection": {
+      "status": "provisional",
+      "architecture_id": "architecture_7160bc27bcdc6149",
+      "rationale": "The configured aggregate-rank filter selected this architecture by minimizing screening_eval.lm_loss and maximizing the RealWorldQA exact-match and MMMU accuracy metrics. This records the pipeline output and does not assert that the selected architecture is better."
+    }
+  },
+  "performance_evidence": {
+    "serving_contract": {
+      "workload": "synthetic_multimodal_requests",
+      "concurrency": 4,
+      "request_count": 8,
+      "requested_input_tokens": 100,
+      "requested_output_tokens": 80,
+      "image_resolution": "1280x720",
+      "warmup_requests": null,
+      "repetitions": null,
+      "aggregation_policy": null,
+      "topology": null
+    },
+    "students": [
+      {
+        "architecture_id": "architecture_7160bc27bcdc6149",
+        "peak_memory_gib_per_tp_rank": 63.9,
+        "output_tokens_per_second_at_concurrency_4": {
+          "images_1": 217.93,
+          "images_4": 240.26,
+          "images_8": 199.19
+        }
+      },
+      {
+        "architecture_id": "architecture_26e8c2778b31ebe5",
+        "peak_memory_gib_per_tp_rank": 63.19,
+        "output_tokens_per_second_at_concurrency_4": {
+          "images_1": 224.55,
+          "images_4": 253.52,
+          "images_8": 217.28
+        }
+      },
+      {
+        "architecture_id": "architecture_56b7819afaa7918f",
+        "peak_memory_gib_per_tp_rank": 62.48,
+        "output_tokens_per_second_at_concurrency_4": {
+          "images_1": 237.27,
+          "images_4": 247.89,
+          "images_8": 206.25
+        }
+      }
+    ],
+    "runtime": {
+      "screening_kd_wall_seconds": 455,
+      "screening_kd_controller_wall_seconds": 608,
+      "screening_kd_allocated_gpus": 6,
+      "post_kd_loss_screen_wall_seconds": 245,
+      "post_kd_downstream_evaluation_wall_seconds": 849,
+      "successful_post_kd_evaluation_wall_seconds": 1235,
+      "total_allocated_gpu_hours_including_retries_and_validation": 8.054,
+      "accelerator_model": null,
+      "observed_memory_capacity_gib": 80
+    }
+  },
+  "limitations": [
+    "The configured fresh 256-step finalist KD run from the selected materialized pre-KD checkpoint was not run and is not an established convergence threshold; screening KD weights are used only for ranking.",
+    "The final bounded matched teacher comparison was not run.",
+    "The quality screen covers only RealWorldQA and MMMU, using the first 100 rows per task.",
+    "The deterministic repetitions reused identical rows and do not add sampling evidence.",
+    "A frozen row manifest, semantic row-selection hash, per-item outputs, and chat-template hash were not retained.",
+    "Corrected pre-KD downstream scores are missing because their exact source artifact was not retained with a verifiable hash.",
+    "The exact execution revision, accelerator identity, loss-evaluator identity, evaluation adapter identity, and serving implementation identity were not retained.",
+    "KD example count, effective-token exposure, optimizer trajectory, and KD-only GPU-hours were not retained.",
+    "The exact runtime evaluation profile name used by the recorded run was not retained.",
+    "Serving warmup, topology, repetition, aggregation policy, and matched teacher serving measurements are missing.",
+    "External artifact byte sizes and public availability were not retained; checksums prove identity only.",
+    "The public runner is an illustrative placeholder, not the executed site contract.",
+    "Single-GPU uncapped full-objective KD did not fit the observed memory envelope.",
+    "Failed and superseded attempts remain external and are not quality evidence."
+  ]
+}

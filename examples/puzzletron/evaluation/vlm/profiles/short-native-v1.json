@@ -1,0 +1,11 @@
+{
+  "extends": "short-v1",
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "short-native-v1",
+  "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+  "backend": {
+    "attention_implementation": "sdpa",
+    "enable_thinking": false,
+    "name": "qwen3_5"
+  }
+}

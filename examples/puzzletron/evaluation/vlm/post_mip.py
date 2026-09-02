@@ -244,10 +244,10 @@ def evaluate_realworldqa_mmmu_prefix100_checkpoint(
         or len(runs) != 2
         or not all(isinstance(item, dict) for item in runs)
     ):
-        raise RuntimeError("pinned VLM final-evaluation profile returned an invalid run count")
+        raise RuntimeError("pinned VLM 100x2 profile returned an invalid run count")
     metric_names = set(runs[0].get("metrics") or {})
     if not metric_names or any(set(item.get("metrics") or {}) != metric_names for item in runs[1:]):
-        raise RuntimeError("pinned VLM final-evaluation repetitions produced different metrics")
+        raise RuntimeError("pinned VLM 100x2 repetitions produced different metrics")
     metrics = {
         name: sum(float(item["metrics"][name]) for item in runs) / len(runs)
         for name in sorted(metric_names)

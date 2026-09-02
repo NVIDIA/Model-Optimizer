@@ -78,6 +78,23 @@ def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
     return {**checkpoint_identity(root), "content_files": files}
 
 
+def _chat_template_sha256(settings: Mapping[str, object]) -> str | None:
+    """Fingerprint a file-backed or inline chat template that affects model inputs."""
+    model_args = settings.get("model_args")
+    if not isinstance(model_args, Mapping):
+        return None
+    chat_template = model_args.get("chat_template")
+    if not isinstance(chat_template, str):
+        return None
+    try:
+        template_path = Path(chat_template)
+        content = template_path.read_bytes() if template_path.is_file() else chat_template.encode()
+    except OSError:
+        # Inline Jinja can exceed filesystem path limits or contain path-invalid characters.
+        content = chat_template.encode()
+    return sha256(content).hexdigest()
+
+
 def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:
     """Fingerprint evaluator outputs needed to reuse a completed repetition."""
     return [
@@ -198,14 +215,24 @@ def evaluate(
     task_root, configured_tasks = tasks.prepare(
         args.output_dir,
         suite=prepared.suite,
+        source_tasks=prepared.source_tasks,
+        profile_task_leaves=prepared.profile_task_leaves,
         dataset_snapshots=prepared.dataset_snapshots,
         quick_manifest=prepared.quick_manifest,
     )
+    settings = preflight.settings(
+        args,
+        tasks_root=task_root,
+        configured_tasks=configured_tasks,
+        prepared=prepared,
+    )
+    settings.update(settings_overrides or {})
     offline_task_preflight = tasks.verify_offline(
         task_root,
         configured_tasks,
         hf_home=prepared.hf_home,
         timeout_seconds=checkpoint.DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
+        model_name=str(settings["model"]),
     )
     report = dict(prepared.report)
     report.update(
@@ -218,23 +245,28 @@ def evaluate(
     if preflight_callback is not None:
         preflight_callback(report)
     if args.preflight_only:
-        return {"preflight": report, "runs": []}
-    settings = preflight.settings(
-        args,
-        tasks_root=task_root,
-        configured_tasks=configured_tasks,
-        prepared=prepared,
-    )
-    settings.update(settings_overrides or {})
+        return {
+            "schema": "modelopt.vlm-evaluation-result/v1",
+            "preflight": report,
+            "runs": [],
+        }
     repetitions = prepared.execution_policy["repetitions"]
     checkpoint_identity = _checkpoint_identity(args.checkpoint)
     profile_identity = {
         "dataset_revisions": report["dataset_revisions"],
         "lmms_eval_revision": report["lmms_eval_revision"],
         "quick_manifest_sha256": report.get("quick_manifest_sha256"),
+        "profile_task": report.get("profile_task"),
+        "profile_task_shard": report.get("profile_task_shard"),
         "source_tasks": report["source_tasks"],
         "suite": prepared.suite,
+        "profile_fingerprint": report.get("profile_fingerprint"),
+        "profile_name": report.get("profile_name"),
+        "profile_schema": report.get("profile_schema"),
     }
+    chat_template_sha256 = _chat_template_sha256(settings)
+    if chat_template_sha256 is not None:
+        profile_identity["chat_template_sha256"] = chat_template_sha256
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
@@ -256,4 +288,8 @@ def evaluate(
                 )
                 _write_completed_run(output_root, identity=identity, result=run_result)
             runs.append(run_result)
-    return {"preflight": report, "runs": runs}
+    return {
+        "schema": "modelopt.vlm-evaluation-result/v1",
+        "preflight": report,
+        "runs": runs,
+    }
