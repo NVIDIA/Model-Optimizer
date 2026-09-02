@@ -111,6 +111,12 @@ def _write_speculation_profile(
     import json
 
     total = sum(length_histogram.values())
+    if total == 0:
+        # Every sample failed, or osl was too small to produce a single decode step.
+        # Writing measured=true here would advertise a draft that accepts nothing,
+        # which is indistinguishable from a genuinely terrible draft.
+        print("  WARNING: no decode steps observed; skipping speculation profile")
+        return
     # Marginal[i] = P(at least i+1 drafts accepted). Acceptance length counts the
     # target's bonus token, so draft position i corresponds to length i+2.
     marginal, conditional = [], []
