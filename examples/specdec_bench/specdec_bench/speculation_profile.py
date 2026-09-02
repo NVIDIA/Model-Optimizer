@@ -85,27 +85,41 @@ def _as_int_keyed(mapping):
     return {int(k): float(v) for k, v in mapping.items()}
 
 
-def _dense_from_length_keyed(length_keyed, num_speculative_tokens):
-    """Project an acceptance-length-keyed map onto a dense per-draft-position vector.
+def _dense_survival(length_keyed, num_speculative_tokens):
+    """Project an acceptance-length-keyed *survival* map onto per-draft-position entries.
 
-    ``AcceptanceRate`` keys its maps by *acceptance length* -- the number of tokens
-    emitted in a decode step, which counts the target model's own bonus token. So
-    length 1 means "no draft token was accepted" and the entry for length 1 is
-    always 1.0 by construction.
+    ``AcceptanceRate`` keys its maps by *acceptance length* -- tokens emitted in a
+    decode step, counting the target's own bonus token. So length 1 means "no draft
+    accepted", and the entry for length 1 is always 1.0 by construction.
 
-    Consumers index by *draft position*: entry i concerns the (i+1)-th drafted
-    token. The two are therefore offset by two, not one::
+    Consumers index by *draft position*: entry i concerns the (i+1)-th drafted token.
+    The two are offset by two, not one::
 
         position i  <->  length i + 2
 
-    The map is also sparse -- lengths never observed simply do not appear -- while
-    consumers require a dense vector of exactly ``num_speculative_tokens`` entries.
-    Missing entries mean "never accepted this far", i.e. 0.0.
+    The map is also sparse: a length that never occurred is simply absent. Defaulting
+    an absent entry to 0.0 is only correct *past the maximum observed length*. For a
+    gap -- say lengths 1 and 3 observed but not 2 -- P(len >= 2) still equals
+    P(len >= 3), because no step ended at exactly 2. Filling gaps with 0.0 would
+    understate acceptance and break the AL identity. So missing entries inherit the
+    next larger observed value, which is what a survival function does.
 
-    Getting either the offset or the densification wrong yields a plausible-looking
-    but wrong profile, which is why this lives in one place with one test.
+    Getting the offset, the densification, or the gap handling wrong all yield a
+    plausible-looking but wrong profile, which is why this lives in one place.
     """
-    return [length_keyed.get(i + 2, 0.0) for i in range(num_speculative_tokens)]
+    if not length_keyed:
+        return [0.0] * num_speculative_tokens
+    max_len = max(length_keyed)
+    out, carried = [], 0.0
+    # Walk downward so each missing length inherits the survival value above it.
+    survival = {}
+    for length in range(max_len, 0, -1):
+        if length in length_keyed:
+            carried = length_keyed[length]
+        survival[length] = carried
+    for i in range(num_speculative_tokens):
+        out.append(survival.get(i + 2, 0.0))
+    return out
 
 
 def per_step_mean_accept_length(histogram):
@@ -210,7 +224,6 @@ def build_profile(
     Returns:
         A JSON-serializable dict.
     """
-    conditional_by_length = _as_int_keyed(acceptance_out.get("Conditional_Acceptance_Rate"))
     marginal_by_length = _as_int_keyed(acceptance_out.get("Joint_Acceptance_Rate"))
     # Per-request mean, as the benchmark reports it. Kept for comparison against
     # published model-card numbers, which do not always state which mean they use.
@@ -222,8 +235,16 @@ def build_profile(
     if mean_accept_length is None:
         mean_accept_length = mean_per_request
 
-    conditional = _dense_from_length_keyed(conditional_by_length, num_speculative_tokens)
-    marginal = _dense_from_length_keyed(marginal_by_length, num_speculative_tokens)
+    # Marginals are a survival function, so gaps inherit from above (see
+    # _dense_survival). Conditionals are then ratios of consecutive marginals rather
+    # than the sparse per-length map, which keeps the two mutually consistent even
+    # when a length was never observed.
+    marginal = _dense_survival(marginal_by_length, num_speculative_tokens)
+    conditional = []
+    prev = 1.0
+    for m in marginal:
+        conditional.append(m / prev if prev > 0 else 0.0)
+        prev = m
 
     if accept_length_model is None:
         accept_length_model = (
