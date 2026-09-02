@@ -30,6 +30,8 @@ from packaging import version
 
 import modelopt.onnx.quantization as moq
 import modelopt.onnx.trt_utils as trt_utils
+from modelopt.onnx.quantization.autotune import Config, QDQAutotuner
+from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
 from modelopt.onnx.utils import get_opset_version
 
 # Mapping of quantization mode to minimum required opset
@@ -110,9 +112,6 @@ def test_realign_input_shapes_profile_rejects_duplicate_calibration_eps():
 
 @pytest.mark.parametrize("quant_type", ["int8", "fp8"])
 def test_autotune_ort_op_types_match_quantization_mode(quant_type):
-    from modelopt.onnx.quantization.autotune import Config, QDQAutotuner
-    from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
-
     model, _ = _make_guard_models(())
     autotuner = QDQAutotuner(model)
     autotuner.initialize(Config(default_quant_type=quant_type))
