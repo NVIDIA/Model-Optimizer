@@ -14,7 +14,7 @@ datasets, sampling policy, checkpoint geometry, and completed stages.
 
 | Run | Evidence status | Completed scope | Provisional outcome |
 |---|---|---|---|
-| [2026-09-01-r2](runs/2026-09-01-r2/README.md) | `preliminary` | Three materialized students, serving, 64-step TP2 KD, post-KD loss, and bounded RealWorldQA/MMMU evaluation | The 9.5%-pruned student is the best-balanced candidate under this screen |
+| [2026-09-01-r2](runs/2026-09-01-r2/summary.md) | `preliminary` | Three materialized students, serving, 64-step TP2 KD, post-KD loss, and RealWorldQA/MMMU prefix-100 evaluation repeated twice | The 9.5%-pruned student is the provisional candidate under this screen |
 
 `preliminary` is deliberate because the downstream screen covers only the first
 100 RealWorldQA and MMMU rows and lacks a frozen per-item manifest. The

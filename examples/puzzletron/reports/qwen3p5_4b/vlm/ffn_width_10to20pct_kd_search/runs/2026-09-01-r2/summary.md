@@ -3,8 +3,10 @@
 Evidence status: `preliminary`.
 
 This run completed the three-candidate screening path through 64-step TP2 KD
-and bounded post-KD evaluation. The [structured record](result.yaml) is the
-source of truth for exact metrics, provenance, identities, and hashes.
+and the `qwen35-vlm-rwqa100-mmmu100-prefix100-repeat2-v1` evaluation contract.
+The [structured record](result_record.json) is the source of truth for exact
+provenance, identities, and hashes. The [metric table](metrics.csv) contains
+the curated numerical observations.
 
 ## Results
 
@@ -23,6 +25,10 @@ higher-compression point, but its MMMU regression is larger.
 The two downstream repetitions used the same first 100 rows per task with
 deterministic decoding. Their identical metrics establish execution
 reproducibility, not independent sampling evidence.
+
+The heterogeneous and homogeneous MIP origins deduplicated to these same three
+physical uniform-width students. This run therefore contains no
+homogeneous-versus-heterogeneous quality comparison.
 
 ## Serving screen
 
@@ -73,3 +79,5 @@ per rank for the 9.5%, 14.3%, and 19.0% students.
 - External checkpoints and runtime artifacts are not published with this
   repository. The structured record retains opaque identities and hashes for
   the canonical summaries that support these results.
+
+Reproduction instructions are in the [campaign guide](../../README.md).
