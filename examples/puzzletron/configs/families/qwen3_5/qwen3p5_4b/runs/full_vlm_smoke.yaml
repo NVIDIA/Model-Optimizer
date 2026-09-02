@@ -1,0 +1,6 @@
+# @package _global_
+
+# Deprecated compatibility alias. Use vlm_lifecycle_smoke.
+defaults:
+  - vlm_lifecycle_smoke
+  - _self_

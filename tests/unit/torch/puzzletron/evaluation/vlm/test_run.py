@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
 
@@ -115,6 +116,19 @@ def test_no_think_template_rejects_unsafe_checkpoint_expression(tmp_path):
 
     with pytest.raises(ValueError, match="chat template is invalid"):
         vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
+
+
+def test_chat_template_fingerprint_accepts_file_and_inline_content(tmp_path):
+    content = "{% if messages %}{{ messages[0]['content'] }}{% endif %}"
+    template_path = tmp_path / "chat_template.jinja"
+    template_path.write_text(content)
+    expected = sha256(content.encode()).hexdigest()
+
+    assert (
+        evaluator._chat_template_sha256({"model_args": {"chat_template": str(template_path)}})
+        == expected
+    )
+    assert evaluator._chat_template_sha256({"model_args": {"chat_template": content}}) == expected
 
 
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
@@ -438,7 +452,7 @@ def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, s
 
 @pytest.mark.parametrize(
     ("corruption", "expected_calls"),
-    [("checkpoint", 4), ("artifact", 3), ("result", 3)],
+    [("checkpoint", 4), ("artifact", 3), ("result", 3), ("profile", 4)],
 )
 def test_short_profile_reruns_stale_completed_repetitions(
     monkeypatch,
@@ -486,8 +500,16 @@ def test_short_profile_reruns_stale_completed_repetitions(
         (model / "preprocessor_config.json").write_text('{"changed": true}\n')
     elif corruption == "artifact":
         (output / "short-repetition-1" / "attempt" / "samples.json").unlink()
-    else:
+    elif corruption == "result":
         (output / "short-repetition-1" / "attempt" / "summary.json").unlink()
+    else:
+
+        def changed_chat_template(_checkpoint_path, output_directory):
+            target = output_directory / "modelopt_qwen35_no_think.jinja"
+            target.write_text("changed template\n")
+            return target
+
+        monkeypatch.setattr(vlm_model, "no_think_chat_template", changed_chat_template)
 
     evaluation.evaluate(args)
     assert len(calls) == expected_calls

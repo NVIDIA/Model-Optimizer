@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Deprecated compatibility alias. Use execution.vlm_lifecycle_smoke.yaml.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 2
+  stages:
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}

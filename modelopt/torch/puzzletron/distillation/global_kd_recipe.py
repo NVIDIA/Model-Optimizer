@@ -298,10 +298,32 @@ def _align_dtensor_to_module_mesh(value, module):
     layout and mesh dimension names are exactly identical.
     """
     _, weight = _find_dtensor_weight_owner(module)
-    if not isinstance(value, DTensor) or not isinstance(weight, DTensor):
+    if not isinstance(weight, DTensor):
         return value
-    source_mesh = value.device_mesh
     target_mesh = weight.device_mesh
+    if not isinstance(value, DTensor):
+        # Hidden states captured from TP modules can be materialized as local
+        # tensors even though the saved LM-head projection owns DTensor
+        # parameters. The head's colwise TP contract consumes replicated hidden
+        # states, so restore that layout without communication before dispatch.
+        target_names = tuple(getattr(target_mesh, "mesh_dim_names", ()) or ())
+        if target_names != ("tp",):
+            raise RuntimeError(
+                "Cannot infer replicated hidden-state placement for a non-TP-only "
+                f"LM-head mesh: names={target_names}"
+            )
+        if int(value.shape[-1]) != int(weight.shape[-1]):
+            raise RuntimeError(
+                "Local hidden state is not the full-width replicated input expected by "
+                f"the TP LM head: hidden_width={value.shape[-1]}, head_width={weight.shape[-1]}"
+            )
+        return DTensor.from_local(
+            value,
+            device_mesh=target_mesh,
+            placements=(Replicate(),) * target_mesh.ndim,
+            run_check=False,
+        )
+    source_mesh = value.device_mesh
     if source_mesh is target_mesh:
         return value
     source_names = tuple(getattr(source_mesh, "mesh_dim_names", ()) or ())
@@ -328,68 +350,56 @@ def _align_dtensor_to_module_mesh(value, module):
 
 
 def _project_teacher_hidden_on_reference_mesh(hidden, teacher_head, reference_logits):
-    """Project frozen teacher hidden shards without cross-mesh DTensor dispatch."""
-    owner, weight = _find_dtensor_weight_owner(teacher_head)
+    """Project frozen teacher hidden states and align the result to student logits."""
+    _, weight = _find_dtensor_weight_owner(teacher_head)
+    projection = getattr(teacher_head, "_puzzletron_projection_forward", None)
     if not isinstance(weight, DTensor):
-        projection = getattr(teacher_head, "_puzzletron_projection_forward", None)
         return projection(hidden) if projection is not None else teacher_head(hidden)
-    local_hidden = hidden.to_local() if isinstance(hidden, DTensor) else hidden
-    reference_local = (
-        reference_logits.to_local() if isinstance(reference_logits, DTensor) else reference_logits
-    )
-    expected_vocab = int(reference_local.shape[-1])
 
-    def _local_tp_parameter(value):
-        if not isinstance(value, DTensor):
-            return value
-        local = value.to_local()
-        if int(local.shape[0]) == expected_vocab:
-            return local
-        mesh_names = tuple(getattr(value.device_mesh, "mesh_dim_names", ()) or ())
-        if len(mesh_names) != len(value.placements):
-            raise RuntimeError(
-                "Cannot isolate the TP vocabulary shard from an unnamed teacher "
-                f"parameter mesh: names={mesh_names}, placements={value.placements}"
-            )
-        placements = tuple(
-            placement if name == "tp" else Replicate()
-            for name, placement in zip(mesh_names, value.placements)
-        )
-        local = value.redistribute(
-            device_mesh=value.device_mesh,
-            placements=placements,
-        ).to_local()
-        if int(local.shape[0]) != expected_vocab:
-            raise RuntimeError(
-                "Teacher LM-head shard does not match the student vocabulary shard "
-                f"after non-TP unsharding: expected={expected_vocab}, got={local.shape[0]}, "
-                f"mesh_names={mesh_names}, placements={value.placements}"
-            )
-        return local
-
-    cache_key = (
-        id(weight),
-        expected_vocab,
-        str(local_hidden.device),
-        local_hidden.dtype,
-    )
-    cache = owner.__dict__.setdefault("_puzzletron_frozen_tp_projection_cache", {})
-    cached = cache.get(cache_key)
-    if cached is None:
-        _trace_global_kd_phase("teacher_mtp_head_unshard_begin")
-        local_weight = _local_tp_parameter(weight).detach()
-        bias = getattr(owner, "bias", None)
-        bias = _local_tp_parameter(bias).detach() if bias is not None else None
-        cache[cache_key] = (local_weight, bias)
-        _trace_global_kd_phase("teacher_mtp_head_unshard_end")
-    else:
-        local_weight, bias = cached
-    local_logits = torch.nn.functional.linear(local_hidden, local_weight, bias)
+    # TP may shard the captured hidden width. Preserve the DTensor so operator
+    # dispatch retains its global shape and placements; projecting local shards
+    # directly produces a half-width matmul.
+    hidden = _align_dtensor_to_module_mesh(hidden, teacher_head)
+    teacher_logits = projection(hidden) if projection is not None else teacher_head(hidden)
     if not isinstance(reference_logits, DTensor):
-        return local_logits
+        return (
+            teacher_logits.full_tensor() if isinstance(teacher_logits, DTensor) else teacher_logits
+        )
+    if not isinstance(teacher_logits, DTensor):
+        raise RuntimeError("TP teacher projection did not return DTensor logits")
+
+    source_mesh = teacher_logits.device_mesh
+    target_mesh = reference_logits.device_mesh
+    source_names = tuple(getattr(source_mesh, "mesh_dim_names", ()) or ())
+    target_names = tuple(getattr(target_mesh, "mesh_dim_names", ()) or ())
+    source_ranks = getattr(source_mesh, "mesh", None)
+    target_ranks = getattr(target_mesh, "mesh", None)
+    equivalent = (
+        source_names == target_names
+        and source_ranks is not None
+        and target_ranks is not None
+        and torch.equal(source_ranks.detach().cpu(), target_ranks.detach().cpu())
+    )
+    if not equivalent:
+        raise RuntimeError(
+            "Cannot align teacher logits to a different student device mesh: "
+            f"teacher_names={source_names}, student_names={target_names}"
+        )
+    if teacher_logits.placements != reference_logits.placements:
+        teacher_logits = teacher_logits.redistribute(
+            device_mesh=source_mesh,
+            placements=reference_logits.placements,
+        )
+    local_logits = teacher_logits.to_local()
+    reference_local = reference_logits.to_local()
+    if local_logits.shape != reference_local.shape:
+        raise RuntimeError(
+            "Teacher and student local vocabulary shards differ after alignment: "
+            f"teacher={tuple(local_logits.shape)}, student={tuple(reference_local.shape)}"
+        )
     return DTensor.from_local(
         local_logits,
-        device_mesh=reference_logits.device_mesh,
+        device_mesh=target_mesh,
         placements=reference_logits.placements,
         run_check=False,
     )

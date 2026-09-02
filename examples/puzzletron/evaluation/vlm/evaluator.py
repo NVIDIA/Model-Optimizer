@@ -78,6 +78,23 @@ def _checkpoint_identity(checkpoint_path: Path) -> dict[str, object]:
     return {**checkpoint_identity(root), "content_files": files}
 
 
+def _chat_template_sha256(settings: Mapping[str, object]) -> str | None:
+    """Fingerprint a file-backed or inline chat template that affects model inputs."""
+    model_args = settings.get("model_args")
+    if not isinstance(model_args, Mapping):
+        return None
+    chat_template = model_args.get("chat_template")
+    if not isinstance(chat_template, str):
+        return None
+    try:
+        template_path = Path(chat_template)
+        content = template_path.read_bytes() if template_path.is_file() else chat_template.encode()
+    except OSError:
+        # Inline Jinja can exceed filesystem path limits or contain path-invalid characters.
+        content = chat_template.encode()
+    return sha256(content).hexdigest()
+
+
 def _artifact_inventory(output_root: Path) -> list[dict[str, object]]:
     """Fingerprint evaluator outputs needed to reuse a completed repetition."""
     return [
@@ -247,6 +264,9 @@ def evaluate(
         "profile_name": report.get("profile_name"),
         "profile_schema": report.get("profile_schema"),
     }
+    chat_template_sha256 = _chat_template_sha256(settings)
+    if chat_template_sha256 is not None:
+        profile_identity["chat_template_sha256"] = chat_template_sha256
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):
