@@ -27,35 +27,29 @@ from modelopt.onnx.quantization.graph_utils import (
     remove_output_initializers,
 )
 
-__all__: list[str] = []
 
-
-def _upgrade_opset_21(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Update an FP8 graph to the opset required for FP16 Q/DQ scales."""
+def _upgrade_opset_21(model: onnx.ModelProto) -> onnx.ModelProto:
     logger.info("Upgrading model to opset 21")
-    graph = gs.import_onnx(onnx_model)
+    graph = gs.import_onnx(model)
 
     for node in graph.nodes:
         if node.op in {"QuantizeLinear", "DequantizeLinear"}:
             node.domain = ""
-
         if node.op == "ReduceMean" and "axes" in node.attrs:
             axes = gs.Constant(
-                name=node.name + "_axes", values=np.array(node.attrs["axes"], dtype=np.int64)
+                name=node.name + "_axes", values=np.array(node.attrs.pop("axes"), dtype=np.int64)
             )
-            del node.attrs["axes"]
             node.inputs.append(axes)
 
-    onnx_model = gs.export_onnx(graph)
-    for opset_import in onnx_model.opset_import:
+    model = gs.export_onnx(graph)
+    for opset_import in model.opset_import:
         if opset_import.domain == "":
             opset_import.version = 21
-
-    return onnx_model
+    return model
 
 
 def _convert_to_runtime_precision(
-    onnx_model: onnx.ModelProto,
+    model: onnx.ModelProto,
     *,
     quantize_mode: str,
     high_precision_dtype: str,
@@ -66,21 +60,19 @@ def _convert_to_runtime_precision(
     opset: int | None = None,
     mha_accumulation_dtype: str = "fp16",
 ) -> onnx.ModelProto:
-    """Convert a quantized model to its requested runtime precision."""
+    """Convert a quantized model to the precision used at runtime."""
     if high_precision_dtype not in {"fp16", "bf16"}:
-        return onnx_model
+        return model
 
-    source_dtype = "float" if quantize_mode == "fp8" else "float32"
-    logger.info(f"Converting {source_dtype} tensors to {high_precision_dtype}")
-
+    logger.info(f"Converting float tensors to {high_precision_dtype}")
     if quantize_mode == "fp8":
-        graph = gs.import_onnx(onnx_model)
-        remove_output_initializers(graph, onnx_model.graph.initializer)
+        graph = gs.import_onnx(model)
+        remove_output_initializers(graph, model.graph.initializer)
         convert_fp16_io(graph)
-        onnx_model = gs.export_onnx(graph)
+        model = gs.export_onnx(graph)
 
-    onnx_model = convert_to_f16(
-        onnx_model,
+    model = convert_to_f16(
+        model,
         keep_io_types=not direct_io_types,
         op_block_list=op_types_to_exclude_fp16 or [],
         tensor_block_dict=custom_ops_to_cast_fp32 or {},
@@ -90,14 +82,12 @@ def _convert_to_runtime_precision(
     )
 
     if quantize_mode != "fp8":
-        return onnx_model
+        return model
 
-    current_opsets = {opset.domain: opset.version for opset in onnx_model.opset_import}
+    current_opsets = {opset.domain: opset.version for opset in model.opset_import}
     if current_opsets.get("", 0) < 19:
-        onnx_model = _upgrade_opset_21(onnx_model)
-
+        model = _upgrade_opset_21(model)
     if mha_accumulation_dtype == "fp32":
         logger.info("Inserting Cast nodes to enable FP8+FP16 MHA")
-        onnx_model = insert_fp8_mha_casts(onnx_model)
-
-    return onnx_model
+        model = insert_fp8_mha_casts(model)
+    return model

@@ -56,17 +56,14 @@ The easiest way to use the autotuner is via the command-line interface:
 The command will:
 
 1. Discover regions in the model automatically
-2. Measure the high-precision no-Q/DQ baseline
-3. Measure the incumbent placement before testing replacements for each region pattern
-4. Test the no-Q/DQ replacement before cached and generated Q/DQ schemes
-5. Accept replacements that meet the configured TensorRT speedup threshold
-6. Export the accepted placement, or the high-precision no-Q/DQ fallback
+2. Measure baseline performance (no quantization)
+3. Test different Q/DQ placement schemes for each region pattern
+4. Select the best scheme based on TensorRT latency measurements
+5. Export an optimized ONNX model with Q/DQ nodes
 
 Autotune searches for Q/DQ placement schemes that improve TensorRT runtime. It does not by itself define the full calibration and quantization policy for an accuracy-sensitive deployment. For end-to-end ONNX PTQ that starts from an unquantized model, run ONNX quantization with calibration data and enable ``--autotune`` there. See the `ONNX quantization Autotune options <_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set>`_.
 
-The default performance threshold is ``1.02``: a replacement must be at least 2% faster than the current full-model placement. ``--schemes_per_region`` counts replacement schemes; Autotune measures one additional incumbent control for each pattern. A completed run can legitimately select the high-precision model with no Q/DQ nodes when no tested placement meets the threshold.
-
-The log reports the selected outcome. Standalone search records its uncalibrated result under ``proxy_decision.proxy_selection``. End-to-end quantization records the calibrated artifact under ``final_decision.final_selection`` as ``qdq`` or ``no_qdq``; ``force_no_qdq: true`` identifies the high-precision fallback.
+End-to-end ONNX quantization benchmarks Autotune candidates in the requested runtime precision, then validates the exact calibrated output. It retains Q/DQ only when the output meets ``Config.performance_threshold`` (``1.02`` by default); otherwise the requested output path contains the high-precision no-Q/DQ model. The log reports which outcome was selected. Standalone Autotune remains an uncalibrated placement search.
 
 **Output Files:**
 
@@ -78,7 +75,7 @@ Files are written under the output directory (default ``./autotuner_output``, or
    ├── autotuner_state.yaml                  # Checkpoint for resuming
    ├── autotuner_state_pattern_cache.yaml    # Pattern cache for future runs
    ├── baseline.onnx                         # Unquantized baseline
-   ├── optimized_final.onnx                  # Accepted Q/DQ model or no-Q/DQ fallback
+   ├── optimized_final.onnx                  # Final optimized model
    ├── logs/                                 # TensorRT build logs
    │   ├── baseline.log
    │   ├── region_*_scheme_*.log
@@ -270,8 +267,6 @@ Basic Workflow
 
 .. code-block:: python
 
-   import math
-
    import onnx
    from modelopt.onnx.quantization.autotune import QDQAutotuner, Config
    from modelopt.onnx.quantization.autotune.workflows import (
@@ -318,16 +313,7 @@ Basic Workflow
            print("  Already profiled, skipping")
            continue
        
-       # Benchmark the current child/leaf placement before testing overrides
-       inherit_idx = autotuner.begin_inherit_profile()
-       if inherit_idx >= 0:
-           model_bytes = autotuner.export_onnx(None, insert_qdq=True)
-           latency = benchmark_onnx_model(model_bytes)
-           autotuner.submit_inherit(
-               latency, success=math.isfinite(latency) and latency > 0
-           )
-
-       # Generate and test 30 override schemes
+       # Generate and test schemes
        for scheme_num in range(30):  # Test 30 schemes per region
            scheme_idx = autotuner.generate()
            
@@ -340,18 +326,17 @@ Basic Workflow
            
            # Measure performance
            latency = benchmark_onnx_model(model_bytes)
-           success = math.isfinite(latency) and latency > 0
+           success = latency != float('inf')
            autotuner.submit(latency, success=success)
            
            if success:
                speedup = baseline_latency / latency
                print(f"  Scheme {scheme_idx}: {latency:.2f} ms ({speedup:.3f}x)")
        
-       # Retain an override only when it meets the configured speedup threshold
+       # Best scheme is automatically selected
        ps = autotuner.current_profile_pattern_schemes
-       selected = ps.select_best(config.performance_threshold) if ps else None
-       if selected:
-           print(f"  Selected {selected.action.value}: {selected.latency_ms:.2f} ms")
+       if ps and ps.best_scheme:
+           print(f"  Best: {ps.best_scheme.latency_ms:.2f} ms")
 
    # Commit final region
    autotuner.set_profile_region(None, commit=True)
@@ -439,7 +424,6 @@ The ``Config`` class controls autotuner behavior:
    config = Config(
        default_quant_type="int8",             # "int8" or "fp8"
        default_dq_dtype="float32",            # float16, float32, bfloat16 (bfloat16 needs NumPy with np.bfloat16)
-       performance_threshold=1.02,            # Required replacement speedup
        default_q_scale=0.1,
        default_q_zero_point=0,
        top_percent_to_mutate=0.1,
@@ -559,7 +543,7 @@ The autotuner reports speedup ratios:
 Deploying Optimized Models
 ===========================
 
-When a placement meets the threshold, the optimized ONNX model includes Q/DQ nodes and can be used with TensorRT as follows. If Autotune selects the high-precision fallback, the same output path contains a valid model without Q/DQ nodes and the selection is reported in the log and state file.
+The optimized ONNX model includes Q/DQ nodes and can be used with TensorRT as follows.
 
 Using Trtexec
 -------------

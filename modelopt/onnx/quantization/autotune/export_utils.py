@@ -234,14 +234,7 @@ def insert_qdq_at_tensors(
 
     default_dq_dtype = resolve_dtype(config.default_dq_dtype, np.float32, _DTYPE_MAP)
 
-    for insertion_point in sorted(
-        resolved_insertion_points,
-        key=lambda point: (
-            point.tensor_name,
-            -1 if point.node_index is None else point.node_index,
-            -1 if point.input_index is None else point.input_index,
-        ),
-    ):
+    for insertion_point in resolved_insertion_points:
         tensor_name = insertion_point.tensor_name
         node_index = insertion_point.node_index
         input_index = insertion_point.input_index
@@ -338,7 +331,7 @@ def export_qdq_onnx(
         config: Config for Q/DQ parameters and dtypes.
         insert_qdq: If True, insert Q/DQ at resolved points before exporting.
         needs_fp8_conversion: If True, build as INT8 then convert to FP8 (e.g. when config.default_quant_type is fp8).
-        model_transform: Optional transform applied after INT8 Q/DQ insertion and before FP8 conversion.
+        model_transform: Optional transform applied before INT8-to-FP8 conversion.
 
     Returns:
         Exported ONNX ModelProto (with Q/DQ and/or FP8 as requested).

@@ -59,19 +59,6 @@ class QDQAutotuner(QDQAutotunerBase):
 
         return regions
 
-    @staticmethod
-    def _sort_regions_for_profiling(regions: list[Region]) -> list[Region]:
-        """Order every descendant before its ancestors with stable same-height IDs."""
-        subtree_heights: dict[int, int] = {}
-
-        def get_subtree_height(region: Region) -> int:
-            if region.id not in subtree_heights:
-                child_heights = [get_subtree_height(child) for child in region.get_children()]
-                subtree_heights[region.id] = 1 + max(child_heights, default=-1)
-            return subtree_heights[region.id]
-
-        return sorted(regions, key=lambda region: (get_subtree_height(region), region.id))
-
     def _reassign_region_ids(self, regions: list[Region]) -> None:
         """Reassign sequential IDs to regions in breadth-first order.
 
@@ -121,7 +108,8 @@ class QDQAutotuner(QDQAutotunerBase):
         for region in self.regions:
             all_regions.extend(QDQAutotuner._visit_region_recursively(region))
 
-        self.regions = self._sort_regions_for_profiling(all_regions)
+        all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
+        self.regions = all_regions
 
         type_counts = Counter(r.type for r in self.regions)
         logger.info(
@@ -129,4 +117,4 @@ class QDQAutotuner(QDQAutotunerBase):
             f"({type_counts[RegionType.LEAF]} LEAF, {type_counts[RegionType.COMPOSITE]} COMPOSITE, "
             f"{type_counts[RegionType.ROOT]} ROOT)"
         )
-        logger.debug("Regions ordered descendant-first for profiling")
+        logger.debug("Regions prioritized: LEAF regions first for profiling")

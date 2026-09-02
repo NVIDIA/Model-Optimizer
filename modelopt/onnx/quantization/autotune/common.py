@@ -16,10 +16,6 @@
 """Common data structures and types for the QDQ Autotuner."""
 
 import hashlib
-import math
-import os
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -49,40 +45,6 @@ class AutotunerNotInitializedError(AutotunerError):
 
 class InvalidSchemeError(AutotunerError):
     """Exception raised when an invalid scheme is referenced."""
-
-
-class SchemeAction(str, Enum):
-    """Action taken for a region when an insertion scheme is resolved."""
-
-    INHERIT = "inherit"
-    NO_QDQ = "no_qdq"
-    QDQ = "qdq"
-
-
-def is_valid_latency(latency_ms: float | int | None) -> bool:
-    """Return whether a latency can be used for a performance decision."""
-    try:
-        return latency_ms is not None and math.isfinite(latency_ms) and latency_ms > 0
-    except TypeError:
-        return False
-
-
-def _atomic_yaml_dump(data: dict[str, Any], output_path: str) -> None:
-    """Atomically replace a YAML checkpoint in its destination directory."""
-    output_path = os.path.abspath(output_path)
-    fd, temporary_path = tempfile.mkstemp(
-        dir=os.path.dirname(output_path), prefix=f".{os.path.basename(output_path)}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as file:
-            yaml.safe_dump(data, file, default_flow_style=False, sort_keys=False)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary_path, output_path)
-    except BaseException:
-        with suppress(FileNotFoundError):
-            os.unlink(temporary_path)
-        raise
 
 
 class RegionType(Enum):
@@ -249,7 +211,7 @@ class Region:
         )
 
 
-@dataclass(init=False)
+@dataclass
 class InsertionScheme:
     """Complete Q/DQ insertion specification for a region pattern.
 
@@ -258,52 +220,12 @@ class InsertionScheme:
     is applied to all regions matching the pattern.
     """
 
-    _action: SchemeAction = field(default=SchemeAction.NO_QDQ, repr=False)
     node_inputs: list[NodeInputInsertionPoint] = field(default_factory=list)
     child_region_inputs: list[ChildRegionInputInsertionPoint] = field(default_factory=list)
     region_outputs: list[ChildRegionOutputInsertionPoint] = field(default_factory=list)
     latency_ms: float = float("inf")
     error: bool = False
     profile_timestamp: str | None = None
-
-    def __init__(
-        self,
-        node_inputs: list[NodeInputInsertionPoint] | None = None,
-        child_region_inputs: list[ChildRegionInputInsertionPoint] | None = None,
-        region_outputs: list[ChildRegionOutputInsertionPoint] | None = None,
-        latency_ms: float = float("inf"),
-        error: bool = False,
-        profile_timestamp: str | None = None,
-        *,
-        action: SchemeAction = SchemeAction.NO_QDQ,
-    ) -> None:
-        """Initialize a scheme and normalize its action against its insertion points."""
-        self.node_inputs = node_inputs if node_inputs is not None else []
-        self.child_region_inputs = child_region_inputs if child_region_inputs is not None else []
-        self.region_outputs = region_outputs if region_outputs is not None else []
-        self.latency_ms = latency_ms
-        self.error = error
-        self.profile_timestamp = profile_timestamp
-        self._action = SchemeAction(action)
-        self._normalize_action()
-
-    def _normalize_action(self) -> None:
-        if self._action == SchemeAction.NO_QDQ and not self.is_empty:
-            self._action = SchemeAction.QDQ
-        if self._action == SchemeAction.INHERIT and not self.is_empty:
-            raise ValueError("INHERIT schemes cannot contain insertion points")
-
-    @property
-    def action(self) -> SchemeAction:
-        """Return the action normalized against the current insertion points."""
-        self._normalize_action()
-        return self._action
-
-    @action.setter
-    def action(self, action: SchemeAction) -> None:
-        """Set and normalize the scheme action."""
-        self._action = SchemeAction(action)
-        self._normalize_action()
 
     @property
     def hash(self) -> str:
@@ -321,7 +243,7 @@ class InsertionScheme:
             [(pt.region_index, pt.node_index, pt.output_index) for pt in self.region_outputs]
         )
 
-        hash_input = f"{self.action.value}|{sorted_nodes}|{sorted_regions}|{sorted_region_outputs}"
+        hash_input = f"{sorted_nodes}|{sorted_regions}|{sorted_region_outputs}"
 
         return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:32]
 
@@ -331,33 +253,17 @@ class InsertionScheme:
         return not self.node_inputs and not self.child_region_inputs and not self.region_outputs
 
     @property
-    def is_inherit(self) -> bool:
-        """Check if this scheme preserves Q/DQ inherited from child regions."""
-        return self.action == SchemeAction.INHERIT
-
-    @property
-    def is_no_qdq(self) -> bool:
-        """Check if this scheme explicitly removes overlapping Q/DQ."""
-        return self.action == SchemeAction.NO_QDQ
-
-    @property
-    def is_qdq(self) -> bool:
-        """Check if this scheme explicitly inserts at least one Q/DQ pair."""
-        return self.action == SchemeAction.QDQ and not self.is_empty
-
-    @property
     def is_profiled(self) -> bool:
         """Check if this scheme has been profiled (measured).
 
         A scheme is considered profiled if it has been measured (has non-infinite latency)
         or has encountered an error during measurement.
         """
-        return self.error or is_valid_latency(self.latency_ms)
+        return self.error or self.latency_ms != float("inf")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "action": self.action.value,
             "latency_ms": self.latency_ms,
             "error": self.error,
             "profile_timestamp": self.profile_timestamp,
@@ -370,35 +276,21 @@ class InsertionScheme:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "InsertionScheme":
         """Create InsertionScheme from serialized dictionary."""
-        node_inputs = [
-            NodeInputInsertionPoint.from_dict(pt) for pt in data.get("nodes_insertion_points", [])
-        ]
-        child_region_inputs = [
-            ChildRegionInputInsertionPoint.from_dict(pt)
-            for pt in data.get("child_region_inputs", [])
-        ]
-        region_outputs = [
-            ChildRegionOutputInsertionPoint.from_dict(pt) for pt in data.get("region_outputs", [])
-        ]
-        action_value = data.get("action")
-        if action_value is None:
-            action = (
-                SchemeAction.QDQ
-                if node_inputs or child_region_inputs or region_outputs
-                else SchemeAction.NO_QDQ
-            )
-        else:
-            action = SchemeAction(action_value)
-
-        scheme = cls(
-            action=action,
-            node_inputs=node_inputs,
-            child_region_inputs=child_region_inputs,
-            region_outputs=region_outputs,
-        )
+        scheme = cls()
         scheme.latency_ms = data.get("latency_ms", float("inf"))
         scheme.error = data.get("error", False)
         scheme.profile_timestamp = data.get("profile_timestamp")
+
+        scheme.node_inputs = [
+            NodeInputInsertionPoint.from_dict(pt) for pt in data.get("nodes_insertion_points", [])
+        ]
+        scheme.child_region_inputs = [
+            ChildRegionInputInsertionPoint.from_dict(pt)
+            for pt in data.get("child_region_inputs", [])
+        ]
+        scheme.region_outputs = [
+            ChildRegionOutputInsertionPoint.from_dict(pt) for pt in data.get("region_outputs", [])
+        ]
 
         return scheme
 
@@ -425,7 +317,7 @@ class InsertionScheme:
         """String representation for debugging."""
         error_str = ", error=True" if self.error else ""
         return (
-            f"InsertionScheme(action={self.action.value}, node_insertions={len(self.node_inputs)}, "
+            f"InsertionScheme(node_insertions={len(self.node_inputs)}, "
             f"region_insertions={len(self.child_region_inputs)}, "
             f"region_output_insertions={len(self.region_outputs)}, "
             f"latency={self.latency_ms:.3f}ms{error_str})"
@@ -461,9 +353,6 @@ class PatternSchemes:
 
     pattern: "RegionPattern | None" = None  # Structural pattern signature
     schemes: list[InsertionScheme] = field(default_factory=list)  # Candidate schemes
-    selected_scheme_hash: str | None = None
-    search_exhausted: bool = False
-    completed: bool = False
 
     @property
     def pattern_signature(self) -> str:
@@ -486,75 +375,16 @@ class PatternSchemes:
             InsertionScheme with lowest latency (excluding error schemes),
             or None if no valid schemes exist
         """
-        valid_schemes = [
-            scheme
-            for scheme in self.schemes
-            if not scheme.error and is_valid_latency(scheme.latency_ms)
-        ]
-        return min(valid_schemes, key=lambda scheme: scheme.latency_ms, default=None)
-
-    @property
-    def selected_scheme(self) -> InsertionScheme | None:
-        """Get the explicitly selected scheme for export."""
-        if self.selected_scheme_hash is not None:
-            return next(
-                (scheme for scheme in self.schemes if scheme.hash == self.selected_scheme_hash),
-                None,
-            )
-        if not any(scheme.is_inherit for scheme in self.schemes):
-            return self.best_scheme
-        return None
-
-    @property
-    def profiled_override_count(self) -> int:
-        """Return the number of attempted non-INHERIT scheme measurements."""
-        return sum(scheme.is_profiled and not scheme.is_inherit for scheme in self.schemes)
-
-    def ensure_control_schemes(self) -> None:
-        """Ensure mandatory INHERIT and NO_QDQ controls lead the scheme list."""
-        inherit = next((scheme for scheme in self.schemes if scheme.is_inherit), None)
-        no_qdq = next((scheme for scheme in self.schemes if scheme.is_no_qdq), None)
-        if inherit is None:
-            inherit = InsertionScheme(action=SchemeAction.INHERIT)
-        if no_qdq is None:
-            no_qdq = InsertionScheme(action=SchemeAction.NO_QDQ)
-        qdq_schemes = [scheme for scheme in self.schemes if scheme.is_qdq]
-        self.schemes = [inherit, no_qdq, *qdq_schemes]
-
-    def select_best(self, performance_threshold: float) -> InsertionScheme | None:
-        """Select an override only when it beats the INHERIT incumbent by the threshold."""
-        if not math.isfinite(performance_threshold) or performance_threshold < 1.0:
-            raise ValueError("performance_threshold must be finite and at least 1.0")
-
-        inherit = next(
-            (
-                scheme
-                for scheme in self.schemes
-                if scheme.is_inherit and not scheme.error and is_valid_latency(scheme.latency_ms)
-            ),
-            None,
-        )
-        inherit_control = next((scheme for scheme in self.schemes if scheme.is_inherit), None)
-        if inherit is None:
-            selected = self.best_scheme if inherit_control is None else inherit_control
-        else:
-            overrides = [
-                scheme
-                for scheme in self.schemes
-                if not scheme.is_inherit
-                and not scheme.error
-                and is_valid_latency(scheme.latency_ms)
-            ]
-            candidate = min(overrides, key=lambda scheme: scheme.latency_ms, default=None)
-            selected = inherit
-            if (
-                candidate is not None
-                and inherit.latency_ms / candidate.latency_ms >= performance_threshold
-            ):
-                selected = candidate
-
-        self.selected_scheme_hash = selected.hash if selected is not None else None
-        return selected
+        if len(self.schemes) == 0:
+            return None
+        min_idx, min_latency = -1, float("inf")
+        for idx, scheme in enumerate(self.schemes):
+            if not scheme.error and scheme.latency_ms < min_latency:
+                min_idx = idx
+                min_latency = scheme.latency_ms
+        if min_idx < 0:
+            return None
+        return self.schemes[min_idx]
 
     @property
     def num_schemes(self) -> int:
@@ -570,9 +400,6 @@ class PatternSchemes:
         return {
             "pattern_signature": self.pattern_signature,
             "pattern_size": self.pattern_size,
-            "selected_scheme_hash": self.selected_scheme_hash,
-            "search_exhausted": self.search_exhausted,
-            "completed": self.completed,
             "schemes": [scheme.to_dict() for scheme in self.schemes],
         }
 
@@ -614,9 +441,6 @@ class PatternSchemes:
         ps.schemes = [
             InsertionScheme.from_dict(scheme_data) for scheme_data in data.get("schemes", [])
         ]
-        ps.selected_scheme_hash = data.get("selected_scheme_hash")
-        ps.search_exhausted = bool(data.get("search_exhausted", False))
-        ps.completed = bool(data.get("completed", False))
 
         return ps
 
@@ -675,14 +499,8 @@ class PatternCache:
         if existing_idx is not None:
             all_schemes.extend(self.pattern_schemes[existing_idx].schemes)
 
-        # Controls are model-local measurements, never reusable cache candidates.
-        valid_schemes = [
-            scheme
-            for scheme in all_schemes
-            if scheme.is_qdq
-            and not scheme.error
-            and (is_valid_latency(scheme.latency_ms) or scheme.latency_ms == float("inf"))
-        ]
+        # Filter out schemes with errors and deduplicate by hash
+        valid_schemes = [s for s in all_schemes if not s.error]
         unique_schemes = {}
         for scheme in valid_schemes:
             scheme_hash = scheme.hash
@@ -726,9 +544,6 @@ class PatternCache:
         # Keep only the top N best-performing schemes per pattern
         if self.max_entries_per_pattern > 0:
             sorted_schemes = sorted_schemes[: self.max_entries_per_pattern]
-
-        if not sorted_schemes:
-            return
 
         # Create PatternSchemes with all schemes that passed the eviction criteria
         result = PatternSchemes(pattern=pattern_schemes.pattern)
@@ -792,7 +607,6 @@ class PatternCache:
         pattern = RegionPattern.from_region(region, graph)
         # Track insertion points
         scheme = InsertionScheme(
-            action=SchemeAction.QDQ,
             node_inputs=[],
             child_region_inputs=[],
             region_outputs=[],
@@ -803,7 +617,6 @@ class PatternCache:
         full_insertion_scheme = pattern.get_full_insertion_scheme(region, graph)
         for point in full_insertion_scheme.node_inputs:
             temp_scheme = InsertionScheme(
-                action=SchemeAction.QDQ,
                 node_inputs=[point],
                 child_region_inputs=[],
                 region_outputs=[],
@@ -820,7 +633,6 @@ class PatternCache:
         if region.type == RegionType.COMPOSITE:
             for child_point in full_insertion_scheme.child_region_inputs:
                 temp_scheme = InsertionScheme(
-                    action=SchemeAction.QDQ,
                     node_inputs=[],
                     child_region_inputs=[child_point],
                     region_outputs=[],
@@ -834,7 +646,6 @@ class PatternCache:
         # Analyze region outputs
         for output_point in full_insertion_scheme.region_outputs:
             temp_scheme = InsertionScheme(
-                action=SchemeAction.QDQ,
                 node_inputs=[],
                 child_region_inputs=[],
                 region_outputs=[output_point],
@@ -910,8 +721,9 @@ class PatternCache:
         )
 
         for ps_data in data.get("pattern_schemes", []):
+            # Create PatternSchemes without pattern object (pattern=None)
             ps = PatternSchemes.from_dict(ps_data, pattern=None)
-            cache.add_pattern_schemes(ps)
+            cache.pattern_schemes.append(ps)
 
         return cache
 
@@ -927,7 +739,8 @@ class PatternCache:
         """
         state = self.to_dict()
 
-        _atomic_yaml_dump(state, output_path)
+        with open(output_path, "w") as f:
+            yaml.dump(state, f, default_flow_style=False, sort_keys=False)
 
         logger.info(
             f"Saved pattern cache → {output_path} ({self.num_patterns} patterns, "
@@ -1033,8 +846,3 @@ class Config:
     # Pattern Cache Settings
     pattern_cache_minimum_distance: int = 4
     pattern_cache_max_entries_per_pattern: int = 32
-
-    def __post_init__(self) -> None:
-        """Validate values that participate in correctness decisions."""
-        if not math.isfinite(self.performance_threshold) or self.performance_threshold < 1.0:
-            raise ValueError("performance_threshold must be finite and at least 1.0")

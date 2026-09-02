@@ -13,41 +13,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import onnx
 import pytest
 
 import modelopt.onnx.quantization.autotune.export_utils as export_utils
 import modelopt.onnx.quantization.precision_utils as precision_utils
+from modelopt.onnx.quantization.autotune import workflows
 from modelopt.onnx.quantization.autotune.common import Config
 
 
 @pytest.mark.parametrize(
     ("quantize_mode", "expected_events"),
     [
-        pytest.param("int8", ["convert"], id="int8"),
-        pytest.param(
-            "fp8",
-            ["import", "remove_outputs", "convert_io", "export", "convert", "upgrade", "mha"],
-            id="fp8",
-        ),
+        ("int8", ["convert"]),
+        ("fp8", ["import", "remove_outputs", "convert_io", "export", "convert", "upgrade", "mha"]),
     ],
 )
-def test_convert_to_runtime_precision_preserves_mode_specific_steps(
-    monkeypatch, quantize_mode, expected_events
+@pytest.mark.parametrize("direct_io_types", [False, True])
+def test_runtime_precision_conversion_preserves_mode_steps(
+    monkeypatch, quantize_mode, expected_events, direct_io_types
 ):
-    source_model = onnx.ModelProto()
-    graph_copy = object()
-    io_converted_model = onnx.ModelProto()
-    low_precision_model = onnx.ModelProto()
-    low_precision_model.opset_import.add(domain="", version=17)
-    upgraded_model = onnx.ModelProto()
-    final_model = onnx.ModelProto()
+    source = onnx.ModelProto()
+    graph = object()
+    io_model = onnx.ModelProto()
+    converted = onnx.ModelProto()
+    converted.opset_import.add(domain="", version=17)
+    final = onnx.ModelProto()
     events = []
 
     monkeypatch.setattr(
-        precision_utils.gs,
-        "import_onnx",
-        lambda model: events.append("import") or graph_copy,
+        precision_utils.gs, "import_onnx", lambda model: events.append("import") or graph
     )
     monkeypatch.setattr(
         precision_utils,
@@ -55,46 +53,42 @@ def test_convert_to_runtime_precision_preserves_mode_specific_steps(
         lambda graph, initializers: events.append("remove_outputs"),
     )
     monkeypatch.setattr(
-        precision_utils,
-        "convert_fp16_io",
-        lambda graph: events.append("convert_io"),
+        precision_utils, "convert_fp16_io", lambda graph: events.append("convert_io")
     )
     monkeypatch.setattr(
-        precision_utils.gs,
-        "export_onnx",
-        lambda graph: events.append("export") or io_converted_model,
+        precision_utils.gs, "export_onnx", lambda graph: events.append("export") or io_model
     )
 
-    def convert_to_f16(model, **kwargs):
+    def convert(model, **kwargs):
         events.append("convert")
-        assert model is (io_converted_model if quantize_mode == "fp8" else source_model)
+        assert model is (io_model if quantize_mode == "fp8" else source)
         assert kwargs == {
-            "keep_io_types": True,
+            "keep_io_types": not direct_io_types,
             "op_block_list": ["Resize"],
             "tensor_block_dict": {"Custom": {"inputs": [0]}},
             "low_precision_type": "fp16",
             "trt_plugins": ["plugin.so"],
             "opset": 17,
         }
-        return low_precision_model
+        return converted
 
-    monkeypatch.setattr(precision_utils, "convert_to_f16", convert_to_f16)
+    monkeypatch.setattr(precision_utils, "convert_to_f16", convert)
     monkeypatch.setattr(
         precision_utils,
         "_upgrade_opset_21",
-        lambda model: events.append("upgrade") or upgraded_model,
+        lambda model: events.append("upgrade") or converted,
     )
     monkeypatch.setattr(
         precision_utils,
         "insert_fp8_mha_casts",
-        lambda model: events.append("mha") or final_model,
+        lambda model: events.append("mha") or final,
     )
 
     result = precision_utils._convert_to_runtime_precision(
-        source_model,
+        source,
         quantize_mode=quantize_mode,
         high_precision_dtype="fp16",
-        direct_io_types=False,
+        direct_io_types=direct_io_types,
         op_types_to_exclude_fp16=["Resize"],
         custom_ops_to_cast_fp32={"Custom": {"inputs": [0]}},
         trt_extra_plugin_lib_paths=["plugin.so"],
@@ -103,62 +97,77 @@ def test_convert_to_runtime_precision_preserves_mode_specific_steps(
     )
 
     assert events == expected_events
-    assert result is (final_model if quantize_mode == "fp8" else low_precision_model)
+    assert result is (final if quantize_mode == "fp8" else converted)
 
 
 def test_export_transform_runs_between_int8_qdq_and_fp8(monkeypatch):
-    source_model = onnx.ModelProto()
-    source_bytes = source_model.SerializeToString()
-    graph_copy = type("GraphCopy", (), {"toposort": lambda self: None})()
-    int8_model = onnx.ModelProto()
-    transformed_model = onnx.ModelProto()
-    fp8_model = onnx.ModelProto()
+    source = onnx.ModelProto()
+    source_bytes = source.SerializeToString()
+    graph = type("Graph", (), {"toposort": lambda self: None})()
+    int8_model, transformed, fp8_model = (onnx.ModelProto() for _ in range(3))
     events = []
 
-    monkeypatch.setattr(export_utils.gs, "import_onnx", lambda model: graph_copy)
+    monkeypatch.setattr(export_utils.gs, "import_onnx", lambda model: graph)
     monkeypatch.setattr(
-        export_utils.gs,
-        "export_onnx",
-        lambda graph: events.append("export") or int8_model,
+        export_utils.gs, "export_onnx", lambda graph: events.append("export") or int8_model
     )
-
-    def insert_qdq(graph, insertion_points, config):
-        events.append("insert_int8_qdq")
-        assert config.default_quant_type == "int8"
-
-    monkeypatch.setattr(export_utils, "insert_qdq_at_tensors", insert_qdq)
+    monkeypatch.setattr(
+        export_utils,
+        "insert_qdq_at_tensors",
+        lambda graph, points, config: events.append(f"insert_{config.default_quant_type}"),
+    )
     monkeypatch.setattr(
         export_utils,
         "fix_zero_point_initializers",
         lambda model: events.append("fix_zero_point"),
     )
+    monkeypatch.setattr(
+        export_utils,
+        "int8_to_fp8",
+        lambda model: events.append("convert_fp8") or fp8_model,
+    )
 
     def transform(model):
-        events.append("transform")
         assert model is int8_model
-        return transformed_model
-
-    def int8_to_fp8(model):
-        events.append("convert_fp8")
-        assert model is transformed_model
-        return fp8_model
-
-    monkeypatch.setattr(export_utils, "int8_to_fp8", int8_to_fp8)
+        events.append("transform")
+        return transformed
 
     result = export_utils.export_qdq_onnx(
-        source_model,
+        source,
         {object()},
         Config(default_quant_type="fp8"),
         needs_fp8_conversion=True,
         model_transform=transform,
     )
 
-    assert events == [
-        "insert_int8_qdq",
-        "export",
-        "fix_zero_point",
-        "transform",
-        "convert_fp8",
-    ]
+    assert events == ["insert_int8", "export", "fix_zero_point", "transform", "convert_fp8"]
     assert result is fp8_model
-    assert source_model.SerializeToString() == source_bytes
+    assert source.SerializeToString() == source_bytes
+
+
+def test_workflow_transforms_every_benchmark_export(monkeypatch, tmp_path):
+    autotuner = Mock(
+        regions=[SimpleNamespace(id=0, level=0)],
+        baseline_latency_ms=None,
+        current_profile_pattern_schemes=SimpleNamespace(schemes=[]),
+    )
+    autotuner.generate.return_value = 0
+    autotuner.export_onnx.return_value = onnx.ModelProto().SerializeToString()
+    monkeypatch.setattr(workflows, "QDQAutotuner", lambda model: autotuner)
+    monkeypatch.setattr(workflows, "benchmark_onnx_model", lambda *args, **kwargs: 1.0)
+
+    def transform(model):
+        return model
+
+    workflows.region_pattern_autotuning_workflow(
+        onnx.ModelProto(), output_dir=tmp_path, num_schemes_per_region=1, model_transform=transform
+    )
+
+    exports = autotuner.export_onnx.call_args_list
+    assert [(call.kwargs["insert_qdq"], call.kwargs.get("best", False)) for call in exports] == [
+        (False, False),
+        (True, False),
+        (True, True),
+        (True, False),
+    ]
+    assert all(call.kwargs["model_transform"] is transform for call in exports)
