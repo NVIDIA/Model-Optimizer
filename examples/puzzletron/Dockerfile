@@ -8,6 +8,7 @@ ARG TARGETPLATFORM
 ENV VIRTUAL_ENV=/venv
 ENV PATH=/venv/bin/:$PATH
 ENV PIP_NO_CACHE_DIR=1
+ENV LMMS_EVAL_ROOT=/opt/puzzletron/src/lmms-eval
 ENV NLTK_DATA=/opt/puzzletron/nltk_data
 ENV PUZZLETRON_CI_ENVIRONMENT=/opt/puzzletron/ci_environment.json
 ENV PUZZLETRON_REQUIREMENTS=/opt/puzzletron/requirements.txt
@@ -69,6 +70,22 @@ RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
         "${PUZZLETRON_CI_ENVIRONMENT}") && \
     python -m pip install "transformers==$(pin transformers)"
 
+# Install the native Qwen 3.5 evaluator in the shared worker environment. The
+# tracked patch reconciles lmms-eval's WandB metadata with AutoModel's required
+# range without changing evaluator code.
+RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
+    lmms_patch="$(pin lmms_eval.compatibility_patch)" && \
+    echo "$(pin lmms_eval.compatibility_patch_sha256)  /opt/puzzletron/patches/${lmms_patch}" | \
+        sha256sum --check --strict && \
+    git clone --filter=blob:none --no-checkout \
+        "$(pin lmms_eval.repository)" "${LMMS_EVAL_ROOT}" && \
+    git -C "${LMMS_EVAL_ROOT}" checkout --detach "$(pin lmms_eval.commit)" && \
+    test "$(git -C "${LMMS_EVAL_ROOT}" rev-parse HEAD)" = \
+        "$(pin lmms_eval.commit)" && \
+    git -C "${LMMS_EVAL_ROOT}" apply --check "/opt/puzzletron/patches/${lmms_patch}" && \
+    git -C "${LMMS_EVAL_ROOT}" apply "/opt/puzzletron/patches/${lmms_patch}" && \
+    python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"
+
 # Compile the pinned AnyModel vLLM fork for every supported worker GPU.
 RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
     export FORCE_CUDA=1 && \
@@ -124,6 +141,7 @@ COPY examples/puzzletron /opt/puzzletron/src/modelopt/examples/puzzletron
 # by the repository tests and by the install commands above.
 RUN python -m pip install --no-build-isolation --no-deps -e \
         "/opt/puzzletron/src/modelopt[hf,puzzletron,dev-test]" && \
+    python -m pip check && \
     pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
     for module in \
         aiperf causal_conv1d decord fla grouped_gemm langdetect lmms_eval \
@@ -136,10 +154,12 @@ RUN python -m pip install --no-build-isolation --no-deps -e \
     while read -r nltk_resource; do \
         python -c "import nltk; nltk.data.find('tokenizers/${nltk_resource}')"; \
     done < <(jq -r '.gpu_image.nltk_resources[]' "${PUZZLETRON_CI_ENVIRONMENT}") && \
+    python -c \
+        'from examples.puzzletron.evaluation.checkpoint import verify_lmms_eval_revision; verify_lmms_eval_revision()' && \
     lmms_root="$(python -c 'import lmms_eval; print(next(iter(lmms_eval.__path__)))')" && \
-    while read -r task_config; do \
-        test -f "${lmms_root}/${task_config}"; \
-    done < <(jq -r '.lmms_eval.task_configs[]' "${PUZZLETRON_CI_ENVIRONMENT}")
+    while read -r required_path; do \
+        test -f "${lmms_root}/${required_path}"; \
+    done < <(jq -r '.lmms_eval.required_paths[]' "${PUZZLETRON_CI_ENVIRONMENT}")
 
 LABEL org.opencontainers.image.source="https://github.com/NVIDIA/Model-Optimizer" \
     org.opencontainers.image.revision="${MODELOPT_REVISION}" \

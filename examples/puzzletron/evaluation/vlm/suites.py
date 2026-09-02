@@ -117,6 +117,7 @@ class FramePolicy(TypedDict):
 class GenerationPolicy(TypedDict):
     """Generation fields shared by provenance and execution."""
 
+    enable_thinking: bool
     temperature: int
     do_sample: bool
 
@@ -155,7 +156,7 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     )
     return {
         "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
-        "generation": {"temperature": 0, "do_sample": False},
+        "generation": {"enable_thinking": False, "temperature": 0, "do_sample": False},
         "limit": (
             2
             if suite == "realworldqa-smoke"

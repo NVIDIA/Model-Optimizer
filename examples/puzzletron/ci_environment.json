@@ -5,6 +5,14 @@
   "torch": "2.11.0",
   "torchvision": "0.26.0",
   "transformers": "5.8.1",
+  "accelerate": "1.14.0",
+  "av": "15.1.0",
+  "datasets": "5.0.1",
+  "eva-decord": "0.6.1",
+  "huggingface-hub": "1.29.0",
+  "openai": "3.6.0",
+  "qwen-vl-utils": "0.0.14",
+  "wandb": "0.29.0",
   "gpu_image": {
     "base_image": "nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909bdad891fab300ec5700fb4f4656463b2f51980f",
     "torch_cuda": "12.9",
@@ -20,10 +28,20 @@
     "nox": "2026.8.17"
   },
   "lmms_eval": {
-    "base_version": "0.7.0",
+    "base_version": "0.7.2",
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
-    "commit": "15c32bfec165df13c269ddd3cda03b2ed9137825",
-    "task_configs": ["tasks/gsm8k/gsm8k.yaml", "tasks/ifeval/ifeval.yaml"]
+    "commit": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "compatibility_patch": "lmms_eval_wandb_0_29.patch",
+    "compatibility_patch_files": ["pyproject.toml"],
+    "compatibility_patch_sha256": "05a20d097c86bc37a3cfbde47b652be6959f5a4f5302cb238c19ae184f173b7c",
+    "required_paths": [
+      "models/chat/qwen3_5.py",
+      "tasks/gsm8k/gsm8k.yaml",
+      "tasks/ifeval/ifeval.yaml",
+      "tasks/omni_bench/_default_template_yaml",
+      "tasks/realworldqa/realworldqa.yaml",
+      "tasks/videomme/videomme.yaml"
+    ]
   },
   "nemo_automodel": {
     "base_version": "0.5.0",

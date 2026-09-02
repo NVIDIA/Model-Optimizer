@@ -174,10 +174,8 @@ def _report(
         "suite": suite,
         "checkpoint": str(args.checkpoint),
         "lmms_eval_revision": lmms_eval_revision,
-        "model_backend": "vllm",
-        "backend_limitations": [
-            "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
-        ],
+        "model_backend": "qwen3_5",
+        "backend_limitations": [],
         "source_tasks": list(source_tasks),
         "dataset_revisions": revisions,
         "dataset_snapshots": {task: str(snapshot) for task, snapshot in dataset_snapshots.items()},
@@ -213,18 +211,17 @@ def settings(
     frame_policy = execution_policy["frame"]
     generation_policy = execution_policy["generation"]
     return {
-        "model": "vllm",
-        "checkpoint_arg": "model",
+        "model": "qwen3_5",
+        "checkpoint_arg": "pretrained",
         "tasks": ",".join(configured_tasks),
         "limit": execution_policy["limit"],
         "batch_size": args.batch_size,
         "seed": args.seed,
         "timeout_seconds": execution_policy["timeout_seconds"],
-        "reasoning_parser": "qwen3",
-        "log_samples": False,
         "model_args": {
+            "enable_thinking": generation_policy["enable_thinking"],
             "fps": frame_policy["fps"],
-            "max_frame_num": frame_policy["max_frames"],
+            "max_frames": frame_policy["max_frames"],
         },
         "gen_kwargs": {
             "temperature": generation_policy["temperature"],

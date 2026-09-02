@@ -28,6 +28,12 @@ _EXPECTED_SOURCE = {
     "repository": "https://github.com/Separius/Automodel.git",
     "commit": "b22cd029d806197e249f2cc4a42c5de91713b772",
 }
+_EXPECTED_PATCHED_SOURCE = {
+    "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
+    "commit": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "compatibility_patch_files": ["pyproject.toml"],
+    "compatibility_patch_sha256": "a" * 64,
+}
 
 
 # Installed-source provenance
@@ -92,6 +98,51 @@ def test_editable_pinned_dependency_must_be_clean(monkeypatch):
         )
 
 
+def test_editable_compatibility_patch_must_match_exact_diff(monkeypatch):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(
+            {"url": "file:///src/lmms-eval", "dir_info": {"editable": True}}
+        ),
+    )
+    diff = "diff --git a/pyproject.toml b/pyproject.toml\n"
+    expected = {
+        **_EXPECTED_PATCHED_SOURCE,
+        "compatibility_patch_sha256": ci_environment.hashlib.sha256(diff.encode()).hexdigest(),
+    }
+    outputs = iter(
+        [
+            f"{expected['repository']}\n",
+            f"{expected['commit']}\n",
+            " M pyproject.toml\n",
+            diff,
+        ]
+    )
+    monkeypatch.setattr(
+        ci_environment.subprocess,
+        "check_output",
+        lambda *_args, **_kwargs: next(outputs),
+    )
+
+    ci_environment.verify_installed_vcs_source("lmms-eval", expected)
+
+
+def test_direct_vcs_install_cannot_satisfy_required_compatibility_patch(monkeypatch):
+    monkeypatch.setattr(
+        ci_environment.metadata,
+        "distribution",
+        lambda _package: _Distribution(
+            _pep610_source(
+                _EXPECTED_PATCHED_SOURCE["repository"], _EXPECTED_PATCHED_SOURCE["commit"]
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="requires a verified editable"):
+        ci_environment.verify_installed_vcs_source("lmms-eval", _EXPECTED_PATCHED_SOURCE)
+
+
 # Nox execution order
 
 
@@ -111,6 +162,14 @@ def test_nox_verifier_executes_scalar_version_and_exact_vcs_checks(monkeypatch):
         "torch": "1.2.3",
         "torchvision": "2.3.4",
         "transformers": "3.4.5",
+        "accelerate": "4.5.6",
+        "av": "5.6.7",
+        "datasets": "6.7.8",
+        "eva-decord": "7.8.9",
+        "huggingface-hub": "8.9.0",
+        "openai": "9.0.1",
+        "qwen-vl-utils": "0.1.2",
+        "wandb": "1.2.3",
         "lmms-eval": lmms_source["base_version"],
         "nemo-automodel": automodel_source["base_version"],
     }
@@ -161,11 +220,17 @@ def test_puzzletron_nox_session_verifies_environment_before_pytest(monkeypatch):
         "_verify_puzzletron_v2_environment",
         lambda session: events.append(("verify", session)),
     )
+    monkeypatch.setattr(
+        noxfile,
+        "_install_puzzletron_lmms_eval",
+        lambda session: events.append(("install-lmms", session)),
+    )
     session = RecordingSession()
 
     noxfile.puzzletron_v2.func(session)
 
     assert ("run", ("python", "-m", "pip", "check")) in events
+    assert ("install-lmms", session) in events
     verify_index = events.index(("verify", session))
     pytest_index = next(
         index

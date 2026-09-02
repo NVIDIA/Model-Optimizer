@@ -39,7 +39,7 @@ def test_image_recipe_records_pinned_environment(project_root_path):
     )
     assert "for module in" in dockerfile
     assert "nltk.data.find" in dockerfile
-    assert ".lmms_eval.task_configs[]" in dockerfile
+    assert ".lmms_eval.required_paths[]" in dockerfile
 
     vcs_sources = [
         environment["lmms_eval"],
@@ -85,6 +85,47 @@ def test_mamba_compatibility_patch_is_limited_to_the_tilelang_pin(project_root_p
         dockerfile
     )
     assert 'test "$(git -C /tmp/mamba-ssm rev-parse HEAD)" = \\' in dockerfile
+
+
+def test_lmms_eval_compatibility_patch_only_reconciles_wandb(project_root_path):
+    puzzletron_root = project_root_path / "examples/puzzletron"
+    environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
+    dockerfile = (puzzletron_root / "Dockerfile").read_text()
+
+    lmms_source = environment["lmms_eval"]
+    patch = puzzletron_root / "patches" / lmms_source["compatibility_patch"]
+    patch_bytes = patch.read_bytes()
+    assert hashlib.sha256(patch_bytes).hexdigest() == lmms_source["compatibility_patch_sha256"]
+    changed_lines = [
+        line
+        for line in patch_bytes.decode().splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++ ", "--- "))
+    ]
+    assert changed_lines == [
+        '-    "wandb==0.25.0",',
+        '+    "wandb>=0.28.0,<0.30",',
+    ]
+    assert lmms_source["compatibility_patch_files"] == ["pyproject.toml"]
+    assert '"$(pin lmms_eval.repository)" "${LMMS_EVAL_ROOT}"' in dockerfile
+    assert 'git -C "${LMMS_EVAL_ROOT}" checkout --detach "$(pin lmms_eval.commit)"' in dockerfile
+    assert 'git -C "${LMMS_EVAL_ROOT}" apply --check' in dockerfile
+    assert 'python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"' in dockerfile
+
+
+def test_image_checks_native_lmms_eval_contract(project_root_path):
+    puzzletron_root = project_root_path / "examples/puzzletron"
+    environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
+    dockerfile = (puzzletron_root / "Dockerfile").read_text()
+
+    assert environment["lmms_eval"]["base_version"] == "0.7.2"
+    assert set(environment["lmms_eval"]["required_paths"]) >= {
+        "models/chat/qwen3_5.py",
+        "tasks/realworldqa/realworldqa.yaml",
+        "tasks/videomme/videomme.yaml",
+        "tasks/omni_bench/_default_template_yaml",
+    }
+    assert "python -m pip check" in dockerfile
+    assert "verify_lmms_eval_revision" in dockerfile
 
 
 def test_cpu_contract_lane_watches_image_recipe_inputs(project_root_path):

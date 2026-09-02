@@ -115,7 +115,7 @@ def _lmms_eval_gsm8k_config() -> Path:
     locations = spec.submodule_search_locations if spec is not None else None
     if not locations:
         raise RuntimeError(
-            "lmms_eval is not installed; install examples/puzzletron/requirements.txt"
+            "lmms_eval is not installed; run this command in the Puzzletron worker image"
         )
     config = Path(next(iter(locations))) / "tasks/gsm8k/gsm8k.yaml"
     if not config.is_file():

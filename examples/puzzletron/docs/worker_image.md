@@ -17,9 +17,12 @@ python examples/puzzletron/build_worker_image.py
 The command always uses `examples/puzzletron/Dockerfile`, the repository root as
 the build context, Linux amd64 as the platform, and the current full Git
 revision. It checks the installed modules, CUDA version, and required evaluation
-data. The full source revision is recorded in the image label and at
-`/opt/puzzletron/modelopt_revision`. The Dockerfile remains directly usable by
-standard Docker tools, but users do not need to assemble these arguments.
+data. It also validates the exact patched `lmms-eval` checkout, native Qwen 3.5
+backend and representative image/video task files, and the complete Python
+dependency resolution. The full source revision is recorded in the image label
+and at `/opt/puzzletron/modelopt_revision`. The Dockerfile remains directly
+usable by standard Docker tools, but users do not need to assemble these
+arguments.
 
 ## Export for another runtime
 
@@ -59,9 +62,11 @@ docker run --gpus all --ipc=host --rm "${image}" \
 ## Use
 
 The image contains the worker environment at `/venv` and the ModelOpt checkout
-at `/opt/puzzletron/src/modelopt`. Use the image directly with Docker, publish
-it to a registry, or export it for Enroot, Pyxis, or the target Slurm container
-plugin.
+at `/opt/puzzletron/src/modelopt`. It also contains the pinned native
+`lmms-eval` source at `/opt/puzzletron/src/lmms-eval`; use that installed
+evaluator rather than adding a VLM-specific requirements overlay. Use the image
+directly with Docker, publish it to a registry, or export it for Enroot, Pyxis,
+or the target Slurm container plugin.
 
 The current image supports Linux amd64 only. Its CUDA extensions and
 `eva-decord 0.6.1` dependency have not been validated on Linux ARM.

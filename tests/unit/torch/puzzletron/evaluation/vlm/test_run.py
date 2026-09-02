@@ -15,6 +15,7 @@
 
 """High-value behavior tests for local VLM evaluation workflows."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -203,7 +204,9 @@ def _quick_manifest(path: Path) -> Path:
     return path
 
 
-def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, tmp_path, capsys):
+def test_short_profile_materializes_pinned_tasks_and_native_qwen_backend(
+    monkeypatch, tmp_path, capsys
+):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -276,10 +279,9 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
         assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
-    assert settings["model"] == "vllm"
-    assert settings["log_samples"] is False
-    assert settings["checkpoint_arg"] == "model"
-    assert settings["reasoning_parser"] == "qwen3"
+    assert settings["model"] == "qwen3_5"
+    assert settings["checkpoint_arg"] == "pretrained"
+    assert "reasoning_parser" not in settings
     assert "topology" not in settings
     assert settings["env"]["HF_HUB_OFFLINE"] == "1"
     assert settings["env"]["API_TYPE"] == "openai"
@@ -287,17 +289,18 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert settings["env"]["OPENAI_API_KEY"] == "modelopt-disabled-lmms-eval-judge"
     assert settings["env"]["OPENAI_API_URL"] == "http://127.0.0.1:9"
     assert report["model_backend"] == settings["model"]
-    assert report["backend_limitations"] == [
-        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
-    ]
+    assert report["backend_limitations"] == []
     assert report["sample_limit"] == settings["limit"]
     assert report["timeout_seconds"] == settings["timeout_seconds"]
     assert report["frame_policy"] == {
         "reader": settings["env"]["FORCE_QWENVL_VIDEO_READER"],
         "fps": settings["model_args"]["fps"],
-        "max_frames": settings["model_args"]["max_frame_num"],
+        "max_frames": settings["model_args"]["max_frames"],
     }
-    assert report["generation_policy"] == settings["gen_kwargs"]
+    assert report["generation_policy"] == {
+        **settings["gen_kwargs"],
+        "enable_thinking": settings["model_args"]["enable_thinking"],
+    }
 
 
 @pytest.mark.parametrize("suite", ["short", "e2e-full-eval"])
@@ -437,7 +440,11 @@ def test_e2e_full_eval_policy_is_repeated_and_bounded_to_100_rows_per_task():
     policy = suites.execution_policy("e2e-full-eval", timeout_seconds=14400)
     assert policy["limit"] == 100
     assert policy["repetitions"] == 2
-    assert policy["generation"] == {"temperature": 0, "do_sample": False}
+    assert policy["generation"] == {
+        "enable_thinking": False,
+        "temperature": 0,
+        "do_sample": False,
+    }
 
 
 def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path):
@@ -699,6 +706,7 @@ class Task:
 class Group: group_name = "modelopt_vlm_benchmark_mvbench"
 class TaskManager:
     def __init__(self, include_path, model_name):
+        assert model_name == "qwen3_5"
         assert os.environ["HF_DATASETS_OFFLINE"] == "1"
         assert os.environ["HF_HUB_OFFLINE"] == "1"
         assert os.environ["API_TYPE"] == "openai"
@@ -798,15 +806,22 @@ def test_video_reader_validation_is_limited_to_video_suites(monkeypatch):
 
 def test_requirements_pin_matches_runtime_lmms_eval_revision():
     requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
-    assert (
-        "-e git+https://github.com/EvolvingLMMs-Lab/lmms-eval.git@"
-        f"{checkpoint.LMMS_EVAL_REVISION}#egg=lmms-eval"
-    ) in requirements.splitlines()
+    assert "lmms-eval.git" not in requirements
     assert 'eva-decord==0.6.1; platform_system == "Linux"' in requirements.splitlines()
+    assert "wandb==0.29.0" in requirements.splitlines()
     environment = json.loads(
         (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
     )
     assert environment["lmms_eval"]["commit"] == checkpoint.LMMS_EVAL_REVISION
+    patch = (
+        checkpoint.REPOSITORY_ROOT
+        / "examples/puzzletron/patches"
+        / environment["lmms_eval"]["compatibility_patch"]
+    )
+    assert (
+        hashlib.sha256(patch.read_bytes()).hexdigest()
+        == environment["lmms_eval"]["compatibility_patch_sha256"]
+    )
 
 
 def test_vlm_parser_exposes_only_suite_owned_sample_limits():

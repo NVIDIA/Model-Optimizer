@@ -10,28 +10,19 @@ For text-only IFEval and GSM8K evaluation, use the separate
 
 ## Prepare the worker environment
 
-Run evaluation in the same worker environment used by Puzzletron. Install
-ModelOpt and the Puzzletron requirements from the repository root:
+Run evaluation in the default Puzzletron worker image described in the
+[worker environment guide](environment_setup.md). The image includes the exact
+upstream `lmms-eval` 0.7.2 source revision recorded in
+`examples/puzzletron/ci_environment.json`, including its native Qwen 3.5 image
+and video backend. No evaluator overlay or separate VLM requirements install is
+needed.
 
-```bash
-python -m pip install -e '.[hf,puzzletron]' \
-  -r examples/puzzletron/requirements.txt
-```
-
-The requirements install the upstream EvolvingLMMs `lmms-eval` repository at
-the exact revision recorded in `examples/puzzletron/ci_environment.json`. This
-is the supported older revision based on `lmms-eval` 0.7.0, not a ModelOpt fork
-or a locally patched evaluator. It is installed as an editable checkout because
-the evaluator loads task templates that are not included in its wheel.
-Puzzletron generates its benchmark task adapters separately and does not modify
-the evaluator checkout.
-
-The documented [worker environment](environment_setup.md) installs the same
-requirements file, and startup validates both the installed revision and that
-the checkout has no local changes. Do not substitute another `lmms-eval`
-revision in this environment. Support for a newer evaluator and its dependency
-set is separate work. This repository does not define a second Puzzletron
-container-specific evaluator pin.
+The image applies one tracked compatibility patch to `lmms-eval` dependency
+metadata so its WandB requirement agrees with AutoModel. The patch does not
+change evaluator code. Image construction verifies the patch checksum, source
+revision, resulting checkout diff, required native backend and task files, and
+the resolved Python dependency set. Do not replace or modify that evaluator
+checkout inside the worker image.
 
 ## Choose a suite
 
@@ -130,11 +121,9 @@ command, standard output and error, the raw evaluator result, and normalized
 `summary.json` metrics. Repeating a run creates new attempt directories rather
 than overwriting previous evidence.
 
-Qwen 3.5 uses the pinned evaluator's generic vLLM backend. Image and video
-scores are useful for repeatable development comparisons, but the generic
-backend does not preserve video timestamps as faithfully as the newer native
-Qwen 3.5 wrapper. Do not interpret its video scores as backend-equivalence
-results.
+Qwen 3.5 uses the pinned evaluator's native `qwen3_5` backend for image and
+video inputs. The recorded preflight report includes this backend identity,
+frame policy, generation policy, and exact evaluator revision.
 
 If preflight fails, address the reported checkpoint, revision, cache, decoder,
 or credential mismatch before retrying. Inspect `stderr.txt` in the attempt

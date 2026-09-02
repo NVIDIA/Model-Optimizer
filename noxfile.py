@@ -66,6 +66,31 @@ PUZZLETRON_V2_AUTOMODEL = (
 )
 
 
+def _install_puzzletron_lmms_eval(session):
+    """Install the worker image's patched native evaluator in the CPU test environment."""
+    checkout = Path(tempfile.mkdtemp(prefix="lmms-eval-", dir=session.create_tmp()))
+    patch = Path("examples/puzzletron/patches") / PUZZLETRON_V2_LMMS_SOURCE["compatibility_patch"]
+    session.run(
+        "git",
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        PUZZLETRON_V2_LMMS_SOURCE["repository"],
+        str(checkout),
+    )
+    session.run(
+        "git",
+        "-C",
+        str(checkout),
+        "checkout",
+        "--detach",
+        PUZZLETRON_V2_LMMS_SOURCE["commit"],
+    )
+    session.run("git", "-C", str(checkout), "apply", "--check", str(patch.resolve()))
+    session.run("git", "-C", str(checkout), "apply", str(patch.resolve()))
+    session.install("-e", f"{checkout}[qwen]")
+
+
 def _verify_puzzletron_v2_environment(session):
     """Fail before collection when the dedicated Puzzletron runtime drifts."""
     expected_versions = {
@@ -73,6 +98,14 @@ def _verify_puzzletron_v2_environment(session):
         "torch": PUZZLETRON_V2_CI_ENVIRONMENT["torch"],
         "torchvision": PUZZLETRON_V2_CI_ENVIRONMENT["torchvision"],
         "transformers": PUZZLETRON_V2_CI_ENVIRONMENT["transformers"],
+        "accelerate": PUZZLETRON_V2_CI_ENVIRONMENT["accelerate"],
+        "av": PUZZLETRON_V2_CI_ENVIRONMENT["av"],
+        "datasets": PUZZLETRON_V2_CI_ENVIRONMENT["datasets"],
+        "eva-decord": PUZZLETRON_V2_CI_ENVIRONMENT["eva-decord"],
+        "huggingface-hub": PUZZLETRON_V2_CI_ENVIRONMENT["huggingface-hub"],
+        "openai": PUZZLETRON_V2_CI_ENVIRONMENT["openai"],
+        "qwen-vl-utils": PUZZLETRON_V2_CI_ENVIRONMENT["qwen-vl-utils"],
+        "wandb": PUZZLETRON_V2_CI_ENVIRONMENT["wandb"],
         "lmms-eval": PUZZLETRON_V2_LMMS_SOURCE["base_version"],
         "nemo-automodel": PUZZLETRON_V2_AUTOMODEL_SOURCE["base_version"],
     }
@@ -98,6 +131,14 @@ actual = {{
     "torch": Version(version("torch")).base_version,
     "torchvision": Version(version("torchvision")).base_version,
     "transformers": Version(version("transformers")).base_version,
+    "accelerate": Version(version("accelerate")).base_version,
+    "av": Version(version("av")).base_version,
+    "datasets": Version(version("datasets")).base_version,
+    "eva-decord": Version(version("eva-decord")).base_version,
+    "huggingface-hub": Version(version("huggingface-hub")).base_version,
+    "openai": Version(version("openai")).base_version,
+    "qwen-vl-utils": Version(version("qwen-vl-utils")).base_version,
+    "wandb": Version(version("wandb")).base_version,
     "lmms-eval": Version(version("lmms-eval")).base_version,
     "nemo-automodel": Version(version("nemo-automodel")).base_version,
 }}
@@ -161,6 +202,7 @@ def puzzletron_v2(session):
         ".[hf,puzzletron,dev-test]",
         PUZZLETRON_V2_AUTOMODEL,
     )
+    _install_puzzletron_lmms_eval(session)
     # This environment is resolved and installed by pip.  Use pip's dependency
     # check so older, pip-compatible platform tags (notably decord's manylinux
     # wheel) are not rejected by uv's stricter wheel-tag validation.
