@@ -24,12 +24,17 @@ class ONNXQuantExporter(ABC):
     """Base class for ONNX quantizer exporters."""
 
     @classmethod
-    def process_model(cls, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    def process_model(
+        cls, onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
+    ) -> onnx.ModelProto:
         """Processes the ONNX model."""
         onnx_model = cls.pre_process(onnx_model)
         onnx_model = cls.compute_scales(onnx_model)
         onnx_model = cls.compress_weights(onnx_model)
-        onnx_model = cls.post_process(onnx_model)
+        if high_precision_dtype is None:
+            onnx_model = cls.post_process(onnx_model)
+        else:
+            onnx_model = cls.post_process(onnx_model, high_precision_dtype)
         return onnx_model
 
     @staticmethod
@@ -49,5 +54,7 @@ class ONNXQuantExporter(ABC):
 
     @staticmethod
     @abstractmethod
-    def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    def post_process(
+        onnx_model: onnx.ModelProto, high_precision_dtype: str | None = None
+    ) -> onnx.ModelProto:
         """Post-processes the ONNX model."""

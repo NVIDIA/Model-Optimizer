@@ -19,6 +19,7 @@ import warnings
 from collections.abc import Sequence
 from typing import Any
 
+import ml_dtypes
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -61,6 +62,7 @@ onnx_bit_dtype_signed_map = {4: "INT4", 8: "INT8"}
 onnx_bit_dtype_unsigned_map = {4: "UINT4", 8: "UINT8"}
 
 np_dtype_map = {
+    "BFloat16": ml_dtypes.bfloat16,
     "Float": np.float32,
     "Half": np.float16,
     "INT8": np.int8,
@@ -1020,40 +1022,71 @@ def remove_graph_input_q(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
 
 def replace_zero_scale_with_smallest_nonzero(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Replace zero scale values with smallest nonzero fp16 value in the ONNX model."""
-    graph = onnx_model.graph
-    fp16_smallest_nonzero = np.float16(6e-08)
+    """Replace zero scale values with the smallest nonzero value of their dtype."""
     qdq_op_types = {
         "QuantizeLinear",
         "DequantizeLinear",
         "TRT_INT4QuantizeLinear",
         "TRT_INT4DequantizeLinear",
     }
-    scale_tensor_names = {
-        node.input[1]
-        for node in graph.node
-        if node.op_type in qdq_op_types and len(node.input) >= 2
-    }
-    # Scales stored as graph initializers (e.g. INT4_AWQ / TRT_INT4DequantizeLinear exports).
-    for init in graph.initializer:
-        if init.name in scale_tensor_names:
-            tensor = numpy_helper.to_array(init)
-            if tensor.dtype.kind == "f":
-                new_tensor = np.where(tensor == 0, fp16_smallest_nonzero, tensor).astype(
-                    tensor.dtype
-                )
-                init.CopyFrom(numpy_helper.from_array(new_tensor, init.name))
-    # Scales emitted by Constant nodes (legacy QDQ export path).
-    for node in graph.node:
-        if node.op_type == "Constant" and node.output[0] in scale_tensor_names:
+
+    def replace_zeros(tensor_proto: onnx.TensorProto) -> None:
+        dtype = {
+            onnx.TensorProto.BFLOAT16: ml_dtypes.bfloat16,
+            onnx.TensorProto.DOUBLE: np.float64,
+            onnx.TensorProto.FLOAT: np.float32,
+            onnx.TensorProto.FLOAT16: np.float16,
+        }.get(tensor_proto.data_type)
+        if dtype is None:
+            return
+
+        tensor = numpy_helper.to_array(tensor_proto)
+        dtype_info = ml_dtypes.finfo(dtype) if dtype == ml_dtypes.bfloat16 else np.finfo(dtype)
+        smallest_nonzero = np.array(dtype_info.smallest_subnormal, dtype=dtype)
+        new_tensor = np.where(tensor == 0, smallest_nonzero, tensor).astype(dtype)
+        tensor_proto.CopyFrom(numpy_helper.from_array(new_tensor, tensor_proto.name))
+
+    def replace_zero_scales(graph: onnx.GraphProto) -> set[str]:
+        scale_tensor_names = {
+            node.input[1]
+            for node in graph.node
+            if node.op_type in qdq_op_types and len(node.input) >= 2 and node.input[1]
+        }
+
+        for node in graph.node:
             for attr in node.attribute:
-                if attr.name == "value":
-                    tensor = numpy_helper.to_array(attr.t)
-                    if tensor.dtype.kind == "f":
-                        new_tensor = np.where(tensor == 0, fp16_smallest_nonzero, tensor).astype(
-                            tensor.dtype
-                        )
-                        attr.t.CopyFrom(numpy_helper.from_array(new_tensor, attr.t.name))
+                if attr.type == onnx.AttributeProto.GRAPH:
+                    scale_tensor_names.update(replace_zero_scales(attr.g))
+                elif attr.type == onnx.AttributeProto.GRAPHS:
+                    for subgraph in attr.graphs:
+                        scale_tensor_names.update(replace_zero_scales(subgraph))
+
+        # Scales stored as graph initializers (e.g. INT4_AWQ / TRT_INT4DequantizeLinear exports).
+        initializer_names = {init.name for init in graph.initializer}
+        sparse_initializer_names = {
+            init.values.name for init in graph.sparse_initializer if init.values.name
+        }
+        for init in graph.initializer:
+            if init.name in scale_tensor_names:
+                replace_zeros(init)
+
+        # Scales emitted by Constant nodes (legacy QDQ export path).
+        node_output_names = {output for node in graph.node for output in node.output if output}
+        for node in graph.node:
+            if node.op_type == "Constant" and node.output[0] in scale_tensor_names:
+                for attr in node.attribute:
+                    if attr.name == "value":
+                        replace_zeros(attr.t)
+
+        local_definitions = (
+            initializer_names
+            | sparse_initializer_names
+            | node_output_names
+            | {value.name for value in graph.input if value.name}
+        )
+        return scale_tensor_names - local_definitions
+
+    replace_zero_scales(onnx_model.graph)
     return onnx_model
 
 

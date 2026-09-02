@@ -48,6 +48,176 @@ For 512, the unit in last place (ULP) is 0.5, for 1024 it is 1.0, etc.
 DEFAULT_DATA_MAX = 512
 DEFAULT_INIT_MAX = np.finfo(np.float16).max
 LATEST_IR_VERSION_SUPPORTED_BY_ORT = 10
+_FLOAT_TYPES_TO_FP32 = {
+    onnx.TensorProto.DOUBLE,
+    onnx.TensorProto.FLOAT16,
+    onnx.TensorProto.BFLOAT16,
+}
+_STANDARD_FLOAT_DTYPE_ATTRIBUTES = {
+    "dtype",
+    "output_datatype",
+    "output_dtype",
+    "precision",
+    "softmax_precision",
+    "stash_type",
+}
+_TRT_FLOAT_DTYPE_ATTRIBUTES = {"output_dtype"}
+
+
+def _convert_tensor_to_fp32(tensor: onnx.TensorProto) -> None:
+    if tensor.data_type not in _FLOAT_TYPES_TO_FP32:
+        return
+    if tensor.data_location == onnx.TensorProto.EXTERNAL and not tensor.raw_data:
+        raise ValueError("External tensor data must be loaded before FP32 conversion")
+    if tensor.HasField("segment"):
+        raise ValueError("Segmented tensors are not supported for FP32 conversion")
+
+    dims = list(tensor.dims)
+    name = tensor.name
+    doc_string = tensor.doc_string
+    metadata_props = [deepcopy(prop) for prop in getattr(tensor, "metadata_props", ())]
+    if tensor.data_type in (onnx.TensorProto.FLOAT16, onnx.TensorProto.BFLOAT16):
+        values = (
+            onnx_utils.read_f16_tensor_as_fp32(tensor)
+            if tensor.raw_data
+            else onnx.numpy_helper.to_array(tensor).astype(np.float32)
+        )
+    else:
+        values = onnx.numpy_helper.to_array(tensor).astype(np.float32)
+
+    # Release the low-precision payload before allocating the serialized FP32 payload.
+    tensor.Clear()
+    tensor.dims.extend(dims)
+    tensor.data_type = onnx.TensorProto.FLOAT
+    tensor.name = name
+    tensor.doc_string = doc_string
+    if metadata_props:
+        tensor.metadata_props.extend(metadata_props)
+    tensor.raw_data = values.tobytes()
+
+
+def _convert_type_to_fp32(type_proto: onnx.TypeProto) -> None:
+    if type_proto.HasField("tensor_type"):
+        if type_proto.tensor_type.elem_type in _FLOAT_TYPES_TO_FP32:
+            type_proto.tensor_type.elem_type = onnx.TensorProto.FLOAT
+    elif type_proto.HasField("sparse_tensor_type"):
+        if type_proto.sparse_tensor_type.elem_type in _FLOAT_TYPES_TO_FP32:
+            type_proto.sparse_tensor_type.elem_type = onnx.TensorProto.FLOAT
+    elif type_proto.HasField("sequence_type"):
+        _convert_type_to_fp32(type_proto.sequence_type.elem_type)
+    elif type_proto.HasField("optional_type"):
+        _convert_type_to_fp32(type_proto.optional_type.elem_type)
+    elif type_proto.HasField("map_type"):
+        _convert_type_to_fp32(type_proto.map_type.value_type)
+
+
+def _dtype_attributes_for_node(node: onnx.NodeProto) -> set[str]:
+    if node.domain in ("", "ai.onnx"):
+        attributes = set(_STANDARD_FLOAT_DTYPE_ATTRIBUTES)
+        if node.op_type == "Cast":
+            attributes.add("to")
+        return attributes
+    if node.domain == "trt":
+        return set(_TRT_FLOAT_DTYPE_ATTRIBUTES)
+    return set()
+
+
+def _convert_attribute_to_fp32(
+    attribute: onnx.AttributeProto, dtype_attributes: set[str] | None = None
+) -> None:
+    if (
+        attribute.type == onnx.AttributeProto.INT
+        and dtype_attributes is not None
+        and attribute.name in dtype_attributes
+        and attribute.i in _FLOAT_TYPES_TO_FP32
+    ):
+        attribute.i = onnx.TensorProto.FLOAT
+    elif attribute.type == onnx.AttributeProto.TENSOR:
+        _convert_tensor_to_fp32(attribute.t)
+    elif attribute.type == onnx.AttributeProto.TENSORS:
+        for tensor in attribute.tensors:
+            _convert_tensor_to_fp32(tensor)
+    elif attribute.type == onnx.AttributeProto.SPARSE_TENSOR:
+        _convert_tensor_to_fp32(attribute.sparse_tensor.values)
+    elif attribute.type == onnx.AttributeProto.SPARSE_TENSORS:
+        for sparse_tensor in attribute.sparse_tensors:
+            _convert_tensor_to_fp32(sparse_tensor.values)
+    elif attribute.type == onnx.AttributeProto.TYPE_PROTO:
+        _convert_type_to_fp32(attribute.tp)
+    elif attribute.type == onnx.AttributeProto.TYPE_PROTOS:
+        for type_proto in attribute.type_protos:
+            _convert_type_to_fp32(type_proto)
+    elif attribute.type == onnx.AttributeProto.GRAPH:
+        _convert_graph_to_fp32(attribute.g)
+    elif attribute.type == onnx.AttributeProto.GRAPHS:
+        for graph in attribute.graphs:
+            _convert_graph_to_fp32(graph)
+
+
+def _convert_node_to_fp32(node: onnx.NodeProto) -> None:
+    is_standard_onnx_node = node.domain in ("", "ai.onnx")
+    dtype_attributes = _dtype_attributes_for_node(node)
+    for attribute in node.attribute:
+        if (
+            is_standard_onnx_node
+            and node.op_type == "BitCast"
+            and attribute.name == "to"
+            and attribute.type == onnx.AttributeProto.INT
+            and attribute.i in _FLOAT_TYPES_TO_FP32
+        ):
+            raise ValueError("BitCast targets cannot be converted safely to FP32")
+        _convert_attribute_to_fp32(attribute, dtype_attributes)
+
+
+def _convert_function_to_fp32(function: onnx.FunctionProto) -> None:
+    dtype_attribute_refs = set()
+    bitcast_attribute_refs = set()
+    for node in function.node:
+        dtype_attributes = _dtype_attributes_for_node(node)
+        is_standard_bitcast = node.domain in ("", "ai.onnx") and node.op_type == "BitCast"
+        for attribute in node.attribute:
+            if not attribute.ref_attr_name:
+                continue
+            if is_standard_bitcast and attribute.name == "to":
+                bitcast_attribute_refs.add(attribute.ref_attr_name)
+            elif attribute.name in dtype_attributes:
+                dtype_attribute_refs.add(attribute.ref_attr_name)
+
+    for attribute in function.attribute_proto:
+        if (
+            attribute.name in bitcast_attribute_refs
+            and attribute.type == onnx.AttributeProto.INT
+            and attribute.i in _FLOAT_TYPES_TO_FP32
+        ):
+            raise ValueError("BitCast targets cannot be converted safely to FP32")
+        dtype_attributes = {attribute.name} if attribute.name in dtype_attribute_refs else None
+        _convert_attribute_to_fp32(attribute, dtype_attributes)
+    for value_info in function.value_info:
+        _convert_type_to_fp32(value_info.type)
+    for node in function.node:
+        _convert_node_to_fp32(node)
+
+
+def _convert_graph_to_fp32(graph: onnx.GraphProto) -> None:
+    for value_info in (*graph.input, *graph.output, *graph.value_info):
+        _convert_type_to_fp32(value_info.type)
+    for initializer in graph.initializer:
+        _convert_tensor_to_fp32(initializer)
+    for sparse_initializer in graph.sparse_initializer:
+        _convert_tensor_to_fp32(sparse_initializer.values)
+    for node in graph.node:
+        _convert_node_to_fp32(node)
+
+
+def convert_to_fp32(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Convert FP16, BF16, and FP64 values in an ONNX model to FP32 in place."""
+    _convert_graph_to_fp32(model.graph)
+    for training_info in model.training_info:
+        _convert_graph_to_fp32(training_info.initialization)
+        _convert_graph_to_fp32(training_info.algorithm)
+    for function in model.functions:
+        _convert_function_to_fp32(function)
+    return model
 
 
 def _capture_network_io_metadata(
