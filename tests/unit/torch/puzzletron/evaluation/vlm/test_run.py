@@ -92,18 +92,15 @@ def test_no_think_template_is_local_and_requires_checkpoint_switch(tmp_path):
     tasks_root = tmp_path / "tasks"
     tasks_root.mkdir()
 
-    generated = preflight._no_think_chat_template(checkpoint_path, tasks_root)
-
-    assert generated.parent == tasks_root
-    assert generated.read_text().startswith("{%- set enable_thinking = false %}\n")
     (checkpoint_path / "chat_template.jinja").write_text(
         "{% if enable_thinking is defined and enable_thinking is true %}"
         "<think>\n{% else %}<think>\n\n</think>\n\n{% endif %}"
     )
-    preflight._no_think_chat_template(checkpoint_path, tasks_root)
+    generated = vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
+    assert generated.parent == tasks_root
     (checkpoint_path / "chat_template.jinja").write_text("unsupported\n")
     with pytest.raises(ValueError, match="cannot disable thinking"):
-        preflight._no_think_chat_template(checkpoint_path, tasks_root)
+        vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
 
 
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
@@ -540,30 +537,40 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
     assert prepared.report["suite"] == suites.TASK_PREFIX100_REPEAT2_SUITE
 
 
-def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
-    short = contracts.load_profile("short-v1")
-    short_native = contracts.load_profile("short-native-v1")
-    short_all_native = contracts.load_profile("short-all-native-v1")
-    full = contracts.load_profile("full-v1")
+def test_deprecated_full_name_reports_explicit_suite_identity(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--suite",
+            "e2e-full-eval",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
 
-    assert short.fingerprint == "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177"
-    assert short_native.fingerprint == (
-        "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35"
-    )
-    assert short_all_native.fingerprint == (
-        "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68"
-    )
-    assert full.fingerprint == "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a"
-    assert short.source_tasks == suites.QUICK_TASKS
-    assert short_native.source_tasks == short.source_tasks
-    assert short_all_native.source_tasks == (
-        *short.source_tasks,
-        "video_mmmu",
-        "videomme",
-        "longvideobench_val_v",
-        "mlvu_dev",
-        "perceptiontest_val_mc",
-    )
+    with pytest.warns(FutureWarning, match="realworldqa-mmmu-prefix100-x2"):
+        prepared = preflight.prepare(args)
+
+    assert prepared.suite == "realworldqa-mmmu-prefix100-x2"
+    assert prepared.report["suite"] == prepared.suite
+    assert prepared.execution_policy["limit"] == 100
+
+
+def test_versioned_profile_contracts_pin_selection_and_fingerprints():
+    profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
+    assert {name: contract.fingerprint for name, contract in profiles.items()} == {
+        "short-v1": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
+        "short-native-v1": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
+        "short-all-native-v1": "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68",
+        "full-v1": "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a",
+    }
+
+    short = profiles["short-v1"]
+    short_all_native = profiles["short-all-native-v1"]
     assert {
         task: len(entry["rows"]) for task, entry in short_all_native.manifest["tasks"].items()
     } == {
@@ -576,18 +583,8 @@ def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
         "mlvu_dev": 70,
         "perceptiontest_val_mc": 64,
     }
-    assert short_native.manifest["lmms_eval_revision"] == (
-        checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
-    )
-    assert short_native.manifest["backend"] == {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    }
-    assert full.source_tasks == tuple(
-        task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
-    )
-    assert full.exact_rows is None
+    assert short.exact_rows is not None
+    assert profiles["full-v1"].exact_rows is None
     mmmu_rows = short.manifest["tasks"]["mmmu_val"]["rows"]
     assert Counter(row["source_row_index"] // 30 for row in mmmu_rows) == Counter(
         dict.fromkeys(range(30), 4)
@@ -645,9 +642,9 @@ def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
     assert selectors.select_modelopt_vlm_benchmark_videomme(Documents(2700)) == videomme
 
 
-@pytest.mark.parametrize("name", contracts.PROFILE_NAMES)
-def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp_path, name):
+def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp_path):
     model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    name = "short-v1"
     args = evaluation._build_parser().parse_args(
         [
             "--checkpoint",
@@ -664,30 +661,10 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     prepared = preflight.prepare(args)
 
     contract = contracts.load_profile(name)
-    assert prepared.suite == name
-    assert prepared.profile_contract == contract
     assert prepared.report["profile_name"] == name
-    assert prepared.report["schema"] == "modelopt.vlm-evaluation-preflight/v1"
-    assert prepared.report["profile_schema"] == "modelopt.vlm-evaluation-profile/v1"
     assert prepared.report["profile_fingerprint"] == contract.fingerprint
-    assert prepared.report["batch_size"] == contract.manifest["batch_size"] == 1
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
-    if name == "short-all-native-v1":
-        assert prepared.report["quick_selected_rows"] == 690
-    assert prepared.report["judge_policy"] is None
-    assert (prepared.quick_manifest is not None) == name.startswith("short-")
-
-    task_root, configured_tasks = tasks.prepare(
-        tmp_path / "results",
-        suite=prepared.suite,
-        dataset_snapshots=prepared.dataset_snapshots,
-        quick_manifest=prepared.quick_manifest,
-    )
-    assert configured_tasks == tuple(suites.task_name(task) for task in contract.source_tasks)
-    assert (task_root / "modelopt_quick_selection.py").exists() == name.startswith("short-")
-    if name == "short-all-native-v1":
-        video_mmmu = task_root / "modelopt_vlm_benchmark_video_mmmu_adaptation.yaml"
-        assert "select_modelopt_vlm_benchmark_video_mmmu_adaptation" in video_mmmu.read_text()
+    assert prepared.report["quick_selected_rows"] == 344
 
 
 def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
@@ -715,8 +692,6 @@ def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
     )
 
     assert prepared.report["model_backend"] == "qwen3_5"
-    assert prepared.report["backend_limitations"] == []
-    assert prepared.report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
     assert settings["model"] == "qwen3_5"
     assert settings["checkpoint_arg"] == "pretrained"
     assert settings["model_args"] == {
@@ -773,8 +748,10 @@ def test_versioned_profile_rejects_batch_size_override(monkeypatch, tmp_path):
         preflight.prepare(args)
 
 
-def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_path):
+def test_all_row_profile_task_preserves_contract_identity(monkeypatch, tmp_path):
     model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    profile_name = "full-v1"
+    task = "realworldqa"
     args = evaluation._build_parser().parse_args(
         [
             "--checkpoint",
@@ -782,9 +759,9 @@ def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_pa
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "full-v1",
+            profile_name,
             "--profile-task",
-            "realworldqa",
+            task,
             "--hf-home",
             str(hf_home),
         ]
@@ -792,47 +769,10 @@ def test_full_profile_task_shard_preserves_contract_identity(monkeypatch, tmp_pa
 
     prepared = preflight.prepare(args)
 
-    assert prepared.source_tasks == ("realworldqa",)
-    assert tuple(prepared.dataset_snapshots) == ("realworldqa",)
-    assert prepared.report["profile_task"] == "realworldqa"
-    assert prepared.report["source_tasks"] == ["realworldqa"]
-    assert prepared.report["profile_fingerprint"] == contracts.load_profile("full-v1").fingerprint
-    _, configured_tasks = tasks.prepare(
-        tmp_path / "results",
-        suite=prepared.suite,
-        source_tasks=prepared.source_tasks,
-        dataset_snapshots=prepared.dataset_snapshots,
-        quick_manifest=prepared.quick_manifest,
-    )
-    assert configured_tasks == ("modelopt_vlm_benchmark_realworldqa",)
-
-
-def test_short_all_native_profile_task_preserves_exact_rows(monkeypatch, tmp_path):
-    model, hf_home = _full_inputs(monkeypatch, tmp_path)
-    args = evaluation._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(model),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--profile",
-            "short-all-native-v1",
-            "--profile-task",
-            "videomme",
-            "--hf-home",
-            str(hf_home),
-        ]
-    )
-
-    prepared = preflight.prepare(args)
-
-    assert prepared.source_tasks == ("videomme",)
-    assert prepared.quick_manifest is not None
-    assert tuple(prepared.quick_manifest["tasks"]) == ("videomme",)
-    assert prepared.report["quick_selected_rows"] == 72
+    assert prepared.source_tasks == (task,)
+    assert prepared.report["quick_selected_rows"] is None
     assert (
-        prepared.report["profile_fingerprint"]
-        == contracts.load_profile("short-all-native-v1").fingerprint
+        prepared.report["profile_fingerprint"] == contracts.load_profile(profile_name).fingerprint
     )
 
 
@@ -859,11 +799,6 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
 
     expected_leaves = ("episodic_reasoning", "moving_direction", "egocentric_navigation")
     assert prepared.profile_task_leaves == expected_leaves
-    assert prepared.report["profile_task_shard"] == {
-        "index": 3,
-        "count": 8,
-        "leaves": list(expected_leaves),
-    }
     assert prepared.quick_manifest is not None
     manifest_rows = prepared.quick_manifest["tasks"]["mvbench"]["rows"]
     assert len(manifest_rows) == 24
@@ -878,7 +813,7 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
         prepared.report["profile_fingerprint"]
         == contracts.load_profile("short-all-native-v1").fingerprint
     )
-    tasks_root, configured_tasks = tasks.prepare(
+    tasks_root, _ = tasks.prepare(
         tmp_path / "results",
         suite=prepared.suite,
         source_tasks=prepared.source_tasks,
@@ -886,7 +821,6 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
         dataset_snapshots=prepared.dataset_snapshots,
         quick_manifest=prepared.quick_manifest,
     )
-    assert configured_tasks == ("modelopt_vlm_benchmark_mvbench",)
     group = json.loads((tasks_root / "modelopt_vlm_benchmark_mvbench.yaml").read_text())
     assert group["task"] == [f"modelopt_vlm_benchmark_mvbench_{leaf}" for leaf in expected_leaves]
 

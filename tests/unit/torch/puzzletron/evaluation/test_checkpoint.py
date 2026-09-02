@@ -45,17 +45,11 @@ def test_load_runner_restores_import_state(monkeypatch):
     assert "modelopt.torch.puzzletron.evaluation.lmms" not in sys.modules
 
 
-def test_verify_lmms_eval_revision_accepts_pinned_vcs_install(monkeypatch):
-    provenance = {"vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION}}
-    monkeypatch.setattr(
-        checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
-    )
-
-    assert checkpoint.verify_lmms_eval_revision() == checkpoint.LMMS_EVAL_REVISION
-
-
-def test_verify_lmms_eval_revision_accepts_explicit_profile_pin(monkeypatch):
-    expected = checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION
+@pytest.mark.parametrize(
+    "expected",
+    [checkpoint.LMMS_EVAL_REVISION, checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION],
+)
+def test_verify_lmms_eval_revision_accepts_pinned_vcs_install(monkeypatch, expected):
     provenance = {"vcs_info": {"commit_id": expected}}
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
