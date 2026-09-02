@@ -1,0 +1,105 @@
+# Warm-start fine-tune of the released Nemotron-3.5-Lightning DSpark drafter.
+#
+# Continues training `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark` from its
+# published weights, against `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` served by
+# vLLM (data.mode=streaming).
+#
+# TODO: replace the hand-copied fields below with a proper checkpoint/config converter.
+# Everything under `dflash_architecture_config`, plus block_size / mask_token_id /
+# swa_window_size / draft_attention / attention_sink / target_layer_ids, is transcribed by
+# hand from the drafter's own config.json. Only the shape-bearing fields fail loudly when
+# mistyped; the rest (mask token, causal flag, window size, block size) train "successfully"
+# on the wrong setting and only show up later as a mysteriously low acceptance length. A
+# converter should derive this whole block from the checkpoint's config.json — including its
+# aliases (`pard_token` for mask_token_id, `dspark_markov_rank` for markov_rank,
+# `dflash_query_causal` for causal, top-level `sliding_window` / `attention_sink_bias`) —
+# and reconcile the weight layout (the release nests the Markov head under `markov_head.`,
+# which the loader remaps today).
+#
+# The base model's config.json also needs its layer-type vocabulary updated for vLLM's
+# transformers-5 path (`mamba`->`linear_attention`, `attention`->`full_attention`, plus a
+# matching `hybrid_override_pattern`); that conversion is not covered here either.
+
+metadata:
+  recipe_type: speculative_dflash
+  description: Warm-start fine-tune of the released Nemotron-3.5 DSpark drafter (streaming).
+
+model:
+  model_name_or_path: <path to NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16>
+  trust_remote_code: true
+  use_fake_base_for_offline: true
+
+data:
+  mode: streaming
+  data_path: <path to a jsonl corpus with real assistant turns>
+  offline_data_path:
+  # The stock Nemotron template has no {% generation %} tags, so answer_only_loss would get
+  # an all-zero assistant mask. Point this at a tagged copy.
+  chat_template: <path to nemotron chat template with {% generation %} tags>
+  # This draft's top aux id (51, zero-based) already is the base's last layer, so vLLM emits
+  # no separate base-hidden plane and the final aux plane serves both roles.
+  final_aux_is_base_hidden: true
+
+training:
+  output_dir: <output dir>
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  # Low by default: this continues from converged weights rather than training from scratch.
+  learning_rate: 1.0e-5
+  warmup_steps: 10
+  training_seq_len: 2048
+  logging_steps: 10
+  save_steps: 1000
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Eval runs the DFlash backbone only (no Markov head), so AR would understate the model.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+  do_eval: false
+  lr_scheduler_type: linear
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_find_unused_parameters: true
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+dflash:
+  # --- transcribed from the released drafter's config.json (see TODO above) ---
+  dflash_init_checkpoint: <path to NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-DSpark>
+  dflash_block_size: 8
+  dflash_mask_token_id: 990
+  dflash_swa_window_size: 1024
+  dflash_draft_attention: causal
+  dflash_attention_sink: true
+  # --- training knobs ---
+  dflash_num_anchors: 64
+  dflash_use_torch_compile: false
+  dflash_self_logit_distillation: false
+  dflash_loss_objective: dpace
+  dflash_ce_loss_alpha: 0.1
+  dflash_l1_loss_alpha: 0.9
+  # The released checkpoint carries no confidence head.
+  dflash_confidence_head_alpha: 0.0
+  dflash_report_acc: true
+  dflash_architecture_config:
+    num_hidden_layers: 6
+    num_attention_heads: 32
+    num_key_value_heads: 2
+    head_dim: 128
+    intermediate_size: 6144
+    rms_norm_eps: 1.0e-6
+    projector_type: dspark
+    markov_rank: 512
+    markov_head_type: vanilla
+    use_confidence_head: false
+    # The layers whose hidden states feed `fc`. Must match the checkpoint: the uniform
+    # default for a 52-layer base would be [1,11,20,30,39,49], i.e. different layers.
+    target_layer_ids: [1, 5, 19, 29, 41, 51]

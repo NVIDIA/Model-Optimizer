@@ -8,6 +8,11 @@ of the always-loaded agent instructions.
 Update `AGENTS.md` for repository-wide agent instructions. `CLAUDE.md` is
 symlinked to `AGENTS.md`, so changes there apply to both Codex and Claude Code.
 
+## Installable Skills
+
+The `modelopt` plugin packages the repository skills for use from any
+workspace. Installation commands are in the [README](../README.md#ai-agents).
+
 ## Local Overrides
 
 For private local instructions, use the tool-specific override file:

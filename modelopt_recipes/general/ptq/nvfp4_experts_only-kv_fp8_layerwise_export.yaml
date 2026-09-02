@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8: configs/ptq/units/kv_fp8
+
+metadata:
+  recipe_type: ptq
+  description: >
+    NVFP4 static weight and dynamic activation for expert layers only (W4A4), FP8 KV cache,
+    max layerwise calibration, exporting each decoder layer to a quantized checkpoint shard
+    as soon as it is calibrated. Setting layerwise.export_dir is what enables that; hf_ptq.py
+    rewrites its value to --export_path, since the destination is per-run.
+
+    An interrupted run then resumes without recalibrating or re-exporting finished layers,
+    which is the point for a PTQ run that outlasts its GPU session. The resume state lives
+    beside the checkpoint at <export_path>.layerwise_resume unless you set
+    layerwise.checkpoint_dir yourself. Export rediscovers the q/k/v and gate/up scale-fusion
+    groups per layer, so every tensor matches a whole-model export in key, dtype, shape and
+    value. Only the shard layout differs: one file per layer instead of packed shards.
+
+    Single-process models, resident or accelerate-offloaded. A resumed run never recalibrates
+    the layers it skipped, so the exported checkpoint is complete but the in-memory model is
+    not and must not be used for inference.
+quantize:
+  algorithm:
+    method: max
+    layerwise:
+      enable: true
+      # max only updates _amax, so the exported shard stays valid for its layer.
+      calib_mutates_weights: false
+      # Presence enables per-layer export; the value is replaced with --export_path.
+      export_dir: /tmp/modelopt_layerwise_export
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*block_sparse_moe*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8
+    - $import: default_disabled_quantizers

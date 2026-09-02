@@ -15,10 +15,12 @@
 
 """Hugging Face checkpoint utility."""
 
+import fnmatch
 import json
 import os
 import shutil
 import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -203,7 +205,7 @@ def load_multimodal_components(
     """Load multimodal components from safetensors file.
 
     Args:
-        pretrained_model_path: Path to the pretrained model.
+        pretrained_model_path: Directory or HuggingFace repo id of the pretrained model.
         prefixes: Tensor key prefixes to select.  Defaults to the LLaVA-style
             ``multi_modal_projector`` / ``vision_model`` prefixes.  Pass
             ``("model.visual.",)`` for Qwen3-VL checkpoints.
@@ -213,8 +215,44 @@ def load_multimodal_components(
     """
     hf_checkpoint_path = Path(pretrained_model_path)
     if not hf_checkpoint_path.is_dir():
-        raise ValueError(
-            f"Invalid pretrained model path: {pretrained_model_path}. It should be a directory."
+        # Also accept a repo id, which is what the example scripts pass to quantize.py.
+        # Fetched in two stages: the vision tower is a small fraction of a VLM checkpoint, so
+        # pulling every shard to keep a few would waste tens of GB.
+        local_files_only = _is_hf_hub_offline()
+        repo_id = str(pretrained_model_path)
+        try:
+            index_dir = Path(
+                snapshot_download(
+                    repo_id=repo_id,
+                    allow_patterns=["model.safetensors.index.json"],
+                    local_files_only=local_files_only,
+                )
+            )
+        except (LocalEntryNotFoundError, OSError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid pretrained model path: {pretrained_model_path}. It should be a "
+                "directory or an available HuggingFace repo id."
+            ) from exc
+
+        index_file = index_dir / "model.safetensors.index.json"
+        if index_file.is_file():
+            try:
+                weight_map = json.loads(index_file.read_text())["weight_map"]
+            except (json.JSONDecodeError, KeyError) as exc:
+                raise ValueError(f"Malformed safetensors index in {repo_id}.") from exc
+            wanted = sorted(
+                {shard for key, shard in weight_map.items() if key.startswith(prefixes)}
+            )
+        else:
+            wanted = ["model.safetensors"]  # unsharded checkpoint
+        # Kept separate from the resolution failure above: a hub outage or a full disk here is
+        # retryable, not a bad path.
+        hf_checkpoint_path = Path(
+            snapshot_download(
+                repo_id=repo_id,
+                allow_patterns=["model.safetensors.index.json", *wanted],
+                local_files_only=local_files_only,
+            )
         )
 
     safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
@@ -238,7 +276,13 @@ def load_multimodal_components(
         with open(safetensors_index_file) as f:
             safetensors_index = json.load(f)
 
-        all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
+        all_shard_files = sorted(
+            {
+                shard
+                for key, shard in safetensors_index["weight_map"].items()
+                if key.startswith(prefixes)
+            }
+        )
         for shard_file in all_shard_files:
             safetensors_filepath = Path(hf_checkpoint_path) / shard_file
             with safe_open(safetensors_filepath, framework="pt") as f:
@@ -249,29 +293,60 @@ def load_multimodal_components(
     else:
         print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
 
+    if not multimodal_state_dict:
+        raise ValueError(
+            f"No tensors under {prefixes} in {pretrained_model_path}; the vision tower would be "
+            "missing from the export. The checkpoint's prefixes have likely changed."
+        )
+
     print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
     return multimodal_state_dict
 
 
-def copy_non_safetensor_files_from_ckpt(src: str | os.PathLike, dst: str | os.PathLike):
+def _matches_any_pattern(file_name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(file_name, pattern) for pattern in patterns)
+
+
+def copy_non_safetensor_files_from_ckpt(
+    src: str | os.PathLike,
+    dst: str | os.PathLike,
+    *,
+    exclude_files: Iterable[str] | None = None,
+    exclude_patterns: Iterable[str] | None = None,
+) -> list[str]:
     """Copy every non-safetensors file from a local HF checkpoint dir verbatim.
 
     Use as a baseline so tokenizer files, remote_code ``*.py``, README, LICENSE, etc.
-    are preserved from the source. The caller is expected to overwrite the files
-    modelopt owns (``config.json``, ``generation_config.json``, ``hf_quant_config.json``,
-    ``preprocessor_config.json``) after this step.
+    are preserved from the source. Callers can exclude additional files or patterns when
+    copying after export-owned metadata has already been written.
 
     Args:
         src: Source HF checkpoint directory. Must be a local path.
         dst: Destination directory; created if missing.
+        exclude_files: Exact file names to skip.
+        exclude_patterns: Glob patterns for additional files to skip.
+
+    Returns:
+        File names copied into ``dst``.
     """
     if not os.path.isdir(src):
         raise ValueError(f"Invalid source path: {src}. It should be a directory.")
+    exclude_files = set(exclude_files or ())
+    exclude_patterns = tuple(exclude_patterns or ())
+    copied_files = []
     os.makedirs(dst, exist_ok=True)
-    for entry in os.listdir(src):
+    for entry in sorted(os.listdir(src)):
+        if entry in exclude_files or _matches_any_pattern(entry, exclude_patterns):
+            continue
         sp = os.path.join(src, entry)
         if not os.path.isfile(sp):
             continue
         if entry.endswith(".safetensors") or entry == "model.safetensors.index.json":
             continue
-        shutil.copy2(sp, dst)
+        try:
+            shutil.copy2(sp, dst)
+        except OSError as error:
+            warnings.warn(f"Failed to copy checkpoint sidecar {entry}: {error}")
+            continue
+        copied_files.append(entry)
+    return copied_files

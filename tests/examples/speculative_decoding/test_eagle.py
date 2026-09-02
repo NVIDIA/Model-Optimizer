@@ -116,7 +116,12 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
 
 
 # fmt: off
-@pytest.mark.parametrize(("cp_size", "mix_hidden_states"), [(1, False), (2, False), (1, True), (2, True)])
+@pytest.mark.parametrize(("cp_size", "mix_hidden_states"), [
+    (1, False),
+    pytest.param(2, False, marks=pytest.mark.timeout(360)),
+    (1, True),
+    (2, True),
+])
 def test_llama_eagle3(tiny_llama_path,
                       tiny_daring_anteater_path,
                       eagle_output_dir,

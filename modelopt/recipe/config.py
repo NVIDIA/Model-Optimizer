@@ -24,7 +24,6 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
 from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
@@ -128,24 +127,6 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
 # can declare ``modelopt-schema: modelopt.recipe.config.LayerPatternList`` and be spliced into a
 # ``list[str]`` field — mirrors how base_disable_all is imported into a PTQ quant_cfg list.
 LayerPatternList = list[str]
-
-
-def _load_layer_pattern_list(config_path: str) -> list[str]:
-    """Load a ``list[str]`` layer-pattern unit (e.g. AutoQuantize base disabled/cost-excluded).
-
-    Relies on the unit's ``modelopt-schema: ...LayerPatternList`` comment (like
-    _load_quantizer_cfg_dict_list) rather than an explicit ``list[str]`` schema_type.
-    """
-    return list(load_config(config_path))
-
-
-# Base AutoQuantize layer-pattern sets, loaded once (used by the deprecated --auto_quantize_* CLI shim).
-AUTOQUANT_BASE_DISABLED_LAYERS: list[str] = _load_layer_pattern_list(
-    "configs/auto_quantize/units/base_disabled_layers"
-)
-AUTOQUANT_BASE_COST_EXCLUDED_LAYERS: list[str] = _load_layer_pattern_list(
-    "configs/auto_quantize/units/base_cost_excluded_layers"
-)
 
 
 class AutoQuantizeCost(ModeloptBaseConfig):

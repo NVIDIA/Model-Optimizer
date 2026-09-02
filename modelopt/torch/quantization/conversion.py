@@ -48,6 +48,7 @@ from .utils import is_quantized, is_quantized_linear
 from .utils.shared_input import SharedWeightGlobalAmaxState
 
 __all__ = [
+    "preserve_quantizer_attributes_context",
     "register",
     "replace_quant_module",
     "set_quantizer_attribute",
@@ -503,35 +504,15 @@ def set_quantizer_attributes_partial(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
-    """Context manager that temporarily applies a quantization config and restores the original state on exit.
+def preserve_quantizer_attributes_context(quant_model: nn.Module):
+    """Restore tensor-quantizer properties and Tensor/Sequential types on exit.
 
-    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
-    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
-    ``quant_model`` to its original attributes on exit.
-
-    .. caution::
-        Changing stateful attributes such as ``calibrator`` inside this context may produce
-        unexpected behavior because those objects are not deep-copied during save/restore.
+    Properties are saved with ``get_modelopt_state(properties_only=True)``. Parameters,
+    buffers, and referenced stateful objects such as calibrators are not copied.
 
     Args:
-        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
-        quant_cfg: A quantization config (or list of
-            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
-            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
-
-    Yields:
-        None — the context body runs with the new quantizer attributes active.
+        quant_model: Model whose quantizer attributes will be preserved.
     """
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
-
-    for entry in quant_cfg:
-        if isinstance(entry.get("cfg"), list):
-            raise ValueError(
-                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
-                "Use only single-dict cfg entries."
-            )
-
     original_attributes: dict[str, dict] = {}
     original_types: dict[str, type] = {}
     for name, module in quant_model.named_modules():
@@ -547,7 +528,6 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQ
             original_attributes[name] = module.get_modelopt_state(properties_only=True)
             original_types[name] = TensorQuantizer
 
-    set_quantizer_by_cfg(quant_model, quant_cfg)
     try:
         yield
     finally:
@@ -582,6 +562,41 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQ
                 saved = original_attributes[name]
                 for tq, sub_state in zip(module, saved["sub_states"]):
                     tq.set_from_modelopt_state(sub_state, properties_only=True)
+
+
+@contextmanager
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: RawQuantizeQuantCfgType):
+    """Context manager that temporarily applies a quantization config and restores the original state on exit.
+
+    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
+    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
+    ``quant_model`` to its original attributes on exit.
+
+    .. caution::
+        Changing stateful attributes such as ``calibrator`` inside this context may produce
+        unexpected behavior because those objects are not deep-copied during save/restore.
+
+    Args:
+        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
+        quant_cfg: A quantization config (or list of
+            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
+            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
+
+    Yields:
+        None — the context body runs with the new quantizer attributes active.
+    """
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+
+    for entry in quant_cfg:
+        if isinstance(entry.get("cfg"), list):
+            raise ValueError(
+                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
+                "Use only single-dict cfg entries."
+            )
+
+    with preserve_quantizer_attributes_context(quant_model):
+        set_quantizer_by_cfg(quant_model, quant_cfg)
+        yield
 
 
 def set_quantizer_attribute(

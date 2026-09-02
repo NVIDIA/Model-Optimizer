@@ -1,4 +1,10 @@
-# Puzzletron Algorithm Tutorial
+# Puzzletron
+
+For a step-by-step tutorial on the core Puzzletron algorithm, see the [Puzzletron Algorithm Tutorial](`#puzzletron-algorithm-tutorial`) below.
+For advanced settings with production-scale models and [AutoModel](https://github.com/NVIDIA-NeMo/Automodel/)-based distributed training, see the [experimental Puzzletron
+branch](https://github.com/NVIDIA/Model-Optimizer/tree/feature/puzzletron_v2/examples/puzzletron/README.md).
+
+## Puzzletron Algorithm Tutorial
 
 This tutorial demonstrates how to compress large language models using the puzzletron algorithm based on the [Puzzle paper](https://arxiv.org/abs/2411.19146).
 The goal of the algorithm it to find the most optimal modifications to MLP and attention layers of the model, resulting in a heterogeneous model architecture.
@@ -13,9 +19,9 @@ In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/
 
 > **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
 
-## Environment
+### Environment
 
-### Container setup (NeMo)
+#### Container setup (NeMo)
 
 The recommended way to run puzzletron is inside an NVIDIA NeMo container (e.g. `nvcr.io/nvidia/nemo:26.02`). NeMo containers ship a pre-installed `nvidia-modelopt` that does not include the puzzletron extras so you need to replace it with an editable install from this repo.
 
@@ -40,7 +46,7 @@ To verify the install, you can run the GPU tests as a smoke check:
 python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
 ```
 
-### Hardware
+#### Hardware
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
@@ -50,7 +56,7 @@ python -m pytest tests/gpu/torch/puzzletron/test_puzzletron.py -k "Qwen3-8B"
 hf auth login --token <your token>
 ```
 
-## Compress the Model
+### Compress the Model
 
 1. Download and prepare the dataset.
 
@@ -151,7 +157,7 @@ hf auth login --token <your token>
 
    30% GPU memory reduction leads to nearly 5% regression in token_accuracy_top_10 metric (0.898 / 0.942).
 
-## Re-run MIP Search with different constraints
+### Re-run MIP Search with different constraints
 
 If you want to try different constraints without re-running the expensive pruning and scoring steps, use the `--mip-only` flag.
 This assumes pruning, replacement library building, NAS scoring, and subblock stats calculation have already been completed.
@@ -223,11 +229,11 @@ block_13:  attention  no_op   ffn  intermediate_11520
 block_14:  attention  no_op   ffn  intermediate_3072
 ```
 
-### MIP Sweep Mode
+#### MIP Sweep Mode
 
 The **MIP sweep mode** lets you explore multiple memory compression rates in a single run and compare the accuracy-memory trade-offs.
 
-#### Quick Start
+##### Quick Start
 
 1. Enable sweep in your config YAML (e.g., `llama-3_1-8B_pruneffn_memory.yaml`):
 
@@ -249,20 +255,20 @@ The **MIP sweep mode** lets you explore multiple memory compression rates in a s
 
 3. View results: The CSV file contains compression rates, memory usage, and accuracy metrics for each configuration.
 
-#### Example Results
+##### Example Results
 
 <img src="mip_sweep_example.png" alt="MIP Sweep Results" width="600">
 
 The plot shows how token accuracy changes with different compression rates. Higher compression (0.5 = 50% of original memory) reduces accuracy, while lower compression maintains accuracy closer to the teacher model.
 
-## Evaluation
+### Evaluation
 
 Evaluate AnyModel checkpoints using lm-eval. See the [LM-Eval-Harness section](../llm_eval/README.md#lm-eval-harness) in `examples/llm_eval/README.md` for full instructions, including multi-GPU and Slurm setup.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
 
-## Deploy compressed model in vLLM
+### Deploy compressed model in vLLM
 
 To deploy a compressed model in vLLM, install vLLM fork with AnyModel enabled:
 
@@ -308,7 +314,7 @@ With these changes it is now possible to load the compressed model in vLLM for i
 vllm serve <model_name_or_path>
 ```
 
-### Inference Performance Benchmarking
+#### Inference Performance Benchmarking
 
 Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
 
@@ -324,7 +330,7 @@ vllm bench latency --model path/to/model --load-format safetensors
 vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --load-format safetensors
 ```
 
-## Knowledge Distillation
+### Knowledge Distillation
 
 To recover degradation in the quality of the compressed model, we can use knowledge distillation. This allows transferring the capabilities of the original model to the pruned one.
 
@@ -332,7 +338,7 @@ See [Megatron-Bridge distillation](../megatron_bridge/README.md#distillation) fo
 
 For distillation results on Puzzletron-compressed models, see [examples/pruning/puzzletron/](../pruning/puzzletron/README.md).
 
-## Runtime-Based Latency Optimization
+### Runtime-Based Latency Optimization
 
 You can enable **runtime stats** to measure actual inference latency via vLLM, which unlocks latency-based MIP constraints.
 
@@ -372,6 +378,6 @@ This field is supported in any Puzzletron YAML config and overrides the default 
 
 Due to non-linear extension of the runtime stats of single subblocks to the total runtime of the model, the `target_latency_seconds` value should be set to a value that is slightly lower than the desired latency. For example, in our experiments, the `target_latency_seconds` value of 5 resulted in a final model latency of 5.4 seconds.
 
-## Advanced Usage
+### Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.

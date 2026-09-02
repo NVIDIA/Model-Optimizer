@@ -70,7 +70,7 @@ onnx = [
     "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
     "onnxscript",
     "onnxslim>=0.1.76",
-    "polygraphy>=0.49.22",
+    "polygraphy>=0.53.4",
 ]
 hf = [
     "accelerate>=1.0.0",
@@ -108,7 +108,7 @@ dev-docs = [
     "sphinx-autobuild==2025.8.25; python_version >= '3.12'",
     "sphinx-copybutton~=0.5.2; python_version >= '3.12'",
     "sphinx-inline-tabs==2025.12.21.14; python_version >= '3.12'",
-    "sphinx-rtd-theme~=3.1.0; python_version >= '3.12'",
+    "shibuya~=2026.7.0; python_version >= '3.12'",
     "sphinx-togglebutton~=0.4.0; python_version >= '3.12'",
 ]
 dev-test = [
@@ -145,6 +145,19 @@ include = ["modelopt*"]
 [tool.setuptools.package-data]
 modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
 modelopt_recipes = ["**/*.yml", "**/*.yaml"]
+
+[tool.setuptools.exclude-package-data]
+# huggingface/models is a backward-compat symlink to ../models. The recursive
+# package-data glob above follows it, so drop the aliased copies here to avoid
+# shipping every checkpoint recipe twice; setuptools' exclude glob is non-recursive,
+# hence the explicit org/model/task depths. MANIFEST.in prunes the symlink dir entry
+# itself (build_py can't copy a symlink-to-dir). Old huggingface/models/... --recipe
+# paths keep working via the loader alias in modelopt/recipe/loader.py.
+modelopt_recipes = [
+    "huggingface/models",
+    "huggingface/models/*/*/*/*.yaml", "huggingface/models/*/*/*/*.yml",
+    "huggingface/models/*/*/*/*/*.yaml", "huggingface/models/*/*/*/*/*.yml",
+]
 
 [tool.uv]
 managed = true
@@ -218,7 +231,7 @@ extend-ignore = [
 "examples/*" = ["D"]
 "noxfile.py" = ["D", "E501"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
-".agents/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
+"plugins/modelopt/skills/*/tests/test_*.py" = ["D", "E402"] # Skill test scripts: docstring (D) + sys.path import-order (E402) exemptions
 "*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
 "*.ipynb" = ["D", "E501"] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/kernels/*" = ["N803", "N806", "E731"] # triton style
