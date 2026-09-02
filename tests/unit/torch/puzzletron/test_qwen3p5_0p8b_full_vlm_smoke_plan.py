@@ -334,8 +334,7 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     }
     assert nodes["selected"]["input"] == "short_v1_256"
     assert nodes["approve_512"]["input"] == "bounded_result"
-    assert nodes["approve_1024"]["input"] == "short_v1_512"
-    assert nodes["best"]["input"] == "short_v1_1024"
+    assert nodes["approve_1024"]["input"] == "extended_result"
     assert stages["post.candidate-evaluation.serving"].parents == (
         "post.candidate-evaluation.best",
     )
@@ -345,6 +344,20 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         128,
         256,
     ]
+    assert [row["steps"] for row in nodes["extended_result"]["config"]["milestones"]] == [
+        64,
+        128,
+        256,
+        512,
+    ]
+    assert [row["steps"] for row in nodes["final_result"]["config"]["milestones"]] == [
+        64,
+        128,
+        256,
+        512,
+        1024,
+    ]
+    assert nodes["best"]["input"] == "final_result"
     control_nodes = config["post_mip"]["flows"]["control-learning-curve"]["nodes"]
     assert [
         control_nodes[f"control_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
@@ -352,6 +365,9 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     assert control_nodes["control_selected"]["input"] == "control_result"
     assert control_nodes["control_approve_512"]["input"] == "control_selected"
     assert control_nodes["control_approve_1024"]["input"] == "control_extended_result"
+    assert [
+        row["steps"] for row in control_nodes["control_final_result"]["config"]["milestones"]
+    ] == [64, 128, 256, 512, 1024]
     assert all(stage.total_gpus in {0, 1} for stage in campaign.stages)
 
 
@@ -376,6 +392,10 @@ def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(
     compiled = set(stages)
 
     assert configured <= compiled
+    for prefix in ("post.candidate-evaluation", "post.control-learning-curve"):
+        assert {stage_id for stage_id in configured if stage_id.startswith(f"{prefix}.")} == {
+            stage_id for stage_id in compiled if stage_id.startswith(f"{prefix}.")
+        }
     assert not any(
         stale in stage_id
         for stage_id in configured

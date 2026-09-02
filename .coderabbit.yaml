@@ -44,8 +44,10 @@ reviews:
            tests under tests/unit instead of tests/gpu*).
   auto_review:
     auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
     drafts: false
     base_branches: ["main", "release/.*", "feature/.*"]
+    labels: ["puzzletron_v2"]
   pre_merge_checks:
     custom_checks:
       - name: "Security anti-patterns"

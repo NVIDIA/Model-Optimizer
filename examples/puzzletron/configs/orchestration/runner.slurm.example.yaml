@@ -16,13 +16,13 @@ runner:
     time_limit: "4:00:00"
     log_dir: logs
   execution_contract:
-    # Required. Use the checkout path visible on every worker and in the container, if used.
-    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
-    # Required. Sourced as <venv>/bin/activate on every worker.
-    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
-    # Optional. Set to an image/path accepted by the cluster's srun container plugin.
-    # Leave null to execute directly in the worker environment.
-    container:
+    # The Puzzletron worker image provides these paths. Change them only
+    # when using a custom worker environment.
+    repository: /opt/puzzletron/src/modelopt
+    venv: /venv
+    # Required for the worker image. Replace with a registry
+    # reference or image path accepted by the site's container plugin.
+    container: REPLACE_WITH_PUZZLETRON_IMAGE
     # Optional and used only with a container. Use comma-separated
     # /host/path:/container/path entries, for example /data:/data,/models:/models.
     container_mounts:

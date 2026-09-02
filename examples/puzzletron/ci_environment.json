@@ -1,18 +1,56 @@
 {
   "schema_version": 1,
-  "scope": "puzzletron_v2_ci",
+  "scope": "puzzletron_v2_worker_ci",
   "python": "3.12",
   "torch": "2.11.0",
   "torchvision": "0.26.0",
   "transformers": "5.8.1",
+  "gpu_image": {
+    "base_image": "nvidia/cuda:12.9.2-cudnn-devel-ubuntu24.04@sha256:b4db213759eb86d55a7271909bdad891fab300ec5700fb4f4656463b2f51980f",
+    "torch_cuda": "12.9",
+    "aiperf": "0.12.0",
+    "langdetect": "1.0.9",
+    "nltk": "3.10.3",
+    "nltk_data_commit": "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a",
+    "nltk_resource_sha256": {
+      "punkt": "51c3078994aeaf650bfc8e028be4fb42b4a0d177d41c012b6a983979653660ec",
+      "punkt_tab": "e57f64187974277726a3417ca6f181ec5403676c717672eef6a748a7b20e0106"
+    },
+    "nltk_resources": ["punkt", "punkt_tab"],
+    "nox": "2026.8.17"
+  },
   "lmms_eval": {
     "base_version": "0.7.0",
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
-    "commit": "15c32bfec165df13c269ddd3cda03b2ed9137825"
+    "commit": "15c32bfec165df13c269ddd3cda03b2ed9137825",
+    "task_configs": ["tasks/gsm8k/gsm8k.yaml", "tasks/ifeval/ifeval.yaml"]
   },
   "nemo_automodel": {
     "base_version": "0.5.0",
     "repository": "https://github.com/Separius/Automodel.git",
     "commit": "b22cd029d806197e249f2cc4a42c5de91713b772"
+  },
+  "vllm": {
+    "repository": "https://github.com/Separius/vllm.git",
+    "commit": "a056958c78226dcc5476ad5083a26155dd8863c5"
+  },
+  "runtime_image": {
+    "causal_conv1d": "1.7.0",
+    "flash_linear_attention": "0.5.1",
+    "grouped_gemm": {
+      "base_version": "1.1.4.post8",
+      "distribution": "nv-grouped-gemm",
+      "repository": "https://github.com/fanshiqing/grouped_gemm.git",
+      "commit": "efe8c40eaf4c8ef57191e0ea9aa4117aa5b1a8f2"
+    },
+    "grouped_gemm_cuda_arch_list": "8.0;8.6;9.0",
+    "mamba_ssm": {
+      "base_version": "2.3.2.post1",
+      "repository": "https://github.com/state-spaces/mamba.git",
+      "commit": "a14b1dff0454a3bc27d9eb31355dc01e4b2490ec",
+      "compatibility_patch": "mamba_ssm_tilelang_0_1_9.patch",
+      "compatibility_patch_sha256": "5ac3654a620e44db347b30231bafdceaf328058c16fca061d5dadb25ebff7291"
+    },
+    "torch_cuda_arch_list": "8.0;8.6;9.0;10.0;12.0"
   }
 }

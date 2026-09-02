@@ -26,6 +26,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Literal, cast
 
+import torch
+
 from ..dataset.batch import DataLayout, Modality
 from ..dataset.config import PuzzletronDataSpec
 from ..identity import cache_key, canonicalize
@@ -464,6 +466,45 @@ def _completed_vlm_resume_observability(
             kd_config.max_steps,
         )
     return (prior_observability, True) if completed else (observability, False)
+
+
+def _aggregate_objective_buffers(
+    objective_names: list[str], objective_buffers: dict[str, list[Any]], torch_dist: Any
+) -> dict[str, float | None]:
+    """Average objective buffers with one packed tensor collective."""
+    buffered_values = [
+        value
+        for name in objective_names
+        for value in objective_buffers.get(name, [])
+        if isinstance(value, torch.Tensor)
+    ]
+    distributed = torch_dist.is_available() and torch_dist.is_initialized()
+    if distributed and torch_dist.get_backend() == "nccl":
+        device = torch.device("cuda", torch.cuda.current_device())
+    elif buffered_values:
+        device = buffered_values[0].device
+    else:
+        device = torch.device("cpu")
+
+    totals = torch.zeros((len(objective_names), 2), dtype=torch.float64, device=device)
+    for index, name in enumerate(objective_names):
+        values = objective_buffers.get(name, [])
+        if values:
+            totals[index, 0] = torch.stack(
+                [value.detach().to(device=device, dtype=torch.float64) for value in values]
+            ).sum()
+            totals[index, 1] = len(values)
+
+    if distributed:
+        try:
+            torch_dist.all_reduce(totals)
+        except RuntimeError as error:
+            raise RuntimeError("Global-KD objective metric gathering failed") from error
+    rows = totals.cpu().tolist()
+    return {
+        name: total / count if count else None
+        for name, (total, count) in zip(objective_names, rows)
+    }
 
 
 def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> dict[str, Any]:
@@ -1256,23 +1297,11 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
     observability = (
         trainer.observability_metadata() if hasattr(trainer, "observability_metadata") else {}
     )
-    local_terms: dict[str, list[float]] = {}
-    for name, values in getattr(trainer, "_objective_buffers", {}).items():
-        local_terms[name] = [float(value.detach().float().cpu()) for value in values]
-    gathered_terms: list[dict[str, list[float]] | None] = [local_terms]
-
-    if torch_dist.is_available() and torch_dist.is_initialized():
-        gathered_terms = [None] * torch_dist.get_world_size()
-        try:
-            torch_dist.all_gather_object(gathered_terms, local_terms)
-        except RuntimeError as error:
-            raise RuntimeError("Global-KD objective metric gathering failed") from error
-    objective_metrics = {}
-    for name in kd_config.objective_weights:
-        values = [
-            value for rank_terms in gathered_terms for value in (rank_terms or {}).get(name, [])
-        ]
-        objective_metrics[name] = sum(values) / len(values) if values else None
+    objective_metrics = _aggregate_objective_buffers(
+        list(kd_config.objective_weights),
+        getattr(trainer, "_objective_buffers", {}),
+        torch_dist,
+    )
     # The weighted recipe flushes its per-step buffers into training.jsonl so
     # they do not accumulate across optimizer steps.  Prefer the final logged
     # values for the stage manifest; they are the metrics associated with the

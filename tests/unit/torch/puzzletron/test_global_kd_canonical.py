@@ -28,12 +28,37 @@ from modelopt.torch.puzzletron.distillation import global_kd_recipe
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
     GlobalKDResult,
+    _aggregate_objective_buffers,
     _completed_vlm_resume_observability,
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
 from modelopt.torch.puzzletron.distillation.global_kd_recipe import _WeightedObjectiveMixin
 from modelopt.torch.puzzletron.plugins.automodel import local_kd_recipe
+
+
+def test_global_kd_objective_metrics_use_one_tensor_collective(monkeypatch):
+    collectives = []
+
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda: "gloo")
+
+    def all_reduce(totals):
+        collectives.append(totals.clone())
+        totals.add_(torch.tensor([[4.0, 2.0], [0.0, 0.0]], dtype=totals.dtype))
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+
+    metrics = _aggregate_objective_buffers(
+        ["main_ce", "main_kd"],
+        {"main_ce": [torch.tensor(1.0), torch.tensor(3.0)]},
+        torch.distributed,
+    )
+
+    assert len(collectives) == 1
+    assert collectives[0].tolist() == [[4.0, 2.0], [0.0, 0.0]]
+    assert metrics == {"main_ce": 2.0, "main_kd": None}
 
 
 def test_global_kd_pp_shape_reset_uses_pipeline_activation_dtype(monkeypatch):

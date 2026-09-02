@@ -64,6 +64,7 @@ def _run_profile(
     output_root: str | Path,
     settings: Mapping[str, Any],
     suite: str,
+    require_manifest: bool = False,
 ) -> tuple[argparse.Namespace, dict[str, object], Path]:
     settings = dict(settings)
     unexpected = (
@@ -75,6 +76,10 @@ def _run_profile(
     output_dir.mkdir(parents=True, exist_ok=True)
     row_manifest = settings.pop("row_manifest", None)
     expected_manifest_sha256 = settings.pop("row_manifest_sha256", None)
+    if require_manifest and (not row_manifest or not expected_manifest_sha256):
+        raise ValueError(
+            "frozen 344-row campaign profile requires row_manifest and row_manifest_sha256"
+        )
     quick_manifest = Path(row_manifest).expanduser().absolute() if row_manifest else None
     if quick_manifest is not None:
         if (
@@ -167,6 +172,7 @@ def evaluate_frozen_campaign_checkpoint(
         output_root=output_root,
         settings=settings,
         suite="quick",
+        require_manifest=True,
     )
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):

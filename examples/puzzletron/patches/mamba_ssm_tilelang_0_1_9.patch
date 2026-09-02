@@ -1,0 +1,26 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index a3d4d1a..bd274c9 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -17,7 +17,7 @@ classifiers = [
+ ]
+ dependencies = [
+     "torch",
+-    "tilelang==0.1.8",
++    "tilelang==0.1.9",
+     "apache-tvm-ffi<=0.1.9",
+     "quack-kernels>=0.3.4",
+     "triton>=3.5.0",
+diff --git a/setup.py b/setup.py
+index f9c3320..a3136f9 100755
+--- a/setup.py
++++ b/setup.py
+@@ -399,7 +399,7 @@ setup(
+         "einops",
+         "triton>=3.5.0",
+         "transformers",
+-        "tilelang==0.1.8",
++        "tilelang==0.1.9",
+         "apache-tvm-ffi<=0.1.9",
+         "quack-kernels>=0.3.4",
+         # "causal_conv1d>=1.4.0",

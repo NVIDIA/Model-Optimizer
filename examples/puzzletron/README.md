@@ -40,6 +40,12 @@ conversion, training, evaluation, and benchmarking run in the worker
 environment or container selected during setup. Prepare the
 [worker environment](docs/environment_setup.md) before launching a campaign.
 
+### Worker image
+
+The repository includes a Dockerfile and build command for Puzzletron workers.
+Follow the [image guide](docs/worker_image.md) to build, check, or export an
+Enroot/Pyxis SquashFS image.
+
 ### 2. Generate a campaign
 
 Start the guided setup with the repository defaults:

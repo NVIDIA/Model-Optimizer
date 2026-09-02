@@ -7,6 +7,7 @@ on:
     branches: [main, release/*, feature/*]
     paths:
       - ".github/workflows/unit_tests.yml"
+      - "examples/__init__.py"
       - "examples/puzzletron/**"
       - "modelopt/**"
       - "noxfile.py"
@@ -83,6 +84,8 @@ jobs:
         with:
           files: |
             .github/workflows/unit_tests.yml
+            examples/__init__.py
+            examples/puzzletron/Dockerfile
             examples/puzzletron/**/*.html
             examples/puzzletron/**/*.json
             examples/puzzletron/**/*.md
