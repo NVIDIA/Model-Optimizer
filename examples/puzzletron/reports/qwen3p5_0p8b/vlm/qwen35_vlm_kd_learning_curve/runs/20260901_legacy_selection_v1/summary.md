@@ -6,6 +6,8 @@ Six student checkpoints were evaluated on the same frozen short-v1 row manifest
 before KD and after 64, 128, and 256 cumulative KD steps. The FFN-3328 control
 was additionally evaluated at 512 steps. Teacher evaluation was performed once
 and reused at every comparison milestone.
+The canonical evaluation profile identity is
+`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1`.
 
 ## Teacher and 256-step students
 

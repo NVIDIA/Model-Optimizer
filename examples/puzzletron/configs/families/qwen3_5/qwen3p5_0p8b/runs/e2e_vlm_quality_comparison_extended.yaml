@@ -1,7 +1,7 @@
 # @package _global_
 
 defaults:
-  - full_vlm_smoke_extended
+  - vlm_admitted_axes_lifecycle_smoke
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 

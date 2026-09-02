@@ -51,6 +51,7 @@
   },
   "benchmark_coverage": {
     "suite": "short-v1",
+    "profile_identity": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
     "row_manifest": {
       "row_count": 344,
       "sha256": "c088a0421497c34592a1fe7828cbb93a399744e7e29ec4b098206cde04906326"
@@ -456,8 +457,8 @@
     },
     {
       "path": "summary.md",
-      "sha256": "75b82e98ff333ade2548febc130f1ec0dfa0743d3e7bf1fa7d854dce6cee669c",
-      "size_bytes": 3610
+      "sha256": "0197b86cb2119c0c8852c1bd010d80655c7507c6f6826b5e1738adea1d0899ea",
+      "size_bytes": 3717
     }
   ],
   "external_artifacts": [

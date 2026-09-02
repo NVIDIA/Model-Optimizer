@@ -143,7 +143,7 @@ post_mip:
           model_source: materialized
           failure_policy: strict
           config: &short_v1_evaluation
-            profile: qwen35_vlm_short_v1
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
             evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
             row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
             row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
@@ -264,7 +264,7 @@ post_mip:
           config:
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_short_v1
-            profile: qwen35_vlm_short_v1
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
             row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
             row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
             reference_checkpoint: ${teacher_dir}
@@ -445,7 +445,7 @@ post_mip:
           config: &control_result_config
             pre_kd_source: control_materialized
             pre_kd_evaluation: control_pre_kd_short_v1
-            profile: qwen35_vlm_short_v1
+            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1
             row_manifest: ${oc.env:PUZZLETRON_VLM_SHORT_V1_MANIFEST}
             row_manifest_sha256: ${oc.env:PUZZLETRON_VLM_SHORT_V1_SHA256}
             reference_checkpoint: ${teacher_dir}

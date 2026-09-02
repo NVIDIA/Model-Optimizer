@@ -46,6 +46,9 @@ def _register_evaluation_profiles(config: dict) -> None:
                 if isinstance(profile, str):
                     profiles.add(profile)
     if profiles & {
+        "qwen35_vlm_realworldqa2_prefix2",
+        "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
+        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
         "qwen35_vlm_realworldqa",
         "qwen35_vlm_e2e_full_eval",
         "qwen35_vlm_short_v1",

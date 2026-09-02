@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,7 @@ from modelopt.torch.puzzletron.distributed_eval.storage import atomic_write_json
 
 __all__ = [
     "evaluate_e2e_full_eval_checkpoint",
+    "evaluate_frozen_campaign_checkpoint",
     "evaluate_realworldqa_checkpoint",
     "evaluate_short_v1_checkpoint",
     "register_profiles",
@@ -48,6 +50,9 @@ _RUNNER_OVERRIDES = frozenset(
     }
 )
 _MANIFEST_SETTINGS = frozenset({"row_manifest", "row_manifest_sha256"})
+_REALWORLDQA_PROFILE = "qwen35_vlm_realworldqa2_prefix2"
+_BOUNDED_REPEATED_PROFILE = "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+_FROZEN_CAMPAIGN_PROFILE = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
 
 
 def _run_profile(
@@ -117,6 +122,20 @@ def register_profiles() -> None:
     from modelopt.torch.puzzletron.post_mip.runner import register_downstream_evaluation_profile
 
     register_downstream_evaluation_profile(
+        _REALWORLDQA_PROFILE,
+        evaluate_realworldqa_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _BOUNDED_REPEATED_PROFILE,
+        evaluate_e2e_full_eval_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _FROZEN_CAMPAIGN_PROFILE,
+        evaluate_frozen_campaign_checkpoint,
+    )
+    # Deprecated compatibility aliases. New recipes must use explicit task and
+    # row-selection identities above.
+    register_downstream_evaluation_profile(
         "qwen35_vlm_realworldqa",
         evaluate_realworldqa_checkpoint,
     )
@@ -130,13 +149,13 @@ def register_profiles() -> None:
     )
 
 
-def evaluate_short_v1_checkpoint(
+def evaluate_frozen_campaign_checkpoint(
     checkpoint_path: str | Path,
     *,
     output_root: str | Path,
     settings: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Evaluate one checkpoint on the identity-bound frozen short-v1 rows."""
+    """Evaluate one checkpoint on the identity-bound frozen campaign rows."""
 
     args, result, profile_path = _run_profile(
         checkpoint_path,
@@ -152,6 +171,26 @@ def evaluate_short_v1_checkpoint(
         "profile_path": str(profile_path),
         "checkpoint": str(args.checkpoint),
     }
+
+
+def evaluate_short_v1_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compatibility alias for the explicit frozen-row campaign profile."""
+
+    warnings.warn(
+        f"qwen35_vlm_short_v1 is deprecated; use {_FROZEN_CAMPAIGN_PROFILE}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return evaluate_frozen_campaign_checkpoint(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+    )
 
 
 def evaluate_realworldqa_checkpoint(

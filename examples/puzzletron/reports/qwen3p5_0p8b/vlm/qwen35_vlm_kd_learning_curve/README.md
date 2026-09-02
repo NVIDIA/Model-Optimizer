@@ -4,6 +4,8 @@ This directory packages bounded, identity-bound evidence from the September 2026
 Qwen 3.5 0.8B VLM campaign. The run evaluates six students before KD and after
 64, 128, and 256 cumulative KD steps on one frozen 344-row short-v1 manifest.
 The FFN-3328 control also has a separately gated 512-step milestone.
+The canonical evaluation profile is
+`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1`.
 
 ## Protocol status
 

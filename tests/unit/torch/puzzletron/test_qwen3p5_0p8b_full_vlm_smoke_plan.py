@@ -36,7 +36,7 @@ RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
 EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
 )
-CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.campaign.yaml"
+CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.vlm_admitted_axes_campaign.yaml"
 CAMPAIGN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
@@ -47,7 +47,7 @@ COMPARISON_RUN_PATH = (
 )
 EXTENDED_RUN_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke_extended.yaml"
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_admitted_axes_lifecycle_smoke.yaml"
 )
 EXTENDED_COMPARISON_RUN_PATH = (
     REPOSITORY_ROOT
@@ -225,7 +225,7 @@ def test_qwen3p5_0p8b_vlm_comparison_uses_the_shared_evaluator(
     assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
     assert benchmark["input"] == "short_vlm_kd"
     assert benchmark["failure_policy"] == "strict"
-    assert benchmark["config"]["profile"] == "qwen35_vlm_e2e_full_eval"
+    assert benchmark["config"]["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
 
     wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
         "quality_comparison"
@@ -371,7 +371,10 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         4.0,
     ]
     milestone_evaluations = [nodes[f"short_v1_{steps}"]["config"] for steps in (64, 128, 256)]
-    assert all(settings["profile"] == "qwen35_vlm_short_v1" for settings in milestone_evaluations)
+    assert all(
+        settings["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
+        for settings in milestone_evaluations
+    )
     assert {settings["row_manifest"] for settings in milestone_evaluations} == {
         str(tmp_path / "short-v1.json")
     }
@@ -412,7 +415,7 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     assert nodes["bounded_result"]["config"] == {
         "pre_kd_source": "materialized",
         "pre_kd_evaluation": "pre_kd_short_v1",
-        "profile": "qwen35_vlm_short_v1",
+        "profile": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
         "row_manifest": str(tmp_path / "short-v1.json"),
         "row_manifest_sha256": "a" * 64,
         "reference_checkpoint": config["teacher_dir"],

@@ -205,14 +205,20 @@ deployment image sizes before drawing throughput conclusions.
 
 ## Choose a campaign or quality-comparison route
 
-The routes use the pinned Qwen 3.5 0.8B VLM. `full_vlm_smoke.yaml` keeps the
-portable FFN-only lifecycle check. `full_vlm_smoke_extended.yaml` enables
+The routes use the pinned Qwen 3.5 0.8B VLM. The legacy
+`full_vlm_smoke.yaml` compatibility route keeps the portable FFN-only lifecycle
+check. `vlm_admitted_axes_lifecycle_smoke.yaml` enables
 hidden width, FFN, and depth diagnostics, then realizes
 one mixed candidate whose exact MIP parameter count must retain 85–95% of the
 teacher. That candidate continues through physical materialization, checkpoint
 reload, image serving, two-step VLM KD, and image-text evaluation.
 The extended grid uses 64-channel hidden-width alignment so its `960` and `896`
 endpoints pass the same physical materialization validator used by the smoke.
+
+The older `qwen35_vlm_realworldqa`, `qwen35_vlm_e2e_full_eval`, and
+`qwen35_vlm_short_v1` profile names remain registered only as deprecated
+compatibility aliases. New recipes use identities that state the task scope and
+row-selection policy.
 
 `vlm_campaign.yaml` is the expanded admitted-axis search: hidden width,
 heterogeneous FFN width, and depth. It reuses the existing `params-90` MIP
@@ -230,8 +236,9 @@ evaluated. The selection is an explicit manual gate so the campaign does not
 encode an additional sampling interpretation.
 
 The `3328` and `3072` controls follow their own otherwise identical 64/128/256
-learning curves. Every milestone uses the same `qwen35_vlm_short_v1` profile,
-exact-row manifest path, and required manifest SHA256. The teacher result is
+learning curves. Every milestone uses the same
+`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1` profile, exact-row
+manifest path, and required manifest SHA256. The teacher result is
 computed once under that identity and reused for every control, candidate, and
 milestone. Each KD record includes global batch size, cumulative examples,
 non-padding effective tokens from the training log, a padded-token upper bound,
@@ -285,7 +292,7 @@ Run the campaign with the same execution profile and a distinct output root:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_admitted_axes_campaign.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
 export PUZZLETRON_VLM_SHORT_V1_MANIFEST=/path/to/frozen-short-v1.json

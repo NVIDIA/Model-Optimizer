@@ -90,7 +90,14 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
 
 @pytest.mark.parametrize(
     "profile",
-    ["qwen35_vlm_realworldqa", "qwen35_vlm_e2e_full_eval", "qwen35_vlm_short_v1"],
+    [
+        "qwen35_vlm_e2e_full_eval",
+        "qwen35_vlm_realworldqa",
+        "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
+        "qwen35_vlm_realworldqa2_prefix2",
+        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
+        "qwen35_vlm_short_v1",
+    ],
 )
 def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch, profile):
     # Keep the examples-layer VLM dependencies out of core test collection.
@@ -778,7 +785,7 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
             "config": {
                 "pre_kd_source": "materialized",
                 "pre_kd_evaluation": "pre_kd_short_v1",
-                "profile": "qwen35_vlm_short_v1",
+                "profile": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
                 "row_manifest": "/frozen/short-v1.json",
                 "row_manifest_sha256": "a" * 64,
                 "reference_checkpoint": "/teacher",
