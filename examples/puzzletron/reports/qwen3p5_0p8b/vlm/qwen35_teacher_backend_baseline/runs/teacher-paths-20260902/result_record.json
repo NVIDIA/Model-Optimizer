@@ -6,6 +6,7 @@
     "id": "Qwen/Qwen3.5-0.8B",
     "role": "teacher",
     "revision": null,
+    "revision_status": "not_retained",
     "checkpoint_content_fingerprint": "d4725f5efac19441bcdc22678b9177904abe9fe2413205a351d353d272a7e838"
   },
   "campaign": {
@@ -36,10 +37,10 @@
     }
   },
   "evaluation": {
-    "evaluation_contract_id": "qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1",
+    "evaluation_contract_id": "qwen35-vlm-short-v1-exact-rows-v1",
     "selection_method": "fixed ordered rows",
-    "row_selection_identity_sha256": "f329ccd719d11fc4f86542be80bbb46b00d5c4a36dfe642f283972b8ce48b7dd",
-    "row_selection_identity_method": "SHA-256 of canonical JSON containing the semantic contract ID and each ordered task's dataset repository, revision, and row list",
+    "row_selection_identity_sha256": "eaf88430a43e05da2de74775957a3b4707601920affa95cd5074864bba3abaed",
+    "row_selection_identity_method": "SHA-256 of canonical JSON containing evaluation_contract_id and an ordered tasks object with each dataset repository, revision, and row list",
     "tasks": [
       {"id": "realworldqa", "dataset_repository": "lmms-lab/RealWorldQA", "dataset_revision": "907c4e5228fd1703c710ed937601cb5f89ab8d5c", "complete_rows": null, "selected_rows": 64},
       {"id": "mmmu_val", "dataset_repository": "lmms-lab/MMMU", "dataset_revision": "364f2e2eb107b36e07ff4c5a15f5947a759cef47", "complete_rows": null, "selected_rows": 120},
@@ -94,9 +95,10 @@
     "uncertainty": null
   },
   "reproduction": {
+    "status": "not_exactly_reproducible",
     "prerequisites": [
       "Install the base Puzzletron requirements and the evaluator-specific requirements described in examples/puzzletron/docs/vlm_checkpoint_evaluation.md.",
-      "Download the model and cache the three datasets at the revisions recorded above; do not add them to Git."
+      "Download the named model and verify its content fingerprint; the exact upstream model revision was not retained. Cache the three datasets at the revisions recorded above; do not add them to Git."
     ],
     "generic_command": "python -m examples.puzzletron.evaluation.vlm.run --checkpoint /path/to/checkpoint --output-dir /path/to/results/generic --hf-home /path/to/hf-cache --profile short-v1",
     "qwen_specific_command": "python -m examples.puzzletron.evaluation.vlm.run --checkpoint /path/to/checkpoint --output-dir /path/to/results/qwen-specific --hf-home /path/to/hf-cache --profile short-native-v1",

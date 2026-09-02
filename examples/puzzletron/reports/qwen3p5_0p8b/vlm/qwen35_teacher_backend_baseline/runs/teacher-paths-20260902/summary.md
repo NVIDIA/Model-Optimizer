@@ -2,7 +2,8 @@
 
 Evidence status: `teacher_only`. This record contains one completed evaluation
 per path on an identical ordered selection of 344 rows. It contains no student
-result and no repeated measurement.
+result and no repeated measurement. The exact upstream model revision was not
+retained, so the run is not exactly reproducible from the published record.
 
 ## Results
 
@@ -25,7 +26,7 @@ ablation. The rendered prompts and token sequences were distinct.
 ## Scope and limitations
 
 - The ordered evaluation contract is
-  `qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1`.
+  `qwen35-vlm-short-v1-exact-rows-v1`.
 - Each condition has one retained execution. Sampling was disabled, but one
   execution is not repetition evidence.
 - Correct-count numerators, uncertainty estimates, exact model and execution

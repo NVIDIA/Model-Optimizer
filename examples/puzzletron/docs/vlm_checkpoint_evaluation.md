@@ -38,6 +38,13 @@ adds the Qwen 3.5-specific model loader. Neither pinned version is a ModelOpt
 fork. Follow-up work should use the `lmms-eval` version supplied by the worker
 image once both model-loading paths have been validated with it.
 
+Keep the general vLLM and Qwen-specific paths in separate environments because
+they require different `lmms-eval` revisions. If one environment must be
+reused, reinstall `examples/puzzletron/requirements.txt` before running
+`short-v1` or `full-v1`, and reinstall
+`examples/puzzletron/requirements-vlm-native.txt` before running a profile with
+`native` in its name. Preflight rejects the wrong installed revision.
+
 ## Understand the two execution paths
 
 | Path | Profiles | What it does |

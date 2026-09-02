@@ -163,7 +163,7 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
     """Resolve the provenance and runtime execution fields for one suite."""
     suite = canonical_suite(suite)
     source_tasks(suite)
-    is_versioned_short = suite in {"short-v1", "short-native-v1", "short-all-native-v1"}
+    is_versioned_short = suite in contracts.SHORT_PROFILE_NAMES
     is_smoke = suite in SMOKE_SUITES or is_versioned_short
     default_timeout_seconds = (
         DEFAULT_SMOKE_TIMEOUT_SECONDS if is_smoke else DEFAULT_FULL_TIMEOUT_SECONDS

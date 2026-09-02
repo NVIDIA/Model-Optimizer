@@ -103,6 +103,20 @@ def test_no_think_template_is_local_and_requires_checkpoint_switch(tmp_path):
         vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
 
 
+def test_no_think_template_rejects_unsafe_checkpoint_expression(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    (checkpoint_path / "chat_template.jinja").write_text(
+        "{{ ''.__class__.__mro__ }}"
+        "{% if enable_thinking is defined and enable_thinking is false %}"
+        "<think>\n\n</think>\n\n{% endif %}"
+    )
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+
+    with pytest.raises(ValueError, match="chat template is invalid"):
+        vlm_model.no_think_chat_template(checkpoint_path, tasks_root)
+
+
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
     checkpoint_path = _write_checkpoint(tmp_path)
     config_path = checkpoint_path / "config.json"

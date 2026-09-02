@@ -28,6 +28,7 @@ from examples.puzzletron.evaluation.vlm import profile
 
 __all__ = [
     "PROFILE_NAMES",
+    "SHORT_PROFILE_NAMES",
     "ProfileContract",
     "load_profile",
 ]
@@ -56,6 +57,9 @@ _PROFILE_SELECTIONS = {
     "short-all-native-v1": "exact-rows",
     "full-v1": "all",
 }
+SHORT_PROFILE_NAMES = tuple(
+    name for name in PROFILE_NAMES if _PROFILE_SELECTIONS[name] == "exact-rows"
+)
 _PROFILE_BACKENDS = {
     "short-v1": {
         "enable_thinking": False,

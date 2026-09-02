@@ -20,7 +20,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from jinja2 import Environment, TemplateError
+from jinja2 import TemplateError
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,7 +61,7 @@ def no_think_chat_template(checkpoint: Path, output_directory: Path) -> Path:
 def _render_template(content: str, *, source: Path) -> str:
     try:
         return (
-            Environment()
+            ImmutableSandboxedEnvironment()
             .from_string(content)
             .render(
                 add_generation_prompt=True,
