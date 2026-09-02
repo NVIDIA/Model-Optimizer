@@ -165,3 +165,25 @@ def test_stub_profile_is_marked_unmeasured():
 def test_checkpoint_id_strips_internal_paths(path, expected):
     """The profile is published with checkpoints, so it must not carry cluster layout."""
     assert checkpoint_id(path) == expected
+
+
+def test_gap_in_histogram_uses_survival_not_zero():
+    """A length that never occurred must not zero out acceptance beyond it.
+
+    Lengths 1 and 3 observed, 2 never. P(>=2) still equals P(>=3) because no step
+    ended at exactly 2 -- filling the gap with 0.0 would understate acceptance and
+    break the AL identity, while looking entirely plausible.
+    """
+    out = _acceptance_out_from_histogram({1: 50, 3: 50})
+    profile = build_profile(out, num_speculative_tokens=3, method="eagle3")
+
+    assert profile["marginal_accept_rates"] == pytest.approx([0.5, 0.5, 0.0])
+    assert profile["validation"]["mean_consistency"]["passed"]
+    # 1 + 0.5 + 0.5 == 2.0, and the histogram mean is (50*1 + 50*3)/100 == 2.0.
+    assert profile["mean_accept_length"] == pytest.approx(2.0)
+
+
+def test_empty_histogram_does_not_claim_a_measurement():
+    out = {"Conditional_Acceptance_Rate": {}, "Joint_Acceptance_Rate": {}, "Average_AL": 0.0}
+    profile = build_profile(out, num_speculative_tokens=3, method="eagle3")
+    assert profile["marginal_accept_rates"] == [0.0, 0.0, 0.0]
