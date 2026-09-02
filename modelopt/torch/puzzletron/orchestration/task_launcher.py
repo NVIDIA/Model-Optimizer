@@ -39,7 +39,18 @@ __all__ = [
     "resolve_task_binding",
 ]
 
-TASK_IDENTITY_ENV_KEYS = frozenset(
+TORCH_DISTRIBUTED_ENV_KEYS = frozenset(
+    {
+        "LOCAL_RANK",
+        "LOCAL_WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "RANK",
+        "WORLD_SIZE",
+    }
+)
+
+TASK_IDENTITY_ENV_KEYS = TORCH_DISTRIBUTED_ENV_KEYS | frozenset(
     {
         "CUDA_VISIBLE_DEVICES",
         "SLURM_LOCALID",
@@ -257,6 +268,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         PUZZLETRON_RENDEZVOUS_ENDPOINT=rendezvous_endpoint(binding),
         PUZZLETRON_RENDEZVOUS_ID=binding.rendezvous_id,
     )
+    for key in TORCH_DISTRIBUTED_ENV_KEYS:
+        env.pop(key, None)
+    if args.launcher == TaskLauncher.DIRECT.value and binding.group_size == 1:
+        env.update(
+            LOCAL_RANK="0",
+            LOCAL_WORLD_SIZE="1",
+            MASTER_ADDR=binding.master_addr,
+            MASTER_PORT=str(binding.master_port),
+            RANK="0",
+            WORLD_SIZE="1",
+        )
     print(
         "puzzletron binding "
         f"host={binding.hostname} task={binding.task_index} "

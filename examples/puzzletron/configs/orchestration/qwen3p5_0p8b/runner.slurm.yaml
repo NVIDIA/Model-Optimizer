@@ -11,9 +11,9 @@ runner:
     max_nodes: 1
     time_limit: "4:00:00"
   execution_contract:
-    repository: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_CHECKOUT
-    venv: REPLACE_WITH_WORKER_VISIBLE_MODELOPT_VENV
-    container: REPLACE_WITH_REVIEWED_PUZZLETRON_IMAGE
+    repository: /opt/puzzletron/src/modelopt
+    venv: /venv
+    container: REPLACE_WITH_PUZZLETRON_IMAGE
     container_mounts: REPLACE_WITH_REQUIRED_CONTAINER_MOUNTS
     prerun_commands: []
     postrun_commands: []

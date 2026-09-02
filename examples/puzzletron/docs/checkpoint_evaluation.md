@@ -22,13 +22,9 @@ separate [VLM checkpoint evaluator](vlm_checkpoint_evaluation.md).
 
 ## Quick start
 
-Install the Puzzletron worker requirements:
-
-```bash
-python -m pip install -r examples/puzzletron/requirements.txt
-```
-
-Then run the default smoke:
+Run the command in the Puzzletron worker image described in the
+[environment setup guide](environment_setup.md#worker-environment). Mount the
+checkpoint and output paths into the container, then run the default smoke:
 
 ```bash
 python -m examples.puzzletron.evaluation.text \
