@@ -350,7 +350,7 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
         assert nodes[node_id]["config"]["objective"] == config["global_distillation"]["objective"]
     assert nodes["serving"]["config"]["allow_aiperf_v011_online_tokenizer_resolution"] is True
     assert nodes["quality_screen"]["config"]["profile"] == (
-        "qwen35_vlm_realworldqa_mmmu_prefix100_repeat2"
+        "qwen35_vlm_realworldqa_mmmu_prefix100_x2"
     )
     assert nodes["quality_screen"]["config"]["disable_thinking"] is True
     assert "reference_checkpoint" not in nodes["quality_screen"]["config"]

@@ -13,7 +13,7 @@ measurements.
 
 | Checkpoint | Parameters | Reduction | Post-KD loss | Teacher top-1 agreement | RealWorldQA | MMMU |
 |---|---:|---:|---:|---:|---:|---:|
-| Teacher | 5,295,564,288 | baseline | - | - | 0.70 | 0.42 |
+| Earlier teacher run | 5,295,564,288 | baseline | - | - | 0.70 | 0.42 |
 | FFN 7168 | 4,792,247,808 | 9.5045% | 0.275756 | 0.935247 | 0.74 | 0.33 |
 | FFN 6144 | 4,540,589,568 | 14.2567% | 0.335212 | 0.928762 | 0.56 | 0.37 |
 | FFN 5120 | 4,288,931,328 | 19.0090% | 0.238116 | 0.921556 | 0.71 | 0.29 |
@@ -34,6 +34,9 @@ students.
 - The teacher scores came from an earlier evaluation. We did not run the planned
   final teacher and student comparison, and we do not have the exact teacher
   checkpoint fingerprint or runtime settings.
+- The separate [4B teacher baseline](../../../qwen35_teacher_backend_baseline/README.md)
+  uses 64 RealWorldQA rows, 120 MMMU rows, and 160 MVBench rows. It does not use
+  the same evaluation rows as this run.
 
 The search produced each of the three FFN widths in two different ways, but the
 resulting model shapes were identical. There are three distinct students, not

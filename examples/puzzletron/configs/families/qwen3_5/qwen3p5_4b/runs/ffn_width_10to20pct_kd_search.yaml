@@ -180,7 +180,7 @@ post_mip:
           input: screening_eval
           failure_policy: strict
           config: &bounded_vlm_evaluation
-            profile: qwen35_vlm_realworldqa_mmmu_prefix100_repeat2
+            profile: qwen35_vlm_realworldqa_mmmu_prefix100_x2
             disable_thinking: true
             batch_size: 1
             timeout_seconds: 14400

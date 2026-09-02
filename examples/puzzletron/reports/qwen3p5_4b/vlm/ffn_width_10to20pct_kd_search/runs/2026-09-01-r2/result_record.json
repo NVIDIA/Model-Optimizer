@@ -28,7 +28,7 @@
       "serving_screen",
       "64_step_tp2_kd",
       "post_kd_loss_screen",
-      "qwen35-vlm-rwqa100-mmmu100-prefix100-repeat2-v1"
+      "qwen35-vlm-rwqa100-mmmu100-prefix100-x2-v1"
     ],
     "configured_but_not_run": [
       "exploratory_256_step_finalist_kd",
@@ -59,7 +59,7 @@
     "configuration": {
       "experiment": {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
-        "packaged_sha256": "b0fa4b38ebece3e7b783fc4425b0c45596e8d53750d8f7c5341ab9a61aab6417",
+        "packaged_sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a",
         "execution_equivalent_sha256": "c4e6be62bf55980d23d20a12f35e11261d8dffbe59a1f457c7bccec6cc84ec06",
         "relationship": "canonical_profile_alias_and_comments_only"
       },
@@ -113,7 +113,7 @@
       {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
         "role": "validated_successor_experiment_recipe",
-        "sha256": "b0fa4b38ebece3e7b783fc4425b0c45596e8d53750d8f7c5341ab9a61aab6417"
+        "sha256": "01384151e7cc8910e961e5eb238c1e206c9167f9e64c86b57c18eeb7294d906a"
       },
       {
         "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
@@ -281,11 +281,11 @@
     "checkpoint_fingerprint_algorithm": "SHA-256 of concatenated sha256sum lines for every regular file, using ./-prefixed relative paths sorted bytewise in the C locale."
   },
   "evaluation": {
-    "evaluation_contract_id": "qwen35-vlm-rwqa100-mmmu100-prefix100-repeat2-v1",
+    "evaluation_contract_id": "qwen35-vlm-rwqa100-mmmu100-prefix100-x2-v1",
     "runtime_profile": null,
-    "canonical_runtime_profile": "qwen35_vlm_realworldqa_mmmu_prefix100_repeat2",
+    "canonical_runtime_profile": "qwen35_vlm_realworldqa_mmmu_prefix100_x2",
     "deprecated_runtime_profile_aliases": ["qwen35_vlm_e2e_full_eval"],
-    "suite": "realworldqa-mmmu-prefix100-repeat2",
+    "suite": "realworldqa-mmmu-prefix100-x2",
     "evaluator": "lmms-eval",
     "evaluator_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825",
     "adapter": null,
