@@ -31,14 +31,18 @@ This tool inserts Quantize-Dequantize (QDQ) nodes following compiler-friendly pa
 model.
 """
 
+import copy
+import hashlib
 import os
 import platform
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import onnx
 import onnx.onnx_cpp2py_export.checker as C
 import onnx_graphsurgeon as gs
@@ -64,7 +68,9 @@ from modelopt.onnx.quantization.graph_utils import (
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile, update_trt_ep_support
+from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
 from modelopt.onnx.quantization.qdq_utils import (
+    has_qdq_nodes,
     qdq_to_dq,
     remove_graph_input_q,
     remove_input_dq_and_output_q,
@@ -81,6 +87,168 @@ from modelopt.onnx.utils import (
 )
 
 __all__ = ["quantize"]
+
+
+@dataclass
+class _AutotuneContext:
+    """State needed to validate the calibrated Autotune artifact."""
+
+    ort_config: tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]
+    autotuner: Any
+    baseline_model: onnx.ModelProto
+    output_dir: Path
+    state_path: Path
+    temporary_output_dir: tempfile.TemporaryDirectory | None = None
+
+    def cleanup(self) -> None:
+        if self.temporary_output_dir is not None:
+            self.temporary_output_dir.cleanup()
+            self.temporary_output_dir = None
+
+
+def _update_source_digest(
+    digest: Any, value: Any, active_object_ids: set[int] | None = None
+) -> None:
+    """Update a digest from stable value content without retaining the source value."""
+    if active_object_ids is None:
+        active_object_ids = set()
+
+    if value is None:
+        digest.update(b"none")
+        return
+    if isinstance(value, np.ndarray):
+        digest.update(b"ndarray")
+        digest.update(value.dtype.str.encode())
+        digest.update(str(tuple(value.shape)).encode())
+        if value.dtype.hasobject:
+            for item in value.reshape(-1):
+                _update_source_digest(digest, item, active_object_ids)
+        else:
+            contiguous = np.ascontiguousarray(value)
+            digest.update(memoryview(contiguous).cast("B"))
+        return
+    if isinstance(value, np.generic):
+        digest.update(b"numpy-scalar")
+        digest.update(value.dtype.str.encode())
+        digest.update(value.tobytes())
+        return
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        digest.update(type(value).__name__.encode())
+        digest.update(bytes(value))
+        return
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, (str, int, float, bool)):
+        digest.update(type(value).__name__.encode())
+        digest.update(repr(value).encode())
+        return
+
+    object_id = id(value)
+    if object_id in active_object_ids:
+        digest.update(b"cycle")
+        return
+    active_object_ids.add(object_id)
+    try:
+        if isinstance(value, dict):
+            digest.update(b"dict")
+            items = []
+            for key, item in value.items():
+                key_digest = hashlib.sha256()
+                _update_source_digest(key_digest, key)
+                items.append((key_digest.digest(), key, item))
+            for _, key, item in sorted(items, key=lambda entry: entry[0]):
+                _update_source_digest(digest, key, active_object_ids)
+                _update_source_digest(digest, item, active_object_ids)
+            return
+        if isinstance(value, (list, tuple)):
+            digest.update(type(value).__name__.encode())
+            for item in value:
+                _update_source_digest(digest, item, active_object_ids)
+            return
+        if isinstance(value, (set, frozenset)):
+            digest.update(type(value).__name__.encode())
+            item_digests = []
+            for item in value:
+                item_digest = hashlib.sha256()
+                _update_source_digest(item_digest, item)
+                item_digests.append(item_digest.digest())
+            for item_digest in sorted(item_digests):
+                digest.update(item_digest)
+            return
+
+        type_name = f"{type(value).__module__}.{type(value).__qualname__}"
+        digest.update(type_name.encode())
+        if isinstance(value, Iterator) or callable(value):
+            return
+        try:
+            state = vars(value)
+        except TypeError:
+            return
+        _update_source_digest(digest, state, active_object_ids)
+    finally:
+        active_object_ids.remove(object_id)
+
+
+def _get_value_source_identity(value: Any) -> dict[str, str]:
+    digest = hashlib.sha256()
+    _update_source_digest(digest, value)
+    return {"sha256": digest.hexdigest()}
+
+
+def _get_file_source_identity(path: str | None) -> dict[str, str | int | bool | None] | None:
+    if path is None:
+        return None
+    resolved_path = Path(path).resolve()
+    identity: dict[str, str | int | bool | None] = {
+        "path_sha256": hashlib.sha256(str(resolved_path).encode()).hexdigest(),
+        "exists": resolved_path.is_file(),
+        "sha256": None,
+    }
+    if not resolved_path.is_file():
+        return identity
+
+    digest = hashlib.sha256()
+    with resolved_path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    identity["size"] = resolved_path.stat().st_size
+    identity["sha256"] = digest.hexdigest()
+    return identity
+
+
+def _get_calibration_reader_identity(
+    calibration_data_reader: CalibrationDataReader | None,
+) -> dict[str, str] | None:
+    if calibration_data_reader is None:
+        return None
+    reader_type = type(calibration_data_reader)
+    type_name = f"{reader_type.__module__}.{reader_type.__qualname__}"
+    try:
+        source_state = vars(calibration_data_reader)
+    except TypeError:
+        source_state = None
+    return {
+        "type_sha256": hashlib.sha256(type_name.encode()).hexdigest(),
+        "state_sha256": _get_value_source_identity(source_state)["sha256"],
+    }
+
+
+def _get_calibration_source_identity(
+    *,
+    calibration_cache_path: str | None,
+    calibration_eps: list[str],
+    calibration_data: CalibrationDataType | None,
+    calibration_data_reader: CalibrationDataReader | None,
+) -> dict[str, Any]:
+    """Return redacted identities for inputs that determine the calibrated artifact."""
+    return {
+        "cache": _get_file_source_identity(calibration_cache_path),
+        "execution_providers": _get_value_source_identity(calibration_eps),
+        "data": (
+            _get_value_source_identity(calibration_data) if calibration_data is not None else None
+        ),
+        "reader": _get_calibration_reader_identity(calibration_data_reader),
+    }
 
 
 def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
@@ -290,6 +458,11 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str] | None,
     high_precision_dtype: str = "fp16",
+    direct_io_types: bool = False,
+    op_types_to_exclude_fp16: list[str] | None = None,
+    custom_ops_to_cast_fp32: dict | None = None,
+    opset: int | None = None,
+    mha_accumulation_dtype: str = "fp16",
     output_dir: str | None = None,
     num_schemes_per_region: int = 50,
     pattern_cache_file: str | None = None,
@@ -302,7 +475,8 @@ def _find_nodes_to_quantize_autotune(
     warmup_runs: int = 50,
     timing_runs: int = 100,
     trtexec_args: str | None = None,
-) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
+    resume_fingerprint: dict | None = None,
+) -> _AutotuneContext:
     """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
 
@@ -330,19 +504,218 @@ def _find_nodes_to_quantize_autotune(
         raise RuntimeError("Failed to initialize TensorRT benchmark")
 
     precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
-    autotuner = region_pattern_autotuning_workflow(
-        onnx_model,
-        output_dir=Path(output_dir) if output_dir else None,
-        num_schemes_per_region=num_schemes_per_region,
-        pattern_cache_file=pattern_cache_file,
-        state_file=state_file,
-        quant_type=quantize_mode,
-        default_dq_dtype=precision_map[high_precision_dtype],
-        qdq_baseline_model=qdq_baseline_model,
-        node_filter_list=node_filter_list,
-        verbose=verbose,
+    temporary_output_dir = None
+    if output_dir is None:
+        temporary_output_dir = tempfile.TemporaryDirectory(prefix="modelopt_autotune_")
+        resolved_output_dir = Path(temporary_output_dir.name)
+    else:
+        resolved_output_dir = Path(output_dir)
+    resolved_state_path = (
+        Path(state_file) if state_file else resolved_output_dir / "autotuner_state.yaml"
     )
-    return autotuner.get_ort_quantization_config()
+
+    def model_transform(model: onnx.ModelProto) -> onnx.ModelProto:
+        return _convert_to_runtime_precision(
+            model,
+            quantize_mode=quantize_mode,
+            high_precision_dtype=high_precision_dtype,
+            direct_io_types=direct_io_types,
+            op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+            custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+            trt_extra_plugin_lib_paths=trt_plugins,
+            opset=opset,
+            mha_accumulation_dtype=mha_accumulation_dtype,
+        )
+
+    try:
+        autotuner = region_pattern_autotuning_workflow(
+            onnx_model,
+            output_dir=resolved_output_dir,
+            num_schemes_per_region=num_schemes_per_region,
+            pattern_cache_file=pattern_cache_file,
+            state_file=str(resolved_state_path),
+            quant_type=quantize_mode,
+            default_dq_dtype=precision_map[high_precision_dtype],
+            qdq_baseline_model=qdq_baseline_model,
+            node_filter_list=node_filter_list,
+            verbose=verbose,
+            model_transform=model_transform,
+            resume_fingerprint={
+                **(resume_fingerprint or {}),
+                "runtime_precision": {
+                    "high_precision_dtype": high_precision_dtype,
+                    "direct_io_types": direct_io_types,
+                    "op_types_to_exclude_fp16": op_types_to_exclude_fp16,
+                    "custom_ops_to_cast_fp32": custom_ops_to_cast_fp32,
+                    "opset": opset,
+                    "mha_accumulation_dtype": mha_accumulation_dtype,
+                },
+            },
+        )
+        return _AutotuneContext(
+            ort_config=autotuner.get_ort_quantization_config(),
+            autotuner=autotuner,
+            baseline_model=model_transform(copy.deepcopy(onnx_model)),
+            output_dir=resolved_output_dir,
+            state_path=resolved_state_path,
+            temporary_output_dir=temporary_output_dir,
+        )
+    except BaseException:
+        if temporary_output_dir is not None:
+            temporary_output_dir.cleanup()
+        raise
+
+
+def _model_sha256(model: onnx.ModelProto) -> str:
+    return hashlib.sha256(model.SerializeToString(deterministic=True)).hexdigest()
+
+
+def _count_quantization_sites(model: onnx.ModelProto) -> int:
+    quantized_tensors = set()
+    for node in model.graph.node:
+        if node.op_type == "QuantizeLinear" and node.output:
+            quantized_tensors.add(node.output[0])
+        elif node.op_type == "DequantizeLinear" and node.input:
+            quantized_tensors.add(node.input[0])
+    return len(quantized_tensors)
+
+
+def _get_reusable_autotune_final_model(
+    baseline_model: onnx.ModelProto,
+    candidate_model: onnx.ModelProto,
+    autotuner: Any,
+) -> onnx.ModelProto | None:
+    baseline_measurement = autotuner.final_baseline_measurement
+    decision = autotuner.final_decision
+    if not isinstance(baseline_measurement, dict) or not isinstance(decision, dict):
+        return None
+
+    baseline_model_sha256 = _model_sha256(baseline_model)
+    candidate_model_sha256 = _model_sha256(candidate_model)
+    candidate_quantization_site_count = _count_quantization_sites(candidate_model)
+    final_selection = decision.get("final_selection")
+    selected_model = candidate_model if final_selection == "qdq" else baseline_model
+    selected_model_sha256 = _model_sha256(selected_model)
+    baseline_latency = baseline_measurement.get("baseline_final_latency_ms")
+
+    is_consistent = (
+        baseline_measurement.get("decision_stage") == "calibrated_baseline"
+        and decision.get("decision_stage") == "calibrated_final"
+        and final_selection in {"qdq", "no_qdq"}
+        and baseline_measurement.get("baseline_model_sha256") == baseline_model_sha256
+        and decision.get("baseline_model_sha256") == baseline_model_sha256
+        and decision.get("baseline_final_latency_ms") == baseline_latency
+        and decision.get("candidate_model_sha256") == candidate_model_sha256
+        and decision.get("candidate_quantization_site_count") == candidate_quantization_site_count
+        and decision.get("selected_model_sha256") == selected_model_sha256
+        and (final_selection != "qdq" or candidate_quantization_site_count > 0)
+    )
+    if not is_consistent:
+        logger.info("Saved calibrated Autotune decision does not match the current artifacts")
+        return None
+
+    autotuner.set_force_no_qdq(final_selection == "no_qdq")
+    return selected_model
+
+
+def _apply_autotune_final_guard(
+    candidate_model: onnx.ModelProto,
+    context: _AutotuneContext,
+    *,
+    quantize_mode: str,
+    use_external_data_format: bool,
+) -> onnx.ModelProto:
+    """Keep the calibrated Q/DQ artifact only when it beats its precision-matched baseline."""
+    from modelopt.onnx.quantization.autotune.common import is_valid_latency
+    from modelopt.onnx.quantization.autotune.workflows import benchmark_onnx_model
+
+    logs_dir = context.output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = context.output_dir / "calibrated_baseline.onnx"
+    candidate_path = context.output_dir / "calibrated_candidate.onnx"
+
+    baseline_model = copy.deepcopy(context.baseline_model)
+    candidate_model = copy.deepcopy(candidate_model)
+    baseline_model.ir_version = 10
+    candidate_model.ir_version = 10
+    save_onnx(baseline_model, str(baseline_path), use_external_data_format)
+    save_onnx(candidate_model, str(candidate_path), use_external_data_format)
+
+    reusable_model = _get_reusable_autotune_final_model(
+        baseline_model, candidate_model, context.autotuner
+    )
+    if reusable_model is not None:
+        context.autotuner.save_state(str(context.state_path))
+        logger.info("Reused the validated calibrated Autotune decision from the checkpoint")
+        return reusable_model
+
+    baseline_latency = benchmark_onnx_model(
+        str(baseline_path), str(logs_dir / "calibrated_baseline.log")
+    )
+    if not is_valid_latency(baseline_latency):
+        raise RuntimeError(
+            "Autotune could not establish a finite positive latency for the "
+            "high-precision no-Q/DQ reference"
+        )
+    context.autotuner.record_final_baseline_measurement(
+        decision_stage="calibrated_baseline",
+        baseline_final_latency_ms=baseline_latency,
+        baseline_model_sha256=_model_sha256(baseline_model),
+    )
+    context.autotuner.save_state(str(context.state_path))
+
+    candidate_latency = benchmark_onnx_model(
+        str(candidate_path), str(logs_dir / "calibrated_candidate.log")
+    )
+    threshold = context.autotuner.config.performance_threshold
+    candidate_quantization_site_count = _count_quantization_sites(candidate_model)
+    candidate_is_valid = is_valid_latency(candidate_latency)
+    speedup = baseline_latency / candidate_latency if candidate_is_valid else 0.0
+    keep_candidate = candidate_quantization_site_count > 0 and speedup >= threshold
+
+    context.autotuner.set_force_no_qdq(not keep_candidate)
+    selected_model = candidate_model if keep_candidate else baseline_model
+    context.autotuner.record_final_decision(
+        decision_stage="calibrated_final",
+        final_selection="qdq" if keep_candidate else "no_qdq",
+        candidate_final_latency_ms=candidate_latency if candidate_is_valid else None,
+        final_latency_ms=candidate_latency if keep_candidate else baseline_latency,
+        candidate_quantization_site_count=candidate_quantization_site_count,
+        candidate_model_sha256=_model_sha256(candidate_model),
+        selected_model_sha256=_model_sha256(selected_model),
+    )
+    context.autotuner.save_state(str(context.state_path))
+
+    if keep_candidate:
+        logger.info(
+            "Autotune retained the calibrated Q/DQ model: %.3fx speedup (required >=%.3fx)",
+            speedup,
+            threshold,
+        )
+    elif candidate_quantization_site_count == 0:
+        logger.warning(
+            "Autotune selected the high-precision no-Q/DQ fallback: the calibrated candidate "
+            "contained no quantization sites. Despite quantize_mode=%s, the saved artifact is "
+            "not quantized.",
+            quantize_mode,
+        )
+    elif not candidate_is_valid:
+        logger.warning(
+            "Autotune selected the high-precision no-Q/DQ fallback: the calibrated candidate "
+            "did not produce a finite positive latency. Despite quantize_mode=%s, the saved "
+            "artifact is not quantized.",
+            quantize_mode,
+        )
+    else:
+        logger.warning(
+            "Autotune selected the high-precision no-Q/DQ fallback: best valid "
+            "quantized output achieved %.3fx vs required >=%.3fx. Despite "
+            "quantize_mode=%s, the saved artifact is not quantized.",
+            speedup,
+            threshold,
+            quantize_mode,
+        )
+    return selected_model
 
 
 def quantize(
@@ -531,11 +904,12 @@ def quantize(
             effect in INT8 quantization. Note that this may cause accuracy degradation, proceed with caution.
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
-            If False, use the default pattern-based quantization approach.
+            Placements must meet the configured performance threshold; otherwise the output is the requested
+            high-precision model without Q/DQ nodes. If False, use the default pattern-based quantization approach.
         autotune_output_dir:
             Output directory for autotune results (state file, logs). Default: temp directory.
         autotune_num_schemes_per_region:
-            Number of Q/DQ schemes to test per region.
+            Number of replacement schemes to test per region. The incumbent control is measured separately.
         autotune_pattern_cache_file:
             Path to pattern cache YAML for warm-start.
         autotune_qdq_baseline:
@@ -576,6 +950,10 @@ def quantize(
     if calibrate_per_node and quantize_mode not in ["int8", "fp8"]:
         raise ValueError(
             "Per node calibration is only supported for int8 and fp8 quantization modes"
+        )
+    if autotune and (nodes_to_quantize or op_types_to_quantize):
+        raise ValueError(
+            "Autotune cannot be combined with explicit nodes_to_quantize or op_types_to_quantize"
         )
 
     # quantize_static creates a shape-inferred copy at the input model's directory
@@ -630,6 +1008,9 @@ def quantize(
         quantize_mode,
         opset,
     )
+    if autotune and has_qdq_nodes(onnx_model):
+        raise ValueError("Autotune requires an unquantized source model without Q/DQ nodes")
+
     original_calibration_eps = list(calibration_eps)
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
 
@@ -678,107 +1059,152 @@ def quantize(
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
 
-    if quantize_mode in ["fp8", "int8"]:
-        if autotune:
-            (
-                nodes_to_quantize_autotune,
-                op_types_to_quantize_autotune,
-                no_quantize_inputs,
-                op_types_needing_output_quant,
-            ) = _find_nodes_to_quantize_autotune(
-                onnx_model,
-                quantize_mode,
-                trt_plugins,
-                high_precision_dtype,
-                output_dir=autotune_output_dir,
-                num_schemes_per_region=autotune_num_schemes_per_region,
-                pattern_cache_file=autotune_pattern_cache_file,
-                state_file=autotune_state_file,
-                qdq_baseline_model=autotune_qdq_baseline,
-                node_filter_list=autotune_node_filter_list,
-                verbose=autotune_verbose,
-                use_trtexec=autotune_use_trtexec,
-                timing_cache_file=autotune_timing_cache,
-                warmup_runs=autotune_warmup_runs,
-                timing_runs=autotune_timing_runs,
-                trtexec_args=autotune_trtexec_args,
-            )
-            op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
-            nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
-            kwargs["no_quantize_inputs"] = no_quantize_inputs
-            kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
-
-        kwargs["target_dla"] = target_dla
-        quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
-        onnx_model = quantize_func(
-            onnx_path=onnx_path,
-            calibration_method=calibration_method or "entropy",
-            calibration_data_reader=calibration_data_reader,
-            calibration_cache_path=calibration_cache_path,
-            calibration_shapes=calibration_shapes,
-            calibration_eps=calibration_eps,
-            op_types_to_quantize=op_types_to_quantize,
-            op_types_to_exclude=op_types_to_exclude,
-            op_types_to_exclude_fp16=op_types_to_exclude_fp16,
-            custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
-            nodes_to_quantize=nodes_to_quantize,
-            nodes_to_exclude=nodes_to_exclude,
-            use_external_data_format=use_external_data_format,
-            intermediate_generated_files=intermediate_generated_files,
-            trt_extra_plugin_lib_paths=trt_plugins,
-            high_precision_dtype=high_precision_dtype,
-            mha_accumulation_dtype=mha_accumulation_dtype,
-            passes=passes,
-            log_level=log_level,
-            calibrate_per_node=calibrate_per_node,
-            custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
-            direct_io_types=direct_io_types,
-            opset=opset,
-            autotune=autotune,
-            input_shapes_profile=input_shapes_profile,
-            **kwargs,
-        )
-
-    elif "int4" in quantize_mode:
-        onnx_model = quantize_int4(
-            onnx_path=onnx_path,
-            calibration_method=calibration_method or "awq_clip",
-            calibration_data_reader=calibration_data_reader,
-            calibration_eps=calibration_eps,
-            use_external_data_format=use_external_data_format,
-            block_size=block_size,
-            nodes_to_exclude=nodes_to_exclude,
-            use_zero_point=use_zero_point,
-            log_level=log_level,
-            input_shapes_profile=input_shapes_profile,
-            **kwargs,
-        )
-    else:
-        raise RuntimeError(f"Invalid quantization mode choice: {quantize_mode}")
-
-    if onnx_model:
-        # Fuse Q nodes for INT8/FP8 mode
-        if quantize_mode in ["int8", "fp8"]:
-            if dq_only:
-                onnx_model = qdq_to_dq(onnx_model)
-            if custom_ops_to_quantize:
-                # Remove DQ nodes from the input and Q from the output of the requested custom ops
-                onnx_model = remove_input_dq_and_output_q(
-                    onnx_model, quantizable_custom_ops=custom_ops_to_quantize
+    autotune_context = None
+    try:
+        if quantize_mode in ["fp8", "int8"]:
+            if autotune:
+                autotune_context = _find_nodes_to_quantize_autotune(
+                    onnx_model,
+                    quantize_mode,
+                    trt_plugins,
+                    high_precision_dtype=high_precision_dtype,
+                    direct_io_types=direct_io_types,
+                    op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+                    custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+                    opset=opset,
+                    mha_accumulation_dtype=mha_accumulation_dtype,
+                    output_dir=autotune_output_dir,
+                    num_schemes_per_region=autotune_num_schemes_per_region,
+                    pattern_cache_file=autotune_pattern_cache_file,
+                    state_file=autotune_state_file,
+                    qdq_baseline_model=autotune_qdq_baseline,
+                    node_filter_list=autotune_node_filter_list,
+                    verbose=autotune_verbose,
+                    use_trtexec=autotune_use_trtexec,
+                    timing_cache_file=autotune_timing_cache,
+                    warmup_runs=autotune_warmup_runs,
+                    timing_runs=autotune_timing_runs,
+                    trtexec_args=autotune_trtexec_args,
+                    resume_fingerprint={
+                        "final_pipeline": {
+                            "calibration_method": calibration_method or "entropy",
+                            "calibration_shapes": calibration_shapes,
+                            "calibration_source": _get_calibration_source_identity(
+                                calibration_cache_path=calibration_cache_path,
+                                calibration_eps=calibration_eps,
+                                calibration_data=calibration_data,
+                                calibration_data_reader=calibration_data_reader,
+                            ),
+                            "op_types_to_exclude": op_types_to_exclude,
+                            "nodes_to_exclude": nodes_to_exclude,
+                            "passes": passes,
+                            "dq_only": dq_only,
+                            "custom_ops_to_quantize": custom_ops_to_quantize,
+                            "calibrate_per_node": calibrate_per_node,
+                            "input_shapes_profile": (
+                                list(input_shapes_profile)
+                                if input_shapes_profile is not None
+                                else None
+                            ),
+                            "target_dla": target_dla,
+                        }
+                    },
                 )
-            if direct_io_types:
-                onnx_model = remove_graph_input_q(onnx_model)
+                (
+                    nodes_to_quantize_autotune,
+                    op_types_to_quantize_autotune,
+                    no_quantize_inputs,
+                    op_types_needing_output_quant,
+                ) = autotune_context.ort_config
+                op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
+                nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
+                kwargs["no_quantize_inputs"] = no_quantize_inputs
+                kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
+
+            kwargs["target_dla"] = target_dla
+            quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
+            onnx_model = quantize_func(
+                onnx_path=onnx_path,
+                calibration_method=calibration_method or "entropy",
+                calibration_data_reader=calibration_data_reader,
+                calibration_cache_path=calibration_cache_path,
+                calibration_shapes=calibration_shapes,
+                calibration_eps=calibration_eps,
+                op_types_to_quantize=op_types_to_quantize,
+                op_types_to_exclude=op_types_to_exclude,
+                op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+                custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+                nodes_to_quantize=nodes_to_quantize,
+                nodes_to_exclude=nodes_to_exclude,
+                use_external_data_format=use_external_data_format,
+                intermediate_generated_files=intermediate_generated_files,
+                trt_extra_plugin_lib_paths=trt_plugins,
+                high_precision_dtype=high_precision_dtype,
+                mha_accumulation_dtype=mha_accumulation_dtype,
+                passes=passes,
+                log_level=log_level,
+                calibrate_per_node=calibrate_per_node,
+                custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
+                direct_io_types=direct_io_types,
+                opset=opset,
+                autotune=autotune,
+                input_shapes_profile=input_shapes_profile,
+                **kwargs,
+            )
+
+        elif "int4" in quantize_mode:
+            onnx_model = quantize_int4(
+                onnx_path=onnx_path,
+                calibration_method=calibration_method or "awq_clip",
+                calibration_data_reader=calibration_data_reader,
+                calibration_eps=calibration_eps,
+                use_external_data_format=use_external_data_format,
+                block_size=block_size,
+                nodes_to_exclude=nodes_to_exclude,
+                use_zero_point=use_zero_point,
+                log_level=log_level,
+                input_shapes_profile=input_shapes_profile,
+                **kwargs,
+            )
         else:
-            # Remove redundant cast nodes in the quantized model
-            # Note. This is called within the qdq_to_dq function as well
-            remove_redundant_cast_nodes(onnx_model.graph)
+            raise RuntimeError(f"Invalid quantization mode choice: {quantize_mode}")
 
-        # Collect and print stats of the quantized model
-        print_stat(gs.import_onnx(onnx_model))
+        if onnx_model:
+            # Fuse Q nodes for INT8/FP8 mode
+            if quantize_mode in ["int8", "fp8"]:
+                if dq_only:
+                    onnx_model = qdq_to_dq(onnx_model)
+                if custom_ops_to_quantize:
+                    # Remove DQ nodes from the input and Q from the output of the requested custom ops
+                    onnx_model = remove_input_dq_and_output_q(
+                        onnx_model, quantizable_custom_ops=custom_ops_to_quantize
+                    )
+                if direct_io_types:
+                    onnx_model = remove_graph_input_q(onnx_model)
+                if autotune_context is not None:
+                    onnx_model = _apply_autotune_final_guard(
+                        onnx_model,
+                        autotune_context,
+                        quantize_mode=quantize_mode,
+                        use_external_data_format=use_external_data_format,
+                    )
+            else:
+                # Remove redundant cast nodes in the quantized model
+                # Note. This is called within the qdq_to_dq function as well
+                remove_redundant_cast_nodes(onnx_model.graph)
 
-        # Save the quantized model to the output path
-        save_onnx(onnx_model, output_path, use_external_data_format)
-        logger.info(f"Quantized onnx model is saved as {output_path}")
+            # Collect and print stats of the quantized model
+            print_stat(gs.import_onnx(onnx_model))
+
+            # Save the quantized model to the output path
+            save_onnx(onnx_model, output_path, use_external_data_format)
+            if autotune_context is not None and autotune_context.autotuner.force_no_qdq:
+                logger.info(f"Autotune high-precision ONNX model is saved as {output_path}")
+            else:
+                logger.info(f"Quantized onnx model is saved as {output_path}")
+    finally:
+        if autotune_context is not None:
+            autotune_context.cleanup()
 
     # Check if intermediate files should be deleted
     if not keep_intermediate_files:

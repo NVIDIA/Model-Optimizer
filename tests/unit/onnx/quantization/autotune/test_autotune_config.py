@@ -20,6 +20,8 @@ Tests configuration parameter validation, defaults, and CLI --mode preset
 selection and explicit-flag precedence.
 """
 
+import pytest
+
 from modelopt.onnx.quantization.autotune.__main__ import (
     MODE_PRESETS,
     apply_mode_presets,
@@ -39,6 +41,7 @@ class TestConfig:
         assert not config.verbose
 
         # Performance thresholds
+        assert config.performance_threshold == 1.02
 
         # Q/DQ defaults
         assert config.default_q_scale == 0.1
@@ -101,6 +104,11 @@ class TestConfig:
 
         assert config.pattern_cache_minimum_distance == 3
         assert config.pattern_cache_max_entries_per_pattern == 10
+
+    @pytest.mark.parametrize("threshold", [0.99, float("inf"), float("nan")])
+    def test_invalid_performance_threshold(self, threshold):
+        with pytest.raises(ValueError, match="performance_threshold"):
+            Config(performance_threshold=threshold)
 
 
 class TestModePresets:

@@ -222,7 +222,10 @@ Examples:
         dest="num_schemes",
         action=StoreWithExplicitFlag,
         explicit_attr="_explicit_num_schemes",
-        help=f"Schemes per region (default: {DEFAULT_NUM_SCHEMES}; preset from --mode if not set)",
+        help=(
+            f"Replacement schemes per region (default: {DEFAULT_NUM_SCHEMES}; preset from --mode if not set). "
+            "The incumbent control is measured separately."
+        ),
     )
     strategy_group.add_argument(
         "--pattern_cache",

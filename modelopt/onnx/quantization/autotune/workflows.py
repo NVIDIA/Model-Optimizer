@@ -19,9 +19,15 @@ This module provides high-level workflow functions for automated Q/DQ (Quantizat
 optimization of ONNX models using pattern-based region analysis and TensorRT performance measurement.
 """
 
+import dataclasses
 import fnmatch
+import hashlib
+import json
+import re
 import shutil
+import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import onnx
@@ -29,10 +35,193 @@ import onnx
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner import QDQAutotuner
 from modelopt.onnx.quantization.autotune.benchmark import TensorRTPyBenchmark, TrtExecBenchmark
-from modelopt.onnx.quantization.autotune.common import Config, PatternCache
+from modelopt.onnx.quantization.autotune.common import (
+    Config,
+    PatternCache,
+    SchemeAction,
+    is_valid_latency,
+)
+from modelopt.onnx.quantization.ort_utils import _run_trtexec
 from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
 _benchmark_instance = None
+
+
+def _meets_performance_threshold(
+    reference_latency_ms: float, candidate_latency_ms: float, threshold: float
+) -> bool:
+    return (
+        is_valid_latency(reference_latency_ms)
+        and is_valid_latency(candidate_latency_ms)
+        and reference_latency_ms / candidate_latency_ms >= threshold
+    )
+
+
+def _require_valid_latency(latency_ms: float, measurement: str) -> None:
+    if not is_valid_latency(latency_ms):
+        raise RuntimeError(f"Unable to measure a valid {measurement} latency")
+
+
+def _get_model_artifact_info(model_path: Path) -> tuple[str, int]:
+    model = onnx.load(model_path, load_external_data=True)
+    model_sha256 = hashlib.sha256(model.SerializeToString(deterministic=True)).hexdigest()
+    qdq_count = sum(node.op_type == "QuantizeLinear" for node in model.graph.node)
+    return model_sha256, qdq_count
+
+
+def _get_file_identity(path: str) -> dict[str, str | int | bool | None]:
+    resolved_path = Path(path).resolve()
+    identity: dict[str, str | int | bool | None] = {
+        "name_sha256": hashlib.sha256(resolved_path.name.encode()).hexdigest(),
+        "path_sha256": hashlib.sha256(str(resolved_path).encode()).hexdigest(),
+        "exists": resolved_path.is_file(),
+    }
+    if not resolved_path.is_file():
+        identity["sha256"] = None
+        return identity
+    digest = hashlib.sha256()
+    with resolved_path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    identity["size"] = resolved_path.stat().st_size
+    identity["sha256"] = digest.hexdigest()
+    return identity
+
+
+def _get_path_identity(path: str) -> dict[str, str]:
+    resolved_path = Path(path).resolve()
+    return {
+        "name_sha256": hashlib.sha256(resolved_path.name.encode()).hexdigest(),
+        "path_sha256": hashlib.sha256(str(resolved_path).encode()).hexdigest(),
+    }
+
+
+def _normalize_fingerprint_value(value):
+    if isinstance(value, dict):
+        return {str(key): _normalize_fingerprint_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_fingerprint_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _get_value_identity(value) -> dict[str, int | str]:
+    normalized = _normalize_fingerprint_value(value)
+    serialized = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    item_count = len(value) if isinstance(value, (dict, list, tuple)) else int(value is not None)
+    return {"sha256": hashlib.sha256(serialized.encode()).hexdigest(), "item_count": item_count}
+
+
+def _get_trtexec_identity() -> dict[str, object]:
+    executable = shutil.which("trtexec")
+    if executable is None:
+        return {"available": False}
+    executable = str(Path(executable).resolve())
+
+    identity: dict[str, object] = {
+        "available": True,
+        "binary": _get_file_identity(executable),
+    }
+    try:
+        result = _run_trtexec(timeout=10)
+        version_output = "\n".join((result.stdout, result.stderr)).strip()
+        match = re.search(r"TensorRT(?:\.trtexec)?[^\n]*?v([0-9][0-9.]*)", version_output)
+        identity.update(
+            {
+                "version": match.group(1) if match else None,
+                "version_output_sha256": hashlib.sha256(version_output.encode()).hexdigest(),
+                "version_returncode": result.returncode,
+            }
+        )
+    except Exception:
+        identity["version"] = None
+    return identity
+
+
+def _get_benchmark_fingerprint() -> dict:
+    if _benchmark_instance is None:
+        return {"backend": None}
+    benchmark_module = sys.modules.get(type(_benchmark_instance).__module__)
+    trt_module = getattr(benchmark_module, "trt", None)
+    torch_module = getattr(benchmark_module, "torch", None)
+    cuda_device = None
+    if torch_module is not None and torch_module.cuda.is_available():
+        device_index = torch_module.cuda.current_device()
+        properties = torch_module.cuda.get_device_properties(device_index)
+        cuda_device = {
+            "index": device_index,
+            "name": properties.name,
+            "capability": [properties.major, properties.minor],
+            "total_memory": properties.total_memory,
+            "uuid_sha256": hashlib.sha256(
+                str(getattr(properties, "uuid", "")).encode()
+            ).hexdigest(),
+        }
+    fingerprint = {
+        "backend": type(_benchmark_instance).__name__,
+        "tensorrt_version": getattr(trt_module, "__version__", None),
+        "cuda_device": cuda_device,
+        "timing_cache": _get_path_identity(_benchmark_instance.timing_cache_file),
+        "warmup_runs": _benchmark_instance.warmup_runs,
+        "timing_runs": _benchmark_instance.timing_runs,
+        "plugin_libraries": [
+            _get_file_identity(path) for path in _benchmark_instance.plugin_libraries
+        ],
+        "trtexec_args": _get_value_identity(getattr(_benchmark_instance, "trtexec_args", None)),
+        "shape_configs": _get_value_identity(getattr(_benchmark_instance, "_shape_configs", None)),
+    }
+    if isinstance(_benchmark_instance, TrtExecBenchmark):
+        fingerprint["trtexec"] = _get_trtexec_identity()
+    return fingerprint
+
+
+def _count_profile_measurements(autotuner: QDQAutotuner) -> int:
+    pattern_schemes = list(autotuner.profiled_patterns)
+    current_pattern = getattr(autotuner, "current_profile_pattern_schemes", None)
+    if current_pattern is not None and all(current_pattern is not item for item in pattern_schemes):
+        pattern_schemes.append(current_pattern)
+    return sum(scheme.is_profiled for pattern in pattern_schemes for scheme in pattern.schemes)
+
+
+def _reuse_proxy_decision(
+    autotuner: QDQAutotuner,
+    final_model_path: Path,
+    baseline_latency: float,
+    candidate_model_sha256: str,
+    candidate_qdq_count: int,
+    model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None,
+) -> bool:
+    decision = autotuner.proxy_decision
+    if not isinstance(decision, dict):
+        return False
+
+    proxy_selection = decision.get("proxy_selection")
+    if (
+        proxy_selection not in {SchemeAction.QDQ.value, SchemeAction.NO_QDQ.value}
+        or decision.get("baseline_latency_ms") != baseline_latency
+        or decision.get("candidate_model_sha256") != candidate_model_sha256
+        or decision.get("candidate_quantization_site_count") != candidate_qdq_count
+    ):
+        logger.info("Saved Autotune proxy decision does not match the current candidate")
+        return False
+
+    keep_qdq = proxy_selection == SchemeAction.QDQ.value
+    autotuner.set_force_no_qdq(not keep_qdq)
+    autotuner.export_onnx(
+        str(final_model_path),
+        insert_qdq=keep_qdq,
+        model_transform=model_transform,
+    )
+    selected_model_sha256, _ = _get_model_artifact_info(final_model_path)
+    if decision.get("selected_model_sha256") == selected_model_sha256:
+        logger.info("Reused the validated Autotune proxy decision from the checkpoint")
+        return True
+
+    logger.info("Saved Autotune proxy selection does not match the current artifact")
+    autotuner.set_force_no_qdq(False)
+    autotuner.export_onnx(str(final_model_path), insert_qdq=True, model_transform=model_transform)
+    return False
 
 
 def benchmark_onnx_model(
@@ -170,6 +359,8 @@ def region_pattern_autotuning_workflow(
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
+    model_transform: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    resume_fingerprint: dict | None = None,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 
@@ -214,10 +405,17 @@ def region_pattern_autotuning_workflow(
         node_filter_list: Optional list of wildcard patterns to filter ONNX nodes. Regions
                          without any matching nodes are skipped during autotuning (default: None)
         verbose: Enable verbose logging in Config for detailed autotuner output (default: False)
+        model_transform: Optional transformation applied to each benchmark model after Q/DQ
+                         insertion and before FP8 conversion.
+        resume_fingerprint: Additional runtime-precision and environment options used to validate
+                            resumed measurements.
 
     Returns:
         QDQAutotuner instance after autotuning
     """
+    if num_schemes_per_region < 1:
+        raise ValueError("num_schemes_per_region must be at least 1")
+
     output_dir_is_temp = output_dir is None
     if not output_dir:
         output_dir = Path(tempfile.mkdtemp())
@@ -262,6 +460,23 @@ def region_pattern_autotuning_workflow(
     autotuner = QDQAutotuner(model)
     autotuner.initialize(config, pattern_cache)
 
+    fingerprint = {
+        "config": _normalize_fingerprint_value(dataclasses.asdict(config)),
+        "search": {
+            "num_schemes_per_region": num_schemes_per_region,
+            "node_filter_list": _get_value_identity(node_filter_list),
+            "pattern_cache": (
+                _get_file_identity(pattern_cache_file) if pattern_cache_file else None
+            ),
+            "qdq_baseline": (
+                _get_file_identity(qdq_baseline_model) if qdq_baseline_model else None
+            ),
+        },
+        "caller_options": _get_value_identity(resume_fingerprint),
+        "benchmark": _get_benchmark_fingerprint(),
+    }
+    autotuner.set_resume_fingerprint(**fingerprint)
+
     if state_path.exists():
         logger.info(f"Resuming from checkpoint: {state_path}")
         autotuner.load_state(str(state_path))
@@ -286,18 +501,29 @@ def region_pattern_autotuning_workflow(
     if autotuner.baseline_latency_ms is None:
         logger.info("Measuring baseline (no Q/DQ)")
         baseline_path = output_dir / "baseline.onnx"
-        autotuner.export_onnx(str(baseline_path), insert_qdq=False)
+        autotuner.export_onnx(str(baseline_path), insert_qdq=False, model_transform=model_transform)
         baseline_log = logs_dir / "baseline.log"
         baseline_latency = benchmark_onnx_model(str(baseline_path), str(baseline_log))
+        _require_valid_latency(baseline_latency, "baseline")
         autotuner.submit(baseline_latency)
+        autotuner.save_state(str(state_path))
         logger.info(f"Baseline: {baseline_latency:.2f} ms")
     else:
         baseline_latency = autotuner.baseline_latency_ms
+        _require_valid_latency(baseline_latency, "baseline")
         logger.info(f"Using baseline from checkpoint: {baseline_latency:.2f} ms")
 
-    logger.info(f"Starting region profiling ({num_schemes_per_region} schemes per region)")
+    logger.info(
+        f"Starting region profiling (incumbent plus {num_schemes_per_region} overrides per region)"
+    )
 
-    iteration_count = 0
+    profile_measurement_count = _count_profile_measurements(autotuner)
+    resumed_region_id = (
+        autotuner.current_profile_region.id
+        if autotuner.current_profile_region is not None
+        else None
+    )
+    resumed_region_reached = resumed_region_id is None
 
     for region_idx, region in enumerate(regions):
         logger.info(
@@ -310,48 +536,77 @@ def region_pattern_autotuning_workflow(
             logger.info("  Skipping (no nodes match filter patterns)")
             continue
 
-        commit = region_idx > 0
+        if not resumed_region_reached:
+            if region.id != resumed_region_id:
+                logger.info("  Skipping (completed before resumed region)")
+                continue
+            resumed_region_reached = True
+
+        commit = region_idx > 0 and region.id != resumed_region_id
         autotuner.set_profile_region(region, commit=commit)
 
         if autotuner.current_profile_pattern_schemes is None:
             logger.info("  Skipping (already profiled)")
             continue
 
+        inherit_scheme_idx = autotuner.begin_inherit_profile()
+        if inherit_scheme_idx >= 0:
+            inherit_model_bytes = autotuner.export_onnx(
+                None, insert_qdq=True, model_transform=model_transform
+            )
+            inherit_log = logs_dir / f"region_{region.id}_inherit.log"
+            profile_measurement_count += 1
+            inherit_latency = benchmark_onnx_model(inherit_model_bytes, str(inherit_log))
+            autotuner.submit_inherit(inherit_latency, success=is_valid_latency(inherit_latency))
+            autotuner.save_state(str(state_path))
+
+        ps = autotuner.current_profile_pattern_schemes
+        remaining_override_budget = max(0, num_schemes_per_region - ps.profiled_override_count)
         schemes_tested = 0
-        for scheme_num in range(num_schemes_per_region):
-            iteration_count += 1
+        for scheme_num in range(remaining_override_budget):
             scheme_idx = autotuner.generate()
 
             if scheme_idx == -1:
+                autotuner.save_state(str(state_path))
                 logger.debug(f"  Stopping at scheme {scheme_num + 1} (no more unique schemes)")
                 break
 
             schemes_tested += 1
-            model_bytes = autotuner.export_onnx(None, insert_qdq=True)
+            model_bytes = autotuner.export_onnx(
+                None, insert_qdq=True, model_transform=model_transform
+            )
             test_log = logs_dir / f"region_{region.id}_scheme_{scheme_idx}.log"
-            flush_timing_cache = (iteration_count % 10) == 0
+            profile_measurement_count += 1
+            flush_timing_cache = (profile_measurement_count % 10) == 0
             latency = benchmark_onnx_model(
                 model_bytes, str(test_log), flush_timing_cache=flush_timing_cache
             )
 
-            autotuner.submit(latency, success=(latency != float("inf")))
+            autotuner.submit(latency, success=is_valid_latency(latency))
+            autotuner.save_state(str(state_path))
 
-        ps = autotuner.current_profile_pattern_schemes
+        if ps is not None:
+            ps.select_best(autotuner.config.performance_threshold)
         if ps and ps.schemes:
-            best_scheme = ps.best_scheme
+            best_scheme = ps.selected_scheme
             if best_scheme and best_scheme.latency_ms < float("inf") and baseline_latency > 0:
                 speedup = baseline_latency / best_scheme.latency_ms
                 logger.info(
-                    f"  Tested {schemes_tested} schemes: "
+                    f"  Tested {schemes_tested} overrides: "
                     f"best {best_scheme.latency_ms:.2f} ms ({speedup:.3f}x speedup)"
                 )
             else:
-                logger.info(f"  Tested {schemes_tested} schemes: no valid measurements")
+                logger.info(f"  Tested {schemes_tested} overrides: no valid measurements")
         else:
-            logger.info(f"  Tested {schemes_tested} schemes")
+            logger.info(f"  Tested {schemes_tested} overrides")
 
         region_model_path = models_dir / f"region_{region.id}_level_{region.level}.onnx"
-        autotuner.export_onnx(str(region_model_path), insert_qdq=True, best=True)
+        autotuner.export_onnx(
+            str(region_model_path),
+            insert_qdq=True,
+            best=True,
+            model_transform=model_transform,
+        )
         logger.debug(f"  Saved best model: {region_model_path.name}")
 
         # Save state after each region (incremental, crash recovery)
@@ -363,18 +618,57 @@ def region_pattern_autotuning_workflow(
 
     logger.info("Exporting final optimized model")
     final_model_path = output_dir / "optimized_final.onnx"
-    autotuner.export_onnx(str(final_model_path), insert_qdq=True)
-    final_log = logs_dir / "final.log"
-    final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
+    autotuner.set_force_no_qdq(False)
+    autotuner.export_onnx(str(final_model_path), insert_qdq=True, model_transform=model_transform)
+    candidate_model_sha256, candidate_qdq_count = _get_model_artifact_info(final_model_path)
 
-    if final_latency > 0 and final_latency != float("inf"):
-        speedup = baseline_latency / final_latency
-        logger.info(
-            f"Results: {baseline_latency:.2f} ms → {final_latency:.2f} ms ({speedup:.3f}x speedup)"
+    reused_proxy_decision = _reuse_proxy_decision(
+        autotuner,
+        final_model_path,
+        baseline_latency,
+        candidate_model_sha256,
+        candidate_qdq_count,
+        model_transform,
+    )
+    if not reused_proxy_decision:
+        final_log = logs_dir / "final.log"
+        final_latency = benchmark_onnx_model(str(final_model_path), str(final_log))
+
+        if candidate_qdq_count > 0 and _meets_performance_threshold(
+            baseline_latency, final_latency, autotuner.config.performance_threshold
+        ):
+            proxy_selection = SchemeAction.QDQ.value
+            speedup = baseline_latency / final_latency
+            logger.info(
+                f"Autotune proxy retained Q/DQ placement for calibrated evaluation: "
+                f"{speedup:.3f}x speedup (required {autotuner.config.performance_threshold:.3f}x)"
+            )
+        else:
+            autotuner.set_force_no_qdq()
+            autotuner.export_onnx(
+                str(final_model_path), insert_qdq=False, model_transform=model_transform
+            )
+            proxy_selection = SchemeAction.NO_QDQ.value
+            candidate_outcome = (
+                f"{baseline_latency / final_latency:.3f}x speedup"
+                if is_valid_latency(final_latency)
+                else "an invalid latency"
+            )
+            logger.warning(
+                f"Autotune proxy rejected Q/DQ placement after measuring {candidate_outcome}; "
+                f"the required speedup is {autotuner.config.performance_threshold:.3f}x. "
+                "The calibrated candidate will use the high-precision no-Q/DQ placement."
+            )
+
+        selected_model_sha256, _ = _get_model_artifact_info(final_model_path)
+        autotuner.record_proxy_decision(
+            proxy_selection=proxy_selection,
+            baseline_latency_ms=baseline_latency,
+            candidate_latency_ms=final_latency if is_valid_latency(final_latency) else None,
+            candidate_quantization_site_count=candidate_qdq_count,
+            candidate_model_sha256=candidate_model_sha256,
+            selected_model_sha256=selected_model_sha256,
         )
-    else:
-        logger.info(f"Results: {baseline_latency:.2f} ms → failed (invalid measurement)")
-
     autotuner.save_state(str(state_path))
 
     logger.info("Autotuning complete")
