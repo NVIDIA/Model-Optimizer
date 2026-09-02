@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
 
+import modelopt.torch.quantization as mtq
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
 from modelopt.torch._deploy.utils import (
     OnnxBytes,
@@ -55,6 +56,26 @@ _DYNAMO_REPRESENTATIVE_MODELS = {
 deploy_benchmark_dynamo = {
     k: v for k, v in deploy_benchmark_dynamo.items() if k in _DYNAMO_REPRESENTATIVE_MODELS
 }
+
+
+def _export_fp8_linear(source_dtype, weights_dtype):
+    model = nn.Sequential(nn.Linear(4, 4, bias=False)).eval().to(source_dtype)
+    sample_input = torch.arange(4, dtype=source_dtype).reshape(1, 4)
+    model = mtq.quantize(
+        model,
+        mtq.FP8_DEFAULT_CFG,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model,
+        (sample_input,),
+        model_name="fp8_linear",
+        weights_dtype=weights_dtype,
+        dq_only=False,
+        onnx_opset=23,
+    )
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    return onnx.load_model_from_string(onnx_bytes_obj.get_onnx_model_file_bytes())
 
 
 @pytest.mark.parametrize(
@@ -155,6 +176,58 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
             torch.allclose(ot, torch.from_numpy(oo).to(ot))
             for ot, oo in zip(out_torch_flat, out_ort2_flat)
         )
+
+
+@pytest.mark.parametrize(
+    ("source_dtype", "weights_dtype", "expected_onnx_dtype"),
+    [
+        pytest.param(
+            torch.bfloat16,
+            "bf16",
+            onnx.TensorProto.BFLOAT16,
+            id="bf16-no-op",
+        ),
+        pytest.param(
+            torch.float32,
+            "fp16",
+            onnx.TensorProto.FLOAT16,
+            id="fp16-conversion",
+        ),
+    ],
+)
+def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, expected_onnx_dtype):
+    exported_model = _export_fp8_linear(source_dtype, weights_dtype)
+
+    onnx.checker.check_model(exported_model)
+    assert not any(
+        node.op_type in {"TRT_FP8QuantizeLinear", "TRT_FP8DequantizeLinear"}
+        for node in exported_model.graph.node
+    )
+    initializer_by_name = {
+        initializer.name: initializer for initializer in exported_model.graph.initializer
+    }
+    fp8_weight_dq_nodes = [
+        node
+        for node in exported_model.graph.node
+        if node.op_type == "DequantizeLinear"
+        and node.input[0] in initializer_by_name
+        and initializer_by_name[node.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
+    ]
+    assert fp8_weight_dq_nodes
+    assert all(
+        initializer_by_name[node.input[1]].data_type == expected_onnx_dtype
+        for node in fp8_weight_dq_nodes
+    )
+    graph_io = [*exported_model.graph.input, *exported_model.graph.output]
+    assert all(value.type.tensor_type.elem_type == expected_onnx_dtype for value in graph_io)
+
+
+def test_fp8_export_rejects_bf16_conversion_from_fp32():
+    with pytest.raises(
+        AssertionError,
+        match="Converting a quantized ONNX graph to BF16 is not supported",
+    ):
+        _export_fp8_linear(torch.float32, "bf16")
 
 
 class SingleArgModel(nn.Module):
