@@ -422,6 +422,7 @@ def _apply_autotune_final_guard(
     use_external_data_format: bool,
 ) -> onnx.ModelProto:
     """Keep the calibrated artifact only when it beats its no-Q/DQ reference."""
+    # Keep Autotune's Torch and TensorRT imports off the ordinary quantization path.
     from modelopt.onnx.quantization.autotune.workflows import benchmark_onnx_model
 
     logs_dir = context.output_dir / "logs"
