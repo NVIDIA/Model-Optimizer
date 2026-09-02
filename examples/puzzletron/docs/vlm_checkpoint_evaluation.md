@@ -19,21 +19,49 @@ python -m pip install -e '.[hf,puzzletron]' \
   -r examples/puzzletron/requirements.txt
 ```
 
-The requirements install the upstream EvolvingLMMs `lmms-eval` repository at
-the exact revision recorded in `examples/puzzletron/ci_environment.json`. This
-is the generic vLLM profile revision based on `lmms-eval` 0.7.0, not a ModelOpt
-fork or a locally patched evaluator. It is installed as an editable checkout
-because the evaluator loads task templates that are not included in its wheel.
-Puzzletron generates its benchmark task adapters separately and does not modify
-the evaluator checkout.
+Puzzletron does not use whichever `lmms-eval` package happens to be in the
+worker image. The command above installs the exact upstream revision recorded
+in `examples/puzzletron/ci_environment.json`, replacing a preinstalled version
+when necessary. That revision declares version 0.7.0 and contains the generic
+vLLM adapter used by `short-v1` and `full-v1`.
+
+Qwen 3.5 support currently requires a temporary second upstream revision. The
+revision in `examples/puzzletron/requirements-vlm-native.txt` declares version
+0.7.1 and adds the Qwen 3.5-specific Transformers adapter. Neither revision is
+a ModelOpt fork or a locally patched evaluator. The evaluator is installed as
+an editable checkout because it loads task templates that are not included in
+its wheel. Puzzletron generates its benchmark task adapters separately and
+does not modify the evaluator checkout.
 
 The documented [worker environment](environment_setup.md) installs the same
 requirements file, and startup validates both the installed revision and that
-the checkout has no local changes. To use a native profile, install
-`examples/puzzletron/requirements-vlm-native.txt` after the base requirements.
-That file selects the separately pinned upstream revision containing the native
-Qwen 3.5 backend. Preflight rejects an evaluator revision that does not match
-the selected profile.
+the checkout has no local changes. To use a profile with `native` in its name,
+install `examples/puzzletron/requirements-vlm-native.txt` after the base
+requirements. Preflight rejects an evaluator revision that does not match the
+selected profile.
+
+The separate native requirements file is temporary. Follow-up work should make
+the Puzzletron package set compatible with the latest `lmms-eval` installed in
+the worker image, validate both adapters there, and remove the second pin. Until
+then, the explicit pins prevent a container rebuild from silently changing
+benchmark behavior.
+
+## Understand the two execution paths
+
+The profile names use `native` as shorthand for the Qwen-specific path:
+
+- **Qwen-specific Transformers adapter:** `short-native-v1` and
+  `short-all-native-v1` ask `lmms-eval` to load the checkpoint directly with
+  Transformers through its `qwen3_5` adapter. This adapter builds Qwen-specific
+  image and video messages and includes timestamps for sampled video frames.
+- **Generic vLLM adapter:** `short-v1` and `full-v1` ask `lmms-eval` to run the
+  checkpoint through its general `vllm` adapter. Puzzletron supplies the
+  no-thinking chat template, but this path converts the inputs to generic
+  multimodal messages and does not include Qwen video timestamps.
+
+These paths use different `lmms-eval` revisions and construct different model
+inputs. Their scores should be compared as two complete evaluation paths, not
+as a test that changes only the inference engine.
 
 ## Choose a suite
 
