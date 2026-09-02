@@ -193,6 +193,37 @@ def test_duplicate_shared_constants_retains_initializer_captured_by_subgraphs():
     onnx.checker.check_model(result)
 
 
+def test_duplicate_shared_constants_retains_initializer_exposed_as_graph_output():
+    shared = make_tensor("shared", onnx.TensorProto.FLOAT, [1], [1.0])
+    graph = make_graph(
+        [
+            make_node("Add", ["input", "shared"], ["left"]),
+            make_node("Add", ["input", "shared"], ["right"]),
+        ],
+        "initializer_graph_output",
+        [make_tensor_value_info("input", onnx.TensorProto.FLOAT, [1])],
+        [
+            make_tensor_value_info("left", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("right", onnx.TensorProto.FLOAT, [1]),
+            make_tensor_value_info("shared", onnx.TensorProto.FLOAT, [1]),
+        ],
+        initializer=[shared],
+    )
+    model = make_model(graph)
+
+    result, modified = onnx_utils.duplicate_shared_constants(model)
+
+    assert modified
+    assert [node.input[1] for node in result.graph.node] == ["shared_1", "shared_2"]
+    assert {initializer.name for initializer in result.graph.initializer} == {
+        "shared",
+        "shared_1",
+        "shared_2",
+    }
+    assert [output.name for output in result.graph.output] == ["left", "right", "shared"]
+    onnx.checker.check_model(result)
+
+
 @pytest.mark.parametrize(
     ("model_size", "expected"),
     [

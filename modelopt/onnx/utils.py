@@ -604,7 +604,10 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
             duplicated_initializer.name = _get_unique_name(input_name)
             node.input[input_index] = duplicated_initializer.name
 
-    removed_initializer_names = shared_names - captured_names
+    retained_names = captured_names | {
+        output.name for output in graph.output if output.name in shared_names
+    }
+    removed_initializer_names = shared_names - retained_names
     for initializer in initializers.values():
         if initializer.name in removed_initializer_names:
             graph.initializer.remove(initializer)

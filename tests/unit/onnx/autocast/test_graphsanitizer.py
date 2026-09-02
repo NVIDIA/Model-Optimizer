@@ -20,7 +20,7 @@ import onnx
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-import modelopt.onnx.trt_utils as trt_utils
+import modelopt.onnx.autocast.graphsanitizer as graphsanitizer
 from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 
 
@@ -462,9 +462,9 @@ def test_find_custom_nodes_uses_source_model_path(tmp_path, monkeypatch):
     get_custom_layers = Mock(return_value=([custom_node.name], tensor_info))
     infer_types_shapes = Mock(return_value=model)
 
-    monkeypatch.setattr(trt_utils, "set_trt_plugin_domain", Mock(return_value=model))
-    monkeypatch.setattr(trt_utils, "get_custom_layers", get_custom_layers)
-    monkeypatch.setattr(trt_utils, "infer_types_shapes_tensorrt", infer_types_shapes)
+    monkeypatch.setattr(graphsanitizer, "set_trt_plugin_domain", Mock(return_value=model))
+    monkeypatch.setattr(graphsanitizer, "get_custom_layers", get_custom_layers)
+    monkeypatch.setattr(graphsanitizer, "infer_types_shapes_tensorrt", infer_types_shapes)
 
     sanitizer = GraphSanitizer(model, min_opset=22, onnx_path=str(model_path))
     sanitizer.find_custom_nodes()

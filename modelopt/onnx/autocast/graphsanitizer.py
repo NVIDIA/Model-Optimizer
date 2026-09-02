@@ -27,7 +27,12 @@ import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast.logging_config import logger
 from modelopt.onnx.quantization.graph_utils import cast_custom_ops
-from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag
+from modelopt.onnx.trt_utils import (
+    get_custom_layers,
+    infer_types_shapes_tensorrt,
+    interpret_trt_plugins_precision_flag,
+    set_trt_plugin_domain,
+)
 
 
 class GraphSanitizer:
@@ -124,12 +129,6 @@ class GraphSanitizer:
             node.op_type for node in self.model.graph.node if node.op_type not in self.standard_ops
         }
         if self.custom_ops:
-            from modelopt.onnx.trt_utils import (
-                get_custom_layers,
-                infer_types_shapes_tensorrt,
-                set_trt_plugin_domain,
-            )
-
             # Set TensorRT plugin domain info in the graph for ORT compatibility
             self.model = set_trt_plugin_domain(self.model, self.custom_ops)
 
