@@ -6,7 +6,7 @@
   "torchvision": "0.26.0",
   "transformers": "5.8.1",
   "accelerate": "1.14.0",
-  "aiohttp": "3.14.3",
+  "aiohttp": "3.13.3",
   "antlr4-python3-runtime": "4.9.3",
   "av": "15.1.0",
   "datasets": "5.0.1",
