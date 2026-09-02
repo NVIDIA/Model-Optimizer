@@ -59,7 +59,7 @@
     "configuration": {
       "experiment": {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
-        "packaged_sha256": "10af46cf18854e03cdbcb30bbfbe3ce36c80d111e3eadcac74a3deb4bde969bd",
+        "packaged_sha256": "b0fa4b38ebece3e7b783fc4425b0c45596e8d53750d8f7c5341ab9a61aab6417",
         "execution_equivalent_sha256": "c4e6be62bf55980d23d20a12f35e11261d8dffbe59a1f457c7bccec6cc84ec06",
         "relationship": "canonical_profile_alias_and_comments_only"
       },
@@ -113,7 +113,7 @@
       {
         "path": "examples/puzzletron/configs/families/qwen3_5/qwen3p5_4b/runs/ffn_width_10to20pct_kd_search.yaml",
         "role": "validated_successor_experiment_recipe",
-        "sha256": "10af46cf18854e03cdbcb30bbfbe3ce36c80d111e3eadcac74a3deb4bde969bd"
+        "sha256": "b0fa4b38ebece3e7b783fc4425b0c45596e8d53750d8f7c5341ab9a61aab6417"
       },
       {
         "path": "examples/puzzletron/configs/orchestration/qwen3p5_4b/execution.ffn_width_10to20pct_kd_search.yaml",
@@ -464,7 +464,7 @@
     }
   },
   "limitations": [
-    "The configured 256-step finalist continuation was not run and is not an established convergence threshold.",
+    "The configured fresh 256-step finalist KD run from the selected materialized pre-KD checkpoint was not run and is not an established convergence threshold; screening KD weights are used only for ranking.",
     "The final bounded matched teacher comparison was not run.",
     "The quality screen covers only RealWorldQA and MMMU, using the first 100 rows per task.",
     "The deterministic repetitions reused identical rows and do not add sampling evidence.",

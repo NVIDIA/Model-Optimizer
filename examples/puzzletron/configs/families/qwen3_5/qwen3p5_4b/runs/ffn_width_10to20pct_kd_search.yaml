@@ -217,7 +217,8 @@ post_mip:
           model_source: materialized
           config:
             <<: *screening_kd_config
-            # Exploratory 4x continuation budget for the selected student.
+            # Exploratory fresh 256-step run from the selected materialized student.
+            # Screening KD weights are used for ranking only, not initialization.
             # This is not a convergence threshold or a campaign completion gate.
             max_steps: 256
             checkpoint_every_steps: 256

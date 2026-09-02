@@ -356,7 +356,24 @@ def test_qwen3p5_4b_campaign_compares_pruning_bands_and_teacher(monkeypatch, tmp
     assert "reference_checkpoint" not in nodes["quality_screen"]["config"]
     assert nodes["quality_benchmarks"]["config"]["disable_thinking"] is True
     assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert nodes["selected"]["top_k"] == 1
+    assert nodes["selected"] == {
+        "type": "filter",
+        "input": "quality_screen",
+        "mode": "aggregate_rank",
+        "metrics": [
+            {"metric": "screening_eval.lm_loss", "direction": "minimize"},
+            {
+                "metric": "quality_screen.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract",
+                "direction": "maximize",
+            },
+            {
+                "metric": "quality_screen.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+                "direction": "maximize",
+            },
+        ],
+        "top_k": 1,
+    }
+    assert nodes["global_kd"]["model_source"] == "materialized"
     assert tuple(stage.stage_id for stage in plan.stages)[-11:-1] == (
         "post.candidate-evaluation.online_eval",
         "post.candidate-evaluation.materialized",

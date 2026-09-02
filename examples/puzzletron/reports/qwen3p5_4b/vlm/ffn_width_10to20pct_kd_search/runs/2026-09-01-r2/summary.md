@@ -26,6 +26,10 @@ The two downstream repetitions used the same first 100 rows per task with
 deterministic decoding. Their identical metrics establish execution
 reproducibility, not independent sampling evidence.
 
+The teacher values are retained external baseline evidence. The configured
+final matched teacher comparison was not run, and the exact teacher checkpoint
+fingerprint and runtime identity were not retained.
+
 The heterogeneous and homogeneous MIP origins deduplicated to these same three
 physical uniform-width students. This run therefore contains no
 homogeneous-versus-heterogeneous quality comparison.
@@ -57,13 +61,14 @@ The teacher was not measured under the same serving contract.
 Each KD student used two tensor-parallel ranks, local and global batch size one,
 a frozen vision tower, activation checkpointing, 64-token KD chunks, and the
 uncapped 64-row multimodal dataset. Peak memory was 63.90, 63.19, and 62.48 GiB
-per rank for the 9.5%, 14.3%, and 19.0% students.
+per rank for the 9.5%, 14.3%, and 19.0% students. Effective example and token
+exposure and the optimizer trajectory were not retained.
 
 ## Limitations
 
-- The configured 256-step finalist continuation was not run. It was an authored
-  exploratory budget and has not been established as necessary or sufficient
-  for convergence.
+- The configured fresh 256-step finalist KD run was not run. It would initialize
+  from the selected materialized pre-KD checkpoint, using the 64-step screening
+  weights only for ranking. Its budget is not an established convergence target.
 - RealWorldQA and MMMU cover only two task families and use the first 100 rows,
   not a randomized or coverage-preserving sample.
 - Deterministic repetitions reuse the same rows and do not reduce sampling

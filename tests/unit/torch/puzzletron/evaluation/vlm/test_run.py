@@ -438,7 +438,7 @@ def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, s
 
 @pytest.mark.parametrize(
     ("corruption", "expected_calls"),
-    [("checkpoint", 4), ("artifact", 3), ("result", 3)],
+    [("checkpoint", 4), ("artifact", 3), ("result", 3), ("profile", 4)],
 )
 def test_short_profile_reruns_stale_completed_repetitions(
     monkeypatch,
@@ -480,16 +480,19 @@ def test_short_profile_reruns_stale_completed_repetitions(
             str(hf_home),
         ]
     )
-    evaluation.evaluate(args)
+    profile_identity = {"chat_template_sha256": "first"} if corruption == "profile" else None
+    evaluation.evaluate(args, profile_identity_overrides=profile_identity)
 
     if corruption == "checkpoint":
         (model / "preprocessor_config.json").write_text('{"changed": true}\n')
     elif corruption == "artifact":
         (output / "short-repetition-1" / "attempt" / "samples.json").unlink()
-    else:
+    elif corruption == "result":
         (output / "short-repetition-1" / "attempt" / "summary.json").unlink()
+    else:
+        profile_identity = {"chat_template_sha256": "second"}
 
-    evaluation.evaluate(args)
+    evaluation.evaluate(args, profile_identity_overrides=profile_identity)
     assert len(calls) == expected_calls
 
 
@@ -914,9 +917,13 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
     output = tmp_path / "output"
     captured = {"invocations": 0}
 
-    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+    def fake_evaluate(args, *, settings_overrides, profile_identity_overrides, preflight_callback):
         captured["invocations"] += 1
-        captured.update(args=args, settings_overrides=settings_overrides)
+        captured.update(
+            args=args,
+            settings_overrides=settings_overrides,
+            profile_identity_overrides=profile_identity_overrides,
+        )
         preflight_callback({"profile": suites.EVALUATION_PROFILE, "sample_limit": None})
         runs = []
         score_offset = (captured["invocations"] - 1) * 0.2
@@ -986,7 +993,7 @@ def test_post_mip_prefix100_rejects_different_repetition_metrics(
     monkeypatch,
     tmp_path,
 ):
-    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+    def fake_evaluate(args, *, settings_overrides, profile_identity_overrides, preflight_callback):
         return {
             "runs": [
                 {"metrics": {"realworldqa.accuracy": 0.5}, "result_path": "first.json"},

@@ -190,6 +190,7 @@ def evaluate(
     args: argparse.Namespace,
     *,
     settings_overrides: Mapping[str, object] | None = None,
+    profile_identity_overrides: Mapping[str, object] | None = None,
     preflight_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     """Prepare and run one pinned VLM profile invocation."""
@@ -247,6 +248,7 @@ def evaluate(
         "profile_name": report.get("profile_name"),
         "profile_schema": report.get("profile_schema"),
     }
+    profile_identity.update(profile_identity_overrides or {})
     runs = []
     with checkpoint.without_huggingface_credentials():
         for repetition in range(1, repetitions + 1):

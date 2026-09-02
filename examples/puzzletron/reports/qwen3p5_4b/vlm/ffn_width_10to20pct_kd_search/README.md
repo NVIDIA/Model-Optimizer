@@ -18,7 +18,7 @@ datasets, sampling policy, checkpoint geometry, and completed stages.
 
 `preliminary` is deliberate because the downstream screen covers only the first
 100 RealWorldQA and MMMU rows and lacks a frozen per-item manifest. The
-configured 256-step continuation was not run, but it is an exploratory budget,
+configured fresh 256-step finalist KD run was not run, but it is an exploratory budget,
 not a requirement for campaign or scientific completeness. The bounded scores
 select a follow-up candidate; they do not establish general VLM quality
 preservation.
@@ -56,7 +56,7 @@ Inspect the compiled topology, paths, environment, scheduler resources, and
 all nested requests before removing `--dry-run`. The public runner is a
 template and is not runnable until its placeholders are replaced. Launching
 the complete checked-in campaign continues past the scope retained in the
-current run leaf and includes the exploratory finalist continuation.
+current run leaf and includes the exploratory fresh finalist KD run.
 
 See the [Qwen 3.5 4B VLM example](../../../../docs/qwen3p5_4b_vlm_example.md)
 for environment preparation and lifecycle details.
