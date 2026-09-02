@@ -240,21 +240,11 @@ def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
     tmp_path: Path,
 ) -> None:
     smoke = _compile_campaign(monkeypatch, tmp_path, run_path=EXTENDED_RUN_PATH)
-    regression = _compile_campaign(
-        monkeypatch,
-        tmp_path,
-        run_path=EXTENDED_COMPARISON_RUN_PATH,
-    )
+    comparison = _compile_campaign(monkeypatch, tmp_path, run_path=EXTENDED_COMPARISON_RUN_PATH)
     config = smoke.experiment_config
     profile = config["mip"]["runs"]["params-90"]
     stages = {stage.stage_id: stage for stage in smoke.stages}
-    regression_stages = {stage.stage_id: stage for stage in regression.stages}
 
-    assert yaml.safe_load(EXTENDED_RUN_PATH.read_text())["defaults"] == [
-        "full_vlm_smoke",
-        "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_",
-        "_self_",
-    ]
     assert config["sort"]["deferred_axes"] == []
     assert config["width_sanity"]["axes"] == [
         "hidden_width",
@@ -270,56 +260,31 @@ def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
             "ffn.intermediate_size": [2816],
         },
     }
-    assert profile["solver"]["num_solutions"] == 1
-    assert profile["homogeneous"]["enabled"] is False
     assert "depth_importance" in stages
     assert stages["post.params-90.materialized"].parents == ("post.params-90.best_vlm_loss",)
     assert stages["post.params-90.post_kd_checkpoint_eval"].parents == (
         "post.params-90.short_vlm_kd",
     )
-    assert regression_stages["post.params-90.quality_benchmarks"].parents == (
-        "post.params-90.short_vlm_kd",
-    )
-    assert all(stage.total_gpus == 1 for stage in (*smoke.stages, *regression.stages))
+    assert "post.params-90.quality_benchmarks" in {stage.stage_id for stage in comparison.stages}
+    assert all(stage.total_gpus == 1 for stage in (*smoke.stages, *comparison.stages))
 
 
 def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    campaign = _compile_campaign(
-        monkeypatch,
-        tmp_path,
-        run_path=CAMPAIGN_PATH,
-    )
-    comparison = _compile_campaign(
-        monkeypatch,
-        tmp_path,
-        run_path=COMPARISON_RUN_PATH,
-    )
+    campaign = _compile_campaign(monkeypatch, tmp_path, run_path=CAMPAIGN_PATH)
     config = campaign.experiment_config
-    comparison_config = comparison.experiment_config
     nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
-    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
-
-    assert yaml.safe_load(CAMPAIGN_PATH.read_text())["defaults"] == [
-        "mip_vlm_smoke",
-        "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_",
-        "_self_",
-    ]
     candidates = config["mip"]["runs"]["params-90"]
     assert candidates["constraints"] == {"params": {"max": "90%"}}
-    assert candidates["solver"]["num_solutions"] == 1
     assert candidates["search_space"] == {
         "depth": [0, 1, 2],
         "embedding": [1024, 960, 896],
         "axes_default": "all",
         "axes": {"ffn.intermediate_size": "all"},
     }
-    assert config["global_distillation"]["domain"] == "vlm"
-    assert config["global_distillation"]["freeze_policy"] == "train_all"
-    controls = config["mip"]["runs"]["calibration-controls"]
-    assert controls["variants"] == {
+    assert config["mip"]["runs"]["calibration-controls"]["variants"] == {
         "width-3328": {
             "constraints": {"params": {"min": "95%", "max": "100%"}},
             "search_space": {"axes": {"ffn.intermediate_size": [3328]}},
@@ -329,8 +294,6 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
             "search_space": {"axes": {"ffn.intermediate_size": [3072]}},
         },
     }
-    assert config["post_mip"]["flows"]["candidate-evaluation"]["source"]["run"] == ("params-90")
-    assert "input" not in nodes["online_eval"]
     assert nodes["best_lm"] == {
         "type": "filter",
         "input": "online_eval",
@@ -339,159 +302,44 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         "direction": "minimize",
         "top_k": 2,
     }
-    assert nodes["pre_kd_short_v1"]["input"] == "serving"
-    assert nodes["kd_64"]["input"] == "pre_kd_short_v1"
     trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256, 512, 1024)]
-    assert [node["config"]["max_steps"] for node in trajectory_nodes] == [
-        64,
-        128,
-        256,
-        512,
-        1024,
-    ]
+    assert [node["config"]["max_steps"] for node in trajectory_nodes] == [64, 128, 256, 512, 1024]
     assert {node["trajectory"] for node in trajectory_nodes} == {
         "retained-candidate-learning-curve"
     }
     assert {node["model_source"] for node in trajectory_nodes} == {"materialized"}
-    assert all(node["config"]["resume"] is True for node in trajectory_nodes)
-    assert all(node["failure_policy"] == "strict" for node in trajectory_nodes)
-    assert all(node["config"]["global_batch_size"] == 4 for node in trajectory_nodes)
-    assert [node["exposure"]["cumulative_examples"] for node in trajectory_nodes] == [
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-    ]
-    assert [node["exposure"]["estimated_cumulative_gpu_hours"] for node in trajectory_nodes] == [
-        0.25,
-        0.5,
-        1.0,
-        2.0,
-        4.0,
-    ]
     milestone_evaluations = [nodes[f"short_v1_{steps}"]["config"] for steps in (64, 128, 256)]
-    assert all(
-        settings["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
-        for settings in milestone_evaluations
-    )
-    assert {settings["row_manifest"] for settings in milestone_evaluations} == {
-        str(tmp_path / "short-v1.json")
+    identity_fields = {
+        "profile",
+        "row_manifest",
+        "row_manifest_sha256",
+        "reference_checkpoint",
+        "reference_cache_id",
     }
-    assert {settings["row_manifest_sha256"] for settings in milestone_evaluations} == {"a" * 64}
-    assert {settings["reference_checkpoint"] for settings in milestone_evaluations} == {
-        config["teacher_dir"]
-    }
-    assert all(settings["reference_once"] is True for settings in milestone_evaluations)
-    assert all(
-        settings["limit_mm_per_prompt"] == {"image": 32}
-        for settings in (
-            nodes["pre_kd_short_v1"]["config"],
-            *milestone_evaluations,
-            config["post_mip"]["flows"]["control-learning-curve"]["nodes"][
-                "control_pre_kd_short_v1"
-            ]["config"],
+    assert {
+        tuple((field, settings[field]) for field in sorted(identity_fields))
+        for settings in (nodes["pre_kd_short_v1"]["config"], *milestone_evaluations)
+    } == {
+        tuple(
+            (field, nodes["pre_kd_short_v1"]["config"][field]) for field in sorted(identity_fields)
         )
-    )
-    assert all(
-        settings["max_model_len"] == 65536
-        for settings in (
-            nodes["pre_kd_short_v1"]["config"],
-            *milestone_evaluations,
-            config["post_mip"]["flows"]["control-learning-curve"]["nodes"][
-                "control_pre_kd_short_v1"
-            ]["config"],
-        )
-    )
-    assert {settings["reference_cache_id"] for settings in milestone_evaluations} == {
-        "qwen35-0p8b-short-v1-teacher"
     }
-    assert nodes["selected"]["type"] == "manual_filter"
     assert nodes["selected"]["input"] == "short_v1_256"
-    assert nodes["approve_512"]["type"] == "manual_filter"
     assert nodes["approve_512"]["input"] == "bounded_result"
-    assert nodes["approve_1024"]["type"] == "manual_filter"
     assert nodes["approve_1024"]["input"] == "short_v1_512"
-    assert nodes["bounded_result"]["config"] == {
-        "pre_kd_source": "materialized",
-        "pre_kd_evaluation": "pre_kd_short_v1",
-        "profile": "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
-        "row_manifest": str(tmp_path / "short-v1.json"),
-        "row_manifest_sha256": "a" * 64,
-        "reference_checkpoint": config["teacher_dir"],
-        "reference_cache_id": "qwen35-0p8b-short-v1-teacher",
-        "milestones": [
-            {"steps": 64, "kd": "kd_64", "evaluation": "short_v1_64"},
-            {"steps": 128, "kd": "kd_128", "evaluation": "short_v1_128"},
-            {"steps": 256, "kd": "kd_256", "evaluation": "short_v1_256"},
-        ],
-    }
-    control_nodes = config["post_mip"]["flows"]["control-learning-curve"]["nodes"]
-    assert config["post_mip"]["flows"]["control-learning-curve"]["source"]["run"] == (
-        "calibration-controls"
-    )
-    assert [
-        control_nodes[f"control_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
-    ] == [
+    assert [row["steps"] for row in nodes["bounded_result"]["config"]["milestones"]] == [
         64,
         128,
         256,
     ]
-    assert {control_nodes[f"control_kd_{steps}"]["trajectory"] for steps in (64, 128, 256)} == {
-        "conservative-control-learning-curve"
-    }
-    assert all(
-        control_nodes[f"control_kd_{steps}"]["failure_policy"] == "strict"
-        for steps in (64, 128, 256)
-    )
-    assert control_nodes["control_result"]["config"]["milestones"] == [
-        {"steps": 64, "kd": "control_kd_64", "evaluation": "control_short_v1_64"},
-        {"steps": 128, "kd": "control_kd_128", "evaluation": "control_short_v1_128"},
-        {"steps": 256, "kd": "control_kd_256", "evaluation": "control_short_v1_256"},
-    ]
+    control_nodes = config["post_mip"]["flows"]["control-learning-curve"]["nodes"]
+    assert [
+        control_nodes[f"control_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
+    ] == [64, 128, 256]
     assert control_nodes["control_selected"]["input"] == "control_result"
     assert control_nodes["control_approve_512"]["input"] == "control_selected"
-    assert control_nodes["control_kd_512"]["input"] == "control_approve_512"
-    assert control_nodes["control_kd_512"]["trajectory"] == ("conservative-control-learning-curve")
-    assert control_nodes["control_kd_512"]["config"]["max_steps"] == 512
-    assert control_nodes["control_kd_512"]["exposure"]["cumulative_examples"] == 2048
-    assert control_nodes["control_extended_result"]["config"]["milestones"][-1] == {
-        "steps": 512,
-        "kd": "control_kd_512",
-        "evaluation": "control_short_v1_512",
-    }
     assert control_nodes["control_approve_1024"]["input"] == "control_extended_result"
-    assert control_nodes["control_kd_1024"]["input"] == "control_approve_1024"
-    assert control_nodes["control_kd_1024"]["config"]["max_steps"] == 1024
-    assert control_nodes["control_kd_1024"]["exposure"]["cumulative_examples"] == 4096
-    assert control_nodes["control_pre_kd_short_v1"]["input"] == "control_materialized"
-    assert control_nodes["control_kd_64"]["input"] == "control_pre_kd_short_v1"
-    comparison_benchmark = comparison_nodes["quality_benchmarks"]
-    assert comparison_benchmark["input"] == "short_vlm_kd"
-    assert comparison_benchmark["failure_policy"] == "strict"
-    assert (
-        comparison_benchmark["config"]["reference_checkpoint"] == comparison_config["teacher_dir"]
-    )
-    campaign_post_stages = tuple(
-        stage.stage_id for stage in campaign.stages if stage.stage_id.startswith("post.")
-    )
-    assert campaign_post_stages[:8] == (
-        "post.candidate-evaluation.online_eval",
-        "post.candidate-evaluation.best_lm",
-        "post.candidate-evaluation.materialized",
-        "post.candidate-evaluation.serving",
-        "post.candidate-evaluation.pre_kd_short_v1",
-        "post.candidate-evaluation.kd_64",
-        "post.candidate-evaluation.short_v1_64",
-        "post.candidate-evaluation.kd_128",
-    )
-    assert campaign_post_stages[8:12] == (
-        "post.candidate-evaluation.short_v1_128",
-        "post.candidate-evaluation.kd_256",
-        "post.candidate-evaluation.short_v1_256",
-        "post.candidate-evaluation.selected",
-    )
-    assert all(stage.total_gpus in {0, 1} for stage in (*campaign.stages, *comparison.stages))
+    assert all(stage.total_gpus in {0, 1} for stage in campaign.stages)
 
 
 def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(

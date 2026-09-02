@@ -151,24 +151,15 @@ quoted: \"1e-4\"
     )
 
 
-def test_load_experiment_config_applies_deletion_overrides(tmp_path: Path) -> None:
-    experiment = tmp_path / "experiment.yaml"
-    experiment.write_text("quotas:\n  retained-95: 1\n  retained-85: 1\n")
-
-    config = load_experiment_config(experiment, overrides=["~quotas.retained-95"])
-
-    assert config["quotas"] == {"retained-85": 1}
-
-
-@pytest.mark.parametrize("override", ["~value=1", "~missing.value"])
-def test_load_experiment_config_rejects_invalid_deletion_overrides(
+@pytest.mark.parametrize("override", ["~value", "~value=1"])
+def test_load_experiment_config_rejects_deletion_overrides(
     tmp_path: Path,
     override: str,
 ) -> None:
     experiment = tmp_path / "experiment.yaml"
     experiment.write_text("value: 1\n")
 
-    with pytest.raises(ValueError, match="^Deletion override"):
+    with pytest.raises(ValueError, match="^Deletion overrides are not supported"):
         load_experiment_config(experiment, overrides=[override])
 
 
@@ -187,7 +178,7 @@ def test_load_experiment_config_distinguishes_hydra_addition_modes(
     assert created["created"] == {"value": 3}
 
 
-@pytest.mark.parametrize("override", ["+experiment.dir=other"])
+@pytest.mark.parametrize("override", ["+experiment.dir=other", "~experiment.dir"])
 def test_load_experiment_config_rejects_unsupported_hydra_operators(
     tmp_path: Path,
     override: str,

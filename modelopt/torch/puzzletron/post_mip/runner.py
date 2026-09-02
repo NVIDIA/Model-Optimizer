@@ -35,13 +35,17 @@ from ..evaluation import DEFAULT_LMMS_EVAL_TIMEOUT_SECONDS, run_lmms_eval_checkp
 from ..identity import canonicalize, stable_hash
 from ..security_policy import require_boolean_policy
 from .base import CompiledPostMIPNode, NodeKind, compile_post_mip_flows
+from .evidence import checkpoint_fingerprint as _checkpoint_fingerprint
+from .evidence import collect_kd_exposure, kd_exposure_metrics
+from .evidence import downstream_evaluation_identity as _downstream_evaluation_identity
+from .evidence import evaluation_contract as _evaluation_contract
 from .filters import apply_filter
 from .identity import (
     expected_post_mip_execution_identity,
     post_mip_execution_contract,
     post_mip_execution_contract_identity,
 )
-from .records import ArtifactKind, CandidateLedger, CandidateRevision, CandidateSet, NodeObservation
+from .records import ArtifactKind, CandidateLedger, CandidateSet, NodeObservation
 
 __all__ = [
     "aggregate_post_mip_node",
@@ -51,14 +55,6 @@ __all__ = [
 ]
 
 _DOWNSTREAM_EVALUATION_PROFILES: dict[str, Callable[..., dict[str, Any]]] = {}
-
-
-def _checkpoint_fingerprint(checkpoint: str | Path) -> str:
-    """Return the content-bound checkpoint fingerprint used by evaluation identities."""
-
-    from ..distributed_eval.config import checkpoint_identity
-
-    return str(checkpoint_identity(checkpoint)["fingerprint"])
 
 
 def register_downstream_evaluation_profile(
@@ -762,80 +758,6 @@ def _compare_recorded_observation(
     )
 
 
-def _downstream_evaluation_identity(
-    *,
-    source: CandidateRevision,
-    reference_checkpoint: str | Path,
-    profile: Any,
-    evaluator_revision: Any,
-    settings: Mapping[str, Any],
-    candidate: Mapping[str, Any],
-    reference_checkpoint_fingerprint: str | None = None,
-) -> dict[str, Any]:
-    """Bind one comparison to its checkpoint, KD, data, and evaluator contract."""
-
-    profile_identity = None
-    profile_path = candidate.get("profile_path")
-    if profile_path:
-        report = json.loads(Path(str(profile_path)).read_text())
-        profile_identity = {
-            key: report.get(key)
-            for key in (
-                "profile",
-                "suite",
-                "lmms_eval_revision",
-                "source_tasks",
-                "dataset_revisions",
-                "frame_policy",
-                "generation_policy",
-                "sample_limit",
-                "quick_manifest_sha256",
-                "repetitions",
-            )
-        }
-    exposure = None
-    exposure_path = source.artifact.get("exposure_path")
-    if exposure_path:
-        raw_exposure = json.loads(Path(str(exposure_path)).read_text())
-        exposure = {
-            key: raw_exposure.get(key)
-            for key in (
-                "cumulative_steps",
-                "global_batch_size",
-                "cumulative_examples",
-                "max_sample_length",
-                "effective_tokens",
-                "effective_tokens_source",
-                "token_upper_bound",
-            )
-        }
-    evaluator_settings = {
-        key: copy.deepcopy(value)
-        for key, value in settings.items()
-        if key not in {"row_manifest", "timeout_seconds"}
-    }
-    return canonicalize(
-        {
-            "candidate_checkpoint_fingerprint": _checkpoint_fingerprint(
-                source.artifact["checkpoint"]
-            ),
-            "reference_checkpoint_fingerprint": reference_checkpoint_fingerprint
-            or _checkpoint_fingerprint(reference_checkpoint),
-            "architecture_id": source.architecture_id,
-            "kd": {
-                "producer_node": source.producer_node,
-                "exposure": exposure,
-            },
-            "evaluator": {
-                "profile": profile,
-                "revision": evaluator_revision,
-                "settings": evaluator_settings,
-                "resolved_profile": profile_identity,
-            },
-        }
-    )
-
-
 def _post_mip_kd_settings(
     config: Mapping[str, Any],
     node_settings: Mapping[str, Any],
@@ -904,66 +826,20 @@ def _global_kd(
     if not checkpoint:
         raise RuntimeError("global KD produced no consolidated checkpoint")
     metrics = dict(result.metrics)
-    exposure = copy.deepcopy(dict(node.config.get("exposure") or {}))
+    configured_exposure = dict(node.config.get("exposure") or {})
     exposure_path = None
-    if exposure:
-        training_records = []
-        training_log = output / "checkpoints" / "training.jsonl"
-        if training_log.is_file():
-            training_records = [
-                json.loads(line) for line in training_log.read_text().splitlines() if line.strip()
-            ]
-        effective_tokens = sum(
-            int(record.get("num_label_tokens", 0)) for record in training_records
+    if configured_exposure:
+        exposure = collect_kd_exposure(
+            output,
+            configured_exposure,
+            max_steps=kd_config.max_steps,
+            elapsed_gpu_hours=elapsed_gpu_hours,
+            resumed_completed_milestone=bool(metrics.get("resumed_completed_milestone")),
         )
-        if effective_tokens <= 0:
-            raise RuntimeError("global KD produced no non-padding token accounting")
-        exposure_root = output / "exposure"
-        milestone_path = exposure_root / f"step_{kd_config.max_steps:06d}.json"
-        prior_milestone = {}
-        if milestone_path.is_file():
-            prior_milestone = json.loads(milestone_path.read_text())
-        prior_gpu_hours = 0.0
-        for path in exposure_root.glob("step_*.json"):
-            if path != milestone_path:
-                prior_gpu_hours += float(
-                    json.loads(path.read_text()).get("actual_incremental_gpu_hours", 0.0)
-                )
-        incremental_gpu_hours = elapsed_gpu_hours
-        cumulative_gpu_hours = prior_gpu_hours + elapsed_gpu_hours
-        if metrics.get("resumed_completed_milestone") and prior_milestone:
-            incremental_gpu_hours = float(
-                prior_milestone.get("actual_incremental_gpu_hours", elapsed_gpu_hours)
-            )
-            cumulative_gpu_hours = float(
-                prior_milestone.get(
-                    "actual_cumulative_gpu_hours", prior_gpu_hours + incremental_gpu_hours
-                )
-            )
-        exposure.update(
-            effective_tokens=effective_tokens,
-            effective_tokens_source="training.jsonl:num_label_tokens",
-            token_upper_bound=(
-                int(exposure["cumulative_examples"]) * int(exposure["max_sample_length"])
-            ),
-            actual_incremental_gpu_hours=incremental_gpu_hours,
-            actual_cumulative_gpu_hours=cumulative_gpu_hours,
+        exposure_path = _atomic_json(
+            output / "exposure" / f"step_{kd_config.max_steps:06d}.json", exposure
         )
-        exposure_path = _atomic_json(milestone_path, exposure)
-        metrics.update(
-            {
-                "exposure.global_batch_size": float(exposure["global_batch_size"]),
-                "exposure.cumulative_examples": float(exposure["cumulative_examples"]),
-                "exposure.effective_tokens": float(effective_tokens),
-                "exposure.estimated_cumulative_gpu_hours": float(
-                    exposure["estimated_cumulative_gpu_hours"]
-                ),
-                "exposure.actual_incremental_gpu_hours": incremental_gpu_hours,
-                "exposure.actual_cumulative_gpu_hours": float(
-                    exposure["actual_cumulative_gpu_hours"]
-                ),
-            }
-        )
+        metrics.update(kd_exposure_metrics(exposure))
     return {
         "artifact_kind": "checkpoint",
         "checkpoint": str(checkpoint),
@@ -1142,57 +1018,6 @@ def _aggregate_result_manifest(
     expected_manifest_sha256 = str(settings["row_manifest_sha256"])
     expected_reference_fingerprint = _checkpoint_fingerprint(settings["reference_checkpoint"])
 
-    def evaluation_contract(identity: Any, *, label: str) -> dict[str, Any]:
-        if not isinstance(identity, Mapping):
-            raise RuntimeError(f"{label} evaluation identity must be a mapping")
-        evaluator = identity.get("evaluator")
-        if not isinstance(evaluator, Mapping):
-            raise RuntimeError(f"{label} evaluation identity is missing evaluator")
-        if not evaluator.get("revision"):
-            raise RuntimeError(f"{label} evaluation identity is missing evaluator revision")
-        evaluator_settings = evaluator.get("settings")
-        resolved_profile = evaluator.get("resolved_profile")
-        if not isinstance(evaluator_settings, Mapping) or not isinstance(resolved_profile, Mapping):
-            raise RuntimeError(
-                f"{label} evaluation identity is missing evaluator settings or resolved profile"
-            )
-        required_profile_fields = {
-            "profile",
-            "suite",
-            "lmms_eval_revision",
-            "source_tasks",
-            "dataset_revisions",
-            "frame_policy",
-            "generation_policy",
-            "sample_limit",
-            "quick_manifest_sha256",
-            "repetitions",
-        }
-        missing = required_profile_fields - resolved_profile.keys()
-        if missing:
-            raise RuntimeError(
-                f"{label} evaluation identity resolved profile is missing {sorted(missing)}"
-            )
-        if evaluator.get("profile") != expected_profile:
-            raise RuntimeError(f"{label} evaluation profile differs from the result contract")
-        if evaluator_settings.get("row_manifest_sha256") != expected_manifest_sha256:
-            raise RuntimeError(f"{label} evaluator row manifest differs from the result contract")
-        if resolved_profile.get("quick_manifest_sha256") != expected_manifest_sha256:
-            raise RuntimeError(f"{label} resolved row manifest differs from the result contract")
-        if identity.get("reference_checkpoint_fingerprint") != expected_reference_fingerprint:
-            raise RuntimeError(f"{label} reference checkpoint differs from the result contract")
-        return canonicalize(
-            {
-                "reference_checkpoint_fingerprint": identity["reference_checkpoint_fingerprint"],
-                "evaluator": {
-                    "profile": evaluator["profile"],
-                    "revision": evaluator.get("revision"),
-                    "settings": evaluator_settings,
-                    "resolved_profile": resolved_profile,
-                },
-            }
-        )
-
     for revision_id in input_set.revision_ids:
         revision = ledger.revisions[revision_id]
         pre_kd = ledger.source_revision(revision_id, pre_kd_source)
@@ -1207,7 +1032,13 @@ def _aggregate_result_manifest(
             Path(pre_kd_evaluation_observation.artifacts["comparison_path"]).read_text()
         )
         pre_kd_identity = pre_kd_comparison.get("identity")
-        expected_evaluation_contract = evaluation_contract(pre_kd_identity, label="pre-KD")
+        expected_evaluation_contract = _evaluation_contract(
+            pre_kd_identity,
+            label="pre-KD",
+            expected_profile=expected_profile,
+            expected_manifest_sha256=expected_manifest_sha256,
+            expected_reference_fingerprint=expected_reference_fingerprint,
+        )
         milestones = []
         for milestone in settings["milestones"]:
             kd_observation = ledger._observation_for_revision(str(milestone["kd"]), revision_id)
@@ -1227,8 +1058,12 @@ def _aggregate_result_manifest(
             milestone_identity = json.loads(
                 Path(evaluation_observation.artifacts["comparison_path"]).read_text()
             ).get("identity")
-            milestone_contract = evaluation_contract(
-                milestone_identity, label=f"{int(milestone['steps'])}-step"
+            milestone_contract = _evaluation_contract(
+                milestone_identity,
+                label=f"{int(milestone['steps'])}-step",
+                expected_profile=expected_profile,
+                expected_manifest_sha256=expected_manifest_sha256,
+                expected_reference_fingerprint=expected_reference_fingerprint,
             )
             if milestone_contract != expected_evaluation_contract:
                 raise RuntimeError(
@@ -1248,7 +1083,7 @@ def _aggregate_result_manifest(
                 }
             )
         payload = {
-            "schema": "modelopt.puzzletron.vlm-kd-learning-curve/v1",
+            "schema": "modelopt.puzzletron.kd-learning-curve/v1",
             "execution_identity": execution_identity,
             "architecture_id": revision.architecture_id,
             "architecture": canonicalize(asdict(ledger.architectures[revision.architecture_id])),

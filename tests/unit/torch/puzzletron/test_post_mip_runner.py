@@ -660,50 +660,13 @@ def test_recorded_observation_differences_are_suppressed_on_identity_mismatch():
     assert metrics == {}
 
 
-def test_downstream_evaluation_reuses_one_identity_bound_reference(monkeypatch, tmp_path):
-    reference = tmp_path / "teacher"
-    reference.mkdir()
-    candidates = [tmp_path / "candidate-a", tmp_path / "candidate-b"]
-    for candidate in candidates:
-        candidate.mkdir()
-    calls = []
-
-    def fake_evaluate(checkpoint_path, *, output_root, settings):
-        calls.append(Path(checkpoint_path))
-        return {
-            "metrics": {"accuracy": 0.5 if Path(checkpoint_path) == reference else 0.4},
-            "result_path": str(Path(output_root) / "result.json"),
-        }
-
-    monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
-    node = SimpleNamespace(
-        node_id="short_v1",
-        config={
-            "config": {
-                "reference_checkpoint": str(reference),
-                "reference_once": True,
-                "reference_cache_id": "short-v1-teacher",
-                "evaluator_revision": "revision-a",
-                "tasks": ["fixture"],
-            }
-        },
-    )
-    config = {"puzzle_dir": str(tmp_path)}
-    for index, candidate in enumerate(candidates):
-        source = SimpleNamespace(
-            architecture_id=f"architecture-{index}",
-            artifact_kind=ArtifactKind.CHECKPOINT,
-            artifact={"checkpoint": str(candidate)},
-            producer_node="kd_64",
-        )
-        runner._downstream_evaluation(config, node, source, f"execution-{index}")
-
-    assert calls.count(reference) == 1
-    assert calls == [candidates[0], reference, candidates[1]]
-
-
-@pytest.mark.parametrize("changed_identity", ["evaluator_revision", "checkpoint_fingerprint"])
-def test_downstream_evaluation_invalidates_reference_cache(monkeypatch, tmp_path, changed_identity):
+@pytest.mark.parametrize(
+    ("changed_identity", "expected_reference_calls"),
+    [(None, 1), ("evaluator_revision", 2), ("checkpoint_fingerprint", 2)],
+)
+def test_downstream_evaluation_reuses_only_matching_reference_cache(
+    monkeypatch, tmp_path, changed_identity, expected_reference_calls
+):
     reference = tmp_path / "teacher"
     reference.mkdir()
     candidates = [tmp_path / "candidate-a", tmp_path / "candidate-b"]
@@ -751,12 +714,13 @@ def test_downstream_evaluation_invalidates_reference_cache(monkeypatch, tmp_path
         )
         runner._downstream_evaluation(config, node, source, f"execution-{index}")
 
-    assert calls.count(reference) == 2
+    assert calls.count(reference) == expected_reference_calls
 
 
-def test_global_kd_resume_reports_durable_incremental_gpu_hours(monkeypatch, tmp_path):
-    execution_root = tmp_path / "execution"
-    output = execution_root / "checkpoints" / "architecture"
+def test_global_kd_resume_reports_durable_incremental_gpu_hours(tmp_path):
+    from modelopt.torch.puzzletron.post_mip.evidence import collect_kd_exposure, kd_exposure_metrics
+
+    output = tmp_path / "trajectory"
     training_log = output / "checkpoints" / "training.jsonl"
     training_log.parent.mkdir(parents=True)
     training_log.write_text(json.dumps({"num_label_tokens": 128}) + "\n")
@@ -770,50 +734,22 @@ def test_global_kd_resume_reports_durable_incremental_gpu_hours(monkeypatch, tmp
             }
         )
     )
-
-    from modelopt.torch.puzzletron.distillation import global_automodel
-
-    monkeypatch.setattr(runner, "_execution_root", lambda *_args: execution_root)
-    monkeypatch.setattr(
-        global_automodel,
-        "build_global_kd_config",
-        lambda _config: SimpleNamespace(max_steps=64),
-    )
-    monkeypatch.setattr(
-        global_automodel,
-        "run_global_kd",
-        lambda _config: SimpleNamespace(metrics={"resumed_completed_milestone": True}),
+    exposure = collect_kd_exposure(
+        output,
+        {
+            "global_batch_size": 4,
+            "cumulative_examples": 256,
+            "max_sample_length": 512,
+            "estimated_cumulative_gpu_hours": 3.0,
+        },
+        max_steps=64,
+        elapsed_gpu_hours=1.0,
+        resumed_completed_milestone=True,
     )
 
-    def write_summary(_config, _result):
-        path = output / "summary.json"
-        path.write_text(json.dumps({"post_kd_checkpoint": str(output / "checkpoint")}))
-        return path
-
-    monkeypatch.setattr(future_stages, "_write_global_distillation_summary", write_summary)
-    monotonic = iter((10.0, 3610.0))
-    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic))
-    node = SimpleNamespace(
-        config={
-            "config": {"max_steps": 64},
-            "exposure": {
-                "global_batch_size": 4,
-                "cumulative_examples": 256,
-                "max_sample_length": 512,
-                "estimated_cumulative_gpu_hours": 3.0,
-            },
-        }
-    )
-    source = SimpleNamespace(
-        architecture_id="architecture",
-        artifact={"checkpoint": str(tmp_path / "student")},
-    )
-
-    result = runner._global_kd({}, node, source, "execution")
-
-    assert result["metrics"]["exposure.actual_incremental_gpu_hours"] == 1.25
-    assert result["metrics"]["exposure.actual_cumulative_gpu_hours"] == 2.5
-    assert json.loads(exposure_path.read_text())["actual_incremental_gpu_hours"] == 1.25
+    assert exposure["actual_incremental_gpu_hours"] == 1.25
+    assert exposure["actual_cumulative_gpu_hours"] == 2.5
+    assert kd_exposure_metrics(exposure)["exposure.actual_incremental_gpu_hours"] == 1.25
 
 
 def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):

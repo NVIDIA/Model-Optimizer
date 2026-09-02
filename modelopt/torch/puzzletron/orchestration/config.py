@@ -182,21 +182,9 @@ def _resolve(value: Any, config: Mapping[str, Any]) -> Any:
 
 def _apply_override(config: dict[str, Any], override: str) -> None:
     if override.startswith("~"):
-        key, separator, _raw_value = override.removeprefix("~").partition("=")
-        key = key.strip()
-        keys = key.split(".")
-        if separator or not key or any(not part for part in keys):
-            raise ValueError(f"Deletion override has invalid KEY form: {override!r}")
-        target = config
-        for part in keys[:-1]:
-            child = target.get(part)
-            if not isinstance(child, dict):
-                raise ValueError(f"Deletion override path does not exist: {override!r}")
-            target = child
-        if keys[-1] not in target:
-            raise ValueError(f"Deletion override path does not exist: {override!r}")
-        del target[keys[-1]]
-        return
+        raise ValueError(
+            f"Deletion overrides are not supported by the dependency-light controller: {override!r}"
+        )
     key, separator, raw_value = override.partition("=")
     key = key.strip()
     if key.startswith("~"):
