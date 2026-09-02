@@ -177,6 +177,22 @@ def test_pipeline_and_controller_loaders_apply_overrides_with_parity(
     )
 
 
+def test_pipeline_and_controller_loaders_apply_deletion_overrides_with_parity(
+    tmp_path: Path,
+) -> None:
+    experiment = tmp_path / "experiment.yaml"
+    experiment.write_text(
+        "defaults: [_self_]\nruntime_annotations:\n  remove: stale\n  keep: current\n"
+    )
+
+    override = "~runtime_annotations.remove"
+    pipeline = pipeline_config_from_path(experiment, overrides=[override])
+    controller = load_experiment_config(experiment, overrides=[override])
+
+    expected = {"keep": "current"}
+    assert pipeline["runtime_annotations"] == controller["runtime_annotations"] == expected
+
+
 def test_runtime_adapter_derives_legacy_loader_fields_from_canonical_data():
     canonical = normalize_pipeline_config(
         {

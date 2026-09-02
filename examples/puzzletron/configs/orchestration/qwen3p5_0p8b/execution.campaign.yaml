@@ -41,3 +41,11 @@ execution:
     post.control-learning-curve.control_kd_256: *control_instances
     post.control-learning-curve.control_short_v1_256: *control_instances
     post.control-learning-curve.control_result: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_selected: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_approve_512: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_kd_512: {instances: 1}
+    post.control-learning-curve.control_short_v1_512: {instances: 1}
+    post.control-learning-curve.control_extended_result: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_approve_1024: {strategy: single, resource: cpu}
+    post.control-learning-curve.control_kd_1024: {instances: 1}
+    post.control-learning-curve.control_short_v1_1024: {instances: 1}

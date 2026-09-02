@@ -394,6 +394,46 @@ def _resolve_domain(kd_config: GlobalKDConfig) -> Literal["llm", "vlm"]:
     return "llm"
 
 
+def _completed_vlm_resume_observability(
+    kd_config: GlobalKDConfig, observability: dict[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """Restore durable observability only for an already completed identical milestone."""
+
+    if _resolve_domain(kd_config) != "vlm" or int(observability.get("vision_forward_count", 0)) > 0:
+        return observability, False
+    summary_path = kd_config.output_dir / "global_distillation_summary.json"
+    try:
+        prior_summary = json.loads(summary_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return observability, False
+    prior_observability = dict((prior_summary.get("metrics") or {}).get("observability") or {})
+    checkpoint = Path(prior_summary.get("post_kd_checkpoint") or "")
+    try:
+        checkpoint_is_local = checkpoint.resolve().is_relative_to(kd_config.output_dir.resolve())
+    except (OSError, RuntimeError):
+        checkpoint_is_local = False
+    step_dir = checkpoint.parents[1] if len(checkpoint.parents) >= 2 else Path()
+    try:
+        checkpoint_step = int(step_dir.name.rsplit("_step_", 1)[1])
+    except (IndexError, ValueError):
+        checkpoint_step = -1
+    completed = (
+        prior_summary.get("kd_id") == kd_config.identity
+        and prior_summary.get("max_steps") == kd_config.max_steps
+        and int(prior_observability.get("vision_forward_count", 0)) > 0
+        and checkpoint_is_local
+        and (checkpoint / "config.json").is_file()
+        and (step_dir / "saving_completed").is_file()
+        and checkpoint_step >= kd_config.max_steps - 1
+    )
+    if completed:
+        logger.info(
+            "Reused identity-bound VLM observability for completed global-KD milestone %d",
+            kd_config.max_steps,
+        )
+    return (prior_observability, True) if completed else (observability, False)
+
+
 def _model_recipe(kd_config: GlobalKDConfig, *, teacher: bool, domain: str) -> dict[str, Any]:
     descriptor = (
         kd_config.resolved_teacher_descriptor if teacher else kd_config.resolved_student_descriptor
@@ -1227,6 +1267,9 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
         }
     if hasattr(trainer, "close_observability"):
         trainer.close_observability()
+    observability, resumed_completed_milestone = _completed_vlm_resume_observability(
+        kd_config, observability
+    )
     if kd_config.max_steps >= 8 and (trend is None or not trend["decreased"]):
         raise RuntimeError(f"global KD acceptance loss did not decrease: {trend}")
     if kd_config.freeze_policy == "train_all":
@@ -1255,6 +1298,7 @@ def run_automodel_global_kd(kd_config: GlobalKDConfig) -> dict[str, Any]:
         "loss_history": loss_values,
         "loss_trend": trend,
         "observability": observability,
+        "resumed_completed_milestone": resumed_completed_milestone,
         "latest_training_metrics": latest_record,
     }
 

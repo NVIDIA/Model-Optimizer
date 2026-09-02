@@ -377,6 +377,7 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
     }
     assert {node["model_source"] for node in trajectory_nodes} == {"materialized"}
     assert all(node["config"]["resume"] is True for node in trajectory_nodes)
+    assert all(node["failure_policy"] == "strict" for node in trajectory_nodes)
     assert all(node["config"]["global_batch_size"] == 4 for node in trajectory_nodes)
     assert [node["exposure"]["cumulative_examples"] for node in trajectory_nodes] == [
         256,
@@ -402,6 +403,26 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
         config["teacher_dir"]
     }
     assert all(settings["reference_once"] is True for settings in milestone_evaluations)
+    assert all(
+        settings["limit_mm_per_prompt"] == {"image": 32}
+        for settings in (
+            nodes["pre_kd_short_v1"]["config"],
+            *milestone_evaluations,
+            config["post_mip"]["flows"]["control-learning-curve"]["nodes"][
+                "control_pre_kd_short_v1"
+            ]["config"],
+        )
+    )
+    assert all(
+        settings["max_model_len"] == 65536
+        for settings in (
+            nodes["pre_kd_short_v1"]["config"],
+            *milestone_evaluations,
+            config["post_mip"]["flows"]["control-learning-curve"]["nodes"][
+                "control_pre_kd_short_v1"
+            ]["config"],
+        )
+    )
     assert {settings["reference_cache_id"] for settings in milestone_evaluations} == {
         "qwen35-0p8b-short-v1-teacher"
     }
@@ -439,11 +460,30 @@ def test_qwen3p5_0p8b_vlm_campaign_bounds_and_deduplicates_multi_axis_candidates
     assert {control_nodes[f"control_kd_{steps}"]["trajectory"] for steps in (64, 128, 256)} == {
         "conservative-control-learning-curve"
     }
+    assert all(
+        control_nodes[f"control_kd_{steps}"]["failure_policy"] == "strict"
+        for steps in (64, 128, 256)
+    )
     assert control_nodes["control_result"]["config"]["milestones"] == [
         {"steps": 64, "kd": "control_kd_64", "evaluation": "control_short_v1_64"},
         {"steps": 128, "kd": "control_kd_128", "evaluation": "control_short_v1_128"},
         {"steps": 256, "kd": "control_kd_256", "evaluation": "control_short_v1_256"},
     ]
+    assert control_nodes["control_selected"]["input"] == "control_result"
+    assert control_nodes["control_approve_512"]["input"] == "control_selected"
+    assert control_nodes["control_kd_512"]["input"] == "control_approve_512"
+    assert control_nodes["control_kd_512"]["trajectory"] == ("conservative-control-learning-curve")
+    assert control_nodes["control_kd_512"]["config"]["max_steps"] == 512
+    assert control_nodes["control_kd_512"]["exposure"]["cumulative_examples"] == 2048
+    assert control_nodes["control_extended_result"]["config"]["milestones"][-1] == {
+        "steps": 512,
+        "kd": "control_kd_512",
+        "evaluation": "control_short_v1_512",
+    }
+    assert control_nodes["control_approve_1024"]["input"] == "control_extended_result"
+    assert control_nodes["control_kd_1024"]["input"] == "control_approve_1024"
+    assert control_nodes["control_kd_1024"]["config"]["max_steps"] == 1024
+    assert control_nodes["control_kd_1024"]["exposure"]["cumulative_examples"] == 4096
     assert control_nodes["control_pre_kd_short_v1"]["input"] == "control_materialized"
     assert control_nodes["control_kd_64"]["input"] == "control_pre_kd_short_v1"
     comparison_benchmark = comparison_nodes["quality_benchmarks"]
@@ -511,3 +551,8 @@ def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(
             assert kd.total_gpus == 2
             assert evaluation.total_gpus == 2
             assert kd.gpus_per_instance == evaluation.gpus_per_instance == 1
+    for steps in (512, 1024):
+        kd = stages[f"post.control-learning-curve.control_kd_{steps}"]
+        evaluation = stages[f"post.control-learning-curve.control_short_v1_{steps}"]
+        assert kd.total_gpus == evaluation.total_gpus == 1
+        assert kd.gpus_per_instance == evaluation.gpus_per_instance == 1

@@ -275,7 +275,7 @@ def test_post_mip_aggregation_forwards_campaign_overrides(tmp_path: Path, monkey
 
     assert commands == [
         (
-            "python",
+            sys.executable,
             str(tmp_path / "examples" / "puzzletron" / "run_post_mip_node.py"),
             "--config",
             plan.experiment_config_path,

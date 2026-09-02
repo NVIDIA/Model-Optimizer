@@ -203,8 +203,8 @@ post_mip:
             timeout_seconds: 14400
             dtype: bfloat16
             gpu_memory_utilization: 0.5
-            max_model_len: 16384
-            limit_mm_per_prompt: {image: 12}
+            max_model_len: 65536
+            limit_mm_per_prompt: {image: 32}
             topology:
               tensor_parallel_size: 1
               pipeline_parallel_size: 1
@@ -218,6 +218,7 @@ post_mip:
         kd_64:
           type: global_kd
           input: pre_kd_short_v1
+          failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
@@ -246,6 +247,7 @@ post_mip:
         kd_128:
           type: global_kd
           input: short_v1_64
+          failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
@@ -274,6 +276,7 @@ post_mip:
         kd_256:
           type: global_kd
           input: short_v1_128
+          failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
@@ -328,6 +331,7 @@ post_mip:
         kd_512:
           type: global_kd
           input: approve_512
+          failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
@@ -361,6 +365,7 @@ post_mip:
         kd_1024:
           type: global_kd
           input: approve_1024
+          failure_policy: strict
           model_source: materialized
           trajectory: retained-candidate-learning-curve
           config:
@@ -413,6 +418,7 @@ post_mip:
         control_kd_64:
           type: global_kd
           input: control_pre_kd_short_v1
+          failure_policy: strict
           model_source: control_materialized
           trajectory: conservative-control-learning-curve
           config: &control_kd
@@ -441,6 +447,7 @@ post_mip:
         control_kd_128:
           type: global_kd
           input: control_short_v1_64
+          failure_policy: strict
           model_source: control_materialized
           trajectory: conservative-control-learning-curve
           config:
@@ -462,6 +469,7 @@ post_mip:
         control_kd_256:
           type: global_kd
           input: control_short_v1_128
+          failure_policy: strict
           model_source: control_materialized
           trajectory: conservative-control-learning-curve
           config:
@@ -483,7 +491,7 @@ post_mip:
         control_result:
           type: result_manifest
           input: control_short_v1_256
-          config:
+          config: &control_result_config
             pre_kd_source: control_materialized
             pre_kd_evaluation: control_pre_kd_short_v1
             profile: qwen35_vlm_short_v1
@@ -495,6 +503,76 @@ post_mip:
               - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
               - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
               - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+
+        control_selected:
+          type: manual_filter
+          input: control_result
+          prompt: Select one 256-step conservative-control finalist using the frozen short-v1 curve.
+
+        control_approve_512:
+          type: manual_filter
+          input: control_selected
+          prompt: Approve the selected conservative-control finalist for the 512-step extension.
+
+        control_kd_512:
+          type: global_kd
+          input: control_approve_512
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 512
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 512
+            cumulative_examples: 2048
+            estimated_cumulative_gpu_hours: 2.0
+
+        control_short_v1_512:
+          type: downstream_evaluation
+          input: control_kd_512
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
+
+        control_extended_result:
+          type: result_manifest
+          input: control_short_v1_512
+          config:
+            <<: *control_result_config
+            milestones:
+              - {steps: 64, kd: control_kd_64, evaluation: control_short_v1_64}
+              - {steps: 128, kd: control_kd_128, evaluation: control_short_v1_128}
+              - {steps: 256, kd: control_kd_256, evaluation: control_short_v1_256}
+              - {steps: 512, kd: control_kd_512, evaluation: control_short_v1_512}
+
+        control_approve_1024:
+          type: manual_filter
+          input: control_extended_result
+          prompt: Approve the 512-step control finalist for the separately reviewed 1024-step extension.
+
+        control_kd_1024:
+          type: global_kd
+          input: control_approve_1024
+          failure_policy: strict
+          model_source: control_materialized
+          trajectory: conservative-control-learning-curve
+          config:
+            <<: *control_kd
+            max_steps: 1024
+          exposure:
+            <<: *control_exposure_64
+            cumulative_steps: 1024
+            cumulative_examples: 4096
+            estimated_cumulative_gpu_hours: 4.0
+
+        control_short_v1_1024:
+          type: downstream_evaluation
+          input: control_kd_1024
+          failure_policy: strict
+          config:
+            <<: *short_v1_evaluation
 
 zero_shot_evaluation:
   enabled: false

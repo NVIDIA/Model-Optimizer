@@ -913,20 +913,34 @@ def _global_kd(
             raise RuntimeError("global KD produced no non-padding token accounting")
         exposure_root = output / "exposure"
         milestone_path = exposure_root / f"step_{kd_config.max_steps:06d}.json"
+        prior_milestone = {}
+        if milestone_path.is_file():
+            prior_milestone = json.loads(milestone_path.read_text())
         prior_gpu_hours = 0.0
         for path in exposure_root.glob("step_*.json"):
             if path != milestone_path:
                 prior_gpu_hours += float(
                     json.loads(path.read_text()).get("actual_incremental_gpu_hours", 0.0)
                 )
+        incremental_gpu_hours = elapsed_gpu_hours
+        cumulative_gpu_hours = prior_gpu_hours + elapsed_gpu_hours
+        if metrics.get("resumed_completed_milestone") and prior_milestone:
+            incremental_gpu_hours = float(
+                prior_milestone.get("actual_incremental_gpu_hours", elapsed_gpu_hours)
+            )
+            cumulative_gpu_hours = float(
+                prior_milestone.get(
+                    "actual_cumulative_gpu_hours", prior_gpu_hours + incremental_gpu_hours
+                )
+            )
         exposure.update(
             effective_tokens=effective_tokens,
             effective_tokens_source="training.jsonl:num_label_tokens",
             token_upper_bound=(
                 int(exposure["cumulative_examples"]) * int(exposure["max_sample_length"])
             ),
-            actual_incremental_gpu_hours=elapsed_gpu_hours,
-            actual_cumulative_gpu_hours=prior_gpu_hours + elapsed_gpu_hours,
+            actual_incremental_gpu_hours=incremental_gpu_hours,
+            actual_cumulative_gpu_hours=cumulative_gpu_hours,
         )
         exposure_path = _atomic_json(milestone_path, exposure)
         metrics.update(

@@ -28,6 +28,7 @@ from modelopt.torch.puzzletron.distillation import global_kd_recipe
 from modelopt.torch.puzzletron.distillation.global_automodel import (
     GlobalKDConfig,
     GlobalKDResult,
+    _completed_vlm_resume_observability,
     build_automodel_global_kd_recipe,
     build_global_kd_config,
 )
@@ -196,6 +197,73 @@ def test_global_distillation_summary_publishes_canonical_training_records(tmp_pa
     assert payload["sequence_length"] == 16384
     assert payload["records"][-1] == {"step": 2, "loss": 1.0}
     assert payload["post_kd_checkpoint"].endswith("checkpoints/epoch_0_step_2/model/consolidated")
+
+
+def test_completed_vlm_resume_reuses_identity_bound_observability(tmp_path):
+    output_dir = tmp_path / "trajectory"
+    checkpoint = output_dir / "checkpoints/epoch_0_step_63/model/consolidated"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "config.json").write_text("{}")
+    (checkpoint.parents[1] / "saving_completed").touch()
+    config = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=output_dir,
+        descriptor="qwen3_5_vlm",
+        domain="vlm",
+        max_steps=64,
+    )
+    prior = {"vision_forward_count": 64, "vision_input_count": 256}
+    (output_dir / "global_distillation_summary.json").write_text(
+        json.dumps(
+            {
+                "kd_id": config.identity,
+                "max_steps": 64,
+                "post_kd_checkpoint": str(checkpoint),
+                "metrics": {"observability": prior},
+            }
+        )
+    )
+
+    actual, resumed = _completed_vlm_resume_observability(config, {"vision_forward_count": 0})
+
+    assert resumed is True
+    assert actual == prior
+
+
+@pytest.mark.parametrize("mismatch", ["identity", "max_steps", "checkpoint_marker"])
+def test_completed_vlm_resume_rejects_mismatched_or_incomplete_evidence(tmp_path, mismatch):
+    output_dir = tmp_path / "trajectory"
+    checkpoint = output_dir / "checkpoints/epoch_0_step_63/model/consolidated"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "config.json").write_text("{}")
+    marker = checkpoint.parents[1] / "saving_completed"
+    if mismatch != "checkpoint_marker":
+        marker.touch()
+    config = GlobalKDConfig(
+        teacher_dir=tmp_path / "teacher",
+        student_dir=tmp_path / "student",
+        output_dir=output_dir,
+        descriptor="qwen3_5_vlm",
+        domain="vlm",
+        max_steps=64,
+    )
+    (output_dir / "global_distillation_summary.json").write_text(
+        json.dumps(
+            {
+                "kd_id": "other" if mismatch == "identity" else config.identity,
+                "max_steps": 128 if mismatch == "max_steps" else 64,
+                "post_kd_checkpoint": str(checkpoint),
+                "metrics": {"observability": {"vision_forward_count": 64}},
+            }
+        )
+    )
+    current = {"vision_forward_count": 0}
+
+    actual, resumed = _completed_vlm_resume_observability(config, current)
+
+    assert resumed is False
+    assert actual == current
 
 
 def test_global_kd_uses_memory_bounded_1f1b_by_default_and_allows_override(tmp_path, monkeypatch):

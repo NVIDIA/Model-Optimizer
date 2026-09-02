@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -283,7 +284,7 @@ class PostMIPAdapter(WorkAdapter):
         repo = Path(plan.runner.contract.repository)
         script = repo / "examples" / "puzzletron" / "run_post_mip_node.py"
         argv = [
-            "python",
+            sys.executable,
             str(script),
             "--config",
             plan.experiment_config_path,
