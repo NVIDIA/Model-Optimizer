@@ -150,6 +150,27 @@ def test_direct_vcs_install_cannot_satisfy_required_compatibility_patch(monkeypa
 # Nox execution order
 
 
+def test_nox_installs_zero_context_lmms_patch(tmp_path):
+    events = []
+
+    class RecordingSession:
+        def create_tmp(self):
+            return str(tmp_path)
+
+        def install(self, *args):
+            events.append(("install", args))
+
+        def run(self, *args):
+            events.append(("run", args))
+
+    noxfile._install_puzzletron_lmms_eval(RecordingSession())
+
+    apply_calls = [args for event, args in events if event == "run" and "apply" in args]
+    assert len(apply_calls) == 2
+    assert all("--unidiff-zero" in args for args in apply_calls)
+    assert "--check" in apply_calls[0]
+
+
 def test_nox_verifier_executes_scalar_version_and_exact_vcs_checks(monkeypatch):
     lmms_source = {
         "base_version": "7.8.9",

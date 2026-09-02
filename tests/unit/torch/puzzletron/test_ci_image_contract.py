@@ -126,7 +126,8 @@ def test_lmms_eval_compatibility_patch_removes_private_wandb_api(project_root_pa
     assert lmms_source["compatibility_patch_context_lines"] == 0
     assert '"$(pin lmms_eval.repository)" "${LMMS_EVAL_ROOT}"' in dockerfile
     assert 'git -C "${LMMS_EVAL_ROOT}" checkout --detach "$(pin lmms_eval.commit)"' in dockerfile
-    assert 'git -C "${LMMS_EVAL_ROOT}" apply --check' in dockerfile
+    assert 'git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero --check' in dockerfile
+    assert 'git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero "/opt/puzzletron/patches/' in dockerfile
     assert 'python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"' in dockerfile
 
 

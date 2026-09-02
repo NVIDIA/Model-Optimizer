@@ -86,8 +86,10 @@ def _install_puzzletron_lmms_eval(session):
         "--detach",
         PUZZLETRON_V2_LMMS_SOURCE["commit"],
     )
-    session.run("git", "-C", str(checkout), "apply", "--check", str(patch.resolve()))
-    session.run("git", "-C", str(checkout), "apply", str(patch.resolve()))
+    session.run(
+        "git", "-C", str(checkout), "apply", "--unidiff-zero", "--check", str(patch.resolve())
+    )
+    session.run("git", "-C", str(checkout), "apply", "--unidiff-zero", str(patch.resolve()))
     session.install("-e", f"{checkout}[qwen]")
 
 

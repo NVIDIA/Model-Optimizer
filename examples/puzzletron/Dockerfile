@@ -82,8 +82,8 @@ RUN pin() { jq -er ".${1}" "${PUZZLETRON_CI_ENVIRONMENT}"; } && \
     git -C "${LMMS_EVAL_ROOT}" checkout --detach "$(pin lmms_eval.commit)" && \
     test "$(git -C "${LMMS_EVAL_ROOT}" rev-parse HEAD)" = \
         "$(pin lmms_eval.commit)" && \
-    git -C "${LMMS_EVAL_ROOT}" apply --check "/opt/puzzletron/patches/${lmms_patch}" && \
-    git -C "${LMMS_EVAL_ROOT}" apply "/opt/puzzletron/patches/${lmms_patch}" && \
+    git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero --check "/opt/puzzletron/patches/${lmms_patch}" && \
+    git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero "/opt/puzzletron/patches/${lmms_patch}" && \
     python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"
 
 # Compile the pinned AnyModel vLLM fork for every supported worker GPU.
