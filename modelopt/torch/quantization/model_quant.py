@@ -20,7 +20,7 @@ import fnmatch
 import inspect
 import os
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from typing import Any, cast
 
@@ -276,9 +276,7 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
-    quantization_formats: (
-        list[dict[str, Any] | str] | list[dict[str, Any] | str | tuple[dict[str, Any], str]] | None
-    ) = None,
+    quantization_formats: Sequence[dict[str, Any] | str | tuple[dict[str, Any], str]] | None = None,
     data_loader: Iterable | None = None,
     forward_step: Callable[[nn.Module, Any], Any | torch.Tensor] | None = None,
     loss_func: Callable[[Any, Any], torch.Tensor] | None = None,
@@ -337,7 +335,7 @@ def auto_quantize(
                 # For paired K/V-cache formats with exact K/V storage accounting
                 constraints = {"effective_bits": 5.4, "cost_model": "kv_cache"}
 
-        quantization_formats: A list of quantization format config dictionaries or string names to search for.
+        quantization_formats: A sequence of quantization format config dictionaries or string names to search for.
             Each config dictionary should be valid as a ``config`` argument in
             :meth:`quantize <modelopt.torch.quantization.model_quant.quantize>`.
             The supported quantization format names are as listed by :attr:`modelopt.torch.quantization.config.choices`.
@@ -537,6 +535,11 @@ def auto_quantize(
             processed.append((quant_cfg, name))
         return processed
 
+    if quantization_formats is not None:
+        if isinstance(quantization_formats, str) or not isinstance(quantization_formats, Sequence):
+            raise TypeError("`quantization_formats` must be a sequence of formats.")
+        quantization_formats = list(quantization_formats)
+
     is_kv_search = constraints is not None and constraints.get("cost_model") == COST_MODEL_KV_CACHE
     if is_kv_search:
         if (
@@ -560,7 +563,7 @@ def auto_quantize(
                 "KV-cache AutoQuant uses forward KL and does not accept loss_func or "
                 "forward_backward_step."
             )
-        if not isinstance(quantization_formats, list) or not quantization_formats:
+        if not quantization_formats:
             raise ValueError(
                 "cost_model='kv_cache' requires a non-empty quantization_formats list."
             )
@@ -635,8 +638,6 @@ def auto_quantize(
     elif fixed_quantization_config is not None and quantization_formats is None:
         quantization_formats = []
 
-    if not isinstance(quantization_formats, list):
-        raise TypeError("`quantization_formats` must be a list.")
     if fixed_quantization_config is not None and quantization_formats:
         raise ValueError(
             "`fixed_quantization_config` cannot be combined with global "

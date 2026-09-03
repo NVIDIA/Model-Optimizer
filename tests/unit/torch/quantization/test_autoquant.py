@@ -533,13 +533,13 @@ def test_auto_quantize_fixed_ptq_baseline_requires_explicit_search_spaces():
         )
 
 
-@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG, ()])
-def test_auto_quantize_rejects_non_list_global_formats(formats):
-    with pytest.raises(TypeError, match="`quantization_formats` must be a list"):
+@pytest.mark.parametrize("formats", ["FP8_DEFAULT_CFG", mtq.FP8_DEFAULT_CFG])
+def test_auto_quantize_rejects_non_sequence_global_formats(formats):
+    with pytest.raises(TypeError, match="`quantization_formats` must be a sequence"):
         mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
 
 
-@pytest.mark.parametrize("formats", [[], [None]])
+@pytest.mark.parametrize("formats", [[], [None], ()])
 def test_auto_quantize_rejects_empty_global_formats(formats):
     with pytest.raises(ValueError, match="`quantization_formats` must"):
         mtq.auto_quantize(TransformerBlock(), quantization_formats=formats)
