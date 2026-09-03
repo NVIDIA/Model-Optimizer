@@ -106,7 +106,8 @@ def _export_value_info_proto(tensor: gs.Variable, do_type_check: bool) -> onnx.V
             dtype = tensor.dtype
         if isinstance(dtype, (int, np.integer)):
             dtype = int(dtype)
-            onnx.TensorProto.DataType.Name(dtype)
+            if dtype not in onnx.TensorProto.DataType.values():
+                raise ValueError(f"Unknown ONNX tensor dtype for {tensor.name}: {dtype}")
         else:
             dtype = onnx.helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
         onnx_tensor = onnx.helper.make_tensor_value_info(tensor.name, dtype, tensor.shape)

@@ -59,9 +59,17 @@ deploy_benchmark_dynamo = {
 }
 
 
-def _export_fp8_linear(source_dtype, weights_dtype):
-    model = nn.Sequential(nn.Linear(4, 4, bias=False)).eval().to(source_dtype)
-    sample_input = torch.arange(4, dtype=source_dtype).reshape(1, 4)
+def _export_fp8_model(source_dtype, weights_dtype, conv=False):
+    if conv:
+        model = nn.Sequential(nn.Conv2d(1, 1, 1, bias=False))
+        sample_input = torch.ones(1, 1, 2, 2, dtype=source_dtype)
+    else:
+        model = nn.Sequential(nn.Linear(4, 4, bias=False))
+        sample_input = torch.arange(4, dtype=source_dtype).reshape(1, 4)
+    model = model.eval().to(source_dtype)
+    if conv:
+        with torch.no_grad():
+            model[0].weight.fill_(1e-38)
     model = mtq.quantize(
         model,
         mtq.FP8_DEFAULT_CFG,
@@ -178,16 +186,19 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
 
 
 @pytest.mark.parametrize(
-    ("source_dtype", "weights_dtype", "expected_onnx_dtype"),
+    ("source_dtype", "weights_dtype", "expected_onnx_dtype", "conv"),
     [
-        (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16),
-        (torch.float32, "fp16", onnx.TensorProto.FLOAT16),
+        (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16, False),
+        (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16, True),
+        (torch.float32, "fp16", onnx.TensorProto.FLOAT16, False),
     ],
 )
-def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, expected_onnx_dtype):
-    exported_model = _export_fp8_linear(source_dtype, weights_dtype)
+def test_fp8_export_with_supported_weights_dtype(
+    source_dtype, weights_dtype, expected_onnx_dtype, conv
+):
+    exported_model = _export_fp8_model(source_dtype, weights_dtype, conv)
 
-    onnx.checker.check_model(exported_model)
+    onnx.checker.check_model(exported_model, full_check=True)
     assert not any(
         node.op_type in {"TRT_FP8QuantizeLinear", "TRT_FP8DequantizeLinear"}
         for node in exported_model.graph.node
@@ -207,6 +218,11 @@ def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, ex
         initializer_by_name[node.input[1]].data_type == expected_onnx_dtype
         for node in fp8_weight_dq_nodes
     )
+    if conv:
+        assert all(
+            set(initializer_by_name[node.input[0]].raw_data).isdisjoint({0x7F, 0xFF})
+            for node in fp8_weight_dq_nodes
+        )
     graph_io = [*exported_model.graph.input, *exported_model.graph.output]
     assert all(value.type.tensor_type.elem_type == expected_onnx_dtype for value in graph_io)
 
@@ -216,7 +232,7 @@ def test_fp8_export_rejects_bf16_conversion_from_fp32():
         AssertionError,
         match="Converting a quantized ONNX graph to BF16 is not supported",
     ):
-        _export_fp8_linear(torch.float32, "bf16")
+        _export_fp8_model(torch.float32, "bf16")
 
 
 def test_fp8_bf16_noop_rejects_incompatible_mixed_format():
@@ -237,6 +253,30 @@ def test_fp8_bf16_noop_rejects_incompatible_mixed_format():
     with pytest.raises(
         AssertionError,
         match="Converting a quantized ONNX graph to BF16 is not supported",
+    ):
+        get_onnx_bytes_and_metadata(model, (sample_input,), weights_dtype="bf16", onnx_opset=23)
+
+
+def test_fp8_bf16_noop_rejects_mixed_source_dtypes():
+    class MixedDtypeModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bf16_layer = nn.Linear(4, 4, bias=False).to(torch.bfloat16)
+            self.fp32_layer = nn.Linear(4, 4, bias=False)
+
+        def forward(self, inputs):
+            hidden = self.bf16_layer(inputs)
+            return self.fp32_layer(hidden.float())
+
+    model = MixedDtypeModel().eval()
+    sample_input = torch.ones(1, 4, dtype=torch.bfloat16)
+    model = mtq.quantize(
+        model,
+        mtq.FP8_DEFAULT_CFG,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+    with pytest.raises(
+        AssertionError, match="Converting a quantized ONNX graph to BF16 is not supported"
     ):
         get_onnx_bytes_and_metadata(model, (sample_input,), weights_dtype="bf16", onnx_opset=23)
 

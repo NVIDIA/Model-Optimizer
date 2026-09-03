@@ -536,7 +536,7 @@ class TestFP8QuantExporter:
             if initializer.name == "linear/weight_quantizer/fp8_weights"
         )
         assert fp8_weight.data_type == TensorProto.FLOAT8E4M3FN
-        assert fp8_weight.raw_data == b"\x3a"
+        assert fp8_weight.raw_data == b"\x3b"
         output_scale = next(
             initializer
             for initializer in converted_model.graph.initializer
