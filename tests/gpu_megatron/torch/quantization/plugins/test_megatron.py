@@ -1097,8 +1097,8 @@ def test_te_grouped_vs_sequential_default_amax(dist_workers_size_1, quant_cfg):
     )
 
 
-def _set_te_grouped_weight_amax(model, ep_rank, num_local_experts):
-    """Give every local expert a distinct amax derived from its global expert index."""
+def _set_te_grouped_weight_quantizer_state(model, ep_rank, num_local_experts):
+    """Give every local expert distinct quantizer state derived from its global index."""
     for linear in model.modules():
         if not isinstance(linear, _QuantMegatronTEGroupedLinear):
             continue
@@ -1106,11 +1106,16 @@ def _set_te_grouped_weight_amax(model, ep_rank, num_local_experts):
             quantizer = linear.weight_quantizer[local_expert_idx]
             leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
             for leaf in leaves:
-                if leaf._amax is not None:
-                    leaf._amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
+                amax = getattr(leaf, "_amax", None)
+                if amax is not None:
+                    amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
+                global_amax = getattr(leaf, "_global_amax", None)
+                if global_amax is not None:
+                    global_amax.fill_(1.0 + ep_rank * num_local_experts + local_expert_idx)
 
 
-def _assert_te_grouped_weight_amax(model, expected_amax):
+def _assert_te_grouped_weight_quantizer_state(model, expected_amax, expect_global_amax):
+    checked = 0
     for linear in model.modules():
         if not isinstance(linear, _QuantMegatronTEGroupedLinear):
             continue
@@ -1118,10 +1123,22 @@ def _assert_te_grouped_weight_amax(model, expected_amax):
             quantizer = linear.weight_quantizer[local_expert_idx]
             leaves = list(quantizer) if isinstance(quantizer, SequentialQuantizer) else [quantizer]
             for leaf in leaves:
-                assert leaf._amax is not None
-                assert torch.equal(
-                    leaf._amax, torch.full_like(leaf._amax, expected_amax[local_expert_idx])
+                amax = getattr(leaf, "_amax", None)
+                assert amax is not None, (
+                    "TEGrouped per-expert weight quantizer amax was not restored"
                 )
+                checked += 1
+                assert torch.equal(amax, torch.full_like(amax, expected_amax[local_expert_idx]))
+                global_amax = getattr(leaf, "_global_amax", None)
+                if expect_global_amax:
+                    assert global_amax is not None, (
+                        "TEGrouped per-expert weight quantizer global_amax was not restored"
+                    )
+                    assert torch.equal(
+                        global_amax,
+                        torch.full_like(global_amax, expected_amax[local_expert_idx]),
+                    )
+    assert checked > 0, "no TEGrouped per-expert weight quantizer amax was checked"
 
 
 def test_initialize_grouped_weight_quantizer_state_for_restore():
@@ -1158,6 +1175,8 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     save_ep_size,
     load_tp_size,
     load_ep_size,
+    quant_cfg,
+    expect_global_amax,
     checkpoint_path,
     rank,
     size,
@@ -1183,8 +1202,10 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
     for module in source.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
-    mtq.quantize(source, mtq.NVFP4_DEFAULT_CFG, forward)
-    _set_te_grouped_weight_amax(source, get_expert_model_parallel_rank(), save_num_local_experts)
+    mtq.quantize(source, copy.deepcopy(quant_cfg), forward)
+    _set_te_grouped_weight_quantizer_state(
+        source, get_expert_model_parallel_rank(), save_num_local_experts
+    )
     save_distributed_checkpoint(checkpoint_path, source)
     save_sharded_modelopt_state([source], checkpoint_path)
     torch.distributed.barrier()
@@ -1215,18 +1236,46 @@ def _test_te_grouped_sharded_state_dict_reshard_helper(
             1 + (get_expert_model_parallel_rank() + 1) * load_num_local_experts,
         )
     )
-    _assert_te_grouped_weight_amax(target, expected_amax)
+    _assert_te_grouped_weight_quantizer_state(target, expected_amax, expect_global_amax)
 
 
 @pytest.mark.parametrize(
     (
+        "quant_cfg",
+        "expect_global_amax",
         "save_tp_size",
         "save_ep_size",
         "load_tp_size",
         "load_ep_size",
     ),
-    [(1, 2, 1, 1), (1, 1, 1, 2), (1, 1, 2, 1), (2, 1, 1, 1)],
-    ids=["ep-downsize", "ep-upsize", "tp-upsize", "tp-downsize"],
+    [
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 2, 1, 1, id="fp8-ep-downsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 1, 2, id="fp8-ep-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 1, 1, 2, 1, id="fp8-tp-upsize"),
+        pytest.param(mtq.FP8_DEFAULT_CFG, False, 2, 1, 1, 1, id="fp8-tp-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 2, 1, 1, id="nvfp4-ep-downsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 1, 2, id="nvfp4-ep-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 1, 1, 2, 1, id="nvfp4-tp-upsize"),
+        pytest.param(mtq.NVFP4_DEFAULT_CFG, False, 2, 1, 1, 1, id="nvfp4-tp-downsize"),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            2,
+            1,
+            1,
+            id="nvfp4-mse-ep-downsize",
+        ),
+        pytest.param(
+            mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
+            True,
+            1,
+            1,
+            1,
+            2,
+            id="nvfp4-mse-ep-upsize",
+        ),
+    ],
 )
 def test_te_grouped_sharded_state_dict_reshard(
     dist_workers_size_2,
@@ -1235,6 +1284,8 @@ def test_te_grouped_sharded_state_dict_reshard(
     save_ep_size,
     load_tp_size,
     load_ep_size,
+    quant_cfg,
+    expect_global_amax,
 ):
     dist_workers_size_2.run(
         partial(
@@ -1243,6 +1294,8 @@ def test_te_grouped_sharded_state_dict_reshard(
             save_ep_size,
             load_tp_size,
             load_ep_size,
+            quant_cfg,
+            expect_global_amax,
             tmp_path,
         )
     )

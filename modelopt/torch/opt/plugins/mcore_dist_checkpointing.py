@@ -188,41 +188,25 @@ def _initialize_grouped_weight_quantizer_state_for_restore(model: torch.nn.Modul
     for module in model.modules():
         if not hasattr(module, "num_gemms") or not hasattr(module, "weight_quantizer"):
             continue
-        reference_tensor = next(module.parameters(), None)
-        if reference_tensor is None:
-            continue
-        for gemm_idx in range(module.num_gemms):
-            quantizer = module.weight_quantizer[gemm_idx]
-            quantizers = quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
-            for quantizer_idx, tensor_quantizer in enumerate(quantizers):
-                if not tensor_quantizer.is_enabled or tensor_quantizer.is_mx_format:
+        grouped_leaves = [
+            quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
+            for quantizer in [module.weight_quantizer[idx] for idx in range(module.num_gemms)]
+        ]
+        for sibling_leaves in zip(*grouped_leaves):
+            eligible_leaves = [
+                quantizer
+                for quantizer in sibling_leaves
+                if quantizer.is_enabled and not quantizer.is_mx_format
+            ]
+            for state_name in ("amax", "global_amax"):
+                reference = next(
+                    (getattr(quantizer, state_name, None) for quantizer in eligible_leaves), None
+                )
+                if reference is None:
                     continue
-                for state_name in ("amax", "global_amax"):
-                    if (
-                        not hasattr(tensor_quantizer, state_name)
-                        or getattr(tensor_quantizer, state_name) is not None
-                    ):
-                        continue
-                    for sibling_gemm_idx in range(module.num_gemms):
-                        sibling_quantizer = module.weight_quantizer[sibling_gemm_idx]
-                        sibling_quantizers = (
-                            sibling_quantizer
-                            if isinstance(sibling_quantizer, torch.nn.Sequential)
-                            else [sibling_quantizer]
-                        )
-                        if quantizer_idx >= len(sibling_quantizers):
-                            continue
-                        sibling_quantizer = sibling_quantizers[quantizer_idx]
-                        if not sibling_quantizer.is_enabled or sibling_quantizer.is_mx_format:
-                            continue
-                        sibling_state = getattr(sibling_quantizer, state_name, None)
-                        if sibling_state is not None:
-                            setattr(
-                                tensor_quantizer,
-                                state_name,
-                                torch.zeros_like(sibling_state, device=reference_tensor.device),
-                            )
-                            break
+                for quantizer in eligible_leaves:
+                    if getattr(quantizer, state_name, None) is None:
+                        setattr(quantizer, state_name, torch.zeros_like(reference))
 
 
 def restore_sharded_modelopt_state(
