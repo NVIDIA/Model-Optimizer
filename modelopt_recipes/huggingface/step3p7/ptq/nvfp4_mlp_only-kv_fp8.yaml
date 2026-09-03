@@ -52,7 +52,9 @@ quantize:
         $import: nvfp4
     - $import: kv_fp8
     - $import: default_disabled_quantizers
-    # Router and shared expert are matched by `*moe*` above; disable them last (later wins).
+    # The router (`moe.gate`) is matched by `*moe*` above, so it must be disabled last
+    # (later wins). `share_expert` is not matched by any rule above — it is listed as an
+    # explicit guard so the shared expert stays BF16 if the patterns are ever widened.
     - quantizer_name: '*moe.gate.*'
       enable: false
     - quantizer_name: '*share_expert*'

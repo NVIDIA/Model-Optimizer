@@ -321,7 +321,7 @@ recipes' `*.experts.*`, `*block_sparse_moe*` and `*mlp*` patterns match nothing
 on the routed experts — the general recipe would quantize *nothing* and export a
 checkpoint with `quant_algo: null`. These select `*moe*` instead and disable the
 router (`moe.gate`) and `share_expert` on top. Use them, not the general
-recipes, for any Step checkpoint.
+recipes, for Step-3.7 checkpoints; Step-3.5 has its own recipe above.
 
 ### Algorithm overrides — `gemma`, `gemma4`, `mpt`
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -179,3 +179,44 @@ def test_expert_indexed_moe_is_quantized_and_reconstructed():
     assert not hasattr(up_proj, "experts")
     assert up_proj.weight.shape == reference_weight.shape
     assert torch.equal(up_proj.weight, reference_weight)
+
+
+def test_export_handler_matches_a_differently_named_wrapper():
+    """Export dispatch must key on the wrapper type, not the generated class name.
+
+    The registration is structural, so a compatible remote-code class can be named
+    anything; its generated class is then ``Quant<ThatName>``. If the export handler only
+    matched the literal name ``QuantMoELinear``, such a module would skip
+    ``_export_moe_linear`` and export without the input-amax fallback for experts that
+    calibration never routed to.
+    """
+    from modelopt.torch.export.hf_export_handlers import _export_moe_linear
+    from modelopt.torch.export.registry import ExportModuleRegistry
+
+    model = _TinyStepModel()
+    mtq.quantize(model, _moe_quant_cfg(), forward_loop=lambda m: m(torch.randn(2, 8, HIDDEN_SIZE)))
+
+    converted = model.moe.up_proj
+    # The generated name is derived from the model's own class, not from `MoELinear`.
+    assert type(converted).__name__ == "Quant_SyntheticMoELinear"
+    assert ExportModuleRegistry.match(converted) is _export_moe_linear
+
+
+def test_export_handler_fills_input_amax_for_unrouted_experts():
+    """The handler is what gives never-routed experts an input amax before export."""
+    from modelopt.torch.export.hf_export_handlers import _export_moe_linear
+    from modelopt.torch.export.registry import ExportContext
+
+    torch.manual_seed(0)
+    model = _TinyStepModel()
+    mtq.quantize(model, _moe_quant_cfg(), forward_loop=lambda m: m(torch.randn(2, 8, HIDDEN_SIZE)))
+
+    experts = model.moe.up_proj.experts
+    # Simulate an expert that calibration never routed a token to.
+    experts[0].input_quantizer.reset_amax()
+    assert experts[0].input_quantizer.amax is None
+    assert any(e.input_quantizer.amax is not None for e in experts), "need a donor amax"
+
+    _export_moe_linear("moe.up_proj", model.moe.up_proj, ExportContext(model, torch.float16))
+
+    assert experts[0].input_quantizer.amax is not None
