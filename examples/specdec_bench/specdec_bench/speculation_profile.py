@@ -112,16 +112,13 @@ def _dense_survival(length_keyed, num_speculative_tokens):
     if not length_keyed:
         return [0.0] * num_speculative_tokens
     max_len = max(length_keyed)
-    out, carried = [], 0.0
     # Walk downward so each missing length inherits the survival value above it.
-    survival = {}
+    survival, carried = {}, 0.0
     for length in range(max_len, 0, -1):
         if length in length_keyed:
             carried = length_keyed[length]
         survival[length] = carried
-    for i in range(num_speculative_tokens):
-        out.append(survival.get(i + 2, 0.0))
-    return out
+    return [survival.get(i + 2, 0.0) for i in range(num_speculative_tokens)]
 
 
 def per_step_mean_accept_length(histogram):
@@ -195,7 +192,7 @@ def _validate_rates(rates, name):
     acceptance -- so it is rejected here, at the boundary, rather than serialized.
     """
     for i, r in enumerate(rates):
-        if not isinstance(r, (int, float)) or isnan(r) or isinf(r):
+        if not isinstance(r, int | float) or isnan(r) or isinf(r):
             raise ValueError(f"{name}[{i}] is not a finite number: {r!r}")
         if not 0.0 <= r <= 1.0:
             raise ValueError(f"{name}[{i}] is not a probability: {r!r}")
