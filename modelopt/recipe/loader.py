@@ -24,7 +24,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from modelopt.torch.opt.config_loader import BUILTIN_CONFIG_ROOT as BUILTIN_RECIPES_LIB
-from modelopt.torch.opt.config_loader import load_config
+from modelopt.torch.opt.config_loader import _alias_builtin_recipe_prefix, load_config
 from modelopt.torch.quantization.config import QuantizeConfig
 
 from .config import (
@@ -58,32 +58,28 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         isinstance(recipe_path, Path) and recipe_path.is_absolute()
     ):
         rp_str = str(recipe_path)
-        # Backward-compat aliases for the recipe-library restructure. A source
-        # checkout keeps ``huggingface`` -> ``model_type`` (and the nested
-        # ``model_type/models`` -> ``../models``) symlinks, but symlinks don't
-        # survive into built wheels, so the old prefixes are rewritten here too —
-        # that keeps saved ``--recipe huggingface/...`` paths working for
-        # pip-installed users, not just source checkouts.
-        #   * ``huggingface/`` was renamed to ``model_type/`` (architecture-specific
-        #     recipes keyed by a HF ``model_type``).
-        #   * Checkpoint-mirror recipes moved further, out of the old
-        #     ``huggingface/models/<org>/<model_id>/`` layout to the top-level
-        #     ``models/`` tier, so that longer prefix is rewritten straight to
-        #     ``models/`` (checked first, as it is more specific).
-        rp_norm = rp_str.replace("\\", "/")
-        if rp_norm.startswith("huggingface/models/"):
-            rp_str = "models/" + rp_norm[len("huggingface/models/") :]
-        elif rp_norm.startswith("huggingface/"):
-            rp_str = "model_type/" + rp_norm[len("huggingface/") :]
-        suffixes = [""] if rp_str.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
-        for suffix in suffixes:
-            candidate = BUILTIN_RECIPES_LIB.joinpath(rp_str + suffix)
+        # Backward-compat aliases for the recipe-library restructure. A source checkout keeps
+        # ``huggingface`` -> ``model_type`` (and the nested ``model_type/models`` -> ``../models``)
+        # symlinks, but symlinks don't survive into built wheels, so the deprecated tier
+        # prefixes are rewritten (see ``_alias_builtin_recipe_prefix``) before the built-in
+        # lookup — that keeps saved ``--recipe huggingface/...`` paths working for pip-installed
+        # users, not just source checkouts. The rewrite is applied to built-in candidates only;
+        # the filesystem fallback below probes the path exactly as given first, so a user's own
+        # local ``huggingface/`` recipe tree still loads by its natural relative name.
+        aliased = _alias_builtin_recipe_prefix(rp_str)
+
+        def _suffixes(s: str) -> list[str]:
+            return [""] if s.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
+
+        for suffix in _suffixes(aliased):
+            candidate = BUILTIN_RECIPES_LIB.joinpath(aliased + suffix)
             if candidate.is_file() or candidate.is_dir():
                 return candidate
-        for suffix in suffixes:
-            fs_candidate = Path(rp_str + suffix)
-            if fs_candidate.is_file() or fs_candidate.is_dir():
-                return fs_candidate
+        for probe in dict.fromkeys((rp_str, aliased)):
+            for suffix in _suffixes(probe):
+                fs_candidate = Path(probe + suffix)
+                if fs_candidate.is_file() or fs_candidate.is_dir():
+                    return fs_candidate
         return Path(rp_str)
     return recipe_path
 
