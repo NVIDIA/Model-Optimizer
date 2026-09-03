@@ -175,6 +175,7 @@ def _replace_fp4qdq_with_2dq(
         name=weight_name + "_DequantizeLinear_1",
         axis=-1,
         block_size=block_size,
+        domain="trt",
     )
 
     # Add value_info for sw_f32
@@ -427,6 +428,10 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         graph.ClearField("initializer")
         graph.initializer.extend(new_initializers)
         logger.info(f"Removed {len(initializers_to_delete)} initializers")
+
+        if fp4_qdq_nodes and not any(opset.domain == "trt" for opset in onnx_model.opset_import):
+            onnx_model.opset_import.append(onnx.helper.make_opsetid("trt", 1))
+            logger.info("Added TensorRT opset import")
 
         utils.topologically_sort_graph_nodes(graph)
 

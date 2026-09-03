@@ -29,12 +29,14 @@ from _test_utils.torch.quantization.models import SimpleLinear
 from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
 from onnx import TensorProto, helper, numpy_helper
 
+import modelopt.torch._deploy.utils.torch_onnx as torch_onnx
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.onnx import utils
 from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.onnx.export.nvfp4_exporter import _encode_nvfp4_block_scale
 from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import is_quantized_linear
 
@@ -103,6 +105,48 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
     converted_model = NVFP4QuantExporter.process_model(exported_model)
     assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
     onnx.checker.check_model(converted_model)
+
+
+def test_nvfp4_dynamo_helper_uses_quantized_fp16_conversion(monkeypatch, tmp_path):
+    sample_input = SimpleLinear.get_input()
+
+    def forward_loop(model):
+        model(sample_input)
+
+    def cpu_dynamic_block_quantize(inputs, *args):
+        return inputs
+
+    monkeypatch.setattr(tensor_quant, "dynamic_block_quantize_op", cpu_dynamic_block_quantize)
+    model = mtq.quantize(SimpleLinear().eval(), mtq.NVFP4_DEFAULT_CFG, forward_loop=forward_loop)
+
+    def fail_generic_conversion(*args, **kwargs):
+        pytest.fail("Dynamo NVFP4 export must use the quantization-aware FP16 conversion path")
+
+    monkeypatch.setattr(torch_onnx, "convert_to_f16", fail_generic_conversion)
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model,
+        (sample_input,),
+        model_name="nvfp4_dynamo_fp16",
+        dynamo_export=True,
+        onnx_opset=24,
+        weights_dtype="fp16",
+    )
+    onnx_package = OnnxBytes.from_bytes(onnx_bytes)
+    export_dir = tmp_path / "nvfp4_dynamo_fp16"
+    onnx_package.write_to_disk(str(export_dir))
+    exported = onnx.load(export_dir / f"{onnx_package.model_name}.onnx", load_external_data=True)
+
+    onnx.checker.check_model(exported, full_check=True)
+    node_types = {node.op_type for node in exported.graph.node}
+    assert "TRT_FP4DynamicQuantize" in node_types
+    assert "TRT_FP4QDQ" not in node_types
+    bias_initializers = [
+        initializer
+        for initializer in exported.graph.initializer
+        if initializer.name.endswith("bias")
+    ]
+    assert bias_initializers
+    assert all(initializer.data_type == TensorProto.FLOAT16 for initializer in bias_initializers)
 
 
 @pytest.mark.parametrize(

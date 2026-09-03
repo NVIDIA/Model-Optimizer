@@ -57,6 +57,28 @@ deploy_benchmark_dynamo = {
 }
 
 
+class _DefaultScalarModel(nn.Module):
+    def forward(self, x, flag=False):
+        if flag:
+            return -x
+        return x + 1
+
+
+def test_onnx_dynamo_export_preserves_default_scalar_as_constant():
+    sample_input = torch.ones(2, 3)
+
+    onnx_bytes, metadata = get_onnx_bytes_and_metadata(
+        _DefaultScalarModel(), (sample_input,), dynamo_export=True, onnx_opset=21
+    )
+    onnx_model = onnx.load_model_from_string(
+        OnnxBytes.from_bytes(onnx_bytes).get_onnx_model_file_bytes()
+    )
+
+    onnx.checker.check_model(onnx_model, full_check=True)
+    assert [value.name for value in onnx_model.graph.input] == ["x"]
+    assert generate_onnx_input(metadata, (sample_input,)).keys() == {"x"}
+
+
 @pytest.mark.parametrize(
     "model", deploy_benchmark_dynamo.values(), ids=deploy_benchmark_dynamo.keys()
 )

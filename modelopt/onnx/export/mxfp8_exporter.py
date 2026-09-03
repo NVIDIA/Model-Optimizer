@@ -20,7 +20,10 @@ import onnx
 from onnx import numpy_helper
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.quantization.graph_utils import get_tensor_producer_nodes
+from modelopt.onnx.quantization.graph_utils import (
+    get_tensor_consumer_nodes,
+    get_tensor_producer_nodes,
+)
 from modelopt.onnx.quantization.qdq_utils import _cast_fp8, onnx_dtype_map
 from modelopt.onnx.quantization.quant_utils import compute_e8m0, get_amax
 from modelopt.onnx.utils import get_attribute, has_attribute
@@ -32,13 +35,25 @@ DEFAULT_BLOCK_SIZE = 32
 DEFAULT_QUANT_AXIS = -1
 
 
+def _sync_initializer_metadata(graph: onnx.GraphProto, initializer: onnx.TensorProto) -> None:
+    """Synchronize existing type and shape declarations for an initializer."""
+    for value_info in (*graph.input, *graph.value_info, *graph.output):
+        if value_info.name != initializer.name:
+            continue
+        tensor_type = value_info.type.tensor_type
+        tensor_type.elem_type = initializer.data_type
+        del tensor_type.shape.dim[:]
+        for dim_value in initializer.dims:
+            tensor_type.shape.dim.add().dim_value = dim_value
+
+
 def _get_weight_dq_nodes(graph: onnx.GraphProto) -> list[onnx.NodeProto]:
     """Get weight DequantizeLinear nodes from the graph."""
+    initializer_names = {initializer.name for initializer in graph.initializer}
     return [
         node
         for node in graph.node
-        if node.op_type == "TRT_MXFP8DequantizeLinear"
-        and any(".weight" in inp for inp in node.input)
+        if node.op_type == "TRT_MXFP8DequantizeLinear" and node.input[0] in initializer_names
     ]
 
 
@@ -70,6 +85,74 @@ class MXFP8QuantExporter(ONNXQuantExporter):
     @staticmethod
     def pre_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Pre-processes the ONNX model for MXFP8 quantization."""
+        graph = onnx_model.graph
+        weight_dq_nodes = _get_weight_dq_nodes(graph)
+        tensor_consumer_map = get_tensor_consumer_nodes(graph)
+        tensor_producer_map = get_tensor_producer_nodes(graph)
+        initializer_map = {initializer.name: initializer for initializer in graph.initializer}
+        tensor_names = {
+            name for node in graph.node for name in (*node.input, *node.output) if name
+        } | set(initializer_map)
+        initializer_candidates_to_remove = set()
+        constant_outputs_to_remove = set()
+
+        def _clone_shared_input(node: onnx.NodeProto, input_index: int, path_index: int):
+            tensor_name = node.input[input_index]
+            if len(tensor_consumer_map[tensor_name]) <= 1:
+                return
+
+            tensor = initializer_map.get(tensor_name)
+            if tensor is None:
+                producer = tensor_producer_map.get(tensor_name)
+                if producer is None or producer.op_type != "Constant":
+                    raise ValueError(f"Expected a constant shared input for {node.name}")
+                tensor = next((attr.t for attr in producer.attribute if attr.name == "value"), None)
+                if tensor is None:
+                    raise ValueError(f"Expected a tensor value for {producer.name}")
+                constant_outputs_to_remove.update(producer.output)
+            else:
+                initializer_candidates_to_remove.add(tensor_name)
+
+            base_name = f"{tensor_name}_mxfp8_{path_index}"
+            unique_name = base_name
+            suffix = 0
+            while unique_name in tensor_names:
+                suffix += 1
+                unique_name = f"{base_name}_{suffix}"
+            tensor_names.add(unique_name)
+
+            cloned_tensor = onnx.TensorProto()
+            cloned_tensor.CopyFrom(tensor)
+            cloned_tensor.name = unique_name
+            graph.initializer.append(cloned_tensor)
+            initializer_map[unique_name] = cloned_tensor
+            node.input[input_index] = unique_name
+
+        for path_index, node in enumerate(weight_dq_nodes):
+            _clone_shared_input(node, 0, path_index)
+            _clone_shared_input(node, 1, path_index)
+
+        used_tensors = {input_name for node in graph.node for input_name in node.input}
+        protected_tensors = used_tensors | {value.name for value in (*graph.input, *graph.output)}
+        new_initializers = [
+            initializer
+            for initializer in graph.initializer
+            if initializer.name not in initializer_candidates_to_remove
+            or initializer.name in protected_tensors
+        ]
+        new_nodes = [
+            node
+            for node in graph.node
+            if not (
+                node.op_type == "Constant"
+                and any(output in constant_outputs_to_remove for output in node.output)
+                and not any(output in used_tensors for output in node.output)
+            )
+        ]
+        del graph.initializer[:]
+        graph.initializer.extend(new_initializers)
+        del graph.node[:]
+        graph.node.extend(new_nodes)
         return onnx_model
 
     @staticmethod
@@ -92,17 +175,21 @@ class MXFP8QuantExporter(ONNXQuantExporter):
             se8m0_fp32 = compute_e8m0(amax, weight.shape, quant_axis, block_size)
             se8m0 = se8m0_fp32.astype(np.uint8)
 
-            # Remove scale producer if it's a Constant node
             scale_name = node.input[1]
-            scale_producer = tensor_producer_map[scale_name]
-            if scale_producer.op_type == "Constant":
-                graph.node.remove(scale_producer)
+            if scale_name in initializer_map:
+                scale_tensor = onnx.numpy_helper.from_array(se8m0, scale_name)
+                initializer_map[scale_name].CopyFrom(scale_tensor)
+            else:
+                scale_producer = tensor_producer_map[scale_name]
+                if scale_producer.op_type == "Constant":
+                    graph.node.remove(scale_producer)
 
-            # Create and add new scale tensor
-            scale_name_new = scale_name.replace("Constant_output_0", "scale")
-            scale_tensor = onnx.numpy_helper.from_array(se8m0, scale_name_new)
-            graph.initializer.append(scale_tensor)
-            node.input[1] = scale_name_new
+                scale_name_new = scale_name.replace("Constant_output_0", "scale")
+                scale_tensor = onnx.numpy_helper.from_array(se8m0, scale_name_new)
+                graph.initializer.append(scale_tensor)
+                initializer_map[scale_name_new] = scale_tensor
+                node.input[1] = scale_name_new
+            _sync_initializer_metadata(graph, scale_tensor)
 
         return onnx_model
 
@@ -138,6 +225,7 @@ class MXFP8QuantExporter(ONNXQuantExporter):
                 raw=True,
             )
             initializer_map[weight_name].CopyFrom(weights_e4m3)
+            _sync_initializer_metadata(graph, initializer_map[weight_name])
             logger.debug(f"Converted {weight_name} to MXFP8")
 
         return onnx_model
