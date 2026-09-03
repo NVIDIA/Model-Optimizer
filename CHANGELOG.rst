@@ -1,15 +1,21 @@
 Changelog
 =========
 
-0.48 (2026-10-xx)
-^^^^^^^^^^^^^^^^^
+0.48.0 (2026-10-xx)
+^^^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+**Backward Breaking Changes**
+
+**Deprecations**
 
 **Bug Fixes**
 
 - Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
 
-0.47 (2026-09-xx)
-^^^^^^^^^^^^^^^^^
+0.47.0 (2026-09-xx)
+^^^^^^^^^^^^^^^^^^^
 
 **New Features**
 
@@ -72,8 +78,8 @@ Changelog
 - Fix EAGLE-3 training with context parallelism (``--cp_size > 1`` in ``examples/speculative_decoding``), which failed to start on ``accelerate >= 1.13`` and then raised ``got mixed torch.Tensor and DTensor``.
 - Polygraphy minimum dependency upgraded to ``0.53.4`` to solve ONNX AutoCast failures when marking optional graph outputs.
 
-0.46 (2026-08-17)
-^^^^^^^^^^^^^^^^^
+0.46.0 (2026-08-18)
+^^^^^^^^^^^^^^^^^^^
 
 **New Features**
 
@@ -156,8 +162,8 @@ Changelog
 - Fix ``--use_fsdp2`` PTQ (``examples/hf_ptq``) failing on models that hold a few parameters in a dtype other than the model's own, with ``AssertionError: FSDP expects uniform original parameter dtype`` on the first calibration forward. Nemotron-3-Nano is one such model: its MoE router gates are declared ``float32`` while the rest of the checkpoint is bfloat16, so each decoder layer's FSDP2 shard group mixed dtypes. ``fsdp2_wrap`` now passes those off-dtype parameters to ``fully_shard(ignored_params=...)``, leaving them replicated in their original dtype instead of casting them, and warns with their names and their share of the model.
 - Fix ``--use_fsdp2`` HF export making no progress for hours on large MoE checkpoints. ``create_fsdp_param_mapping`` resolved each ``FSDPParam``'s module by scanning every ``model.named_parameters()``, and export calls it once per quantized module, so the cost was quadratic in (parameters x modules): harmless for dense models, intractable for a MoE with many experts. Exporting Nemotron-3-Nano-30B-A3B (6,243 parameter tensors, 6,004 quantized modules) spent an estimated 1.9 hours there with every GPU idle. The parameter index is now built once per mapping instead of once per ``FSDPParam`` (1151 ms -> 5.1 ms per call), preserving the previous ``named_parameters()``-order resolution for tied weights.
 
-0.45 (2026-07-02)
-^^^^^^^^^^^^^^^^^
+0.45.0 (2026-07-06)
+^^^^^^^^^^^^^^^^^^^
 
 **New Features**
 
@@ -249,8 +255,8 @@ Changelog
 - Fix unified HF checkpoint export for Llama4 MoE models. The uncalibrated-experts input-quantizer ``amax`` fallback in ``_export_transformers_checkpoint`` special-cased only ``QuantGptOssExperts``; ``QuantLlama4TextExperts`` uses the same fused ``gate_up_proj`` / ``down_proj`` layout and is now handled by the same branch, fixing the export failure.
 - Fix ``NotImplementedError: "max_all_cuda" not implemented for 'Float8_e4m3fn'`` during quantization calibration of models with natively FP8 (``float8_e4m3fn`` / ``float8_e5m2``) weights, such as DeepSeek-V3. FP8 dtypes implement no reduction (``max``/``amax``), ``abs``, or elementwise ``maximum`` kernels, so ``reduce_amax`` now upcasts FP8 inputs to the default float dtype before reducing; the upcast is lossless and only affects the FP8 path.
 
-0.44 (2026-05-14)
-^^^^^^^^^^^^^^^^^
+0.44.0 (2026-05-13)
+^^^^^^^^^^^^^^^^^^^
 
 **New Features**
 
@@ -293,8 +299,8 @@ Changelog
 - Improve ``megatron_preprocess_data``: add ``--reasoning_content`` support for Nemotron v3 datasets, eliminate intermediate JSONL for HuggingFace datasets, return output file prefixes from the Python API, add gzip input support (``.jsonl.gz``), add ``--strip_newlines`` flag for plain-text pretraining data, add ``--hf_streaming`` for very large datasets (only consumed rows downloaded), and auto-shuffle when ``--hf_max_samples_per_split`` is set to avoid biased sampling.
 - Add installation support for Python 3.14. Only basic unit tests are verified for now. Production usage still defaults to Python 3.12. Python 3.10 support will be dropped in the next release.
 
-0.43 (2026-04-16)
-^^^^^^^^^^^^^^^^^
+0.43.0 (2026-04-16)
+^^^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
 
@@ -337,8 +343,8 @@ Changelog
 - Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
 - Enable experimental Python 3.13 wheel support and unit tests in CI/CD.
 
-0.42 (2026-03-10)
-^^^^^^^^^^^^^^^^^
+0.42.0 (2026-03-09)
+^^^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
 
@@ -361,8 +367,8 @@ Changelog
 - Add PTQ support for Nemotron Parse.
 - Add distillation support for LTX-2. See `examples/diffusers/distillation/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation>`_ for more details.
 
-0.41 (2026-01-19)
-^^^^^^^^^^^^^^^^^
+0.41.0 (2026-01-20)
+^^^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
 
@@ -394,8 +400,8 @@ Changelog
 - Add support for some diffusion models' quantization on Windows. Refer `example script <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/torch_onnx/diffusers>`_ for details.
 - Add `Perplexity <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/perplexity_metrics>`_ and `KL-Divergence <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/kl_divergence_metrics>`_ accuracy benchmarks.
 
-0.40 (2025-12-12)
-^^^^^^^^^^^^^^^^^
+0.40.0 (2025-12-12)
+^^^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
 
@@ -425,8 +431,8 @@ Changelog
 - Bump minimum recommended transformers version to 4.53.
 - Replace ONNX simplification package from ``onnxsim`` to ``onnxslim``.
 
-0.39 (2025-11-11)
-^^^^^^^^^^^^^^^^^
+0.39.0 (2025-11-13)
+^^^^^^^^^^^^^^^^^^^
 
 **Deprecations**
 
@@ -454,8 +460,8 @@ Changelog
 - Add general guidelines for Minitron pruning and distillation. See `pruning guidelines <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
 - Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to `examples/llm_qat/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment>`_ for more details
 
-0.37 (2025-10-08)
-^^^^^^^^^^^^^^^^^
+0.37.0 (2025-10-08)
+^^^^^^^^^^^^^^^^^^^
 
 **Deprecations**
 
@@ -473,8 +479,16 @@ Changelog
 - Support storing and restoring Minitron pruning activations and scores for re-pruning without running the forward loop again.
 - Add Minitron pruning example for Megatron-LM framework. See `Megatron-LM/examples/post_training/modelopt <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_ for more details.
 
-0.35 (2025-09-04)
-^^^^^^^^^^^^^^^^^
+0.35.1 (2025-09-20)
+^^^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Import fixes
+
+
+0.35.0 (2025-09-04)
+^^^^^^^^^^^^^^^^^^^
 
 **Deprecations**
 
@@ -501,8 +515,16 @@ Changelog
 - Upgrade TensorRT-LLM dependency to 1.0.0rc6.
 - Add unified HuggingFace model export support for quantized NVFP4 GPT-OSS models.
 
-0.33 (2025-07-14)
-^^^^^^^^^^^^^^^^^
+0.33.1 (2025-08-12)
+^^^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix a Qwen3 MOE model export issue.
+
+
+0.33.0 (2025-07-14)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -519,14 +541,13 @@ Changelog
 - ModelOpt now supports quantization of tensor-parallel sharded Huggingface transformer models. This requires ``transformers>=4.52.0``.
 - Support quantization of FSDP2 wrapped models and add FSDP2 support in the ``llm_qat`` example.
 - Add NeMo 2 Simplified Flow examples for quantization aware training/distillation (QAT/QAD), speculative decoding, pruning & distillation.
-- Fix a Qwen3 MOE model export issue.
 
 **Windows Support**
 
 - Model Optimizer for Windows now supports `NvTensorRtRtx <https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html>`_ execution-provider.
 
-0.31 (2025-06-04)
-^^^^^^^^^^^^^^^^^
+0.31.0 (2025-06-05)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -554,8 +575,8 @@ Changelog
 - Add ``--low_memory_mode`` flag in the llm_ptq example support to initialize HF models with compressed weights and reduce peak memory of PTQ and quantized checkpoint export.
 - Support ``NemotronHForCausalLM``, ``Qwen3ForCausalLM``, ``Qwen3MoeForCausalLM`` Megatron Core model import/export (from/to HuggingFace).
 
-0.29 (2025-05-08)
-^^^^^^^^^^^^^^^^^
+0.29.0 (2025-05-09)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -584,8 +605,16 @@ Changelog
 - Add MXFP8, NVFP4 quantized ONNX export support.
 - Add new example for torch quantization to ONNX for MXFP8, NVFP4 precision.
 
-0.27 (2025-04-03)
-^^^^^^^^^^^^^^^^^
+0.27.1 (2025-04-15)
+^^^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Add experimental quantization support for Llama4, QwQ and Qwen MOE models.
+
+
+0.27.0 (2025-04-03)
+^^^^^^^^^^^^^^^^^^^
 
 **Deprecations**
 
@@ -593,7 +622,7 @@ Changelog
 
 **New Features**
 
-- Add new model support in the ``llm_ptq`` example: OpenAI Whisper. Experimental support: Llama4, QwQ, Qwen MOE.
+- Add new model support in the ``llm_ptq`` example: OpenAI Whisper.
 - Add blockwise FP8 quantization support in unified model export.
 - Add quantization support to the Transformer Engine Linear module.
 - Add support for SVDQuant. Currently, only simulation is available; real deployment (for example, TensorRT deployment) support is coming soon.
@@ -616,8 +645,8 @@ Changelog
 
 - Quantization of T5 models is broken. Please use ``nvidia-modelopt==0.25.0`` with ``transformers<4.50`` meanwhile.
 
-0.25 (2025-03-03)
-^^^^^^^^^^^^^^^^^
+0.25.0 (2025-03-03)
+^^^^^^^^^^^^^^^^^^^
 
 **Deprecations**
 
@@ -638,8 +667,25 @@ Changelog
 - Add `NVFP4 PTQ example for DeepSeek-R1 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/deepseek>`_.
 - Add end-to-end `AutoDeploy example for AutoQuant LLM models <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_autodeploy>`_.
 
-0.23 (2025-01-29)
-^^^^^^^^^^^^^^^^^
+0.23.2 (2025-02-19)
+^^^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix export for Nvidia NeMo models.
+
+
+0.23.1 (2025-02-14)
+^^^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Set ``torch.load(..., weights_only=False)`` where Model Optimizer state is restored since torch 2.6 makes the default value to ``True``.
+- Other minor fixes.
+
+
+0.23.0 (2025-01-29)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -660,8 +706,8 @@ Changelog
 - Exclude modules in TensorRT-LLM export configs are now wildcards
 - The unified llama3.1 FP8 huggingface checkpoints can be deployed on `SGLang <https://github.com/sgl-project/sglang/pull/2535>`_.
 
-0.21 (2024-12-03)
-^^^^^^^^^^^^^^^^^
+0.21.0 (2024-12-03)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -686,8 +732,8 @@ Changelog
 
 - Added deprecation warnings for Python 3.8, torch 2.0, and CUDA 11.x. Support will be dropped in the next release.
 
-0.19 (2024-10-23)
-^^^^^^^^^^^^^^^^^
+0.19.0 (2024-10-23)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -728,8 +774,8 @@ Changelog
 \* *This version includes experimental features such as TensorRT deployment of ONNX INT4 models, PyTorch quantization and sparsity. These are currently unverified on Windows.*
 
 
-0.17 (2024-09-11)
-^^^^^^^^^^^^^^^^^
+0.17.0 (2024-09-11)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -765,8 +811,8 @@ Changelog
   a future release.
 
 
-0.15 (2024-07-25)
-^^^^^^^^^^^^^^^^^
+0.15.0 (2024-07-25)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -799,8 +845,8 @@ Changelog
 - Added deprecation warning for ``torch<2.0``. Support will be dropped in next release.
 
 
-0.13 (2024-06-14)
-^^^^^^^^^^^^^^^^^
+0.13.0 (2024-06-14)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
@@ -818,8 +864,8 @@ Changelog
 - (Experimental) Python 3.12 support added.
 
 
-0.11 (2024-05-07)
-^^^^^^^^^^^^^^^^^
+0.11.0 (2024-05-07)
+^^^^^^^^^^^^^^^^^^^
 
 **Backward Breaking Changes**
 
