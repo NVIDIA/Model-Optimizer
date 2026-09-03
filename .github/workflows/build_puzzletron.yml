@@ -1,0 +1,19 @@
+- name: Build and push Docker images
+  uses: docker/build-push-action@v7.3.0
+
+on:
+  pull_request:
+    branches: [feature/puzzletron_v2]
+  schedule:
+    - cron: "0 0 * * 6" # Nightly on Saturday
+  workflow_dispatch:
+    # On-demand
+
+jobs:
+  build_image:
+    name: Build Puzzletron v2 Docker image
+    steps:
+      - name: Build image
+        run: |
+          echo "TESTING BUILD IMAGE"
+    
