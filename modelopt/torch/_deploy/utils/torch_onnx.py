@@ -59,7 +59,10 @@ from modelopt.onnx.utils import (
     remove_node_training_mode,
     remove_redundant_casts,
 )
-from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
+from modelopt.torch.quantization.export_onnx import (
+    configure_linear_module_onnx_quantizers,
+    get_dynamo_onnx_translation_table,
+)
 from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
@@ -527,11 +530,16 @@ def get_onnx_bytes_and_metadata(
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
-    # Standardize model args and also tensorize them so they also appear in the onnx graph!
-    # Floats/ints are tensorized when they are provided, but not tensorized when they are not
-    # provided which is somewhat inconsistent (we always tensorize them!)
-    named_args, _ = standardize_named_model_args(model, dummy_input)
-    named_args = {k: _to_expected_onnx_type(v) for k, v in named_args.items()}
+    # Standardize model args and pre-convert numeric inputs to ONNX tensor inputs.
+    # Dynamo must preserve signature defaults as Python constants for control-flow specialization.
+    # Legacy export retains its existing tensorization behavior.
+    named_args, args_with_default = standardize_named_model_args(model, dummy_input)
+    named_args = {
+        name: value
+        if dynamo_export and name in args_with_default
+        else _to_expected_onnx_type(value)
+        for name, value in named_args.items()
+    }
 
     # Also standardize dummy_input again so we can use it
     dummy_input = tuple(named_args.values())
@@ -595,7 +603,9 @@ def get_onnx_bytes_and_metadata(
     )
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
-        if not dynamo_export:
+        if dynamo_export:
+            additional_kwargs["custom_translation_table"] = get_dynamo_onnx_translation_table()
+        else:
             additional_kwargs["dynamic_axes"] = dynamic_axes
         torch.onnx.export(
             model,
@@ -636,7 +646,8 @@ def get_onnx_bytes_and_metadata(
 
     if weights_dtype in ["fp16", "bf16"]:
         if (
-            is_int4_quantized(model)
+            (dynamo_export and is_fp4_quantized(model))
+            or is_int4_quantized(model)
             or is_mxfp8_quantized(model)
             or is_fp8_quantized(model)
             or is_int8_quantized(model)

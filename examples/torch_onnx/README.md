@@ -58,7 +58,7 @@ The `torch_quant_to_onnx.py` script quantizes [timm](https://github.com/huggingf
 - Postprocesses the ONNX model to be compatible with TensorRT.
 - Saves the final ONNX model.
 
-> *Opset 20 is used to export the torch models to ONNX.*
+> *The legacy exporter and opset 20 remain the defaults. Dynamo export requires opset 21 or newer.*
 
 ### Usage
 
@@ -68,6 +68,40 @@ python torch_quant_to_onnx.py \
     --quantize_mode=<fp8|mxfp8|int8|nvfp4|int4_awq> \
     --onnx_save_path=<path to save the exported ONNX model>
 ```
+
+Use the torch.export-based ONNX exporter by selecting a compatible opset:
+
+```bash
+python torch_quant_to_onnx.py \
+    --timm_model_name=vit_base_patch16_224 \
+    --quantize_mode=fp8 \
+    --onnx_save_path=vit_base_patch16_224.fp8.onnx \
+    --dynamo_export \
+    --onnx_opset=24
+```
+
+ModelOpt's export helper supplies the custom translations and performs the weight
+postprocessing required by block-quantized formats. Use the helper for these formats.
+Advanced users calling `torch.onnx.export` directly can use the same translations
+for strict export:
+
+```python
+from modelopt.torch.quantization.export_onnx import get_dynamo_onnx_translation_table
+
+exported_program = torch.export.export(model, (sample_input,), strict=True)
+torch.onnx.export(
+    exported_program,
+    (),
+    "model.onnx",
+    dynamo=True,
+    opset_version=24,
+    custom_translation_table=get_dynamo_onnx_translation_table(),
+)
+```
+
+For models whose non-strict Dynamo capture succeeds and which do not require block-weight
+postprocessing, direct `torch.onnx.export(..., dynamo=True, opset_version=24)` is also
+supported. Pass `dynamo=False` to select the legacy TorchScript exporter explicitly.
 
 Quantization configs are loaded from the YAML preset recipes under
 `modelopt_recipes/configs/ptq/presets/model/`, selected by `--quantize_mode`. Pass

@@ -528,6 +528,17 @@ def main():
         help="Build a TensorRT engine from the exported ONNX model using trtexec.",
     )
     parser.add_argument(
+        "--dynamo_export",
+        action="store_true",
+        help="Use the torch.export-based ONNX exporter.",
+    )
+    parser.add_argument(
+        "--onnx_opset",
+        type=int,
+        default=20,
+        help="ONNX opset version. Dynamo quantization export requires opset 21 or newer.",
+    )
+    parser.add_argument(
         "--no_pretrained",
         action="store_true",
         help="Don't load pretrained weights (useful for testing with random weights).",
@@ -546,6 +557,9 @@ def main():
             "--recipe is not supported with --quantize_mode=auto; "
             "use --auto_quantization_formats instead."
         )
+
+    if args.dynamo_export and args.onnx_opset < 21:
+        parser.error("--dynamo_export requires --onnx_opset=21 or newer.")
 
     # Create model and move to appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -650,6 +664,8 @@ def main():
         args.onnx_save_path,
         device,
         weights_dtype="fp16",
+        dynamo_export=args.dynamo_export,
+        onnx_opset=args.onnx_opset,
     )
 
     print(f"Quantized ONNX model is saved to {args.onnx_save_path}")

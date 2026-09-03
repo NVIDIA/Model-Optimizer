@@ -747,7 +747,9 @@ class TensorQuantizer(nn.Module):
             reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(inputs, self._axis)
             amax = quant_utils.reduce_amax(inputs, axis=reduce_axis, keepdims=True).detach()
 
-        amax = amax.detach() if is_torch_export_mode() else amax.data
+        amax = (
+            amax.detach() if is_torch_export_mode() or torch.compiler.is_exporting() else amax.data
+        )
         return amax
 
     def validate_attr(

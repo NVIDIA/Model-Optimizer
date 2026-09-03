@@ -14,6 +14,9 @@
 # limitations under the License.
 
 
+import os
+import tempfile
+
 import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
@@ -75,3 +78,42 @@ def test_torch_onnx_recipe_flag(tmp_path):
         "TRT_FP8QuantizeLinear",
     }
     assert not quantize_ops & {node.op_type for node in onnx.load(onnx_save_path).graph.node}
+
+
+def test_torch_onnx_dynamo_export(tmp_path):
+    timm_model_name, _ = _MODELS["vit_tiny"]
+    model_kwargs = (
+        '{"depth": 1, "img_size": 32, "embed_dim": 32, "num_heads": 1, "mlp_ratio": 1, '
+        '"pretrained_cfg_overlay": {"input_size": [3, 32, 32]}}'
+    )
+    onnx_save_path = tmp_path / "vit_tiny.fp8.dynamo.onnx"
+
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name=timm_model_name,
+        model_kwargs=model_kwargs,
+        quantize_mode="fp8",
+        onnx_save_path=str(onnx_save_path),
+        calibration_data_size="1",
+        onnx_opset="24",
+    )
+    cmd_parts.extend(["--no_pretrained", "--dynamo_export", "--trt_build"])
+    env = os.environ.copy()
+    with tempfile.TemporaryDirectory(prefix="modelopt_torch_extensions_") as extension_dir:
+        env["TORCH_EXTENSIONS_DIR"] = extension_dir
+        run_example_command(cmd_parts, "torch_onnx", env=env)
+
+    model = onnx.load(onnx_save_path)
+    onnx.checker.check_model(model, full_check=True)
+    assert {opset.domain: opset.version for opset in model.opset_import}[""] == 24
+    assert not model.functions
+    node_types = {node.op_type for node in model.graph.node}
+    assert {"QuantizeLinear", "DequantizeLinear"} <= node_types
+    assert all(
+        node.domain not in {"trt", "tensorrt"} and node.op_type != "quantize_op"
+        for node in model.graph.node
+    )
+    assert any(
+        initializer.data_type == onnx.TensorProto.FLOAT8E4M3FN
+        for initializer in model.graph.initializer
+    )

@@ -136,6 +136,7 @@ class FP8QuantExporter(ONNXQuantExporter):
                 # Convert TRT DQ to native ONNX DequantizeLinear with FP8 weights
                 dq_op.inputs[0] = onnx_weights_fp8
                 dq_op.op = "DequantizeLinear"
+                dq_op.domain = ""
                 dq_op.outputs[0].dtype = dq_op.inputs[1].dtype
                 dq_op.outputs[0].shape = list(numpy_weights.shape)
 
@@ -457,6 +458,10 @@ class FP8QuantExporter(ONNXQuantExporter):
         for node in graph.nodes:
             if node.op == "TRT_FP8QuantizeLinear":
                 node.op = "QuantizeLinear"
+                node.domain = ""
+                node.outputs[0].dtype = onnx.helper.tensor_dtype_to_np_dtype(
+                    onnx.TensorProto.FLOAT8E4M3FN
+                )
                 # Add FP8 zero_point if not present
                 if len(node.inputs) == 2:
                     # Create FP8 zero point constant
@@ -475,6 +480,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         for node in graph.nodes:
             if node.op == "TRT_FP8DequantizeLinear":
                 node.op = "DequantizeLinear"
+                node.domain = ""
                 logger.debug(
                     f"Converted {node.name} from TRT_FP8DequantizeLinear to DequantizeLinear"
                 )

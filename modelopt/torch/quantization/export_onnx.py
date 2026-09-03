@@ -103,6 +103,7 @@
 """Utility to export a quantized torch model to quantized ONNX."""
 
 import contextlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import onnx
@@ -111,6 +112,12 @@ from torch.onnx import symbolic_helper
 from torch.onnx import symbolic_helper as sym_help
 
 if TYPE_CHECKING:
+    from onnxscript.function_libs.torch_lib.tensor_typing import (  # noqa: TC004
+        TFloat as _DYNAMO_T_FLOAT,  # noqa: N814
+    )
+    from onnxscript.onnx_types import FLOAT4E2M1 as _DYNAMO_FLOAT4_E2M1  # noqa: TC004
+    from onnxscript.onnx_types import FLOAT8E4M3FN as _DYNAMO_FLOAT8_E4M3FN  # noqa: TC004
+
     if hasattr(torch.onnx._internal, "jit_utils"):
         from torch.onnx._internal.jit_utils import GraphContext
     else:  # torch >= 2.9
@@ -126,7 +133,492 @@ onnx_dtype_map = {
 }
 mha_valid_precisions = {"Half", "BFloat16"}
 
-torch_dtype_map = {"Float": torch.float32, "Half": torch.float16, "BFloat16": torch.bfloat16}
+torch_dtype_map = {
+    "Float": torch.float32,
+    "Half": torch.float16,
+    "BFloat16": torch.bfloat16,
+}
+torch_onnx_dtype_map = {
+    torch.bfloat16: onnx.TensorProto.BFLOAT16,
+    torch.float16: onnx.TensorProto.FLOAT16,
+    torch.float32: onnx.TensorProto.FLOAT,
+    torch.int8: onnx.TensorProto.INT8,
+    torch.uint8: onnx.TensorProto.UINT8,
+}
+
+
+def _dynamo_identity(inputs: torch.Tensor) -> torch.Tensor:
+    """Keep a default-domain opset import in custom-op-only Dynamo graphs."""
+    return torch.onnx.ops.symbolic(
+        "ai.onnx::Identity",
+        (inputs,),
+        dtype=inputs.dtype,
+        shape=inputs.shape,
+        version=21,
+    )
+
+
+def _dynamo_cast(inputs: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    return torch.onnx.ops.symbolic(
+        "ai.onnx::Cast",
+        (inputs,),
+        {"to": torch_onnx_dtype_map[dtype]},
+        dtype=dtype,
+        shape=inputs.shape,
+        version=21,
+    )
+
+
+def _dynamo_shape_with_axis_divided(
+    inputs: torch.Tensor, divisor: int, axis: int = -1
+) -> list[int | torch.SymInt]:
+    shape = list(inputs.shape)
+    shape[axis] = shape[axis] // divisor
+    return shape
+
+
+def export_int8_dynamo(
+    inputs: torch.Tensor,
+    amax: torch.Tensor,
+    num_bits: int,
+    unsigned: bool,
+    narrow_range: bool,
+    trt_high_precision_dtype: str | None,
+) -> torch.Tensor:
+    """Export INT8 Q/DQ with the Dynamo ONNX exporter."""
+    assert num_bits == 8, "Number of bits must be 8 for INT8 ONNX export."
+    maxbound = (1 << (num_bits - 1 + int(unsigned))) - 1
+    output_dtype = (
+        inputs.dtype
+        if trt_high_precision_dtype is None
+        else torch_dtype_map[trt_high_precision_dtype]
+    )
+
+    if amax.numel() == 1:
+        axis = None
+        zero_point = torch.zeros((), dtype=output_dtype, device=amax.device)
+    else:
+        amax_init_shape = amax.shape
+        amax = amax.squeeze().detach()
+        assert len(amax.shape) == 1, "ONNX does not support multi-axis quantization."
+        zero_point = torch.zeros_like(amax, dtype=output_dtype)
+        axis = list(amax_init_shape).index(next(iter(amax.shape)))
+
+    if not unsigned:
+        assert not narrow_range, "ONNX does not support unsigned narrow range INT8."
+    zero_point_dtype = torch.uint8 if unsigned else torch.int8
+    zero_point = _dynamo_cast(zero_point, zero_point_dtype)
+
+    scale = amax.to(output_dtype) / maxbound
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    assert output_dtype in (inputs.dtype, torch.float32, torch.bfloat16), (
+        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
+    )
+
+    if output_dtype != inputs.dtype:
+        inputs = _dynamo_cast(inputs, output_dtype)
+    attrs = {} if axis is None else {"axis": axis}
+    quantized = torch.onnx.ops.symbolic(
+        "ai.onnx::QuantizeLinear",
+        (inputs, scale, zero_point),
+        attrs,
+        dtype=zero_point_dtype,
+        shape=inputs.shape,
+        version=21,
+    )
+    return torch.onnx.ops.symbolic(
+        "ai.onnx::DequantizeLinear",
+        (quantized, scale, zero_point),
+        attrs,
+        dtype=output_dtype,
+        shape=inputs.shape,
+        version=21,
+    )
+
+
+def export_int4_dynamo(
+    inputs: torch.Tensor,
+    amax: torch.Tensor,
+    num_bits: int,
+    trt_high_precision_dtype: str | None,
+    block_size: int,
+    axis: int,
+) -> torch.Tensor:
+    """Export INT4 DQ with the Dynamo ONNX exporter."""
+    assert num_bits == 4, "Number of bits must be 4 for INT4 ONNX export."
+    output_dtype = (
+        inputs.dtype
+        if trt_high_precision_dtype is None
+        else torch_dtype_map[trt_high_precision_dtype]
+    )
+    scale = amax / 7.0
+    return torch.onnx.ops.symbolic(
+        "trt::DequantizeLinear",
+        (inputs, scale),
+        {"axis": axis, "block_size": block_size},
+        dtype=output_dtype,
+        shape=inputs.shape,
+        version=1,
+    )
+
+
+def export_fp8_dynamo(
+    inputs: torch.Tensor,
+    amax: torch.Tensor,
+    trt_high_precision_dtype: str | None,
+) -> torch.Tensor:
+    """Export FP8 Q/DQ with the Dynamo ONNX exporter."""
+    del trt_high_precision_dtype
+    scale = (amax / 448.0).to(inputs.dtype)
+    quantized = torch.onnx.ops.symbolic(
+        "trt::TRT_FP8QuantizeLinear",
+        (inputs, scale),
+        dtype=torch.uint8,
+        shape=inputs.shape,
+        version=1,
+    )
+    return torch.onnx.ops.symbolic(
+        "trt::TRT_FP8DequantizeLinear",
+        (quantized, scale),
+        dtype=inputs.dtype,
+        shape=inputs.shape,
+        version=1,
+    )
+
+
+def export_fp4_dynamo(
+    inputs: torch.Tensor,
+    block_size: int,
+    amax: torch.Tensor | None,
+    num_bits: tuple[int, int],
+    trt_high_precision_dtype: str | None,
+    onnx_quantizer_type: str,
+) -> torch.Tensor:
+    """Export NVFP4 quantization with the Dynamo ONNX exporter."""
+    if onnx_quantizer_type != "dynamic":
+        output = torch.onnx.ops.symbolic(
+            "trt::TRT_FP4QDQ",
+            (inputs,),
+            {"block_size": block_size},
+            dtype=inputs.dtype,
+            shape=inputs.shape,
+            version=1,
+        )
+        return _dynamo_identity(output)
+
+    assert num_bits == (2, 1)
+    output_dtype = (
+        inputs.dtype
+        if trt_high_precision_dtype is None
+        else torch_dtype_map[trt_high_precision_dtype]
+    )
+    if output_dtype != inputs.dtype:
+        inputs = _dynamo_cast(inputs, output_dtype)
+    if amax is None:
+        scale = torch.ones((), dtype=torch.float32, device=inputs.device)
+    else:
+        scale = amax.to(torch.float32) / (6.0 * 448.0)
+        scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+
+    quantized_shape = _dynamo_shape_with_axis_divided(inputs, 2)
+    scale_shape = _dynamo_shape_with_axis_divided(inputs, block_size)
+    dynamic_quantize_args = (
+        "trt::TRT_FP4DynamicQuantize",
+        (inputs, scale),
+        {
+            "axis": -1,
+            "block_size": block_size,
+            "scale_type": onnx.TensorProto.FLOAT8E4M3FN,
+        },
+    )
+    try:
+        quantized, dynamic_scale = torch.onnx.ops.symbolic_multi_out(
+            *dynamic_quantize_args,
+            dtypes=(torch.float4_e2m1fn_x2, torch.float8_e4m3fn),
+            shapes=(quantized_shape, scale_shape),
+            version=1,
+        )
+    except RuntimeError as e:
+        if "Unsupported dtype: torch.float4_e2m1fn_x2" not in str(e):
+            raise
+        quantized, dynamic_scale = torch.onnx.ops.symbolic_multi_out(
+            *dynamic_quantize_args,
+            dtypes=(onnx.TensorProto.FLOAT4E2M1, torch.float8_e4m3fn),
+            shapes=(inputs.shape, scale_shape),
+            version=1,
+        )
+    dequantized_scale = torch.onnx.ops.symbolic(
+        "ai.onnx::DequantizeLinear",
+        (dynamic_scale, scale),
+        dtype=torch.float32,
+        shape=scale_shape,
+        version=21,
+    )
+    dequantized = torch.onnx.ops.symbolic(
+        "trt::DequantizeLinear",
+        (quantized, dequantized_scale),
+        {"axis": -1, "block_size": block_size},
+        dtype=torch.float32,
+        shape=inputs.shape,
+        version=1,
+    )
+    return dequantized if output_dtype == torch.float32 else _dynamo_cast(dequantized, output_dtype)
+
+
+def export_mxfp8_dynamo(
+    inputs: torch.Tensor,
+    onnx_quantizer_type: str,
+    block_size: int,
+) -> torch.Tensor:
+    """Export MXFP8 quantization with the Dynamo ONNX exporter."""
+    if onnx_quantizer_type == "dynamic":
+        scale_shape = _dynamo_shape_with_axis_divided(inputs, block_size)
+        quantized, scale = torch.onnx.ops.symbolic_multi_out(
+            "trt::TRT_MXFP8DynamicQuantize",
+            (inputs,),
+            {
+                "axis": -1,
+                "block_size": block_size,
+                "output_dtype": onnx.TensorProto.FLOAT8E4M3FN,
+            },
+            dtypes=(torch.float8_e4m3fn, torch.uint8),
+            shapes=(inputs.shape, scale_shape),
+            version=1,
+        )
+    else:
+        quantized = inputs
+        scale = torch.ones((), dtype=inputs.dtype, device=inputs.device)
+
+    output = torch.onnx.ops.symbolic(
+        "trt::TRT_MXFP8DequantizeLinear",
+        (quantized, scale),
+        {
+            "axis": -1,
+            "block_size": block_size,
+            "output_dtype": torch_onnx_dtype_map[inputs.dtype],
+        },
+        dtype=inputs.dtype,
+        shape=inputs.shape,
+        version=1,
+    )
+    return _dynamo_identity(output)
+
+
+def get_dynamo_onnx_translation_table() -> dict[Callable, Callable]:
+    """Return ModelOpt custom-op translations for the Dynamo ONNX exporter."""
+    import onnxscript
+    from onnxscript.function_libs.torch_lib.tensor_typing import TFloat
+    from onnxscript.onnx_types import FLOAT4E2M1, FLOAT8E4M3FN
+
+    # ONNXScript resolves annotations from module globals while compiling nested functions.
+    globals().update(
+        {
+            "_DYNAMO_FLOAT4_E2M1": FLOAT4E2M1[...],
+            "_DYNAMO_FLOAT8_E4M3FN": FLOAT8E4M3FN[...],
+            "_DYNAMO_T_FLOAT": TFloat,
+        }
+    )
+    op = onnxscript.opset21
+    trt = onnxscript.values.Opset(domain="trt", version=1)
+
+    @onnxscript.script(trt)
+    def _fp8_qdq(inputs: _DYNAMO_T_FLOAT, scale: _DYNAMO_T_FLOAT) -> _DYNAMO_T_FLOAT:
+        quantized = trt.TRT_FP8QuantizeLinear(inputs, scale)
+        return trt.TRT_FP8DequantizeLinear(quantized, scale)
+
+    @onnxscript.script(trt)
+    def _int4_dq(
+        inputs: _DYNAMO_T_FLOAT, scale: _DYNAMO_T_FLOAT, axis: int, block_size: int
+    ) -> _DYNAMO_T_FLOAT:
+        return trt.DequantizeLinear(inputs, scale, axis=axis, block_size=block_size)
+
+    @onnxscript.script(trt)
+    def _fp4_qdq(inputs: _DYNAMO_T_FLOAT, block_size: int) -> _DYNAMO_T_FLOAT:
+        return trt.TRT_FP4QDQ(inputs, block_size=block_size)
+
+    @onnxscript.script(trt)
+    def _fp4_dynamic_quantize(
+        inputs: _DYNAMO_T_FLOAT,
+        scale: _DYNAMO_T_FLOAT,
+        block_size: int,
+    ) -> tuple[_DYNAMO_FLOAT4_E2M1, _DYNAMO_FLOAT8_E4M3FN]:
+        quantized, dynamic_scale = trt.TRT_FP4DynamicQuantize(
+            inputs,
+            scale,
+            axis=-1,
+            block_size=block_size,
+            scale_type=17,
+        )
+        return quantized, dynamic_scale
+
+    @onnxscript.script(trt)
+    def _fp4_dq(
+        inputs: _DYNAMO_FLOAT4_E2M1,
+        scale: _DYNAMO_T_FLOAT,
+        block_size: int,
+    ) -> _DYNAMO_T_FLOAT:
+        return trt.DequantizeLinear(inputs, scale, axis=-1, block_size=block_size)
+
+    @onnxscript.script(trt)
+    def _mxfp8_dynamic_qdq(
+        inputs: _DYNAMO_T_FLOAT, block_size: int, output_dtype: int
+    ) -> _DYNAMO_T_FLOAT:
+        quantized, scale = trt.TRT_MXFP8DynamicQuantize(
+            inputs,
+            axis=-1,
+            block_size=block_size,
+            output_dtype=17,
+        )
+        return trt.TRT_MXFP8DequantizeLinear(
+            quantized,
+            scale,
+            axis=-1,
+            block_size=block_size,
+            output_dtype=output_dtype,
+        )
+
+    @onnxscript.script(trt)
+    def _mxfp8_static_dq(
+        inputs: _DYNAMO_T_FLOAT,
+        scale: _DYNAMO_T_FLOAT,
+        block_size: int,
+        output_dtype: int,
+    ) -> _DYNAMO_T_FLOAT:
+        return trt.TRT_MXFP8DequantizeLinear(
+            inputs,
+            scale,
+            axis=-1,
+            block_size=block_size,
+            output_dtype=output_dtype,
+        )
+
+    def _cast(inputs, dtype: int):
+        return inputs if int(inputs.dtype) == dtype else op.Cast(inputs, to=dtype)
+
+    def _resolve_dtype(inputs, trt_high_precision_dtype: str | None) -> int:
+        if trt_high_precision_dtype is None:
+            return int(inputs.dtype)
+        return onnx_dtype_map[trt_high_precision_dtype]
+
+    def _quantize_op_translation(
+        inputs,
+        amax,
+        num_bits: int,
+        exponent_bits: int,
+        unsigned: bool,
+        narrow_range: bool,
+        trt_high_precision_dtype: str = None,  # noqa: RUF013
+        block_size: int = None,  # noqa: RUF013
+        axis: int = None,  # noqa: RUF013
+    ):
+        if num_bits == 8 and exponent_bits == 4:
+            scale = op.CastLike(op.Div(amax, 448.0), inputs)
+            return _fp8_qdq(inputs, scale)
+
+        output_dtype = _resolve_dtype(inputs, trt_high_precision_dtype)
+        if num_bits == 8 and exponent_bits == 0:
+            if not unsigned:
+                assert not narrow_range, "ONNX does not support unsigned narrow range INT8."
+            assert output_dtype in (
+                int(inputs.dtype),
+                onnx.TensorProto.FLOAT,
+                onnx.TensorProto.BFLOAT16,
+            ), (
+                "TRT StronglyType requires both weights and amax to be in the BF16/FP16, "
+                "or the QDQ in Float."
+            )
+            inputs = _cast(inputs, output_dtype)
+            amax = op.Squeeze(op.Cast(amax, to=output_dtype))
+            scale = op.Div(amax, float((1 << (7 + int(unsigned))) - 1))
+            scale = op.Where(op.Equal(scale, 0.0), op.CastLike(1.0, scale), scale)
+            zero_point_dtype = onnx.TensorProto.UINT8 if unsigned else onnx.TensorProto.INT8
+            zero_point = op.Cast(op.Mul(amax, 0.0), to=zero_point_dtype)
+            if axis is None:
+                quantized = op.QuantizeLinear(inputs, scale, zero_point)
+                return op.DequantizeLinear(quantized, scale, zero_point)
+            quantized = op.QuantizeLinear(inputs, scale, zero_point, axis=axis)
+            return op.DequantizeLinear(quantized, scale, zero_point, axis=axis)
+
+        if num_bits == 4 and exponent_bits == 0:
+            assert block_size is not None and axis is not None, (
+                "INT4 ONNX export requires block_size and axis."
+            )
+            input_dtype = int(inputs.dtype)
+            scale = op.Div(op.Cast(amax, to=output_dtype), 7.0)
+            output = _int4_dq(inputs, scale, axis, block_size)
+            return output if input_dtype == output_dtype else op.Cast(output, to=output_dtype)
+
+        raise NotImplementedError(
+            f"Unsupported num_bits: {num_bits} and exponent_bits: {exponent_bits} for ONNX export."
+        )
+
+    def _dynamic_block_quantize_op_translation(
+        inputs,
+        block_size: int,
+        amax,
+        num_bits: int,
+        exponent_bits: int,
+        scale_num_bits: int,
+        scale_exponent_bits: int,
+        trt_high_precision_dtype: str = None,  # noqa: RUF013
+        onnx_quantizer_type: str = None,  # noqa: RUF013
+    ):
+        if (num_bits, exponent_bits, scale_num_bits, scale_exponent_bits) == (
+            4,
+            2,
+            8,
+            4,
+        ):
+            if onnx_quantizer_type != "dynamic":
+                return op.Identity(_fp4_qdq(inputs, block_size))
+            output_dtype = _resolve_dtype(inputs, trt_high_precision_dtype)
+            inputs = _cast(inputs, output_dtype)
+            if amax is None:
+                scale = op.Constant(value_float=1.0)
+            else:
+                scale = op.Div(op.Cast(amax, to=onnx.TensorProto.FLOAT), 2688.0)
+                scale = op.Where(op.Equal(scale, 0.0), op.CastLike(1.0, scale), scale)
+            quantized, dynamic_scale = _fp4_dynamic_quantize(inputs, scale, block_size)
+            quantized.dtype = onnxscript.ir.DataType.FLOAT4E2M1
+            dynamic_scale.dtype = onnxscript.ir.DataType.FLOAT8E4M3FN
+            dequantized_scale = op.DequantizeLinear(dynamic_scale, scale)
+            output = _fp4_dq(quantized, dequantized_scale, block_size)
+            return (
+                output
+                if output_dtype == onnx.TensorProto.FLOAT
+                else op.Cast(output, to=output_dtype)
+            )
+
+        if (num_bits, exponent_bits, scale_num_bits, scale_exponent_bits) == (
+            8,
+            4,
+            9,
+            8,
+        ):
+            output_dtype = int(inputs.dtype)
+            if onnx_quantizer_type == "dynamic":
+                output = _mxfp8_dynamic_qdq(inputs, block_size, output_dtype)
+            else:
+                scale = op.CastLike(1.0, inputs)
+                output = _mxfp8_static_dq(inputs, scale, block_size, output_dtype)
+            return op.Identity(output)
+
+        raise NotImplementedError(
+            f"Unsupported num_bits: ({exponent_bits}, {num_bits - exponent_bits - 1}) "
+            "and scale_bits: "
+            f"({scale_exponent_bits}, {scale_num_bits - scale_exponent_bits - 1}) "
+            "for ONNX export."
+        )
+
+    return {
+        torch.ops.tensorrt.quantize_op.default: _quantize_op_translation,
+        torch.ops.tensorrt.dynamic_block_quantize_op.default: (
+            _dynamic_block_quantize_op_translation
+        ),
+        torch.ops.tensorrt.dynamic_block_quantize_op.overload: (
+            _dynamic_block_quantize_op_translation
+        ),
+    }
 
 
 def export_int8(
@@ -206,7 +698,11 @@ def export_int4(
     if trt_high_precision_dtype is None:
         trt_high_precision_dtype = otype
     return g.op(
-        "trt::DequantizeLinear", inputs, scale_inv_op, axis_i=axis, block_size_i=block_size
+        "trt::DequantizeLinear",
+        inputs,
+        scale_inv_op,
+        axis_i=axis,
+        block_size_i=block_size,
     ).setType(
         inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
     )

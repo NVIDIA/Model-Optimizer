@@ -70,11 +70,40 @@ To verify that the quantizer nodes are placed correctly in the model, let's prin
     mtq.print_quant_summary(model)
 
 
-After PTQ, the model can be exported to ONNX with the normal PyTorch ONNX export flow.
+After PTQ, models whose non-strict Dynamo capture succeeds can be exported directly
+to ONNX without a translation table using ONNX opset 21 or newer.
 
 .. code-block:: python
 
-    torch.onnx.export(model, sample_input, onnx_file)
+    torch.onnx.export(
+        model,
+        (sample_input,),
+        onnx_file,
+        dynamo=True,
+        opset_version=24,
+    )
+
+For strict capture, provide ModelOpt's custom translations.
+
+.. code-block:: python
+
+    from modelopt.torch.quantization.export_onnx import get_dynamo_onnx_translation_table
+
+    exported_program = torch.export.export(model, (sample_input,), strict=True)
+    torch.onnx.export(
+        exported_program,
+        (),
+        onnx_file,
+        dynamo=True,
+        opset_version=24,
+        custom_translation_table=get_dynamo_onnx_translation_table(),
+    )
+
+Use the ``get_onnx_bytes_and_metadata(..., dynamo_export=True, onnx_opset=24)``
+helper for block-quantized formats because it adds this table automatically and
+performs the required weight postprocessing. The ``examples/torch_onnx`` workflow
+demonstrates this complete path. The legacy TorchScript exporter remains available
+with ``dynamo=False``.
 
 ModelOpt also supports direct export of Huggingface or Megatron-Bridge/Megatron-LM LLM models to TensorRT-LLM for deployment.
 Please see :doc:`TensorRT-LLM Deployment <../deployment/1_tensorrt_llm>` for more details.

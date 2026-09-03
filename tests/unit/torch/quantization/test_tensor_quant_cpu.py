@@ -31,10 +31,70 @@ from modelopt.torch.quantization.nn import (
     register_quant_backend,
     unregister_quant_backend,
 )
+from modelopt.torch.quantization.tensor_quant import fake_tensor_quant
 
 
 class TestFakeTensorQuantCPU(FakeTensorQuantTester):
     device = "cpu"
+
+
+class _ExportedINT8(torch.nn.Module):
+    def __init__(self, unsigned=False, axis=None):
+        super().__init__()
+        self.unsigned = unsigned
+        self.axis = axis
+
+    def forward(self, inputs, amax):
+        return fake_tensor_quant(
+            inputs,
+            amax,
+            None,
+            8,
+            self.unsigned,
+            True,
+            None,
+            False,
+            None,
+            self.axis,
+        )
+
+
+@pytest.mark.parametrize(
+    ("amax", "axis", "unsigned"),
+    [
+        pytest.param(torch.tensor(2.0), None, False, id="scalar-signed"),
+        pytest.param(torch.tensor([[2.0], [1.0]]), 0, False, id="per-channel-signed"),
+        pytest.param(torch.tensor(2.0), None, True, id="scalar-unsigned"),
+    ],
+)
+def test_strict_exported_program_int8_cpu_matches_eager(amax, axis, unsigned):
+    inputs = torch.tensor([[-2.0, -0.4, 0.2, 1.7], [-0.8, -0.1, 0.3, 0.9]])
+    if unsigned:
+        inputs = inputs.abs()
+    model = _ExportedINT8(unsigned, axis)
+    expected = model(inputs, amax)
+
+    exported_program = torch.export.export(model, (inputs, amax), strict=True)
+
+    assert any(
+        node.target == torch.ops.tensorrt.quantize_op.default
+        for node in exported_program.graph.nodes
+    )
+    torch.testing.assert_close(exported_program.module()(inputs, amax), expected, rtol=0, atol=0)
+
+
+def test_strict_exported_program_int8_cpu_preserves_errors():
+    inputs = torch.ones(2, 4)
+    amax = torch.tensor(2.0)
+    unsigned_program = torch.export.export(
+        _ExportedINT8(unsigned=True), (inputs, amax), strict=True
+    )
+    signed_program = torch.export.export(_ExportedINT8(), (inputs, amax), strict=True)
+
+    with pytest.raises(TypeError, match="Negative values encountered in unsigned quantization"):
+        unsigned_program.module()(-inputs, amax)
+    with pytest.raises(ValueError, match="Negative values in amax"):
+        signed_program.module()(inputs, -amax)
 
 
 class TestQuantizerAttributeConfig:

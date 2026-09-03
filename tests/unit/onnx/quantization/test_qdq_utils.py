@@ -19,7 +19,7 @@ import numpy as np
 import onnx_graphsurgeon as gs
 import onnxruntime as ort
 import pytest
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, checker, helper, numpy_helper
 
 from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
 from modelopt.onnx.export.nvfp4_exporter import _cast_fp4
@@ -65,7 +65,13 @@ def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool
     # Create nodes
     dq_inputs = ["weight", "Constant_output_0"] if constant_scale else ["weight", "scale"]
     dq_node = helper.make_node(
-        "DequantizeLinear", inputs=dq_inputs, outputs=["dq_output"], name="weight_dq"
+        "DequantizeLinear",
+        inputs=dq_inputs,
+        outputs=["dq_output"],
+        name="weight_dq",
+        domain="trt",
+        axis=0,
+        block_size=8,
     )
 
     reshape_constant = helper.make_node(
@@ -122,6 +128,171 @@ def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool
     )
 
     model = helper.make_model(graph)
+    return model
+
+
+def create_test_model_with_shared_int4_weight():
+    weight = numpy_helper.from_array(np.ones((4, 4), dtype=np.float32), "weight")
+    scale = numpy_helper.from_array(np.full((4, 1), 2.0, dtype=np.float32), "scale")
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [2, 4])
+    nodes = []
+    outputs = []
+    value_info = []
+    for index in range(2):
+        dq_output = f"dq_output_{index}"
+        output = f"output_{index}"
+        nodes.extend(
+            [
+                helper.make_node(
+                    "DequantizeLinear",
+                    ["weight", "scale"],
+                    [dq_output],
+                    name=f"weight_dq_{index}",
+                    domain="trt",
+                    axis=1,
+                    block_size=4,
+                ),
+                helper.make_node("MatMul", ["input", dq_output], [output], name=f"matmul_{index}"),
+            ]
+        )
+        outputs.append(helper.make_tensor_value_info(output, TensorProto.FLOAT, [2, 4]))
+        value_info.append(helper.make_tensor_value_info(dq_output, TensorProto.FLOAT, [4, 4]))
+
+    graph = helper.make_graph(
+        nodes,
+        "shared_int4_weight",
+        [input_tensor],
+        outputs,
+        [weight, scale],
+        value_info=value_info,
+    )
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("trt", 1)],
+    )
+
+
+def create_test_model_with_pre_reshape_only_int4_weight():
+    weight = numpy_helper.from_array(np.ones((2, 8), dtype=np.float32), "weight")
+    blocked_shape = numpy_helper.from_array(np.array([-1, 4], dtype=np.int64), "val_3")
+    scale = numpy_helper.from_array(np.full((4, 1), 2.0, dtype=np.float32), "scale")
+    nodes = [
+        helper.make_node("Reshape", ["weight", "val_3"], ["view"], name="weight_view"),
+        helper.make_node(
+            "DequantizeLinear",
+            ["view", "scale"],
+            ["dq_output"],
+            name="weight_dq",
+            domain="trt",
+            axis=0,
+            block_size=4,
+        ),
+        helper.make_node("MatMul", ["input", "dq_output"], ["output"], name="matmul"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "pre_reshape_only_int4_weight",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [2, 4])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 4])],
+        [weight, blocked_shape, scale],
+        value_info=[
+            helper.make_tensor_value_info("view", TensorProto.FLOAT, [4, 4]),
+            helper.make_tensor_value_info("dq_output", TensorProto.FLOAT, [4, 4]),
+        ],
+    )
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("trt", 1)],
+    )
+
+
+def create_test_model_with_pre_and_post_reshape_int4_weight():
+    weight = numpy_helper.from_array(np.ones((4, 8), dtype=np.float32), "weight")
+    blocked_shape = numpy_helper.from_array(np.array([8, 4], dtype=np.int64), "blocked_shape")
+    target_shape = numpy_helper.from_array(np.array([4, 8], dtype=np.int64), "target_shape")
+    scale = numpy_helper.from_array(np.full((8, 1), 2.0, dtype=np.float32), "scale")
+    nodes = [
+        helper.make_node("Reshape", ["weight", "blocked_shape"], ["view"], name="weight_view"),
+        helper.make_node(
+            "DequantizeLinear",
+            ["view", "scale"],
+            ["blocked_dq_output"],
+            name="weight_dq",
+            domain="trt",
+            axis=0,
+            block_size=4,
+        ),
+        helper.make_node(
+            "Reshape",
+            ["blocked_dq_output", "target_shape"],
+            ["dq_output"],
+            name="weight_target_view",
+        ),
+        helper.make_node("MatMul", ["input", "dq_output"], ["output"], name="matmul"),
+    ]
+    graph = helper.make_graph(
+        nodes,
+        "pre_and_post_reshape_int4_weight",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [2, 4])],
+        [helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 8])],
+        [weight, blocked_shape, target_shape, scale],
+        value_info=[
+            helper.make_tensor_value_info("view", TensorProto.FLOAT, [8, 4]),
+            helper.make_tensor_value_info("scale", TensorProto.FLOAT, [8, 1]),
+            helper.make_tensor_value_info("blocked_dq_output", TensorProto.FLOAT, [8, 4]),
+            helper.make_tensor_value_info("dq_output", TensorProto.FLOAT, [4, 8]),
+        ],
+    )
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("trt", 1)],
+    )
+
+
+def create_test_model_with_int4_and_dynamic_nvfp4():
+    model = create_test_model_with_pre_reshape_only_int4_weight()
+    graph = model.graph
+    graph.input.append(helper.make_tensor_value_info("nvfp4_input", TensorProto.FLOAT, [2, 16]))
+    graph.output.append(helper.make_tensor_value_info("nvfp4_output", TensorProto.FLOAT, [2, 16]))
+    graph.initializer.append(
+        numpy_helper.from_array(np.array(1.0, dtype=np.float32), "global_scale")
+    )
+    graph.value_info.extend(
+        [
+            helper.make_tensor_value_info("fp4_quantized", TensorProto.FLOAT4E2M1, [2, 16]),
+            helper.make_tensor_value_info("dynamic_scale", TensorProto.FLOAT8E4M3FN, [2, 1]),
+            helper.make_tensor_value_info("dequantized_scale", TensorProto.FLOAT, [2, 1]),
+        ]
+    )
+    graph.node.extend(
+        [
+            helper.make_node(
+                "TRT_FP4DynamicQuantize",
+                ["nvfp4_input", "global_scale"],
+                ["fp4_quantized", "dynamic_scale"],
+                name="dynamic_nvfp4_quantize",
+                domain="trt",
+                axis=-1,
+                block_size=16,
+                scale_type=TensorProto.FLOAT8E4M3FN,
+            ),
+            helper.make_node(
+                "DequantizeLinear",
+                ["dynamic_scale", "global_scale"],
+                ["dequantized_scale"],
+                name="dynamic_nvfp4_scale_dq",
+            ),
+            helper.make_node(
+                "DequantizeLinear",
+                ["fp4_quantized", "dequantized_scale"],
+                ["nvfp4_output"],
+                name="dynamic_nvfp4_dq",
+                domain="trt",
+                axis=-1,
+                block_size=16,
+            ),
+        ]
+    )
     return model
 
 
@@ -254,6 +425,55 @@ def create_test_model_with_mxfp8_dq():
 
     model = helper.make_model(graph)
     return model
+
+
+def create_test_model_with_shared_mxfp8_weight(num_paths: int):
+    weight_data = np.linspace(-1.0, 1.0, num=32 * 64, dtype=np.float32).reshape(32, 64)
+    weight = numpy_helper.from_array(weight_data, "weight")
+    scale_data = np.array(1.0, dtype=np.float32)
+    scale = helper.make_node(
+        "Constant",
+        [],
+        ["mx_scale"],
+        name="scale_constant",
+        value=numpy_helper.from_array(scale_data),
+    )
+    nodes = [scale]
+    outputs = []
+    value_info = []
+    for index in range(num_paths):
+        dq_output = f"dq_output_{index}"
+        output = f"output_{index}"
+        nodes.extend(
+            [
+                helper.make_node(
+                    "TRT_MXFP8DequantizeLinear",
+                    ["weight", "mx_scale"],
+                    [dq_output],
+                    name=f"weight_dq_{index}",
+                    domain="trt",
+                    axis=-1,
+                    block_size=32,
+                    output_dtype=TensorProto.FLOAT,
+                ),
+                helper.make_node("MatMul", ["input", dq_output], [output], name=f"matmul_{index}"),
+            ]
+        )
+        outputs.append(helper.make_tensor_value_info(output, TensorProto.FLOAT, [4, 64]))
+        value_info.append(helper.make_tensor_value_info(dq_output, TensorProto.FLOAT, [32, 64]))
+
+    graph = helper.make_graph(
+        nodes,
+        "shared_mxfp8_weight",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [4, 32])],
+        outputs,
+        [weight],
+        value_info=value_info,
+    )
+    return helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 21), helper.make_opsetid("trt", 1)],
+    )
 
 
 def create_test_model_with_nvfp4_qdq(with_transpose: bool = False):
@@ -409,6 +629,73 @@ class TestQuantizeWeightsToInt4:
         )
         assert scale_tensor.data_type == TensorProto.FLOAT16
 
+    def test_shared_weight_and_scale_are_processed_independently(self):
+        model = INT4QuantExporter.pre_process(create_test_model_with_shared_int4_weight())
+        dq_nodes = [node for node in model.graph.node if node.domain == "trt"]
+
+        assert len({node.input[0] for node in dq_nodes}) == 2
+        assert len({node.input[1] for node in dq_nodes}) == 2
+
+        model = INT4QuantExporter.compute_scales(model)
+        initializers = {initializer.name: initializer for initializer in model.graph.initializer}
+        for node in dq_nodes:
+            np.testing.assert_array_equal(
+                numpy_helper.to_array(initializers[node.input[0]]),
+                np.full((4, 4), 0.5, dtype=np.float32),
+            )
+
+        model = INT4QuantExporter.compress_weights(model)
+        model = INT4QuantExporter.post_process(model)
+        checker.check_model(model)
+
+    def test_pre_reshape_only_uses_blocked_weight_shape(self):
+        model = INT4QuantExporter.process_model(
+            create_test_model_with_pre_reshape_only_int4_weight()
+        )
+        dq_node = next(node for node in model.graph.node if node.domain == "trt")
+        initializers = {initializer.name: initializer for initializer in model.graph.initializer}
+
+        assert list(initializers[dq_node.input[0]].dims) == [4, 4]
+        assert list(initializers[dq_node.input[1]].dims) == [4, 1]
+        assert initializers[dq_node.input[0]].data_type == TensorProto.INT4
+        axis = next(attribute.i for attribute in dq_node.attribute if attribute.name == "axis")
+        assert axis == 1
+        assert not any(node.op_type == "Reshape" for node in model.graph.node)
+        matmul = next(node for node in model.graph.node if node.op_type == "MatMul")
+        assert matmul.input[1] == dq_node.output[0]
+        checker.check_model(model)
+
+    def test_pre_and_post_reshape_syncs_scale_metadata(self):
+        model = INT4QuantExporter.process_model(
+            create_test_model_with_pre_and_post_reshape_int4_weight()
+        )
+        dq_node = next(node for node in model.graph.node if node.domain == "trt")
+        scale = next(
+            initializer
+            for initializer in model.graph.initializer
+            if initializer.name == dq_node.input[1]
+        )
+        scale_info = next(
+            value_info for value_info in model.graph.value_info if value_info.name == scale.name
+        )
+
+        assert list(scale.dims) == [4, 2]
+        assert scale_info.type.tensor_type.elem_type == scale.data_type == TensorProto.FLOAT
+        assert [dim.dim_value for dim in scale_info.type.tensor_type.shape.dim] == [4, 2]
+        checker.check_model(model, full_check=True)
+
+    def test_dynamic_nvfp4_dq_is_not_processed_as_int4(self):
+        model = INT4QuantExporter.process_model(create_test_model_with_int4_and_dynamic_nvfp4())
+        initializers = {initializer.name: initializer for initializer in model.graph.initializer}
+        int4_dq = next(node for node in model.graph.node if node.name == "weight_dq")
+        nvfp4_dq = next(node for node in model.graph.node if node.name == "dynamic_nvfp4_dq")
+
+        assert initializers[int4_dq.input[0]].data_type == TensorProto.INT4
+        assert nvfp4_dq.input[0] == "fp4_quantized"
+        assert nvfp4_dq.domain == "trt"
+        assert not any(attribute.name.startswith("_") for attribute in nvfp4_dq.attribute)
+        checker.check_model(model, full_check=True)
+
 
 class TestCastFunctions:
     """Test suite for _cast_fp8 and _cast_fp4 functions."""
@@ -486,6 +773,68 @@ class TestCastFunctions:
 
 class TestMXFP8QuantExporter:
     """Test suite for MXFP8QuantExporter."""
+
+    def test_weight_detection_uses_initializer_membership(self):
+        model = create_test_model_with_mxfp8_dq()
+        weight = next(init for init in model.graph.initializer if init.name == "linear.weight")
+        weight_name = "p_linear_weight"
+        weight.name = weight_name
+        dq_node = next(
+            node for node in model.graph.node if node.op_type == "TRT_MXFP8DequantizeLinear"
+        )
+        dq_node.input[0] = weight_name
+
+        quantized_model = MXFP8QuantExporter.process_model(model)
+
+        weight = next(
+            init for init in quantized_model.graph.initializer if init.name == weight_name
+        )
+        assert weight.data_type == TensorProto.FLOAT8E4M3FN
+
+    def test_shared_weight_and_scale_match_single_path(self):
+        baseline = create_test_model_with_shared_mxfp8_weight(1)
+        baseline.graph.value_info.append(
+            helper.make_tensor_value_info("mx_scale", TensorProto.FLOAT, [])
+        )
+        baseline = MXFP8QuantExporter.process_model(baseline)
+        shared = MXFP8QuantExporter.process_model(create_test_model_with_shared_mxfp8_weight(2))
+        baseline_dq = next(
+            node for node in baseline.graph.node if node.op_type == "TRT_MXFP8DequantizeLinear"
+        )
+        shared_dq_nodes = [
+            node for node in shared.graph.node if node.op_type == "TRT_MXFP8DequantizeLinear"
+        ]
+        baseline_initializers = {
+            initializer.name: initializer for initializer in baseline.graph.initializer
+        }
+        shared_initializers = {
+            initializer.name: initializer for initializer in shared.graph.initializer
+        }
+        baseline_weight = baseline_initializers[baseline_dq.input[0]]
+        baseline_scale = baseline_initializers[baseline_dq.input[1]]
+        baseline_scale_info = next(
+            value_info
+            for value_info in baseline.graph.value_info
+            if value_info.name == baseline_scale.name
+        )
+
+        assert len({node.input[0] for node in shared_dq_nodes}) == 2
+        assert len({node.input[1] for node in shared_dq_nodes}) == 2
+        assert baseline_scale_info.type.tensor_type.elem_type == TensorProto.UINT8
+        assert [dim.dim_value for dim in baseline_scale_info.type.tensor_type.shape.dim] == [32, 2]
+        for node in shared_dq_nodes:
+            weight = shared_initializers[node.input[0]]
+            scale = shared_initializers[node.input[1]]
+            assert weight.data_type == baseline_weight.data_type == TensorProto.FLOAT8E4M3FN
+            assert weight.dims == baseline_weight.dims
+            assert weight.raw_data == baseline_weight.raw_data
+            np.testing.assert_array_equal(
+                numpy_helper.to_array(scale), numpy_helper.to_array(baseline_scale)
+            )
+
+        assert not any(node.op_type == "Constant" for node in shared.graph.node)
+        checker.check_model(baseline, full_check=True)
+        checker.check_model(shared, full_check=True)
 
     def test_basic_mxfp8_quantization(self):
         """Test basic MXFP8 quantization with TRT_MXFP8DequantizeLinear nodes."""
@@ -603,6 +952,7 @@ class TestFP4QDQTo2DQ:
     def test_fp4qdq_conversion(self, with_transpose):
         """Test FP4QDQ to 2DQ conversion with and without Transpose node."""
         model = create_test_model_with_nvfp4_qdq(with_transpose=with_transpose)
+        model.opset_import[0].version = 21
 
         # Run FP4QDQ to 2DQ conversion
         converted_model = NVFP4QuantExporter.process_model(model)
@@ -616,6 +966,19 @@ class TestFP4QDQTo2DQ:
             node for node in converted_model.graph.node if node.op_type == "DequantizeLinear"
         ]
         assert len(dq_nodes) == 2
+        scale_dq = next(node for node in dq_nodes if len(node.attribute) == 0)
+        weight_dq = next(
+            node
+            for node in dq_nodes
+            if any(attribute.name == "block_size" for attribute in node.attribute)
+        )
+        assert scale_dq.domain == ""
+        assert weight_dq.domain == "trt"
+        assert {opset.domain: opset.version for opset in converted_model.opset_import} == {
+            "": 21,
+            "trt": 1,
+        }
+        checker.check_model(converted_model, full_check=True)
 
         # Verify new initializers are created
         initializer_names = {init.name for init in converted_model.graph.initializer}
