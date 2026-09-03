@@ -222,6 +222,23 @@ def train():
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             checkpoint, trust_remote_code=recipe.model.trust_remote_code
         )
+        # This branch does NOT call mtsp.convert(), so HFDFlashModel.modify() -- which is
+        # where dflash_fp32_master_weights installs the fp32 master copy -- never runs on
+        # resume. Combined with dtype="auto" reading bfloat16 out of the checkpoint config,
+        # a run that trained with fp32 master weights silently continues in pure bf16.
+        #
+        # That is not a small difference: bf16 spacing at a weight of 1.0 is 0.0039, an
+        # update must clear 0.00195 to round anywhere, and the largest step Adam can take
+        # is the learning rate -- so once the decayed lr falls below ~2e-3 every RMSNorm
+        # weight is frozen. The run keeps going and the loss keeps falling; only the norms
+        # stop learning, which is why this was invisible for two full runs.
+        if isinstance(recipe, ModelOptDFlashRecipe) and recipe.dflash.dflash_fp32_master_weights:
+            model.dflash_fp32_master_weights = True
+            model.dflash_module.float()
+            print_rank_0(
+                "Resume: reapplied fp32 master weights to the draft "
+                f"({sum(1 for _ in model.dflash_module.parameters())} params)"
+            )
     else:
         if checkpoint:
             print_rank_0(
