@@ -1,0 +1,26 @@
+name: Build and push Docker images for Puzzletron
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # branches: [feature/puzzletron_v2]
+  schedule:
+    - cron: "0 0 * * 6" # Nightly on Saturday
+  workflow_dispatch:
+    # On-demand
+
+jobs:
+  build_image:
+    name: Build Puzzletron v2 Docker image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - name: Build image
+        # uses: docker/build-push-action@v7.3.0
+        uses: actions/checkout@v6
+        run: |
+          echo "BUILDING IMAGE"
+          docker build . -f examples/puzzletron/Dockerfile
+
