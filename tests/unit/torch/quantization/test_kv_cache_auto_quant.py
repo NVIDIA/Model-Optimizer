@@ -22,11 +22,9 @@ from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
-from modelopt.torch.opt.searcher import BaseSearcher
 from modelopt.torch.quantization import model_quant, tensor_quant
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
-    AutoQuantizeKVSearcher,
     _candidate_quantizers,
     _eligible_layers,
     _kv_scalar_weight,
@@ -112,10 +110,6 @@ def test_kv_candidate_requires_exact_bits_and_both_sides():
                 effective_bits=8.0,
             )
         )
-
-
-def test_kv_autoquant_uses_shared_searcher_lifecycle():
-    assert issubclass(AutoQuantizeKVSearcher, BaseSearcher)
 
 
 @pytest.mark.parametrize("algorithm", ["svdquant", {"method": "smoothquant"}, {"method": "mse"}])
@@ -369,7 +363,9 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
 
     resolved_config = mtq.get_auto_quantize_config(state, {"effective_bits": 4.5})
     assert resolved_config["algorithm"] == "max"
+    assert resolved_config["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
     assert {entry["quantizer_name"] for entry in resolved_config["quant_cfg"]} == {
+        "*",
         "attn0.k_bmm_quantizer",
         "attn0.v_bmm_quantizer",
         "attn1.k_bmm_quantizer",
@@ -412,7 +408,12 @@ def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quan
     for layer in (model.attn0, model.attn1):
         assert layer.k_bmm_quantizer.num_bits == (4, 3)
         assert layer.v_bmm_quantizer.num_bits == (2, 1)
-    assert get_quant_config(model)["quantization"]["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
+    exported = get_quant_config(model)["quantization"]
+    assert exported["quant_algo"] == "MIXED_PRECISION"
+    assert exported["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert {layer["quant_algo"] for layer in exported["kv_cache_quantized_layers"].values()} == {
+        "FP8_K_NVFP4_V"
+    }
 
 
 def test_kv_autoquant_rejects_asymmetric_candidate_for_unequal_kv_widths(
@@ -576,6 +577,26 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_
         if layer.self_attn.k_bmm_quantizer.num_bits == (4, 3)
     )
 
+    replay_config = mtq.get_auto_quantize_config(state)
+    replay_model = get_tiny_llama(num_hidden_layers=2)
+    replay_model = mtq.quantize(
+        replay_model,
+        replay_config,
+        lambda quantized_model: quantized_model(**data[0]),
+    )
+    assert all(
+        layer.self_attn.k_bmm_quantizer.is_enabled and layer.self_attn.v_bmm_quantizer.is_enabled
+        for layer in replay_model.model.layers
+    )
+    replay_non_kv_quantizers = [
+        quantizer
+        for name, quantizer in replay_model.named_modules()
+        if isinstance(quantizer, TensorQuantizer)
+        and not name.endswith(("k_bmm_quantizer", "v_bmm_quantizer"))
+    ]
+    assert replay_non_kv_quantizers
+    assert all(not quantizer.is_enabled for quantizer in replay_non_kv_quantizers)
+
 
 @pytest.mark.parametrize(
     ("model_factory", "expected_layer", "disabled_layers"),
@@ -611,10 +632,10 @@ def test_public_kv_autoquant_selects_qwen_causal_attention_only(
     report = model._modelopt_kv_cache_auto_quantize_state
     assert json.loads(json.dumps(report))["layers"][expected_layer]["selected"] == "fp8"
     exported = get_quant_config(model)["quantization"]
-    if "kv_cache_quantized_layers" in exported:
-        assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
-    else:
-        assert exported["kv_cache_quant_algo"] == "FP8"
+    assert exported["quant_algo"] == "MIXED_PRECISION"
+    assert exported["quantized_layers"] == {}
+    assert exported["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
 
 
 def test_public_kv_autoquant_validation_and_runtime_failures_are_atomic():

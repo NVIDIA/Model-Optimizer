@@ -25,6 +25,7 @@ from _test_utils.torch.export.utils import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
     KV_CACHE_FP8,
@@ -36,6 +37,13 @@ from modelopt.torch.export.model_config import (
 )
 from modelopt.torch.export.quant_utils import get_quant_config, postprocess_state_dict
 from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+
+
+class _FakeAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.k_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
 
 
 @pytest.mark.parametrize(
@@ -97,6 +105,96 @@ def test_projection_output_quantizers_are_not_exported_as_kv_cache():
     assert quantization["quant_algo"] == "FP8"
     assert quantization["kv_cache_quant_algo"] is None
     assert "kv_cache_quantized_layers" not in quantization
+
+
+def test_uniform_vlm_export_ignores_disabled_vision_attention():
+    model = ToyModel()
+    weight_config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(
+        model,
+        weight_config,
+        lambda quantized_model: quantized_model(torch.randn(1, 4, 10)),
+    )
+    model.language_model = torch.nn.Module()
+    model.language_model.attention = _FakeAttention()
+    model.vision_attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*[kv]_bmm_quantizer", "enable": False},
+            {
+                "quantizer_name": "language_model.*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
+    assert "kv_cache_quantized_layers" not in quantization
+
+
+@pytest.mark.parametrize(
+    ("quantizer_cfg", "expected_format"),
+    [
+        ({"num_bits": (4, 3), "constant_amax": 1.0}, "FP8"),
+        (
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "constant_amax": 1.0,
+            },
+            "NVFP4",
+        ),
+    ],
+)
+def test_uniform_kv_only_export_retains_per_layer_mixed_envelope(quantizer_cfg, expected_format):
+    model = torch.nn.Module()
+    model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": quantizer_cfg,
+                "enable": True,
+            },
+        ],
+    )
+
+    hf_quant_config = get_quant_config(model)
+    quantization = hf_quant_config["quantization"]
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quantized_layers"] == {}
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quantized_layers"] == {
+        "attention": {"quant_algo": expected_format}
+    }
+
+    converted = convert_hf_quant_config_format(hf_quant_config)
+    assert converted["quant_algo"] == "MIXED_PRECISION"
+    assert converted["quantized_layers"] == {}
+    assert converted["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert converted["kv_cache_quantized_layers"] == {"attention": {"quant_algo": expected_format}}
 
 
 def test_mixed_kv_cache_quantization_exports_per_layer_map():

@@ -71,9 +71,14 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import TiedWeightMap
+from .model_utils import TiedWeightMap, get_language_model_from_vl
 
 logger = logging.getLogger(__name__)
+
+
+def _has_large_cpu_fp8_scale(value: torch.Tensor) -> bool:
+    """Return the warning predicate without synchronizing CUDA tensors."""
+    return value.device.type == "cpu" and bool(torch.any(value > 0.5))
 
 
 def get_scaling_factor_from_weight(weight, group_size) -> torch.tensor:
@@ -402,9 +407,9 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
         factor = scaling_factors[i]
         if factor is None:
             continue
-        if factor.item() > 0.5:
+        if _has_large_cpu_fp8_scale(factor):
             warn(
-                f"Warning: Large KV activation detected: {factor.item()}, "
+                "Warning: Large KV activation detected. "
                 "Quantized KV cache may lead to higher accuracy drop."
             )
         scaling_factors[i] = torch.max(
@@ -1075,7 +1080,7 @@ def _postprocess_single_tensor(
                 ], "Invalid KV cache quantization format."
                 assert kv_cache_max_bound > 0, "Maxbound must be greater than zero."
                 value = value.float() / kv_cache_max_bound
-                if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                if layer_quantization == KV_CACHE_FP8 and _has_large_cpu_fp8_scale(value):
                     logger.warning(
                         "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                     )
@@ -1178,7 +1183,7 @@ def postprocess_state_dict(
                     value = value.float() / maxbound
 
                     # Warn if scale exceeds threshold
-                    if layer_quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                    if layer_quantization == KV_CACHE_FP8 and _has_large_cpu_fp8_scale(value):
                         logger.warning(
                             "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
@@ -1691,6 +1696,12 @@ def get_quant_config(
     kv_cache_formats: set[str] = set()
     kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
     kv_cache_eligible_layers = 0
+    language_model_lineage = get_language_model_from_vl(model)
+    language_model_modules = (
+        None
+        if language_model_lineage is None
+        else {id(module) for module in language_model_lineage[-1].modules()}
+    )
     for name, module in dict(model.named_modules()).items():
         # Check for standard quantizers or any quantizers from weight attributes
         weight_names = list(weight_attr_names(module))
@@ -1748,7 +1759,10 @@ def get_quant_config(
             hasattr(module, quantizer_name)
             for quantizer_name in ("k_bmm_quantizer", "v_bmm_quantizer")
         )
-        if has_kv_quantizers:
+        is_language_model_module = (
+            language_model_modules is None or id(module) in language_model_modules
+        )
+        if has_kv_quantizers and is_language_model_module:
             kv_cache_eligible_layers += 1
             if module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled:
                 module_kv_quant = get_kv_cache_dtype(module)
@@ -1770,10 +1784,18 @@ def get_quant_config(
     all_kv_layers_quantized = (
         kv_cache_eligible_layers > 0 and len(kv_cache_quantized_layers) == kv_cache_eligible_layers
     )
-    if len(kv_cache_formats) == 1 and all_kv_layers_quantized:
+    weight_quant_algo = quant_config["quantization"].get("quant_algo")
+    if weight_quant_algo is None and kv_cache_quantized_layers:
+        # A standalone KV recipe still needs a top-level algorithm for ModelOpt consumers.
+        # Keep the complete layer map even when every layer selected the same KV format.
+        quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
+        quant_config["quantization"].setdefault("quantized_layers", {})
+        quant_config["quantization"]["kv_cache_quant_algo"] = "MIXED_PRECISION"
+        quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
+        quant_config["quantization"]["kv_cache_schema_version"] = 1
+    elif len(kv_cache_formats) == 1 and all_kv_layers_quantized:
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
     elif kv_cache_quantized_layers:
-        weight_quant_algo = quant_config["quantization"].get("quant_algo")
         if weight_quant_algo not in (None, "MIXED_PRECISION"):
             raise NotImplementedError(
                 "Mixed-precision KV-cache export with a uniform quantized-weight format is "

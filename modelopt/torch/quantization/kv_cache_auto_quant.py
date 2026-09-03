@@ -764,7 +764,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
 
         self.layers = {}
         for hparam in self._hparams:
-            scores = {}
+            layer_score_sums = []
             for candidate_name in candidate_names:
                 score_sum = score_sums[hparam.name][candidate_name]
                 if score_sum is None:
@@ -772,12 +772,16 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                         "KV-cache AutoQuant did not collect a score for "
                         f"{hparam.name!r}/{candidate_name!r}."
                     )
-                if not torch.isfinite(score_sum):
+                layer_score_sums.append(score_sum)
+            layer_scores = (torch.stack(layer_score_sums) / scored_tokens).tolist()
+            scores = {}
+            for candidate_name, score in zip(candidate_names, layer_scores):
+                if not math.isfinite(score):
                     raise ValueError(
                         "KV-cache AutoQuant produced a non-finite KL score for "
                         f"{hparam.name!r}/{candidate_name!r}."
                     )
-                scores[candidate_name] = float(score_sum.item()) / scored_tokens
+                scores[candidate_name] = score
             self.layers[hparam.name] = {
                 "k_width": hparam.k_width,
                 "v_width": hparam.v_width,
@@ -893,7 +897,7 @@ def get_kv_cache_auto_quantize_config(
         verbose,
     )
 
-    quant_cfg: list[dict[str, Any]] = []
+    quant_cfg: list[dict[str, Any]] = [{"quantizer_name": "*", "enable": False}]
     for layer_name, selected in zip(layer_names, selections):
         config = QuantizeConfig(**candidates[selected]["config"])
         for entry in config.quant_cfg:
