@@ -65,6 +65,7 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+    _initialize_grouped_weight_quantizer_state_for_restore,
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
@@ -1121,6 +1122,35 @@ def _assert_te_grouped_weight_amax(model, expected_amax):
                 assert torch.equal(
                     leaf._amax, torch.full_like(leaf._amax, expected_amax[local_expert_idx])
                 )
+
+
+def test_initialize_grouped_weight_quantizer_state_for_restore():
+    """Missing grouped state inherits the shape and dtype of a populated sibling."""
+    source = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(
+        mtq.nn.TensorQuantizer(amax=torch.tensor([1.0, 2.0])), global_amax=torch.tensor(2.0)
+    )
+    target = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled = mtq.nn.StaticBlockScaleQuantizer.from_tensor_quantizer(mtq.nn.TensorQuantizer())
+    disabled.disable()
+    mx = mtq.nn.TensorQuantizer(
+        mtq.config.QuantizerAttributeConfig(
+            num_bits=(4, 3), block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)}
+        )
+    )
+
+    model = torch.nn.Module()
+    model.weight = torch.nn.Parameter(torch.empty(1))
+    model.num_gemms = 4
+    model.weight_quantizer = torch.nn.ModuleList([source, target, disabled, mx])
+
+    _initialize_grouped_weight_quantizer_state_for_restore(model)
+
+    assert torch.equal(target.amax, torch.zeros_like(source.amax))
+    assert torch.equal(target.global_amax, torch.zeros_like(source.global_amax))
+    assert disabled.amax is None
+    assert disabled.global_amax is None
+    assert mx.amax is None
+    assert not hasattr(mx, "_amax")
 
 
 def _test_te_grouped_sharded_state_dict_reshard_helper(

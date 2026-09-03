@@ -183,8 +183,8 @@ def _load_extra_state_from_sharded_checkpoint(
             module.set_extra_state(extra_state_dict_no_prefix[key])
 
 
-def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
-    """Create deterministic amax placeholders for TE grouped experts absent on the save rank."""
+def _initialize_grouped_weight_quantizer_state_for_restore(model: torch.nn.Module) -> None:
+    """Create deterministic quantizer-state placeholders for TE grouped experts."""
     for module in model.modules():
         if not hasattr(module, "num_gemms") or not hasattr(module, "weight_quantizer"):
             continue
@@ -195,7 +195,14 @@ def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
             quantizer = module.weight_quantizer[gemm_idx]
             quantizers = quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
             for quantizer_idx, tensor_quantizer in enumerate(quantizers):
-                if tensor_quantizer.amax is None:
+                if not tensor_quantizer.is_enabled or tensor_quantizer.is_mx_format:
+                    continue
+                for state_name in ("amax", "global_amax"):
+                    if (
+                        not hasattr(tensor_quantizer, state_name)
+                        or getattr(tensor_quantizer, state_name) is not None
+                    ):
+                        continue
                     for sibling_gemm_idx in range(module.num_gemms):
                         sibling_quantizer = module.weight_quantizer[sibling_gemm_idx]
                         sibling_quantizers = (
@@ -205,10 +212,15 @@ def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
                         )
                         if quantizer_idx >= len(sibling_quantizers):
                             continue
-                        sibling_amax = sibling_quantizers[quantizer_idx].amax
-                        if sibling_amax is not None:
-                            tensor_quantizer.amax = torch.zeros_like(
-                                sibling_amax, device=reference_tensor.device
+                        sibling_quantizer = sibling_quantizers[quantizer_idx]
+                        if not sibling_quantizer.is_enabled or sibling_quantizer.is_mx_format:
+                            continue
+                        sibling_state = getattr(sibling_quantizer, state_name, None)
+                        if sibling_state is not None:
+                            setattr(
+                                tensor_quantizer,
+                                state_name,
+                                torch.zeros_like(sibling_state, device=reference_tensor.device),
                             )
                             break
 
@@ -268,4 +280,4 @@ def restore_sharded_modelopt_state(
     model[0] = mto.restore_from_modelopt_state(model[0], common_modelopt_state)
 
     _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)
-    _initialize_grouped_weight_amax_for_restore(model[0])
+    _initialize_grouped_weight_quantizer_state_for_restore(model[0])
