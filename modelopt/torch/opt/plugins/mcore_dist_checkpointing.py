@@ -184,7 +184,7 @@ def _load_extra_state_from_sharded_checkpoint(
 
 
 def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
-    """Create scalar amax placeholders for TE grouped experts absent on the save rank."""
+    """Create deterministic amax placeholders for TE grouped experts absent on the save rank."""
     for module in model.modules():
         if not hasattr(module, "num_gemms") or not hasattr(module, "weight_quantizer"):
             continue
@@ -194,11 +194,23 @@ def _initialize_grouped_weight_amax_for_restore(model: torch.nn.Module) -> None:
         for gemm_idx in range(module.num_gemms):
             quantizer = module.weight_quantizer[gemm_idx]
             quantizers = quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
-            for tensor_quantizer in quantizers:
+            for quantizer_idx, tensor_quantizer in enumerate(quantizers):
                 if tensor_quantizer.amax is None:
-                    tensor_quantizer.amax = torch.empty(
-                        1, device=reference_tensor.device, dtype=reference_tensor.dtype
-                    )
+                    for sibling_gemm_idx in range(module.num_gemms):
+                        sibling_quantizer = module.weight_quantizer[sibling_gemm_idx]
+                        sibling_quantizers = (
+                            sibling_quantizer
+                            if isinstance(sibling_quantizer, torch.nn.Sequential)
+                            else [sibling_quantizer]
+                        )
+                        if quantizer_idx >= len(sibling_quantizers):
+                            continue
+                        sibling_amax = sibling_quantizers[quantizer_idx].amax
+                        if sibling_amax is not None:
+                            tensor_quantizer.amax = torch.zeros_like(
+                                sibling_amax, device=reference_tensor.device
+                            )
+                            break
 
 
 def restore_sharded_modelopt_state(
