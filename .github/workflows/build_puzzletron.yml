@@ -3,7 +3,8 @@
 
 on:
   pull_request:
-    branches: [feature/puzzletron_v2]
+    types: [opened, synchronize, reopened]
+    # branches: [feature/puzzletron_v2]
   schedule:
     - cron: "0 0 * * 6" # Nightly on Saturday
   workflow_dispatch:
