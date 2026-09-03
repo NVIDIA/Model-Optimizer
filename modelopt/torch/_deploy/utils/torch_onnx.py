@@ -527,8 +527,9 @@ def get_onnx_bytes_and_metadata(
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
-    first_parameter = next(model.parameters(), None)
-    source_weights_dtype = first_parameter.dtype if first_parameter is not None else torch.float32
+    source_parameter_dtypes = {
+        parameter.dtype for parameter in model.parameters() if parameter.is_floating_point()
+    }
 
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
     # Floats/ints are tensorized when they are provided, but not tensorized when they are not
@@ -643,7 +644,7 @@ def get_onnx_bytes_and_metadata(
     )
     is_bf16_fp8_noop = (
         weights_dtype == "bf16"
-        and source_weights_dtype == torch.bfloat16
+        and source_parameter_dtypes == {torch.bfloat16}
         and uses_fp8
         and not uses_other_unsupported_quantizer
     )
