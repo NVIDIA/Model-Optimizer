@@ -58,6 +58,15 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         isinstance(recipe_path, Path) and recipe_path.is_absolute()
     ):
         rp_str = str(recipe_path)
+        # Backward-compat alias: checkpoint-mirror recipes moved from the old
+        # ``huggingface/models/<org>/<model_id>/`` layout to the top-level ``models/``
+        # tier. A source checkout also keeps a ``huggingface/models`` -> ``../models``
+        # symlink, but symlinks don't survive into built wheels, so rewrite the old
+        # prefix here too — that keeps saved ``--recipe huggingface/models/...`` paths
+        # working for pip-installed users, not just source checkouts.
+        _bc_prefix = "huggingface/models/"
+        if rp_str.replace("\\", "/").startswith(_bc_prefix):
+            rp_str = "models/" + rp_str.replace("\\", "/")[len(_bc_prefix) :]
         suffixes = [""] if rp_str.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
         for suffix in suffixes:
             candidate = BUILTIN_RECIPES_LIB.joinpath(rp_str + suffix)

@@ -36,6 +36,10 @@ from megatron.core.extensions.transformer_engine import (
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
+from megatron.core.models.hybrid.hybrid_layer_specs import (
+    hybrid_stack_spec as _te_hybrid_stack_spec,
+)
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.tensor_parallel.layers import (
@@ -68,65 +72,30 @@ from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
 from ..traced_hp import TracedHp
 
-SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
+# Megatron-LM instantiates Nemotron-H et al. as HybridModel; the deprecated MambaModel subclass
+# shares its forward, so DMRegistry resolves those instances to this registration as well.
+SUPPORTED_MODELS = {
+    GPTModel: "megatron.core.models.gpt.GPTModel",
+    HybridModel: "megatron.core.models.hybrid.HybridModel",
+}
 
 try:
     import mamba_ssm  # noqa: F401
-    from megatron.core.models.mamba import MambaModel
-    from megatron.core.models.mamba.mamba_layer_specs import (
-        mamba_stack_spec as _te_mamba_stack_spec,
-    )
     from megatron.core.ssm.mamba_layer import MambaLayer
     from megatron.core.ssm.mamba_mixer import ExtendedRMSNorm, MambaMixer
-
-    SUPPORTED_MODELS[MambaModel] = "megatron.core.models.mamba.MambaModel"
 
     HAS_MAMBA = True
 except ImportError:
     HAS_MAMBA = False
 
-# Newer Megatron-LM instantiates Nemotron-H et al. as plain HybridModel (MambaModel split
-# out as a subclass). Register HybridModel so the dynamic-space converter sees them.
-# DMRegistry._get_registered_nn_class filters by `nn_cls.forward is nn_cls_.forward` and
-# returns the first match in insertion order: MambaModel is registered first, so
-# MambaModel instances dispatch to MambaModel whether or not MambaModel overrides forward.
-try:
-    from megatron.core.models.hybrid.hybrid_layer_specs import (
-        hybrid_stack_spec as _te_hybrid_stack_spec,
-    )
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
-
-    SUPPORTED_MODELS[HybridModel] = "megatron.core.models.hybrid.HybridModel"
-
-    HAS_HYBRID = True
-except ImportError:
-    HAS_HYBRID = False
-
 # Attention module types that _DynamicTransformerLayer converts.
 _ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
 
-__all__ = ["get_te_hybrid_stack_spec", "get_te_mamba_stack_spec"]
-
-
-def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
-    """[Deprecated] Return the TE Mamba stack spec."""
-    assert HAS_MAMBA
-    if moe_grouped_gemm:
-        return _te_mamba_stack_spec
-
-    # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
-    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
-    te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
-    # num_experts needs to be non-zero
-    te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
-        use_te=True, num_experts=8, moe_grouped_gemm=False
-    )
-    return te_mamba_stack_spec
+__all__ = ["get_te_hybrid_stack_spec"]
 
 
 def get_te_hybrid_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
     """Return the TE Hybrid stack spec."""
-    assert HAS_HYBRID
     if moe_grouped_gemm:
         return _te_hybrid_stack_spec
 
@@ -1204,11 +1173,9 @@ class _MambaContextParallelProxy:
             return mixer.d_inner
         if name in ("nheads_local_tp", "nheads_local_tpcp"):
             return mixer.nheads
-        if name == "conv1d_cp1":  # nemo:26.06 and earlier: conv is a module
-            return mixer.conv1d
-        if name == "conv1d_weight_cp1":  # nemo:26.08+: raw conv parameters (dynamically sliced)
+        if name == "conv1d_weight_cp1":
             return mixer.conv1d_weight
-        if name == "conv1d_bias_cp1":  # nemo:26.08+
+        if name == "conv1d_bias_cp1":
             return mixer.conv1d_bias
         if name == "dt_bias_cp1":
             return mixer.dt_bias
@@ -1275,19 +1242,12 @@ class _DynamicMambaMixer(DynamicModule):
         DMRegistry.convert(self.in_proj, input_size=hidden_size, output_size=in_proj_output_size)
 
         conv_dim = build_concat_hp([d_inner, bc])  # z, B, C
-        if hasattr(self, "conv1d"):  # nemo:26.06 and earlier: a depthwise `nn.Conv1d` module.
-            DMRegistry.convert(self.conv1d)
-            self.conv1d.in_channels = conv_dim
-            self.conv1d.out_channels = conv_dim
-            ks = self.conv1d.get_hparam("kernel_size")
-            ks.choices = [ks.original]
-        else:  # nemo:26.08+: the conv is stored as raw parameters
 
-            def _slice_conv(mod, val, _hp=conv_dim):
-                return get_sliced_tensor_by_slices(val, [_hp.active_slice])
+        def _slice_conv(mod, val, _hp=conv_dim):
+            return get_sliced_tensor_by_slices(val, [_hp.active_slice])
 
-            self._register_dynamic_attribute("conv1d_weight", _slice_conv)  # [conv_dim, 1, d_conv]
-            self._register_dynamic_attribute("conv1d_bias", _slice_conv)  # [conv_dim]
+        self._register_dynamic_attribute("conv1d_weight", _slice_conv)  # [conv_dim, 1, d_conv]
+        self._register_dynamic_attribute("conv1d_bias", _slice_conv)  # [conv_dim]
 
         if self.rmsnorm:
             DMRegistry.convert(self.norm)
@@ -1312,8 +1272,6 @@ class _DynamicMambaMixer(DynamicModule):
         """Export the dynamic module to a torch.nn.Module."""
         self.in_proj.export()
         self.out_proj.export()
-        if hasattr(self, "conv1d"):  # nemo:26.06 and earlier
-            self.conv1d.export()
         if self.rmsnorm:
             self.norm.export()
         return super().export()
@@ -1362,10 +1320,10 @@ if HAS_MAMBA:
     )
 
 
-# GPTModel / MambaModel DynamicModule ##############################################################
+# GPTModel / HybridModel DynamicModule ##############################################################
 @DMRegistry.register(SUPPORTED_MODELS)
 class _DynamicMCoreLanguageModel(DynamicModule):
-    """A GPTModel / MambaModel with dynamic hyperparams."""
+    """A GPTModel / HybridModel with dynamic hyperparams."""
 
     def _setup(self):
         assert self.config.tensor_model_parallel_size == 1, "Only TP=1 is supported."
@@ -1394,7 +1352,7 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             DMRegistry.convert(self.decoder.layers[i], hidden_size=hidden_size)
 
         if is_pipeline_last_stage():
-            # NOTE: GPTModel has final_layernorm, MambaModel has final_norm
+            # NOTE: GPTModel has final_layernorm, HybridModel has final_norm
             DMRegistry.convert(
                 getattr(
                     self.decoder,

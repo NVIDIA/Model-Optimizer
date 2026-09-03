@@ -70,10 +70,10 @@ repos:
         exclude: ^modelopt_recipes/configs/
 
       - id: sync-claude-skills
-        name: sync .claude/skills/ symlinks from .agents/skills/
+        name: sync .claude/skills/ symlinks from plugin skills
         entry: bash tools/precommit/sync_claude_skills.sh
         language: system
-        files: ^\.agents/skills/
+        files: ^plugins/modelopt/skills/
         pass_filenames: false
 
       - id: check-launcher-yaml

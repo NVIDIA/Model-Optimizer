@@ -65,6 +65,9 @@ and conciseness.
   Prefer making the code self-explanatory first. Use comments only for non-obvious
   intent or constraints that remain unclear from the code. Apply this guidance to new
   comments only; do not rewrite or delete existing comments just for style.
+  Keep comments to one or two lines. Keep docstrings to a one-line summary with optionally a short
+  description plus only the `Args:`/`Returns:` entries whose meaning isn't obvious from the signature.
+  Benchmark numbers and root-cause analysis belong in the PR description, not the source.
 - **Document public APIs.** Public and higher-level APIs should have docstrings, including examples when useful.
   Internal helpers should usually be self-documenting through clear names and structure.
 - **Fix the bug cause, not the side effect.** For bug fixes, find the root cause instead of patching for its side effect.
@@ -163,12 +166,21 @@ nox -s "unit-3.12(torch_211, tf_latest)"
 
 ### Test design principles
 
+- **Prefer the highest-level test that runs the real code path.** Choose an end-to-end test over a mock-heavy one
+  whenever the real path can run in CI. If the behavior needs a GPU or a framework (Megatron-Core, TensorRT-LLM,
+  vLLM), put the real test in the matching `tests/gpu*` directory rather than approximating it with monkeypatched
+  CPU tests in `tests/unit`. Monkeypatching is for isolating what you genuinely cannot run — network, absent
+  hardware, nondeterminism — not for avoiding the setup cost of the real path. One test that runs the real code
+  beats five that assert on mocks.
 - **Develop with focused tests.** During development, write as many focused tests as needed, including lower-level
-  unit tests or internal probes, to understand and harden behavior.
+  unit tests or internal probes, to understand and harden behavior. These are scaffolding; most should not be
+  checked in.
 - **Curate production tests and keep them lean.** Before staging or committing, decide which tests should be checked
   in. Checked-in tests should document expected behavior, protect against regressions, or flag backward-incompatible
   behavior changes. Remove redundant lower-level tests when a higher-level test already covers the same behavior,
-  keeping CI/CD fast and lean.
+  keeping CI/CD fast and lean. Default to one test per behavior: use `@pytest.mark.parametrize` instead of
+  near-duplicate test functions, and don't add a per-branch test for a helper that a higher-level test already
+  exercises. More tests is not better coverage — every checked-in test is CI time and maintenance forever.
 - **Exercise the behavior a test claims to validate.** Mocks are useful for focused interface and wiring coverage, but
   replacing the implementation under test does not validate its real behavior. Include an end-to-end test that runs
   the actual implementation whenever the test claims backend or runtime behavior. For example, a test of
@@ -180,8 +192,8 @@ nox -s "unit-3.12(torch_211, tf_latest)"
   e.g. the `create_tiny_*` helpers and `get_tiny_tokenizer()` in `tests/_test_utils/`, or a small on-disk dataset
   directory written with `datasets.Dataset.from_dict(...).to_parquet(...)`.
 - **Respect the per-test timeout.** `tests/conftest.py` applies a default per-test call timeout by directory; override a
-  single slow test with `@pytest.mark.timeout(<seconds>)`, and register any new top-level `tests/<group>/` in that
-  mapping (collection errors until you do).
+  single slow test with `@pytest.mark.timeout(<seconds>)` if absolutely necessary, and register any new top-level
+  `tests/<group>/` in that mapping (collection errors until you do).
 
 ## ✍️ Signing your work
 

@@ -669,7 +669,7 @@ def _awq_layerwise_config() -> dict:
     for entry in cfg["quant_cfg"]:
         if entry.get("quantizer_name") == "*weight_quantizer":
             entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
-    cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 0.5, "layerwise": True}
+    cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 0.5, "layerwise": {"enable": True}}
     return cfg
 
 
@@ -679,12 +679,12 @@ def _svdquant_layerwise_config() -> dict:
     for entry in cfg["quant_cfg"]:
         if entry.get("quantizer_name") == "*weight_quantizer":
             entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, "type": "static"}
-    cfg["algorithm"] = {"method": "svdquant", "lowrank": 4, "layerwise": True}
+    cfg["algorithm"] = {"method": "svdquant", "lowrank": 4, "layerwise": {"enable": True}}
     return cfg
 
 
 def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
-    """End-to-end: mtq.quantize with layerwise=True produces populated amax values.
+    """End-to-end: mtq.quantize with layerwise enabled produces populated amax values.
 
     ``max`` is the representative algorithm for the layerwise happy path because
     every other algorithm seeds amax via max_calibrate first — if max works, the
@@ -693,7 +693,7 @@ def test_mtq_quantize_layerwise_e2e_max(monkeypatch):
     CUDA) or unnecessary duplication.
     """
     _register_test_discoverer(monkeypatch)
-    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": True})
+    config = _int8_cfg_with_algorithm({"method": "max", "layerwise": {"enable": True}})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=3, dim=16)
@@ -747,7 +747,7 @@ def test_mtq_quantize_layerwise_dispatches_for_algorithm(monkeypatch, algorithm)
     if algorithm == "awq_lite":
         config = _awq_layerwise_config()
     else:
-        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": True})
+        config = _int8_cfg_with_algorithm({"method": algorithm, "layerwise": {"enable": True}})
 
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)

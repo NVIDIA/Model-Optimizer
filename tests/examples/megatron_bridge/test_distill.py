@@ -12,8 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for prune_minitron.py and distill.py scripts."""
+"""Tests for distill.py and export_distilled_megatron_to_hf.py scripts."""
 
+import argparse
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,12 +32,19 @@ from transformers import AutoModelForImageTextToText
 
 from modelopt.torch.puzzletron.anymodel import convert_model
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "examples" / "megatron_bridge"))
 
-def test_distill_llm(tmp_path, num_gpus):
+from export_distilled_megatron_to_hf import _get_checkpoint_export_paths
+
+
+@pytest.mark.timeout(360)  # distill + inline HF export + export of every iteration
+def test_distill_llm_hf_export(tmp_path, num_gpus):
+    """Distill with an inline HF export, then re-export every saved iteration standalone."""
     teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
     train_iters = 2
     distill_output_dir = tmp_path / "distill_output"
     distilled_hf_path = tmp_path / "distilled_hf"
+    all_exports = tmp_path / "all_exports"
     distill_cmd_parts = extend_cmd_parts(
         ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
         student_hf_path=teacher_hf_path,
@@ -47,15 +57,67 @@ def test_distill_llm(tmp_path, num_gpus):
         gbs=4,
         train_iters=train_iters,
         lr_warmup_iters=1,
-        eval_interval=train_iters,
+        eval_interval=1,  # save_interval defaults to it, so every iteration is checkpointed
         eval_iters=1,
         log_interval=1,
+        checkpoint_keep_last=-1,
         hf_export_path=distilled_hf_path,
     )
     run_example_command(distill_cmd_parts, example_path="megatron_bridge")
 
-    assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
+    checkpoint_root = distill_output_dir / "checkpoints"
+    assert (checkpoint_root / f"iter_{train_iters:07d}").exists()
     assert (distilled_hf_path / "config.json").exists()
+
+    # export_distilled_megatron_to_hf.py converts any saved iteration, not just the final one.
+    all_export_cmd_parts = extend_cmd_parts(
+        ["torchrun", "--nproc_per_node=1", "export_distilled_megatron_to_hf.py"],
+        student_hf_path=teacher_hf_path,
+        megatron_path=checkpoint_root,
+        hf_export_path=all_exports,
+        export_iterations="all",
+    )
+    run_example_command(all_export_cmd_parts, example_path="megatron_bridge")
+
+    for it in range(1, train_iters + 1):
+        assert (all_exports / f"iter_{it:07d}/config.json").exists()
+
+
+def test_distill_llm_sft(tmp_path, num_gpus):
+    """--sft distills from prompt-completion jsonl instead of pre-tokenized --data_paths."""
+    teacher_hf_path = create_tiny_qwen3_dir(tmp_path, with_tokenizer=True)
+    train_iters = 2
+    gbs = 4
+    dataset_root = tmp_path / "sft_data"
+    dataset_root.mkdir()
+    # More records than train_iters * gbs so the sampler does not run dry.
+    records = [{"input": f"Q: what follows {i}?\nA:", "output": f" {i + 1}"} for i in range(64)]
+    for split in ("training", "validation"):
+        (dataset_root / f"{split}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n"
+        )
+
+    distill_output_dir = tmp_path / "distill_output"
+    distill_cmd_parts = extend_cmd_parts(
+        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--sft"],
+        student_hf_path=teacher_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        sft_dataset_root=dataset_root,
+        output_dir=distill_output_dir,
+        tp_size=num_gpus,
+        pp_size=1,
+        seq_length=64,
+        mbs=1,
+        gbs=gbs,
+        train_iters=train_iters,
+        lr_warmup_iters=1,
+        eval_interval=train_iters,
+        eval_iters=1,
+        log_interval=1,
+    )
+    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
+
+    assert (distill_output_dir / f"checkpoints/iter_{train_iters:07d}").exists()
 
 
 def test_distill_validate_only(tmp_path, num_gpus):
@@ -95,14 +157,11 @@ def test_distill_validate_only(tmp_path, num_gpus):
 
 
 # NOTE: Qwen3.5-VL-MoE covered by test_qad.py
-@pytest.mark.timeout(360)  # sometimes times out in CI env with default 300s timeout
+@pytest.mark.timeout(420)  # sometimes times out in CI env with default 300s timeout
 def test_distill_vlm(tmp_path, num_gpus):
     # Self-distillation of a tiny VLM: only the language model is distilled; the vision tower and the
     # vision->language projector must be left byte-for-byte untouched.
-    #
-    # Short-term WAR: distill under data parallelism (TP=PP=1, so DP=num_gpus)
-    # TODO: switch to tp_size=num_gpus once the standalone-LM SP fix lands in the nemo:26.08 container.
-    tp_size = 1
+    tp_size = num_gpus
     pp_size = 1
     vlm_hf_path, teacher_model = create_tiny_qwen3_5_vl_dir(
         tmp_path,
@@ -241,3 +300,42 @@ def _prepare_puzzletron_anymodel_student_and_teacher(tmp_path: Path) -> tuple[Pa
     )
 
     return student_hf_dir, student_anymodel_dir, teacher_hf_dir
+
+
+def test_checkpoint_export_paths_for_selected_iterations(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "iter_0000001").mkdir()
+    (checkpoint_root / "iter_0000002").mkdir()
+    hf_export_root = tmp_path / "hf_validation"
+
+    args = argparse.Namespace(
+        megatron_path=str(checkpoint_root),
+        hf_export_path=str(hf_export_root),
+        export_iterations=["2", "1", "2"],
+    )
+
+    assert _get_checkpoint_export_paths(args) == [
+        (checkpoint_root / "iter_0000001", hf_export_root / "iter_0000001"),
+        (checkpoint_root / "iter_0000002", hf_export_root / "iter_0000002"),
+    ]
+
+
+def test_checkpoint_export_paths_for_all_iterations(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    (checkpoint_root / "iter_0000002").mkdir()
+    (checkpoint_root / "not_an_iteration").mkdir()
+    (checkpoint_root / "iter_0000001").mkdir()
+    hf_export_root = tmp_path / "hf_validation"
+
+    args = argparse.Namespace(
+        megatron_path=str(checkpoint_root),
+        hf_export_path=str(hf_export_root),
+        export_iterations=["all"],
+    )
+
+    assert _get_checkpoint_export_paths(args) == [
+        (checkpoint_root / "iter_0000001", hf_export_root / "iter_0000001"),
+        (checkpoint_root / "iter_0000002", hf_export_root / "iter_0000002"),
+    ]

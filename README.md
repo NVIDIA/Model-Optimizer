@@ -9,7 +9,8 @@
 [![license](https://img.shields.io/badge/License-Apache%202.0-blue)](./LICENSE)
 
 [Documentation](https://nvidia.github.io/Model-Optimizer) |
-[Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699)
+[Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/1699) |
+[Announcement Blogs](https://nvidia.github.io/Model-Optimizer/#announcements)
 
 </div>
 
@@ -26,6 +27,8 @@ Model Optimizer is also integrated with [NVIDIA Megatron-Bridge](https://github.
 
 ## Latest News
 
+- [2026/08/24] [BLOG: AutoQuantize: A Fast Automatic Mixed-Precision Assignment](https://nvidia.github.io/Model-Optimizer/announcements/autoquantize.html)
+- [2026/08/17] [BLOG: Developing Nemotron 3.5 Lightning NVFP4 with QAD Using NVIDIA Model Optimizer](https://developer.nvidia.com/blog/developing-nemotron-3-5-lightning-nvfp4-with-qad-using-nvidia-model-optimizer/): Learn how quantization-aware distillation recovers accuracy from aggressive NVFP4 quantization while reducing model size and increasing throughput.
 - [2026/06/26] [BLOG: Creating the NVIDIA Nemotron 3 Ultra NVFP4 Checkpoint with NVIDIA Model Optimizer](https://developer.nvidia.com/blog/creating-the-nvidia-nemotron-3-ultra-nvfp4-checkpoint-with-nvidia-model-optimizer/): How we quantized Nemotron 3 Ultra (550B) to NVFP4 with Model Optimizer — up to 5.9× higher decode-heavy inference throughput than GLM-5.1 754B FP4 while matching BF16 accuracy. [NVFP4 Checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4) on Hugging Face.
 - [2026/05/27] [**End-to-end Optimization tutorial for Nemotron-3-Nano-30B-A3B**](./examples/megatron_bridge/tutorials/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16): Pruning + two-phase distillation + FP8 quantization achieving 2.6× vLLM throughput and 2.6× memory reduction.
 - [2026/05/13] [**Puzzletron**](./examples/puzzletron): A new algorithm for heterogeneous pruning & NAS of LLM and VLM models.
@@ -170,7 +173,25 @@ Please read our [Contributing](./CONTRIBUTING.md) guidelines for details on how 
 
 ## AI Agents
 
-For AI-assisted development setup, see the [agent tooling notes](./.agents/TOOLING.md).
+ModelOpt's agent skills can be installed from this repository and used in any
+workspace.
+
+### Claude Code
+
+```bash
+claude plugin marketplace add https://github.com/NVIDIA/Model-Optimizer.git
+claude plugin install modelopt@modelopt
+```
+
+### Codex
+
+```bash
+codex plugin marketplace add https://github.com/NVIDIA/Model-Optimizer.git
+```
+
+Then open `/plugins`, select the `modelopt` marketplace, and install `modelopt`.
+Contributors can also use the skills directly from a checkout. See the
+[agent tooling notes](./.agents/TOOLING.md).
 
 ### Top Contributors
 

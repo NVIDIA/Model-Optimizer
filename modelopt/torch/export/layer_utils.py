@@ -213,12 +213,7 @@ def is_conv(module: nn.Module) -> bool:
 def is_embedding(module: nn.Module) -> bool:
     """Returns whether the module is an embedding layer."""
     module_type_name = type(module).__name__
-    return (
-        "Embedding" in module_type_name
-        and "Rotary" not in module_type_name
-        and "PhiImage" not in module_type_name
-        and "Phi3Image" not in module_type_name
-    )
+    return "Embedding" in module_type_name and "Rotary" not in module_type_name
 
 
 def build_embedding_config(module: nn.Module, normalization_constant: float = 1) -> EmbeddingConfig:
@@ -1166,7 +1161,7 @@ def set_expert_quantizer_amax(
     return uncalibrated_modules
 
 
-def sync_moe_gate_up_amax(model: nn.Module) -> int:
+def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
@@ -1179,10 +1174,15 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     (e.g. Qwen MoE, DeepSeek). Models with already-fused gate_up_proj
     (e.g. Llama4, GptOss) are unaffected.
 
+    ``model_type`` is the root model's HF model type; callers passing a sub-tree
+    (layerwise export passes one decoder layer) must supply it, since it cannot be
+    resolved from a decoder layer.
+
     Returns:
         Number of expert gate/up pairs whose amaxes were synced.
     """
-    model_type = hf_model_type(model)
+    if model_type is None:
+        model_type = hf_model_type(model)
     synced = 0
     for _, sub_module in model.named_modules():
         if not (is_moe(sub_module, model_type) and hasattr(sub_module, "experts")):

@@ -90,6 +90,7 @@ _FINAL_NORM_TYPE_BY_MODEL_TYPE: dict[str, str] = {
     "deepseek_v3": "rmsnorm",
     "kimi_k2": "rmsnorm",  # Kimi-K2 / K2-Thinking (DeepSeek-V3 arch) report model_type "kimi_k2"
     "kimi_k25": "rmsnorm",  # Kimi-K2.5 / K2.6 / K2.7 all report model_type "kimi_k25"
+    "nemotron_h": "rmsnorm",
     # M3's final norm is always gemma-style; map it here too so a config that lost its
     # use_gemma_norm flag still gets the correct flavor instead of silently dropping the +1.
     "minimax_m3_vl_text": "gemma_rmsnorm",

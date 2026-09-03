@@ -63,6 +63,8 @@ The command will:
 
 Autotune searches for Q/DQ placement schemes that improve TensorRT runtime. It does not by itself define the full calibration and quantization policy for an accuracy-sensitive deployment. For end-to-end ONNX PTQ that starts from an unquantized model, run ONNX quantization with calibration data and enable ``--autotune`` there. See the `ONNX quantization Autotune options <_onnx_quantization.html#python-m-modelopt.onnx.quantization-autotune-only-applicable-when-autotune-is-set>`_.
 
+End-to-end ONNX quantization benchmarks Autotune candidates in the requested runtime precision, then validates the exact calibrated output. It retains Q/DQ only when the output meets ``Config.performance_threshold`` (``1.02`` by default); otherwise the requested output path contains the high-precision no-Q/DQ model. The log reports which outcome was selected. Standalone Autotune remains an uncalibrated placement search.
+
 **Output Files:**
 
 Files are written under the output directory (default ``./autotuner_output``, or the path given by ``--output_dir``):

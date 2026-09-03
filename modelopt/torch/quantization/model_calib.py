@@ -35,6 +35,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
@@ -2061,16 +2062,12 @@ def layerwise_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
 
-    If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
-    are saved after each layer completes. On restart, calibration resumes from
-    the last completed layer.
-
-    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
-    whether the cached inputs handed to layer N+1 come from a forward through
-    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
-    temporarily disabled (False; matches non-layerwise max-calib semantics).
+    Every knob arrives through ``calib_kwargs`` from :class:`LayerwiseConfig`, which
+    documents them; ``export_dir`` additionally leaves the model in export form, so it
+    must not be used for inference afterwards.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
     calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
@@ -2091,13 +2088,28 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
+    # Before calibration, so unsupported models fail in seconds not hours.
+    exporter = None
+    if export_dir is not None:
+        from modelopt.torch.export.layerwise_export import LayerwiseExporter
+
+        exporter = LayerwiseExporter(model, export_dir)
+
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
         calib_mutates_weights=calib_mutates_weights,
+        save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
+
+    if exporter is not None and _reconcile_export_with_resume(
+        exporter, checkpoint_dir, start_layer, num_layers
+    ):
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
+        return
 
     layer_pbar = tqdm(
         total=num_layers,
@@ -2169,8 +2181,16 @@ def layerwise_calibrate(
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
+                    if exporter is not None:
+                        # As above, for the fusion probe. Only when one runs: without an
+                        # exporter nothing touches the layer before _set_layer_states does.
+                        layer._layerwise_calib.mode = "original"
                 elif is_last:
                     next_inputs = None
+
+                # After the next-layer capture in both orderings: final state.
+                if exporter is not None:
+                    exporter.export_layer(layer_idx, layer, layer_inputs)
 
                 if ckpt:
                     ckpt.save(layer_idx, model, transformer_layers, next_inputs)
@@ -2185,6 +2205,15 @@ def layerwise_calibrate(
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    if exporter is not None:
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
+        if start_layer > 0:
+            warn_rank_0(
+                f"This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} "
+                "were never re-calibrated; their shards come from the earlier run."
+            )
 
     print_rank_0("Layerwise calibration completed")
 

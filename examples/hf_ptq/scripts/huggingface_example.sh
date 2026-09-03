@@ -94,27 +94,15 @@ if [ "$LOW_MEMORY_MODE" = "true" ]; then
     PTQ_ARGS+=" --low_memory_mode "
 fi
 
-# AutoQuantize runs via an AutoQuantize --recipe or the deprecated --auto_quantize_bits CLI path.
-# Auto-generate a checkpoint path (to save/restore the search state) when the user didn't supply one.
-if [ -z "$AUTO_QUANTIZE_CHECKPOINT" ] && { [[ "$RECIPE" == *auto_quantize* ]] || [ -n "$AUTO_QUANTIZE_BITS" ]; }; then
+# AutoQuantize runs via an AutoQuantize --recipe. Auto-generate a checkpoint path (to save/restore
+# the search state) when the user didn't supply one.
+if [ -z "$AUTO_QUANTIZE_CHECKPOINT" ] && [[ "$RECIPE" == *auto_quantize* ]]; then
     AUTO_QUANTIZE_CHECKPOINT="${ROOT_SAVE_PATH}/auto_quantize_checkpoints/${MODEL_NAME}.pth"
     mkdir -p "$(dirname "$AUTO_QUANTIZE_CHECKPOINT")"
     echo "Auto-generated auto_quantize checkpoint path: $AUTO_QUANTIZE_CHECKPOINT"
 fi
 if [ -n "$AUTO_QUANTIZE_CHECKPOINT" ]; then
     PTQ_ARGS+=" --auto_quantize_checkpoint=$AUTO_QUANTIZE_CHECKPOINT "
-fi
-
-# Deprecated AutoQuantize CLI flags: passed through to hf_ptq.py, which converts them into an
-# AutoQuantizeConfig on the fly. Prefer an AutoQuantize --recipe.
-if [ -n "$AUTO_QUANTIZE_BITS" ]; then
-    PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
-    PTQ_ARGS+=" --auto_quantize_method=${AUTO_QUANTIZE_METHOD:-gradient} "
-    PTQ_ARGS+=" --auto_quantize_score_size=${AUTO_QUANTIZE_SCORE_SIZE:-128} "
-    PTQ_ARGS+=" --auto_quantize_cost_model=${AUTO_QUANTIZE_COST_MODEL:-weight} "
-    if [ -n "$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO" ]; then
-        PTQ_ARGS+=" --auto_quantize_active_moe_expert_ratio=$AUTO_QUANTIZE_ACTIVE_MOE_EXPERT_RATIO "
-    fi
 fi
 
 if [ -n "$CALIB_DATASET" ]; then
@@ -330,9 +318,20 @@ if [[ $TASKS =~ "mmlu" ]]; then
     fi
     if [[ ! -d "$MMLU_DATA_PATH" ]] || [[ ! $(ls -A $MMLU_DATA_PATH) ]]; then
         echo "Preparing the MMLU test data"
-        wget https://people.eecs.berkeley.edu/~hendrycks/data.tar -O /tmp/mmlu.tar
+        MMLU_TAR="$(mktemp "${TMPDIR:-/tmp}/mmlu.XXXXXX")" || exit 1
+        trap 'rm -f "$MMLU_TAR"' EXIT
+        # Revision-pinned HuggingFace mirror of the Berkeley tarball, which is unreachable. Bound
+        # the retries, which otherwise outlast the callers' timeouts, and resume rather than refetch.
+        wget --connect-timeout=20 --read-timeout=60 --tries=3 -c \
+            https://huggingface.co/datasets/cais/mmlu/resolve/c30699e8356da336a370243923dbaf21066bb9fe/data.tar \
+            -O "$MMLU_TAR" || {
+            echo "[ERROR] Could not download the MMLU test data. Set MMLU_DATA_PATH to a local copy."
+            exit 1
+        }
         mkdir -p data
-        tar -xf /tmp/mmlu.tar -C data && mv data/data $MMLU_DATA_PATH
+        tar -xf "$MMLU_TAR" -C data && mv data/data $MMLU_DATA_PATH
+        rm -f "$MMLU_TAR"  # 166MB; do not hold it for the rest of the eval
+        trap - EXIT
     fi
 
     mmlu_flags=""

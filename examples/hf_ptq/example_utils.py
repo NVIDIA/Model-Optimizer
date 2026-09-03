@@ -21,7 +21,6 @@ import inspect
 import json
 import logging
 import os
-import shutil
 import warnings
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, nullcontext
@@ -48,6 +47,7 @@ from transformers import (
 
 from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
 
 try:
     from huggingface_hub import snapshot_download
@@ -64,6 +64,52 @@ from modelopt.torch.utils.mlflow import (
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
+    "*.jinja",
+    "*.json",
+    "*.md",
+    "*.model",
+    "*.py",
+    "*.tiktoken",
+    "*.txt",
+    "LICENSE*",
+    "NOTICE*",
+]
+_HF_PTQ_WEIGHT_FILE_PATTERNS = (
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.bin.index.json",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.npy",
+    "*.npz",
+    "*.onnx",
+    "*.pb",
+    "*.pickle",
+    "*.pkl",
+    "*.pt",
+    "*.pth",
+    "*.tar",
+    "*.tar.bz2",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tflite",
+    "*.tgz",
+    "*.zip",
+)
+_HF_PTQ_EXPORT_OWNED_FILES = {
+    "config.json",
+    "hf_quant_config.json",
+    "quant_config.json",
+    "quantization_config.json",
+    "quantize_config.json",
+    "recipe.yaml",
+    "recipe.yml",
+}
 
 
 @dataclass
@@ -177,12 +223,6 @@ def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
         or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
             "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
@@ -989,11 +1029,13 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
             try:
                 local_path = snapshot_download(
                     repo_id=model_name_or_path,
-                    allow_patterns=["*.py", "*.json"],  # Only download Python files and config
+                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
                 )
                 return local_path
             except Exception as e:
-                print(f"Warning: Could not download model files using snapshot_download: {e}")
+                print(
+                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
+                )
 
         # Fallback: try to find in HuggingFace cache
         from transformers.utils import TRANSFORMERS_CACHE
@@ -1028,49 +1070,31 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
     return model_name_or_path
 
 
-def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
-    """Copy processor/tokenizer artifacts (and, with trust_remote_code, custom code) to export.
+def copy_custom_model_files(
+    source_path: str,
+    export_path: str,
+    trust_remote_code: bool = False,
+    exclude_files: Iterable[str] | None = None,
+):
+    """Copy source checkpoint sidecar files to an HF PTQ export.
 
-    Processor and tokenizer *data* artifacts -- e.g. a VLM's ``preprocessor_config.json``,
-    ``merges.txt``/``vocab.json``, and the processor helper modules -- are needed by the
-    deployment stack (vLLM/SGLang) even when the model itself runs on native (non-remote)
-    transformers code. transformers 5.x restructured many VLM configs and no longer
-    re-saves these on ``save_pretrained`` for models loaded natively, so without copying
-    them a native-path export is missing e.g. ``preprocessor_config.json`` and fails to
-    load (``Can't load image processor``). These are copied regardless of
-    ``trust_remote_code``. Executable model/config code (``modeling*.py``,
-    ``configuration_*.py``, ``tokenization_*.py``, and other custom JSON) is only meaningful
-    with ``trust_remote_code`` and is copied only then. ``config.json`` and
-    ``model.safetensors.index.json`` are always skipped (handled by the export itself).
+    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
+    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
+    README assets, parser plugins, and similar deployment files are preserved for both
+    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
+    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
+    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
+    Source tokenizer and processor files intentionally still win because Transformers may
+    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
+    wins when it has a separate chat template. Callers that write a generation config can
+    exclude it; the TensorRT-LLM export retains the source generation config.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used (gates the executable code files)
+        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
+        exclude_files: Additional source file names to skip.
     """
-    # Deployment-critical processor/tokenizer artifacts: safe to copy regardless of
-    # trust_remote_code (data + processor helpers, not model code).
-    always_copy_patterns = [
-        "preprocessor_config.json",
-        "processor_config.json",
-        "image_processing*.py",
-        "processing_*.py",
-        "video_processing*.py",
-        "feature_extraction_*.py",
-        "added_tokens.json",
-        "special_tokens_map.json",
-        "vocab.json",
-        "merges.txt",
-        "tokenizer.model",
-    ]
-    # Executable custom model/config code + other custom JSON: only used with trust_remote_code.
-    code_patterns = [
-        "configuration_*.py",
-        "modeling*.py",
-        "tokenization_*.py",
-        "*.json",
-    ]
-
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
 
@@ -1091,62 +1115,126 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
-    patterns = [*always_copy_patterns, *(code_patterns if trust_remote_code else [])]
+    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
+    if (export_dir / "chat_template.jinja").is_file():
+        exclude_files.add("tokenizer_config.json")
 
-    copied_files: list[str] = []
-    for pattern in patterns:
-        for file_path in source_dir.glob(pattern):
-            if file_path.is_file():
-                # Skip config.json and model.safetensors.index.json as they're handled separately
-                if file_path.name in ["config.json", "model.safetensors.index.json"]:
-                    continue
-                if file_path.name in copied_files:  # e.g. matched by both pattern lists
-                    continue
-                dest_path = export_dir / file_path.name
-                try:
-                    shutil.copy2(file_path, dest_path)
-                    copied_files.append(file_path.name)
-                    print(f"Copied custom model file: {file_path.name}")
-                except Exception as e:
-                    print(f"Warning: Failed to copy {file_path.name}: {e}")
+    copied_files = copy_non_safetensor_files_from_ckpt(
+        source_dir,
+        export_dir,
+        exclude_files=exclude_files,
+        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
+    )
 
     if copied_files:
-        print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
+        for file_name in copied_files:
+            print(f"Copied checkpoint sidecar file: {file_name}")
+        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
     else:
-        print("No custom model files found to copy")
+        print("No checkpoint sidecar files found to copy")
 
 
-def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
-    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
-    if not isinstance(algorithm, dict):
+def _layerwise_blocks(algorithm) -> list[dict]:
+    """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [
+        e["layerwise"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("layerwise"), dict)
+    ]
+
+
+def recipe_layerwise_blocks(recipe) -> list[dict]:
+    """Every ``layerwise`` block in a recipe's algorithm(s), in order, normalized to dicts.
+
+    Reads the parsed *recipe*, where YAML gives plain dicts and the deprecated
+    ``--auto_quantize_*`` path gives config objects; :func:`_layerwise_blocks` reads the
+    resolved ``quant_cfg``, which is always dicts.
+    """
+    quantize = getattr(recipe, "quantize", None)
+    algorithm = getattr(quantize, "algorithm", None)
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    blocks = []
+    for entry in entries:
+        block = (
+            entry.get("layerwise") if isinstance(entry, dict) else getattr(entry, "layerwise", None)
+        )
+        if block is not None:
+            blocks.append(block if isinstance(block, dict) else block.model_dump())
+    return blocks
+
+
+def _layerwise_checkpoint_dir(algorithm) -> str | None:
+    """First ``layerwise.checkpoint_dir`` across the algorithm entries, or None."""
+    return next(
+        (b["checkpoint_dir"] for b in _layerwise_blocks(algorithm) if b.get("checkpoint_dir")),
+        None,
+    )
+
+
+def layerwise_export_block(algorithm) -> dict | None:
+    """The one ``layerwise`` block that owns per-layer export, or None.
+
+    Export finalizes each layer's shard during calibration, so a later pass would change
+    the model after its checkpoint was written: exactly one entry may set ``export_dir``,
+    and it must be the last.
+    """
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    exporting = [
+        (i, e["layerwise"])
+        for i, e in enumerate(entries)
+        if isinstance(e, dict)
+        and isinstance(e.get("layerwise"), dict)
+        and e["layerwise"].get("export_dir") is not None
+    ]
+    if not exporting:
         return None
-    flat = algorithm.get("layerwise_checkpoint_dir")
-    if flat is not None:
-        return "flat", flat
-    nested = algorithm.get("layerwise") or {}
-    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
-    return ("nested", ckpt) if ckpt is not None else None
+    if len(exporting) > 1:
+        raise ValueError(
+            f"{len(exporting)} algorithm entries set layerwise.export_dir; only one "
+            "calibration pass can own the exported checkpoint."
+        )
+    index, block = exporting[0]
+    if index != len(entries) - 1:
+        raise ValueError(
+            f"layerwise.export_dir is set on algorithm entry {index} of {len(entries)}; it "
+            "must be the last, since a later pass would change the model after its shards "
+            "were written."
+        )
+    return block
+
+
+def default_layerwise_resume_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
+    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset.
+
+    A sibling, not a child: nothing deletes the resume state, so inside ``export_path`` it
+    would ship in the checkpoint. An explicit path is left alone.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    # The exporting block specifically: another pass's explicit checkpoint_dir says nothing
+    # about where this one resumes from.
+    block = layerwise_export_block(quant_cfg.get("algorithm"))
+    if block is None or block.get("checkpoint_dir") is not None:
+        return quant_cfg, False
+    block["checkpoint_dir"] = export_path.rstrip("/") + ".layerwise_resume"
+    return quant_cfg, True
 
 
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
     """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
-    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+    return _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None
 
 
 def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
     """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
 
     Allows a single recipe to be reused across models without checkpoint collisions.
-    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
-    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
     Must only be called when :func:`needs_checkpoint_path_update` returns True.
 
     Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
     reference the resolved path without re-deriving the dict shape.
     """
-    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
-    assert location is not None  # guaranteed by needs_checkpoint_path_update
-    shape, base_dir = location
+    assert needs_checkpoint_path_update(quant_cfg), "no layerwise.checkpoint_dir to resolve"
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -1155,15 +1243,41 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
         name = Path(name).name
 
     config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
-    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
+    suffix = f"{name}_{config_hash}"
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    algo = quant_cfg["algorithm"]
-    if "layerwise_checkpoint_dir" in algo:
-        algo["layerwise_checkpoint_dir"] = resolved
-    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
-        algo["layerwise"]["checkpoint_dir"] = resolved
+    # Each pass keeps its own base, so two layerwise passes cannot resolve onto one manifest.
+    exporting = layerwise_export_block(quant_cfg.get("algorithm"))
+    resolved = None
+    for block in _layerwise_blocks(quant_cfg.get("algorithm")):
+        if block.get("checkpoint_dir") is None:
+            continue
+        block["checkpoint_dir"] = os.path.join(block["checkpoint_dir"], suffix)
+        if resolved is None or block is exporting:
+            resolved = block["checkpoint_dir"]
+    assert resolved is not None  # needs_checkpoint_path_update found one above
     return quant_cfg, resolved
+
+
+def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
+    """Retarget layerwise per-layer export at ``export_path``.
+
+    The recipe opts in via ``layerwise.export_dir``; its value is a placeholder, since the
+    destination is per-run. Raises when nothing was retargeted: the caller decides to skip
+    the real export from a separately parsed recipe, so a silent no-op would leave
+    ``--export_path`` empty on a run reporting success.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    algorithm = quant_cfg.get("algorithm")
+    block = layerwise_export_block(algorithm)
+    if block is None:
+        raise ValueError(
+            "layerwise export is enabled but no layerwise.export_dir was found to retarget "
+            f"in algorithm={algorithm!r}. The exported shards would go to the recipe's "
+            "placeholder path instead of --export_path."
+        )
+    block["export_dir"] = export_path
+    return quant_cfg
 
 
 def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
