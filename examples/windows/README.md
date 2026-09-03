@@ -43,9 +43,9 @@ ModelOpt-Windows can be installed either as a standalone toolkit or through Micr
 
 ### Windows on Arm
 
-Windows ARM64 users should first follow the
+WoA Installation Guide is here
 [Windows on Arm installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_windows_arm64.html),
-then use the same [ONNX PTQ examples](../onnx_ptq/README.md) as Windows x64 users.
+WoA support the same feature as Windows x64, please refer the [Support Matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html#support-matrix)
 
 ### Standalone Toolkit Installation (with CUDA 12.x)
 
