@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -53,6 +54,216 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     )
     parsed_args.calib_size = [int(num_sample) for num_sample in parsed_args.calib_size.split(",")]
     return hf_ptq, parsed_args
+
+
+def test_save_quantized_state_calls_mto_save_with_model_and_path(monkeypatch, tmp_path):
+    """--save_quantized_state PATH must hand mto.save exactly (model, PATH) -- this is the
+    round-trip a retried export depends on, so the call shape has to be exact."""
+    state_path = str(tmp_path / "calib.pt")
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", state_path
+    )
+    calls = []
+    monkeypatch.setattr(hf_ptq.mto, "save", lambda model, path: calls.append((model, path)))
+
+    dummy_model = object()
+    hf_ptq._save_quantized_state_if_requested(args, dummy_model)
+
+    assert calls == [(dummy_model, state_path)]
+
+
+def test_save_and_restore_quantized_state_together_is_rejected(monkeypatch):
+    """Both flags set is ambiguous -- restoring skips calibration, so there's nothing new to
+    save. Must fail loudly, at the CLI boundary, not silently prefer one and drop the other."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--save_quantized_state",
+            "/tmp/out.pt",
+            "--restore_quantized_state",
+            "/tmp/in.pt",
+        )
+
+
+def test_save_quantized_state_with_auto_quantize_recipe_is_rejected(monkeypatch):
+    """AutoQuantize's search state is not a single quantized model state, so persistence flags
+    must be rejected before calibration starts, not discovered mid-run."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--recipe",
+            "general/auto_quantize/nvfp4_fp8_at_5p4bits",
+            "--save_quantized_state",
+            "/tmp/out.pt",
+        )
+
+
+def test_restore_quantized_state_with_deprecated_auto_quantize_cli_is_rejected(monkeypatch):
+    """The deprecated --auto_quantize_bits CLI path is also AutoQuantize; it must be rejected
+    the same way as an AutoQuantize --recipe."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch,
+            "--pyt_ckpt_path",
+            "dummy",
+            "--auto_quantize_bits",
+            "5.4",
+            "--restore_quantized_state",
+            "/tmp/in.pt",
+        )
+
+
+def test_auto_quantize_bits_alone_is_rejected(monkeypatch):
+    """--auto_quantize_bits isn't read anywhere in the quantization path anymore -- only an
+    AutoQuantize --recipe enables AutoQuantize. A legacy command passing this flag on its own
+    (no save/restore involved) must fail at parse_args() instead of silently running plain PTQ."""
+    with pytest.raises(SystemExit):
+        _parse_hf_ptq_args(
+            monkeypatch, "--pyt_ckpt_path", "dummy", "--auto_quantize_bits", "5.4"
+        )
+
+
+def test_save_quantized_state_round_trips_through_real_mto(monkeypatch, tmp_path):
+    """The mocked test above pins the call *shape*; this exercises the real ModelOpt
+    persistence path end to end: quantize a small local model, save its state through
+    hf_ptq's helper, restore it into a fresh copy, and confirm the restored model carries
+    the calibrated quantizer state and is usable (a forward pass runs cleanly)."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--save_quantized_state", str(tmp_path / "state.pt")
+    )
+
+    model = torch.nn.Linear(4, 4)
+    hf_ptq.mtq.quantize(
+        model, QUANT_CFG_CHOICES["fp8"], lambda m: m(torch.randn(2, 4))
+    )
+    expected_amax = model.weight_quantizer.amax.clone()
+
+    hf_ptq._save_quantized_state_if_requested(args, model)
+    assert (tmp_path / "state.pt").exists()
+
+    restored = torch.nn.Linear(4, 4)
+    restore_args = SimpleNamespace(
+        restore_quantized_state=str(tmp_path / "state.pt"), save_quantized_state=None
+    )
+    assert hf_ptq._restore_quantized_state_if_requested(restore_args, restored) is True
+
+    assert torch.equal(restored.weight_quantizer.amax, expected_amax)
+    restored(torch.randn(2, 4))  # usable: forward runs without error post-restore
+
+
+def test_restore_quantized_state_skips_calibration_and_exports(monkeypatch):
+    """--restore_quantized_state must skip batch-size probing, calibration dataloader
+    construction, and the pre-quantize generation preview entirely, and go straight to
+    export -- retrying a failed export must not depend on the original calibration dataset
+    still being available."""
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--restore_quantized_state", "/tmp/in.pt"
+    )
+    args.verbose = False
+
+    monkeypatch.setattr(hf_ptq.mto, "restore", lambda model, path: None)
+    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
+
+    def _fail(*_args, **_kwargs):
+        pytest.fail("calibration-only setup must be skipped in restore mode")
+
+    monkeypatch.setattr(hf_ptq, "make_calib_dataloader", _fail)
+    monkeypatch.setattr(hf_ptq, "pre_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "mono_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "auto_quantize", _fail)
+    monkeypatch.setattr(hf_ptq, "get_max_batch_size", _fail)
+
+    export_calls = []
+    monkeypatch.setattr(
+        hf_ptq,
+        "export_quantized",
+        lambda args, full_model, language_model, model_type, tokenizer, dps, dpt: export_calls.append(
+            full_model
+        ),
+    )
+
+    full_model = object()
+    hf_ptq.quantize_main(
+        args,
+        full_model,
+        object(),  # language_model
+        "llama",
+        False,  # calibration_only
+        None,  # processor
+        None,  # tokenizer
+        "left",  # default_padding_side
+        None,  # default_pad_token
+        "cuda",  # device
+    )
+
+    assert export_calls == [full_model]
+
+
+def test_save_quantized_state_happens_after_mxfp4_to_nvfp4_cast(monkeypatch):
+    """--cast_mxfp4_to_nvfp4 overwrites each weight quantizer's global_amax after calibration.
+    Saving before that cast would capture a pre-cast snapshot, so a later
+    --restore_quantized_state retry would export a model that never got the cast applied.
+    Save must run after the cast."""
+    state_path = "/tmp/out.pt"
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--kv_cache_qformat",
+        "none",
+        "--batch_size",
+        "1",
+        "--cast_mxfp4_to_nvfp4",
+        "--save_quantized_state",
+        state_path,
+    )
+    args.verbose = False
+
+    monkeypatch.setattr(hf_ptq, "is_nemotron_vl", lambda model: False)
+    monkeypatch.setattr(
+        hf_ptq, "make_calib_dataloader", lambda *a, **k: (object(), None)
+    )
+    monkeypatch.setattr(hf_ptq, "pre_quantize", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(hf_ptq, "_resolve_model_path", lambda *a, **k: "dummy")
+
+    call_order = []
+    monkeypatch.setattr(
+        hf_ptq, "mono_quantize", lambda *a, **k: call_order.append("mono_quantize")
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "apply_cast_mxfp4_to_nvfp4",
+        lambda *a, **k: call_order.append("apply_cast_mxfp4_to_nvfp4"),
+    )
+    monkeypatch.setattr(
+        hf_ptq,
+        "_save_quantized_state_if_requested",
+        lambda *a, **k: call_order.append("_save_quantized_state_if_requested"),
+    )
+    monkeypatch.setattr(hf_ptq, "post_quantize", lambda *a, **k: None)
+
+    hf_ptq.quantize_main(
+        args,
+        object(),  # full_model
+        object(),  # language_model
+        "llama",
+        False,  # calibration_only
+        None,  # processor
+        None,  # tokenizer
+        "left",  # default_padding_side
+        None,  # default_pad_token
+        "cuda",  # device
+    )
+
+    assert call_order == [
+        "mono_quantize",
+        "apply_cast_mxfp4_to_nvfp4",
+        "_save_quantized_state_if_requested",
+    ]
 
 
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
