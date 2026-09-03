@@ -276,7 +276,9 @@ _AUTO_QUANTIZE_SUPPORTED_ALGORITHMS = {
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, Any] | None = None,
-    quantization_formats: list[dict[str, Any] | str | tuple[dict[str, Any], str]] | None = None,
+    quantization_formats: (
+        list[dict[str, Any] | str] | list[dict[str, Any] | str | tuple[dict[str, Any], str]] | None
+    ) = None,
     data_loader: Iterable | None = None,
     forward_step: Callable[[nn.Module, Any], Any | torch.Tensor] | None = None,
     loss_func: Callable[[Any, Any], torch.Tensor] | None = None,
