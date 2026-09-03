@@ -281,6 +281,29 @@ def test_fp8_bf16_noop_rejects_mixed_source_dtypes():
         get_onnx_bytes_and_metadata(model, (sample_input,), weights_dtype="bf16", onnx_opset=23)
 
 
+def test_fp8_bf16_noop_rejects_mixed_buffer_dtype():
+    class MixedBufferModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bf16_layer = nn.Linear(4, 4, bias=False).to(torch.bfloat16)
+            self.register_buffer("fp32_offset", torch.ones(4))
+
+        def forward(self, inputs):
+            return self.bf16_layer(inputs).float() + self.fp32_offset
+
+    model = MixedBufferModel().eval()
+    sample_input = torch.ones(1, 4, dtype=torch.bfloat16)
+    model = mtq.quantize(
+        model,
+        mtq.FP8_DEFAULT_CFG,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+    with pytest.raises(
+        AssertionError, match="Converting a quantized ONNX graph to BF16 is not supported"
+    ):
+        get_onnx_bytes_and_metadata(model, (sample_input,), weights_dtype="bf16", onnx_opset=23)
+
+
 class SingleArgModel(nn.Module):
     def forward(self, x: torch.Tensor):
         return torch.add(x, x) - x

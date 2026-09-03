@@ -24,6 +24,7 @@ import os
 import shutil
 import tempfile
 from contextlib import nullcontext
+from itertools import chain
 from typing import Any
 
 import onnx
@@ -527,8 +528,10 @@ def get_onnx_bytes_and_metadata(
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
-    source_parameter_dtypes = {
-        parameter.dtype for parameter in model.parameters() if parameter.is_floating_point()
+    source_floating_dtypes = {
+        tensor.dtype
+        for tensor in chain(model.parameters(), model.buffers())
+        if tensor.is_floating_point()
     }
 
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
@@ -644,7 +647,7 @@ def get_onnx_bytes_and_metadata(
     )
     is_bf16_fp8_noop = (
         weights_dtype == "bf16"
-        and source_parameter_dtypes == {torch.bfloat16}
+        and source_floating_dtypes == {torch.bfloat16}
         and uses_fp8
         and not uses_other_unsupported_quantizer
     )
