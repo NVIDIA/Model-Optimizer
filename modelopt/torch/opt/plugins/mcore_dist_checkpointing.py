@@ -200,7 +200,12 @@ def _initialize_grouped_weight_quantizer_state_for_restore(model: torch.nn.Modul
             ]
             for state_name in ("amax", "global_amax"):
                 reference = next(
-                    (getattr(quantizer, state_name, None) for quantizer in eligible_leaves), None
+                    (
+                        state
+                        for quantizer in eligible_leaves
+                        if (state := getattr(quantizer, state_name, None)) is not None
+                    ),
+                    None,
                 )
                 if reference is None:
                     continue

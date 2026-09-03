@@ -1158,7 +1158,7 @@ def test_initialize_grouped_weight_quantizer_state_for_restore():
     model = torch.nn.Module()
     model.weight = torch.nn.Parameter(torch.empty(1))
     model.num_gemms = 4
-    model.weight_quantizer = torch.nn.ModuleList([source, target, disabled, mx])
+    model.weight_quantizer = torch.nn.ModuleList([target, source, disabled, mx])
 
     _initialize_grouped_weight_quantizer_state_for_restore(model)
 
