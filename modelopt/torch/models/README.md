@@ -39,9 +39,9 @@ Then add it to the import list in `__init__.py`. Two tables in
 them:
 
 - `EXPECTED_MOE_VARIANTS` in `test_model_specs.py` — pins the spec's values.
-- `IN_TRANSFORMERS` (or `UNCHECKABLE`, with a reason) in
-  `test_specs_vs_transformers.py` — says whether the spec can be validated against
-  the transformers definition.
+- `UNCHECKABLE` in `test_specs_vs_transformers.py` — only if the model cannot be
+  introspected from transformers at all (trust-remote-code); the set of models to
+  check is read from the registry, so there is nothing to add for the normal case.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.

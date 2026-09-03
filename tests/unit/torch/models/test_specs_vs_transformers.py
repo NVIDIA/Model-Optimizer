@@ -49,35 +49,25 @@ UNCHECKABLE = {
     "deepseek": "trust_remote_code model; not shipped in transformers",
 }
 
-# Model types transformers does ship, so their specs are checked against it. Listed
-# literally rather than derived, so registering a spec forces a decision here -- the
-# point of the classification test below. Membership does not promise the model exists
-# in *every* supported transformers version: the CI matrix spans tf_min to tf_latest,
-# and a model missing from the installed one skips rather than fails.
-IN_TRANSFORMERS = {
-    "dbrx",
-    "gemma4",
-    "gemma4_text",
-    "gpt_oss",
-    "mixtral",
-    "nemotron_h",
-    "qwen2_moe",
-    "qwen3_5_moe",
-    "qwen3_moe",
-    "qwen3_next",
-}
-
 # model_type -> the transformers package directory holding its modeling module, when it
 # differs from the model type itself (a text-only checkpoint of a VLM reuses the VLM's).
 MODULE_OVERRIDES = {
     "gemma4_text": "gemma4",
 }
 
-# A floor so that a wholesale breakage -- wrong module paths, a transformers layout
-# change -- fails instead of turning every case into a silent skip. Individual models
-# may legitimately be missing from a given transformers version; all of them cannot.
-# Lower this only with a note explaining which models stopped resolving and why.
-MIN_VALIDATED_BLOCKS = 5
+# Model types that have been in transformers long enough to exist in every version this
+# repo supports, so failing to resolve one means the lookup itself broke rather than the
+# installed transformers predating the model. Everything else may legitimately be
+# missing on the tf_min end of the CI matrix and only skips.
+#
+# Unlike a bare count, a name here states something a reader can check: "this model has
+# been upstream for years." Drop an entry only when transformers actually removes it.
+ALWAYS_RESOLVABLE = {
+    "dbrx",
+    "mixtral",
+    "qwen2_moe",
+    "qwen3_moe",
+}
 
 
 def _moe_variants():
@@ -115,25 +105,37 @@ def _ids(items):
 VARIANTS = _moe_variants()
 
 
-def test_every_moe_model_type_is_classified():
-    """Every registered MoE model type is classified exactly once.
-
-    The coverage guard, and deliberately pure bookkeeping -- it consults the registry
-    and the two tables, never the installed transformers, so it means the same thing on
-    every version in the CI matrix. Registering a spec without classifying it fails
-    here rather than quietly testing nothing.
-    """
+def test_excused_model_types_are_still_registered():
+    """An UNCHECKABLE entry cannot outlive the spec it excuses."""
     registered = {mt for mt, _ in VARIANTS}
-    classified = IN_TRANSFORMERS | set(UNCHECKABLE)
-    assert not (registered - classified), (
-        f"unclassified MoE model types: {sorted(registered - classified)}. Add each to "
-        f"IN_TRANSFORMERS, or to UNCHECKABLE with the reason it cannot be introspected."
+    stale = set(UNCHECKABLE) - registered
+    assert not stale, (
+        f"UNCHECKABLE names model types with no registered MoE spec: {sorted(stale)}. "
+        f"Drop the entry."
     )
-    assert not (classified - registered), (
-        f"classified model types that are no longer registered: {sorted(classified - registered)}"
+
+
+def test_always_resolvable_models_are_registered():
+    """ALWAYS_RESOLVABLE cannot drift away from the registry."""
+    registered = {mt for mt, _ in VARIANTS}
+    assert registered >= ALWAYS_RESOLVABLE, (
+        f"ALWAYS_RESOLVABLE names unregistered model types: "
+        f"{sorted(ALWAYS_RESOLVABLE - registered)}"
     )
-    assert not (IN_TRANSFORMERS & set(UNCHECKABLE)), (
-        f"model types in both tables: {sorted(IN_TRANSFORMERS & set(UNCHECKABLE))}"
+
+
+@pytest.mark.parametrize("model_type", sorted(UNCHECKABLE))
+def test_excuses_are_still_true(model_type):
+    """An excused model must really be absent from transformers.
+
+    Keeps a stale excuse from suppressing a check forever: once transformers ships a
+    model we skip today, this fires and the entry should be dropped rather than
+    silently leaving the spec unvalidated.
+    """
+    module = _modeling_module(model_type)
+    assert module is None, (
+        f"{model_type!r} is excused as {UNCHECKABLE[model_type]!r}, but transformers now "
+        f"provides {module.__name__}. Remove it from UNCHECKABLE so its spec is checked."
     )
 
 
@@ -195,17 +197,28 @@ def test_expert_linear_names_exist_in_transformers(model_type, variant):
     )
 
 
-def test_enough_blocks_actually_validated():
-    """Guard against every case above degrading into a skip."""
-    validated = []
-    for model_type, variant in VARIANTS:
-        if model_type in UNCHECKABLE:
-            continue
+def test_long_standing_models_still_resolve():
+    """Guard against every case above degrading into a skip.
+
+    The checks skip when a model is absent from the installed transformers, correct for
+    the tf_min end of the matrix but equally able to hide a broken lookup. These models
+    are old enough that not finding one means the lookup broke.
+
+    One resolving variant per model is enough. A model can declare a variant that no
+    transformers version defines -- mixtral carries ``MixtralMoeSparseMoeBlock`` with
+    MCore ``linear_fc1``/``linear_fc2`` naming, migrated from a legacy branch -- and
+    requiring every variant to resolve would fail on those forever.
+    """
+    unresolved = []
+    for model_type in sorted(ALWAYS_RESOLVABLE):
         module = _modeling_module(model_type)
-        if module is not None and _find_block_class(module, variant.block_names) is not None:
-            validated.append((model_type, variant.block_names))
-    assert len(validated) >= MIN_VALIDATED_BLOCKS, (
-        f"only {len(validated)} MoE block classes resolved against transformers "
-        f"{importlib.import_module('transformers').__version__}: {validated}. Expected at "
-        f"least {MIN_VALIDATED_BLOCKS} -- the lookup itself is probably broken."
+        variants = [v for mt, v in VARIANTS if mt == model_type]
+        if module is None or not any(
+            _find_block_class(module, v.block_names) is not None for v in variants
+        ):
+            unresolved.append((model_type, [v.block_names for v in variants]))
+    assert not unresolved, (
+        f"{unresolved} did not resolve against transformers "
+        f"{importlib.import_module('transformers').__version__}, but they ship in every "
+        f"supported version -- the module lookup or the spec's block_names is wrong."
     )
