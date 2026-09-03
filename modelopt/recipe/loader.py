@@ -58,15 +58,23 @@ def _resolve_recipe_path(recipe_path: str | Path | Traversable) -> Path | Traver
         isinstance(recipe_path, Path) and recipe_path.is_absolute()
     ):
         rp_str = str(recipe_path)
-        # Backward-compat alias: checkpoint-mirror recipes moved from the old
-        # ``huggingface/models/<org>/<model_id>/`` layout to the top-level ``models/``
-        # tier. A source checkout also keeps a ``huggingface/models`` -> ``../models``
-        # symlink, but symlinks don't survive into built wheels, so rewrite the old
-        # prefix here too — that keeps saved ``--recipe huggingface/models/...`` paths
-        # working for pip-installed users, not just source checkouts.
-        _bc_prefix = "huggingface/models/"
-        if rp_str.replace("\\", "/").startswith(_bc_prefix):
-            rp_str = "models/" + rp_str.replace("\\", "/")[len(_bc_prefix) :]
+        # Backward-compat aliases for the recipe-library restructure. A source
+        # checkout keeps ``huggingface`` -> ``model_type`` (and the nested
+        # ``model_type/models`` -> ``../models``) symlinks, but symlinks don't
+        # survive into built wheels, so the old prefixes are rewritten here too —
+        # that keeps saved ``--recipe huggingface/...`` paths working for
+        # pip-installed users, not just source checkouts.
+        #   * ``huggingface/`` was renamed to ``model_type/`` (architecture-specific
+        #     recipes keyed by a HF ``model_type``).
+        #   * Checkpoint-mirror recipes moved further, out of the old
+        #     ``huggingface/models/<org>/<model_id>/`` layout to the top-level
+        #     ``models/`` tier, so that longer prefix is rewritten straight to
+        #     ``models/`` (checked first, as it is more specific).
+        rp_norm = rp_str.replace("\\", "/")
+        if rp_norm.startswith("huggingface/models/"):
+            rp_str = "models/" + rp_norm[len("huggingface/models/") :]
+        elif rp_norm.startswith("huggingface/"):
+            rp_str = "model_type/" + rp_norm[len("huggingface/") :]
         suffixes = [""] if rp_str.endswith((".yml", ".yaml")) else ["", ".yml", ".yaml"]
         for suffix in suffixes:
             candidate = BUILTIN_RECIPES_LIB.joinpath(rp_str + suffix)

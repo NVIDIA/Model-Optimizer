@@ -157,14 +157,40 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
+def test_load_recipe_huggingface_arch_backward_compat_alias():
+    """Old ``huggingface/<model_type>/...`` recipe paths resolve to the renamed
+    ``model_type/`` tier.
+
+    ``huggingface/`` was renamed to ``model_type/``. A source checkout keeps a
+    ``huggingface`` -> ``model_type`` symlink, but symlinks don't survive into built
+    wheels, so the loader rewrites the prefix directly. This guards that saved
+    ``--recipe huggingface/<model_type>/...`` paths keep working for pip-installed
+    users, not just source checkouts.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("model_type/*/ptq/*.yaml"))
+    new_path = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
+    old_path = "huggingface/" + new_path[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
+
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    recipe = load_recipe(old_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
 def test_load_recipe_huggingface_models_backward_compat_alias():
     """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
     top-level ``models/`` tier.
 
-    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
-    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
-    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
-    pip-installed users, not just source checkouts.
+    The ``huggingface/models/`` prefix is more specific than the ``huggingface/`` ->
+    ``model_type/`` rename and must win: checkpoint mirrors moved all the way out to
+    the top-level ``models/`` tier. A source checkout keeps the
+    ``huggingface`` -> ``model_type`` -> ``models`` symlink chain, but symlinks don't
+    survive into built wheels, so the loader rewrites the prefix directly. This guards
+    that saved ``--recipe huggingface/models/...`` paths keep working for pip-installed
+    users, not just source checkouts.
     """
     from modelopt.recipe.loader import _resolve_recipe_path
 
@@ -198,7 +224,7 @@ def _all_shipped_ptq_recipe_paths():
 
 
 # Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
-# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# recipe — general/, model_type/<model_type>/, and models/<org>/<model_id>/ — and
 # never drift as recipes are added, moved, or removed.
 _BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
 
@@ -1886,10 +1912,10 @@ def test_load_recipe_autoquantize_builtin_active_moe():
 def test_load_recipe_autoquantize_module_search_spaces():
     """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
     recipe = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     aq = recipe.auto_quantize
-    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    model_ptq = load_recipe("model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
     assert recipe.quantize is not None
     assert recipe.quantize == model_ptq.quantize
     assert aq.candidate_formats == []

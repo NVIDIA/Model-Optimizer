@@ -60,7 +60,7 @@ def test_qwen_vision_recipe_calibrates_and_exports(
 ):
     model = _get_tiny_qwen_vlm(model_type).to("cuda").eval()
     model.config.architectures = [architecture]
-    quant_cfg = load_recipe(f"huggingface/{model_type}/ptq/{recipe}").quantize.model_dump()
+    quant_cfg = load_recipe(f"model_type/{model_type}/ptq/{recipe}").quantize.model_dump()
     vision_config = model.config.vision_config
     pixel_width = (
         vision_config.in_channels * vision_config.temporal_patch_size * vision_config.patch_size**2

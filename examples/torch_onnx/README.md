@@ -113,7 +113,7 @@ mean pooling and L2 normalization on top of the encoder; reranking
 graphs take `input_ids` and `attention_mask` with dynamic batch/sequence axes.
 
 The default recipe
-(`modelopt_recipes/huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
+(`modelopt_recipes/model_type/nemotron_llama/ptq/nvfp4_output_quant_proj.yaml`)
 quantizes weights and activations to NVFP4 and additionally quantizes the
 projection-Linear outputs. Without output-side quantization, quantized GEMMs
 emit FP16 activations, so FP8/FP4 engines can use as much or more activation
@@ -134,7 +134,7 @@ engines, 5 dynamic-shape profiles up to 32x512), engine activation memory:
 python hf_embedding_quant_to_onnx.py \
     --model_path=nvidia/llama-nemotron-embed-1b-v2 \
     --trust_remote_code \
-    --recipe=huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj \
+    --recipe=model_type/nemotron_llama/ptq/nvfp4_output_quant_proj \
     --onnx_save_path=llama_nemotron_embed_nvfp4.onnx
 
 # Reranking variant (auto-detected from the model architecture)
