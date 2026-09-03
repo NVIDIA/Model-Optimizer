@@ -13,18 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Llama specs (HF model type ``llama``)."""
+"""Snowflake Arctic specs (trust-remote-code model type ``arctic``)."""
 
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ModelSpec, MoESpec, MoEVariant
 
 register(
     ModelSpec(
-        model_type="llama",
-        # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
-        pqs_fuse_rules=(
-            (("LlamaAttention",), "v_proj", "o_proj"),
-            (("LlamaMLP",), "up_proj", "down_proj"),
+        model_type="arctic",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(
+                    block_names=("ArcticMoE",),
+                    # ArcticMLP experts use Mixtral-style w1/w2/w3 naming.
+                    expert_linear_names=("w1", "w2", "w3"),
+                    gate_up_pair=("w1", "w3"),
+                ),
+            ),
         ),
     )
 )

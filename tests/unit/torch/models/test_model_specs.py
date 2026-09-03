@@ -30,6 +30,7 @@ from modelopt.torch.export.layer_utils import (
 from modelopt.torch.export.quant_utils import _layernorm_uses_weight_plus_one
 from modelopt.torch.models import (
     ModelSpec,
+    MoESpec,
     MoEVariant,
     get_spec,
     get_specs,
@@ -38,6 +39,11 @@ from modelopt.torch.models import (
     match_moe_block,
 )
 from modelopt.torch.models.registry import _SPECS
+
+
+def _variants(spec):
+    """The MoE variants a spec declares; empty when it has no MoE section."""
+    return spec.moe_spec.moe_variants if spec.moe_spec is not None else ()
 
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
@@ -308,7 +314,7 @@ def test_match_moe_block_scope_prefers_own_model_type():
         block_names=("Qwen3MoeSparseMoeBlock",),
         expert_linear_names=("a_proj", "b_proj"),
     )
-    fork_spec = ModelSpec(model_type="zz_fork", moe_variants=(fork_variant,))
+    fork_spec = ModelSpec(model_type="zz_fork", moe_spec=MoESpec(moe_variants=(fork_variant,)))
     _SPECS[fork_spec.model_type] = fork_spec
     try:
         assert match_moe_block(Qwen3MoeSparseMoeBlock(), "zz_fork") is fork_variant
@@ -537,7 +543,7 @@ def test_moe_variant_values(
 ):
     spec = get_spec(model_type)
     assert spec is not None, f"no spec registered for {model_type!r}"
-    matching = [v for v in spec.moe_variants if v.block_names == block_names]
+    matching = [v for v in _variants(spec) if v.block_names == block_names]
     assert len(matching) == 1, f"expected exactly one {block_names} variant on {model_type!r}"
     variant = matching[0]
     assert variant.expert_linear_names == expert_linear_names
@@ -548,7 +554,7 @@ def test_moe_variant_values(
 def test_moe_variant_table_is_exhaustive():
     # Fails when a new MoE spec is added without a row above, so the table cannot
     # silently drift out of date.
-    registered = {(s.model_type, v.block_names) for s in get_specs() for v in s.moe_variants}
+    registered = {(s.model_type, v.block_names) for s in get_specs() for v in _variants(s)}
     tabled = {(mt, bn) for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS}
     assert registered == tabled
 
@@ -584,7 +590,7 @@ def test_gate_up_pair_is_a_subset_of_expert_linear_names():
     # A gate/up pair naming projections the variant does not declare would silently
     # never sync in sync_moe_gate_up_amax.
     for spec in get_specs():
-        for variant in spec.moe_variants:
+        for variant in _variants(spec):
             if variant.gate_up_pair is None or variant.expert_linear_names is None:
                 continue
             missing = set(variant.gate_up_pair) - set(variant.expert_linear_names)
@@ -625,14 +631,14 @@ def test_iterable_experts_matches_pre_refactor_support():
         "qwen3_moe": "Qwen3MoeForCausalLM",
         "qwen3_next": "Qwen3NextForCausalLM",
     }
-    moe_specs = [s for s in get_specs() if s.moe_variants]
+    moe_specs = [s for s in get_specs() if _variants(s)]
     assert {s.model_type for s in moe_specs} == set(root_class_names), (
         "root_class_names is out of sync with the registered MoE specs"
     )
     for spec in moe_specs:
         root = root_class_names[spec.model_type].lower()
         legacy_supported = any(sub in root for sub in legacy_substrings)
-        spec_supported = any(v.has_iterable_experts for v in spec.moe_variants)
+        spec_supported = any(v.has_iterable_experts for v in _variants(spec))
         assert spec_supported is legacy_supported, (
             f"{spec.model_type}: grouped-export support changed "
             f"(legacy={legacy_supported}, spec={spec_supported})"

@@ -13,18 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen3 (dense) specs (HF model type ``qwen3``)."""
+"""Llama specs (HF model type ``llama``)."""
 
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ExportSpec, ModelSpec
 
 register(
     ModelSpec(
-        model_type="qwen3",
-        # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
-        pqs_fuse_rules=(
-            (("Qwen3Attention",), "v_proj", "o_proj"),
-            (("Qwen3MLP",), "up_proj", "down_proj"),
+        model_type="llama",
+        export_spec=ExportSpec(
+            # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
+            pqs_fuse_rules=(
+                (("LlamaAttention",), "v_proj", "o_proj"),
+                (("LlamaMLP",), "up_proj", "down_proj"),
+            ),
         ),
     )
 )

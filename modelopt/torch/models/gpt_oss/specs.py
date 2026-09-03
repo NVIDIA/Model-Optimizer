@@ -13,20 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron-H specs (HF model type ``nemotron_h``)."""
+"""GPT-OSS specs (HF model type ``gpt_oss``)."""
 
 from ..registry import register
-from ..specs import ModelSpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant
 
 register(
     ModelSpec(
-        model_type="nemotron_h",
-        moe_variants=(
-            MoEVariant(
-                # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
-                block_names=("NemotronHMOE",),
-                expert_linear_names=("up_proj", "down_proj"),
-                has_iterable_experts=True,
+        model_type="gpt_oss",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(
+                    # GPT-OSS fuses gate and up into a single gate_up_proj.
+                    # transformers names the block GptOssMLP; GptOssMoE is kept for the
+                    # legacy name this data was migrated from.
+                    block_names=("GptOssMLP", "GptOssMoE"),
+                    expert_linear_names=("gate_up_proj", "down_proj"),
+                ),
             ),
         ),
     )

@@ -16,4 +16,4 @@
 
 """Per-model specs for HF model type ``nemotron_h``."""
 
-from . import export
+from . import specs

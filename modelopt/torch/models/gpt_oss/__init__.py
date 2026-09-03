@@ -16,4 +16,4 @@
 
 """Per-model specs for HF model type ``gpt_oss``."""
 
-from . import export
+from . import specs

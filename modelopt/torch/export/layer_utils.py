@@ -301,15 +301,18 @@ def is_moe(module: nn.Module, model_type: str | None = None) -> bool:
 
     ``model_type`` (``model.config.model_type``) scopes the registry lookup to the
     model's own spec.
+
+    The model's own spec is consulted first: per-model data always takes precedence
+    over the generic name and structural fallbacks.
     """
-    name = type(module).__name__.lower()
-    # Auto-detect common MoE patterns
-    if name.endswith("sparsemoeblock") or "moelayer" in name:
-        return True
-    # Non-standard MoE block names are per-model data (modelopt/torch/models/*).
+    # Per-model data (modelopt/torch/models/*), which also covers non-standard names.
     if match_moe_block(module, model_type) is not None:
         return True
-    # Structural detection: modules with router + experts (e.g. Gemma4TextDecoderLayer)
+    # Generic fallback: the common MoE block naming conventions.
+    name = type(module).__name__.lower()
+    if name.endswith("sparsemoeblock") or "moelayer" in name:
+        return True
+    # Structural fallback: modules with router + experts (e.g. Gemma4TextDecoderLayer)
     return (
         hasattr(module, "router")
         and hasattr(module, "experts")
@@ -984,8 +987,9 @@ def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[s
             return [first_proj_attr, "down_proj"]
 
     spec = get_spec(model_type) if model_type else None
-    if spec is not None:
-        names = spec.expert_linear_names_for(module)
+    moe_spec = spec.moe_spec if spec is not None else None
+    if moe_spec is not None:
+        names = moe_spec.expert_linear_names_for(module)
         if names is not None:
             return list(names)
 

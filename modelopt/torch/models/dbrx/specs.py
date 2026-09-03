@@ -13,20 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Qwen2-MoE specs (HF model type ``qwen2_moe``)."""
+"""DBRX specs (HF model type ``dbrx``)."""
 
 from ..registry import register
-from ..specs import ModelSpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant
 
+# Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
+# w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on
+# experts.mlp (see modelopt/torch/quantization/plugins/huggingface.py).
 register(
     ModelSpec(
-        model_type="qwen2_moe",
-        moe_variants=(
-            MoEVariant(
-                block_names=("Qwen2MoeSparseMoeBlock",),
-                expert_linear_names=("gate_proj", "down_proj", "up_proj"),
-                gate_up_pair=("gate_proj", "up_proj"),
-                has_iterable_experts=True,
+        model_type="dbrx",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(
+                    block_names=("DbrxFFN",),
+                    expert_linear_names=("w1_linear", "w2_linear", "v1_linear"),
+                ),
             ),
         ),
     )

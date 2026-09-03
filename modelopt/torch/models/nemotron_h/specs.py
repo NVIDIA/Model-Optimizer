@@ -13,11 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-"""Gemma 1 specs (HF model type ``gemma``)."""
+"""Nemotron-H specs (HF model type ``nemotron_h``)."""
 
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ModelSpec, MoESpec, MoEVariant
 
-# Gemma 1 RMSNorm stores weight - 1 (the effective scale is weight + 1).
-register(ModelSpec(model_type="gemma", weight_plus_one_norm_names=("GemmaRMSNorm",)))
+register(
+    ModelSpec(
+        model_type="nemotron_h",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(
+                    # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
+                    block_names=("NemotronHMOE",),
+                    expert_linear_names=("up_proj", "down_proj"),
+                    has_iterable_experts=True,
+                ),
+            ),
+        ),
+    )
+)

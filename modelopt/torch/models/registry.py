@@ -25,7 +25,7 @@ import functools
 from dataclasses import fields
 from typing import TYPE_CHECKING
 
-from .specs import ModelSpec, MoEVariant
+from .specs import ExportSpec, ModelSpec, MoESpec, MoEVariant
 
 if TYPE_CHECKING:
     import torch.nn as nn
@@ -60,22 +60,52 @@ def get_specs() -> list[ModelSpec]:
     return list(_SPECS.values())
 
 
+# The section attributes of ``ModelSpec``, searched in order when resolving an
+# attribute name that a section rather than ``ModelSpec`` itself declares.
+_SECTION_FIELDS = ("moe_spec", "export_spec")
+_SECTION_TYPES = (MoESpec, ExportSpec)
+
+
 @functools.cache
 def _spec_attr_names() -> frozenset[str]:
-    """All ``ModelSpec`` field and property names."""
+    """All field and property names readable off a ``ModelSpec`` or one of its sections."""
     names = {f.name for f in fields(ModelSpec)}
-    for klass in ModelSpec.__mro__:
-        names.update(name for name, attr in vars(klass).items() if isinstance(attr, property))
+    for section_type in _SECTION_TYPES:
+        names.update(f.name for f in fields(section_type))
+        for klass in section_type.__mro__:
+            names.update(name for name, attr in vars(klass).items() if isinstance(attr, property))
     return frozenset(names)
+
+
+def _read_spec_attr(spec: ModelSpec, attr: str):
+    """Read ``attr`` off ``spec`` or whichever section declares it.
+
+    Returns ``None`` when the declaring section is absent on this model, which is how
+    a dense model contributes nothing to an MoE vocabulary. That is distinct from a
+    present-but-empty section, which contributes an empty tuple; both end up adding
+    no values.
+    """
+    if hasattr(spec, attr):
+        return getattr(spec, attr)
+    for section_name in _SECTION_FIELDS:
+        section = getattr(spec, section_name)
+        if section is not None and hasattr(section, attr):
+            return getattr(section, attr)
+    return None
 
 
 def list_all_possible(attr: str) -> tuple:
     """List a spec attribute's values across all registered specs, deduplicated in order.
 
-    E.g. ``list_all_possible("gate_up_pairs")``. The result is a global vocabulary:
-    consumers match it against any model's modules, so adding a value to one spec
-    affects all models the consumer walks — prefer ``get_spec(model_type)`` /
-    ``match_moe_block`` wherever the owning model is identifiable.
+    E.g. ``list_all_possible("gate_up_pairs")``. Looks the name up on ``ModelSpec``
+    and then on its sections, so callers name the field (``"pqs_fuse_rules"``) without
+    naming the section that holds it. Models whose declaring section is ``None``
+    contribute nothing.
+
+    The result is a global vocabulary: consumers match it against any model's modules,
+    so adding a value to one spec affects all models the consumer walks — prefer
+    ``get_spec(model_type)`` / ``match_moe_block`` wherever the owning model is
+    identifiable.
 
     ``attr`` must name a tuple-valued attribute. Scalars (``model_type``) would be
     iterated character by character, so they are rejected rather than silently
@@ -87,7 +117,10 @@ def list_all_possible(attr: str) -> tuple:
         )
     values: list = []
     for spec in get_specs():
-        value = getattr(spec, attr)
+        value = _read_spec_attr(spec, attr)
+        if value is None:
+            # This model does not declare the section that holds ``attr``.
+            continue
         if not isinstance(value, tuple):
             raise ValueError(
                 f"list_all_possible({attr!r}) expects a tuple-valued attribute, got "
@@ -116,14 +149,20 @@ def match_moe_block(module: "nn.Module", model_type: str | None = None) -> MoEVa
     that model's own spec is consulted, and an unregistered model type resolves to
     ``None`` even if the module's class names coincide with another model's.
     ``model_type=None`` searches all specs. A composite model whose MoE lives under
-    a sub-model type registers the root type too (see ``gemma4.py``). Within the
+    a sub-model type registers the root type too (see ``gemma4/specs.py``). Within the
     spec, variant ``block_names`` matched against the module's MRO picks the layout.
     """
     if model_type:
-        spec = get_spec(model_type)
-        return spec.match_moe_variant(module) if spec is not None else None
+        return _match_in_spec(get_spec(model_type), module)
     for spec in get_specs():
-        variant = spec.match_moe_variant(module)
+        variant = _match_in_spec(spec, module)
         if variant is not None:
             return variant
     return None
+
+
+def _match_in_spec(spec: ModelSpec | None, module: "nn.Module") -> MoEVariant | None:
+    """Match ``module`` against one spec's MoE section; ``None`` if either is absent."""
+    if spec is None or spec.moe_spec is None:
+        return None
+    return spec.moe_spec.match_moe_variant(module)

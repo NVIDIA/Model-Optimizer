@@ -13,22 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPT-OSS specs (HF model type ``gpt_oss``)."""
+"""Nemotron specs (HF model type ``nemotron``); Nemotron-H lives in ``nemotron_h.py``."""
 
 from ..registry import register
-from ..specs import ModelSpec, MoEVariant
+from ..specs import ExportSpec, ModelSpec
 
+# LayerNorm1P stores weight - 1 (zero-centered gamma); both the Megatron-style class
+# name and the HF Nemotron port are listed.
 register(
     ModelSpec(
-        model_type="gpt_oss",
-        moe_variants=(
-            MoEVariant(
-                # GPT-OSS fuses gate and up into a single gate_up_proj.
-                # transformers names the block GptOssMLP; GptOssMoE is kept for the
-                # legacy name this data was migrated from.
-                block_names=("GptOssMLP", "GptOssMoE"),
-                expert_linear_names=("gate_up_proj", "down_proj"),
-            ),
+        model_type="nemotron",
+        export_spec=ExportSpec(
+            weight_plus_one_norm_names=("LayerNorm1P", "NemotronLayerNorm1P"),
         ),
     )
 )

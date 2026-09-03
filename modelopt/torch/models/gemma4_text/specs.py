@@ -13,16 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nemotron specs (HF model type ``nemotron``); Nemotron-H lives in ``nemotron_h.py``."""
+"""Gemma4 text-only specs (HF model type ``gemma4_text``).
 
+A text-only Gemma4 checkpoint's root ``model_type`` is ``gemma4_text`` (following the
+gemma3 precedent), while the VLM's is ``gemma4``. The MoE block lives in the text
+model either way, so the layout is imported from ``gemma4`` rather than restated --
+the two must not drift apart.
+"""
+
+from ..gemma4.specs import GEMMA4_MOE_VARIANTS
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ModelSpec, MoESpec
 
-# LayerNorm1P stores weight - 1 (zero-centered gamma); both the Megatron-style class
-# name and the HF Nemotron port are listed.
-register(
-    ModelSpec(
-        model_type="nemotron",
-        weight_plus_one_norm_names=("LayerNorm1P", "NemotronLayerNorm1P"),
-    )
-)
+register(ModelSpec(model_type="gemma4_text", moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS)))

@@ -13,11 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-"""Gemma 2 specs (HF model type ``gemma2``)."""
+"""Qwen3 (dense) specs (HF model type ``qwen3``)."""
 
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ExportSpec, ModelSpec
 
-# Gemma 2 RMSNorm stores weight - 1 (the effective scale is weight + 1).
-register(ModelSpec(model_type="gemma2", weight_plus_one_norm_names=("Gemma2RMSNorm",)))
+register(
+    ModelSpec(
+        model_type="qwen3",
+        export_spec=ExportSpec(
+            # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
+            pqs_fuse_rules=(
+                (("Qwen3Attention",), "v_proj", "o_proj"),
+                (("Qwen3MLP",), "up_proj", "down_proj"),
+            ),
+        ),
+    )
+)

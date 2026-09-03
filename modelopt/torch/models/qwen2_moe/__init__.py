@@ -16,4 +16,4 @@
 
 """Per-model specs for HF model type ``qwen2_moe``."""
 
-from . import export
+from . import specs

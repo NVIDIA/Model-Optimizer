@@ -13,26 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DeepSeek-MoE specs (trust-remote-code model type ``deepseek``).
 
-Matches the remote-code ``DeepseekMoE`` block, not the HF-native ``deepseek_v3``
-classes.
-"""
+"""Gemma 2 specs (HF model type ``gemma2``)."""
 
 from ..registry import register
-from ..specs import ModelSpec, MoEVariant
+from ..specs import ExportSpec, ModelSpec
 
-# has_iterable_experts stays False until the grouped export path is validated on
-# this model.
+# Gemma 2 RMSNorm stores weight - 1 (the effective scale is weight + 1).
 register(
     ModelSpec(
-        model_type="deepseek",
-        moe_variants=(
-            MoEVariant(
-                block_names=("DeepseekMoE",),
-                expert_linear_names=("gate_proj", "down_proj", "up_proj"),
-                gate_up_pair=("gate_proj", "up_proj"),
-            ),
-        ),
+        model_type="gemma2",
+        export_spec=ExportSpec(weight_plus_one_norm_names=("Gemma2RMSNorm",)),
     )
 )

@@ -16,4 +16,4 @@
 
 """Per-model specs for HF model type ``gemma4_text``."""
 
-from . import export
+from . import specs

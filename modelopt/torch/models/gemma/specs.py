@@ -14,10 +14,15 @@
 # limitations under the License.
 
 
-"""Gemma 3 specs (HF model type ``gemma3``)."""
+"""Gemma 1 specs (HF model type ``gemma``)."""
 
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ExportSpec, ModelSpec
 
-# Gemma 3 RMSNorm stores weight - 1 (the effective scale is weight + 1).
-register(ModelSpec(model_type="gemma3", weight_plus_one_norm_names=("Gemma3RMSNorm",)))
+# Gemma 1 RMSNorm stores weight - 1 (the effective scale is weight + 1).
+register(
+    ModelSpec(
+        model_type="gemma",
+        export_spec=ExportSpec(weight_plus_one_norm_names=("GemmaRMSNorm",)),
+    )
+)

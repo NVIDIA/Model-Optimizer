@@ -17,15 +17,19 @@
 
 ``ModelSpec`` is the one global descriptor of a model: everything modelopt knows
 about a model type lives on a single instance, resolved by ``config.model_type``.
-It is composed from section mixins so each concern stays a small, separate class:
+It holds each concern as a separate, optional section object:
 
 - **topic sections** hold architecture facts shared across subsystems (``MoESpec``:
   what a model's MoE blocks are);
 - **subsystem sections** hold one subsystem's per-model data (``ExportSpec``).
 
+A section is ``None`` when the model has nothing to say about it -- a dense model
+carries ``moe_spec=None`` rather than an empty ``MoESpec``, so "not an MoE model" and
+"an MoE model whose layout is not filled in yet" stay distinguishable.
+
 Sections hold per-model data plus trivial accessors over that data; subsystem logic
-never lives here. A model registers exactly one ``ModelSpec`` in its sibling module,
-filling only the sections it customizes.
+never lives here. A model registers exactly one ``ModelSpec`` in its sibling
+``specs.py``, filling only the sections it customizes.
 """
 
 from dataclasses import dataclass
@@ -151,13 +155,22 @@ class ExportSpec:
 
 
 @dataclass(kw_only=True)
-class ModelSpec(MoESpec, ExportSpec):
-    """The one global per-model descriptor, composed from the section mixins.
+class ModelSpec:
+    """The one global per-model descriptor, holding each section as an attribute.
 
     Resolved by HF model type (see ``registry.get_spec``); a model registers exactly
-    one instance, filling only the sections it customizes.
+    one instance, filling only the sections it customizes and leaving the rest
+    ``None``. Consumers must handle an absent section; ``registry.match_moe_block``
+    and ``registry.list_all_possible`` already do for the lookups they cover.
     """
 
     model_type: str
     """The HF model type this spec describes (``config.model_type``, e.g.
     ``"qwen3_moe"``). Unique across the registry."""
+
+    moe_spec: MoESpec | None = None
+    """The model's MoE architecture facts, or ``None`` for a dense model."""
+
+    export_spec: ExportSpec | None = None
+    """Per-model data of the unified HF export path, or ``None`` when export needs
+    nothing model-specific."""

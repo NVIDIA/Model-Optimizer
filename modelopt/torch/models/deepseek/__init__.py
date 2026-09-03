@@ -16,4 +16,4 @@
 
 """Per-model specs for HF model type ``deepseek``."""
 
-from . import export
+from . import specs

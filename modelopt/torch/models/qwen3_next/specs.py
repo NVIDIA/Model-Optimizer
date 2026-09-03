@@ -13,16 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gemma4 text-only specs (HF model type ``gemma4_text``).
+"""Qwen3-Next specs (HF model type ``qwen3_next``)."""
 
-A text-only Gemma4 checkpoint's root ``model_type`` is ``gemma4_text`` (following the
-gemma3 precedent), while the VLM's is ``gemma4``. The MoE block lives in the text
-model either way, so the layout is imported from ``gemma4`` rather than restated --
-the two must not drift apart.
-"""
-
-from ..gemma4.export import GEMMA4_MOE_VARIANTS
 from ..registry import register
-from ..specs import ModelSpec
+from ..specs import ModelSpec, MoESpec, MoEVariant
 
-register(ModelSpec(model_type="gemma4_text", moe_variants=GEMMA4_MOE_VARIANTS))
+register(
+    ModelSpec(
+        model_type="qwen3_next",
+        moe_spec=MoESpec(
+            moe_variants=(
+                MoEVariant(
+                    block_names=("Qwen3NextSparseMoeBlock",),
+                    expert_linear_names=("gate_proj", "down_proj", "up_proj"),
+                    gate_up_pair=("gate_proj", "up_proj"),
+                    has_iterable_experts=True,
+                ),
+            ),
+        ),
+    )
+)
