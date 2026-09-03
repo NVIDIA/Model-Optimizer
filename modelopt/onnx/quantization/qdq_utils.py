@@ -1520,7 +1520,11 @@ def fp4qdq_to_2dq(onnx_model: onnx.ModelProto, verbose: bool = False) -> onnx.Mo
     )
 
     # Lazy import to avoid a circular import: nvfp4_exporter imports from this module.
-    from modelopt.onnx.export.nvfp4_exporter import _cast_fp4, _replace_fp4qdq_with_2dq
+    from modelopt.onnx.export.nvfp4_exporter import (
+        _cast_fp4,
+        _encode_nvfp4_block_scale,
+        _replace_fp4qdq_with_2dq,
+    )
 
     logger.info("Converting model with FP4QDQ nodes to 2DQ only model")
     graph = onnx_model.graph
@@ -1584,11 +1588,10 @@ def fp4qdq_to_2dq(onnx_model: onnx.ModelProto, verbose: bool = False) -> onnx.Mo
         w32 = read_f16_tensor_as_fp32(tensor)
         sw_f32_per_tensor = get_weights_scaling_factor_2(w32)
         sw_f32_per_block = get_weights_scaling_factor(w32, block_size, sw_f32_per_tensor)
+        sw_f32_per_block, sw_f8_per_block = _encode_nvfp4_block_scale(sw_f32_per_block)
         w_f32 = quantize(w32, block_size, sw_f32_per_block, sw_f32_per_tensor)
 
-        # Real quantize the tensors
         w_f4 = _cast_fp4(w_f32)
-        sw_f8_per_block = _cast_fp8(sw_f32_per_block)
 
         _replace_fp4qdq_with_2dq(
             graph,

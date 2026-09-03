@@ -30,7 +30,6 @@ from torch.distributed.tensor import DTensor, Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
-from modelopt.torch.utils.distributed import is_fsdp2_model
 from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
 if TYPE_CHECKING:
@@ -664,19 +663,6 @@ def has_accelerate_offload(module: nn.Module) -> bool:
     )
 
 
-def has_non_resident_weights(module: nn.Module) -> bool:
-    """Whether any weight under ``module`` lives outside it for part of the export.
-
-    Structural (FSDP2 wrapping, accelerate offload hooks) rather than a snapshot of
-    current placement: offloaded weights come and go as materialization windows open and
-    close, so a point-in-time check answers differently depending on when it runs.
-
-    Callers use this for decisions that must hold for a whole export — notably
-    pointer-keyed dedup, which needs ``data_ptr()`` to identify a tensor throughout.
-    """
-    return has_accelerate_offload(module) or is_fsdp2_model(module)
-
-
 @contextmanager
 def persistent_materialization(layer, writeback: bool = True):
     """Keep all layer weights materialized on GPU for the duration.
@@ -727,8 +713,9 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
     1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
        and writes it back, so every expert shares the same input amax.
     2. If ``sync_weight_amax`` is True, also syncs ``weight_quantizer`` amax across
-       experts (max across experts). This matches TEGroupedMLP behavior where all
-       experts share a single weight quantizer.
+       experts (max across experts), so the layer ends up with one effective weight
+       scale. Off by default: experts otherwise keep an independent amax each, which
+       is also what ``TEGroupedLinear``'s per-expert ``GroupedQuantizer`` does.
     3. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.

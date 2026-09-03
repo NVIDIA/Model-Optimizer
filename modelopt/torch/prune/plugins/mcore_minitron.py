@@ -57,8 +57,6 @@ from tqdm import tqdm
 
 from modelopt.torch.nas.conversion import NASModeRegistry
 from modelopt.torch.nas.plugins.megatron import (
-    HAS_HYBRID,
-    HAS_MAMBA,
     SUPPORTED_MODELS,
     _DynamicAttention,
     _DynamicMambaLayer,
@@ -130,10 +128,9 @@ __all__ = [
 def _get_hybrid_pattern_key(model: nn.Module) -> str | None:
     """Return the attribute name carrying the hybrid block pattern for hybrid models, else None.
 
-    Handles both ``MambaModel`` (which still uses ``hybrid_override_pattern``) and plain
-    ``HybridModel`` (the parent class introduced in modern Megatron-LM, which carries
-    ``hybrid_layer_pattern``). Detecting by attribute presence avoids fragile isinstance
-    checks against a class hierarchy that may shift across MCore versions.
+    Handles both the deprecated ``hybrid_override_pattern`` and ``hybrid_layer_pattern``.
+    Detecting by attribute presence avoids fragile isinstance checks against a class
+    hierarchy that may shift across MCore versions.
     """
     for attr in ("hybrid_override_pattern", "hybrid_layer_pattern"):
         if getattr(model, attr, None):
@@ -155,7 +152,7 @@ def _slice_per_layer_pattern(pattern: list | tuple | str, dropped_layers: set[in
 def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[int]) -> None:
     """Remove given layers (1-indexed) of the model (works with TP and/or PP).
 
-    If model is a wrapper around GPTModel or MambaModel, it will be unwrapped.
+    If model is a wrapper around GPTModel or HybridModel, it will be unwrapped.
     """
     layers_to_drop = sorted(layers_to_drop)
     assert layers_to_drop[0] >= 1, (
@@ -807,14 +804,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         return metrics
 
 
-_HYBRID_DIVISORS = {
-    "hidden_size_divisor": 256,
-    "ffn_hidden_size_divisor": 512,
-    "mamba_head_dim_divisor": 8,
-    "num_moe_experts_divisor": 8,
-    "num_layers_divisor": 2,
-}
-
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
     "MCoreMinitronConfig",
     **get_kwargs_for_create_model_with_rules(
@@ -826,8 +815,13 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                 "num_moe_experts_divisor": 8,
                 "num_layers_divisor": 2,
             },
-            **({"megatron.core.models.mamba.MambaModel": _HYBRID_DIVISORS} if HAS_MAMBA else {}),
-            **({"megatron.core.models.hybrid.HybridModel": _HYBRID_DIVISORS} if HAS_HYBRID else {}),
+            "megatron.core.models.hybrid.HybridModel": {
+                "hidden_size_divisor": 256,
+                "ffn_hidden_size_divisor": 512,
+                "mamba_head_dim_divisor": 8,
+                "num_moe_experts_divisor": 8,
+                "num_layers_divisor": 2,
+            },
         },
         doc='Configuration for the ``"mcore_minitron"`` mode.',
     ),
@@ -869,7 +863,7 @@ def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
 
     Model subclasses (e.g. VLM language models like ``Qwen3VLGPTModel``) are registered under their
     own ``DMRegistry`` key but share the dynamic class (and thus the search-space rule schema) of
-    their base ``GPTModel``/``MambaModel``. ``MCoreMinitronConfig`` only defines rule fields for the
+    their base ``GPTModel``/``HybridModel``. ``MCoreMinitronConfig`` only defines rule fields for the
     base classes, so without this a subclass module would have no matching rule and get *frozen*
     during conversion (disabling width/depth pruning). Copy the base rule onto the subclass key.
     """
@@ -878,7 +872,7 @@ def _inherit_base_model_rules(model: nn.Module, rules: dict) -> dict:
         base_rule = rules.get(base_key)
         if base_rule is None:
             continue
-        # GPTModel/MambaModel are siblings (not subclasses of each other), so isinstance uniquely
+        # GPTModel/HybridModel are siblings (not subclasses of each other), so isinstance uniquely
         # assigns each module to its base; the subclass shares the base's dynamic class and hence its
         # rule schema. A subclass registered under its own key but absent from rules inherits it here.
         for mod in model.modules():

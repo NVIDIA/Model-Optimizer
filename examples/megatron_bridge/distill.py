@@ -25,9 +25,9 @@ import contextlib
 import os
 
 import torch
-from _distillation_provider import convert_to_distillation_provider
 from export_distilled_megatron_to_hf import export_llm_to_hf, save_vlm_to_hf
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
@@ -50,12 +50,18 @@ from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 from megatron.core.utils import unwrap_model
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
-from modelopt.torch.utils.plugins.mbridge import load_modelopt_megatron_checkpoint
+from modelopt.torch.utils.plugins.mbridge import (
+    is_vlm_config,
+    load_modelopt_megatron_checkpoint,
+    set_moe_expert_layout,
+    use_moe_grouped_gemm,
+)
 
 with contextlib.suppress(ModuleNotFoundError):
     import modelopt.torch.puzzletron.plugins.mbridge  # noqa: F401
@@ -92,6 +98,15 @@ def get_args():
         help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
+        ),
+    )
     parser.add_argument(
         "--student_megatron_path",
         type=str,
@@ -326,11 +341,26 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace):
+    student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
+        args.student_megatron_path
+    )
+    # A quantized student pins the layout: it must match what quantize.py wrote, so reuse the same
+    # data-driven choice. An unquantized (e.g. pruned) student exports via Megatron-Bridge, which
+    # reads either layout, so it keeps the faster grouped GEMM.
+    moe_grouped_gemm = (
+        use_moe_grouped_gemm(
+            args.student_hf_path,
+            trust_remote_code=args.trust_remote_code,
+            force_sequential=args.no_moe_grouped_gemm,
+        )
+        if student_has_modelopt_state
+        else not args.no_moe_grouped_gemm
+    )
     checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
     tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
-    def _build_model_provider(hf_path, load_weights=True):
+    def _build_model_provider(hf_path, load_weights=True, moe_grouped_gemm=True):
         bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=load_weights)
 
@@ -343,6 +373,7 @@ def main(args: argparse.Namespace):
         provider.expert_model_parallel_size = args.ep_size
         provider.expert_tensor_parallel_size = 1  # Expert tensor parallelism is not supported
         provider.seq_length = args.seq_length
+        set_moe_expert_layout(provider, moe_grouped_gemm)
         if args.sft:
             # A response-only loss mask needs per-token reduction to combine across CP ranks.
             # Must stay in sync with ``average_in_collective=not args.sft`` on the DDP config.
@@ -358,17 +389,21 @@ def main(args: argparse.Namespace):
     # The student structure is always built from --student_hf_path. When --student_megatron_path is
     # given, the HF weights are skipped (they are overwritten by the Megatron checkpoint, loaded into
     # the built student inside the patched provide() below).
-    student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
-        args.student_megatron_path
-    )
+    # Only the student's layout is pinned -- it must match --student_megatron_path (see quantize.py).
     student_provider = _build_model_provider(
-        args.student_hf_path, load_weights=args.student_megatron_path is None
+        args.student_hf_path,
+        load_weights=args.student_megatron_path is None,
+        moe_grouped_gemm=moe_grouped_gemm,
     )
     if student_has_modelopt_state:
         # Gradient accumulation fusion is not supported with ModelOpt quantized models. Disable it
         # before the model is built so the student's linear layers are constructed accordingly.
         student_provider.gradient_accumulation_fusion = False
-    teacher_provider = _build_model_provider(args.teacher_hf_path)
+    # The teacher only runs forward, is loaded from HF, and is hidden from the checkpoint
+    # (``expose_minimal_state_dict``), so it keeps the faster grouped GEMM regardless.
+    teacher_provider = _build_model_provider(
+        args.teacher_hf_path, moe_grouped_gemm=not args.no_moe_grouped_gemm
+    )
 
     # The KD losses compare logits elementwise over the vocab dim, so both output layers must have
     # the same padded width. A shared tokenizer does not imply it: the HF configs can disagree.
@@ -390,10 +425,7 @@ def main(args: argparse.Namespace):
 
     # HF VLM configs expose ``vision_config``; Megatron-Bridge nests the text model under
     # ``language_model`` (used as ``distill_submodule`` below).
-    is_vlm = hasattr(
-        AutoConfig.from_pretrained(args.student_hf_path, trust_remote_code=args.trust_remote_code),
-        "vision_config",
-    )
+    is_vlm = is_vlm_config(args.student_hf_path, trust_remote_code=args.trust_remote_code)
 
     if is_vlm:
         warn_rank_0(
@@ -420,9 +452,14 @@ def main(args: argparse.Namespace):
             print_rank_0(
                 f"Loading student weights from Megatron checkpoint {args.student_megatron_path}"
             )
-            load_modelopt_megatron_checkpoint(
-                [unwrap_model(model_chunks[0])], args.student_megatron_path
-            )
+            student = unwrap_model(model_chunks[0])
+            loaded = load_modelopt_megatron_checkpoint([student], args.student_megatron_path)
+            if is_vlm and student_has_modelopt_state and loaded[0] is student:
+                # PTQ stores the state on the VLM root (it quantizes and saves the whole VLM), but
+                # only ``language_model`` is distilled and checkpointed here, so move it there to
+                # keep the quantizers across the QAD checkpoint's save / restore. Resuming from a
+                # language-model-only checkpoint already restores it there.
+                ModeloptStateManager.transfer_state_dict(student, student.language_model)
             return model_chunks
 
         distill_provider.register_pre_wrap_hook(_restore_student_hook, prepend=True)

@@ -1,0 +1,2 @@
+exclude modelopt_recipes/huggingface/models
+prune modelopt_recipes/huggingface/models
