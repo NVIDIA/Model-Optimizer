@@ -20,6 +20,8 @@ import torch.nn as nn
 from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.model_config import ModelConfig
+from modelopt.torch.export.postprocess import update_lm_head_quantization
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     _process_quantized_modules,
@@ -100,6 +102,69 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+def _build_quantized_lm_head(vocab_size=256, hidden_size=256, block_size=128):
+    """Returns an INT4 block-quantized lm_head QuantLinear."""
+    model = nn.Sequential(nn.Linear(hidden_size, vocab_size, bias=False))
+    quant_cfg = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*weight_quantizer",
+                "cfg": {"num_bits": 4, "block_sizes": {-1: block_size, "type": "static"}},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, quant_cfg, lambda m: m(torch.randn(2, hidden_size)))
+    return model[0]
+
+
+def test_update_lm_head_quantization_disabled_quantizer_no_warning(recwarn):
+    """A disabled lm_head quantizer must not trigger the 'Enable lm_head quantization' warning."""
+    lm_head = _build_quantized_lm_head()
+    lm_head.weight_quantizer.disable()
+    lm_head.input_quantizer.disable()
+
+    update_lm_head_quantization(ModelConfig(), lm_head, 1)
+
+    assert len(recwarn) == 0
+    # The function must not silently (re-)enable quantization either.
+    assert not lm_head.weight_quantizer.is_enabled
+    assert not lm_head.input_quantizer.is_enabled
+
+
+def test_update_lm_head_quantization_enabled_warns():
+    """An enabled, deployable lm_head quantizer stays enabled and warns about accuracy loss."""
+    lm_head = _build_quantized_lm_head()
+
+    with pytest.warns(UserWarning, match="Enable lm_head quantization"):
+        update_lm_head_quantization(ModelConfig(), lm_head, 1)
+
+    assert lm_head.weight_quantizer.is_enabled
+    assert lm_head.input_quantizer.is_enabled
+
+
+def test_update_lm_head_quantization_disables_on_tp_indivisible_vocab(recwarn):
+    """vocab_size divisible by block but not block * TP: quantization is disabled, no warning.
+
+    vocab 384 with block 128 deploys fine on TP=1, but TP=2 shards the vocab (column
+    linear) dim to 192, which no longer holds an integer number of AWQ blocks per rank.
+    """
+    lm_head = _build_quantized_lm_head(vocab_size=384, block_size=128)
+
+    update_lm_head_quantization(ModelConfig(), lm_head, 2)
+
+    assert not lm_head.weight_quantizer.is_enabled
+    assert not lm_head.input_quantizer.is_enabled
+    assert len(recwarn) == 0
 
 
 class QuantMoELinear(nn.Module):
