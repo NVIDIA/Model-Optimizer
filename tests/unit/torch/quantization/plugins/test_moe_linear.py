@@ -23,6 +23,8 @@ import torch.nn.functional as F
 pytest.importorskip("transformers")
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.hf_export_handlers import _export_moe_linear
+from modelopt.torch.export.registry import ExportContext, ExportModuleRegistry
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     _is_expert_indexed_moe_linear,
@@ -190,9 +192,6 @@ def test_export_handler_matches_a_differently_named_wrapper():
     ``_export_moe_linear`` and export without the input-amax fallback for experts that
     calibration never routed to.
     """
-    from modelopt.torch.export.hf_export_handlers import _export_moe_linear
-    from modelopt.torch.export.registry import ExportModuleRegistry
-
     model = _TinyStepModel()
     mtq.quantize(model, _moe_quant_cfg(), forward_loop=lambda m: m(torch.randn(2, 8, HIDDEN_SIZE)))
 
@@ -204,9 +203,6 @@ def test_export_handler_matches_a_differently_named_wrapper():
 
 def test_export_handler_fills_input_amax_for_unrouted_experts():
     """The handler is what gives never-routed experts an input amax before export."""
-    from modelopt.torch.export.hf_export_handlers import _export_moe_linear
-    from modelopt.torch.export.registry import ExportContext
-
     torch.manual_seed(0)
     model = _TinyStepModel()
     mtq.quantize(model, _moe_quant_cfg(), forward_loop=lambda m: m(torch.randn(2, 8, HIDDEN_SIZE)))
