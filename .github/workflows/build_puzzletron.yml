@@ -19,6 +19,7 @@ jobs:
     steps:
       - name: Build image
         # uses: docker/build-push-action@v7.3.0
+        uses: actions/checkout@v6
         run: |
           echo "BUILDING IMAGE"
           docker build . -f examples/puzzletron/Dockerfile
