@@ -21,6 +21,10 @@ from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.common import Config, PatternCache, Region, RegionType
 from modelopt.onnx.quantization.autotune.region_search import CombinedRegionSearch
+from modelopt.onnx.quantization.autotune.torch_region_builder import (
+    TorchRegionBuilder,
+    check_torch_naming_convention,
+)
 
 
 class QDQAutotuner(QDQAutotunerBase):
@@ -94,22 +98,28 @@ class QDQAutotuner(QDQAutotunerBase):
         - Phase 2: Top-down refinement creating hierarchical structure
         """
         logger.info("Discovering optimization regions")
-        search = CombinedRegionSearch(
-            self.graph,
-            maximum_sequence_region_size=self.config.maximum_sequence_region_size,
-            minimum_topdown_search_size=self.config.minimum_topdown_search_size,
-        )
-        self.regions = search.search_regions()
-        self._reassign_region_ids(self.regions)
-        logger.debug(f"Found {len(self.regions)} top-level regions")
+        if check_torch_naming_convention(self.graph):
+            torch_search = TorchRegionBuilder(self.graph)
+            # linearize=True returns leaves + innermost composites, leaves first
+            self.regions = torch_search.build_regions(linearize=True, only_quantizable=True)
+            for i, region in enumerate(self.regions):
+                region.id = i
+        else:
+            default_search = CombinedRegionSearch(
+                self.graph,
+                maximum_sequence_region_size=self.config.maximum_sequence_region_size,
+                minimum_topdown_search_size=self.config.minimum_topdown_search_size,
+            )
+            self.regions = default_search.search_regions()
+            self._reassign_region_ids(self.regions)
 
-        # Flatten the hierarchy into a list of all regions
-        all_regions = []
-        for region in self.regions:
-            all_regions.extend(QDQAutotuner._visit_region_recursively(region))
+            # Flatten the hierarchy into a list of all regions
+            all_regions = []
+            for region in self.regions:
+                all_regions.extend(QDQAutotuner._visit_region_recursively(region))
 
-        all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
-        self.regions = all_regions
+            all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
+            self.regions = all_regions
 
         type_counts = Counter(r.type for r in self.regions)
         logger.info(
