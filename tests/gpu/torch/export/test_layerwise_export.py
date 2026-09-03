@@ -22,11 +22,20 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3_moe
+from _test_utils.torch.transformers_models import (
+    get_tiny_gemma3vl,
+    get_tiny_llama,
+    get_tiny_qwen3_moe,
+)
 from safetensors.torch import load_file
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.layerwise_export import LayerwiseExporter, layer_shard_name
+from modelopt.torch.export.layerwise_export import (
+    LAYERWISE_EXPORTER_ATTR,
+    LayerwiseExporter,
+    layer_shard_name,
+)
+from modelopt.torch.export.model_utils import get_language_model_from_vl
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
 
 NUM_LAYERS = 4
@@ -43,6 +52,23 @@ def _build_model():
     model = get_tiny_llama(num_hidden_layers=NUM_LAYERS).cuda().eval()
     # get_tiny_llama leaves this unset, but export reads it to detect multimodal models.
     model.config.architectures = ["LlamaForCausalLM"]
+    return model
+
+
+def _layerwise_quantize(model, cfg, extra_state_dict=None, export_model=None):
+    """Attach the exporter, calibrate, then finish the checkpoint.
+
+    ``export_model`` names a wider root than the calibrated model, as a VLM pipeline does;
+    omitted, calibration builds and announces its own.
+    """
+    if export_model is not None:
+        setattr(
+            model,
+            LAYERWISE_EXPORTER_ATTR,
+            LayerwiseExporter(export_model, cfg["algorithm"]["layerwise"]["export_dir"]),
+        )
+    mtq.quantize(model, cfg, _calib)
+    getattr(model, LAYERWISE_EXPORTER_ATTR).finalize(extra_state_dict=extra_state_dict)
     return model
 
 
@@ -236,7 +262,7 @@ def test_export_matches_whole_model_export(
     if interrupt_at is not None:
         with _dies_at_layer(interrupt_at), pytest.raises(RuntimeError, match="interrupted"):
             mtq.quantize(_build_model(), cfg, _calib)
-    mtq.quantize(_build_model(), cfg, _calib)
+    _layerwise_quantize(_build_model(), cfg)
 
     exported = _load_checkpoint(export_dir)
     if expected_key_suffix:
@@ -250,6 +276,142 @@ def test_export_matches_whole_model_export(
         assert (export_dir / artifact).is_file(), f"{artifact} missing"
 
 
+def test_config_only_export_is_finishable(tmp_path):
+    """No caller-supplied exporter: calibration builds one and announces it to be finished.
+
+    Held in a local instead, the run would leave layer shards with no tail, index or config.
+    Finalize clears the announcement, or the exporter follows the model into save/deepcopy.
+    """
+    export_dir = tmp_path / "fused"
+    model = _build_model()
+    mtq.quantize(model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+
+    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    assert exporter is not None, "calibration did not attach the exporter it built"
+    exporter.finalize()
+    for artifact in ("model-tail.safetensors", "model.safetensors.index.json", "config.json"):
+        assert (export_dir / artifact).is_file(), f"{artifact} missing"
+    assert getattr(model, LAYERWISE_EXPORTER_ATTR, None) is None, (
+        "the exporter is still attached after the export finished"
+    )
+
+
+def test_only_the_pass_owning_export_dir_exports(tmp_path, baseline_checkpoint):
+    """Only the entry that sets export_dir may drive the exporter.
+
+    An earlier layerwise pass reaching it would convert every layer into export form before
+    this pass has calibrated it, capturing an intermediate state in the shards.
+    """
+    export_dir = tmp_path / "fused"
+    cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt")
+    layerwise = cfg["algorithm"]["layerwise"]
+    # Its own checkpoint_dir: a manifest completed by pass 1 would make pass 2 resume past
+    # every layer.
+    first = copy.deepcopy(layerwise)
+    del first["export_dir"]
+    first["checkpoint_dir"] = str(tmp_path / "ckpt_first")
+    cfg["algorithm"] = [
+        {"method": "max", "layerwise": first},
+        {"method": "max", "layerwise": copy.deepcopy(layerwise)},
+    ]
+    model = _build_model()
+    setattr(model, LAYERWISE_EXPORTER_ATTR, LayerwiseExporter(model, export_dir))
+    exported_by = []
+    real = LayerwiseExporter.export_layer
+
+    def record(self, idx, *args, **kwargs):
+        exported_by.append(idx)
+        return real(self, idx, *args, **kwargs)
+
+    with patch.object(LayerwiseExporter, "export_layer", record):
+        mtq.quantize(model, cfg, _calib)
+    getattr(model, LAYERWISE_EXPORTER_ATTR).finalize()
+
+    assert exported_by == list(range(NUM_LAYERS)), (
+        f"each layer must be exported exactly once, by the owning pass; got {exported_by}"
+    )
+    _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
+
+
+def test_exporter_rooted_off_the_calibrated_layers_is_refused(tmp_path):
+    """layer_idx only means the same thing on both sides while the layer lists match."""
+    torch.manual_seed(0)
+    model = get_tiny_llama(num_hidden_layers=NUM_LAYERS).cuda().eval()
+    model.config.architectures = ["LlamaForCausalLM"]
+    other = get_tiny_llama(num_hidden_layers=NUM_LAYERS + 1).cuda().eval()
+    other.config.architectures = ["LlamaForCausalLM"]
+
+    export_dir = tmp_path / "fused"
+    setattr(model, LAYERWISE_EXPORTER_ATTR, LayerwiseExporter(other, export_dir))
+    with pytest.raises(RuntimeError, match="layer_idx would not agree"):
+        mtq.quantize(model, _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+
+
+def test_orphaned_tensors_reach_the_tail_shard(tmp_path):
+    """MTP weights load after calibration, so they can only be passed once it is over."""
+    export_dir = tmp_path / "fused"
+    orphans = {
+        "mtp.layers.0.weight": torch.ones(4, 4, dtype=torch.bfloat16),
+        "mtp.norm.weight": torch.ones(4, dtype=torch.bfloat16),
+    }
+    _layerwise_quantize(
+        _build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), extra_state_dict=orphans
+    )
+
+    exported = _load_checkpoint(export_dir)
+    for key, value in orphans.items():
+        assert key in exported, f"{key} missing from the exported checkpoint"
+        assert torch.equal(exported[key].cpu(), value)
+    weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    assert set(orphans) <= set(weight_map), "orphans written but left out of the index"
+
+
+def test_vlm_export_follows_the_documented_flow(tmp_path):
+    """quantize(language_model) then export_hf_checkpoint(vlm), with no layerwise plumbing.
+
+    The exporter finds the language model itself, and export_hf_checkpoint dispatches to it,
+    so a VLM caller writes the same two lines a plain LLM does.
+    """
+    torch.manual_seed(0)
+    # sliding_window past the calibration length: the tiny default (16) masks against a
+    # shorter window than the batch and the text forward fails before export is reached.
+    vlm = get_tiny_gemma3vl(tie_word_embeddings=False, sliding_window=1024).cuda().eval()
+    # The plain attribute is what TiedWeightMap reads; the config kwarg only reaches text_config.
+    vlm.all_tied_weights_keys = {}
+    language_model = get_language_model_from_vl(vlm)[-1]
+
+    export_dir = tmp_path / "fused"
+    cfg = _layerwise_cfg(export_dir, tmp_path / "ckpt")
+    LayerwiseExporter(vlm, export_dir)
+    mtq.quantize(language_model, cfg, _calib)
+    export_hf_checkpoint(vlm, export_dir=export_dir)
+
+    exported = _load_checkpoint(export_dir)
+    assert any(k.startswith("language_model.model.layers.") for k in exported), (
+        "decoder keys lost the VLM namespace"
+    )
+    assert any(k.startswith("vision_tower.") for k in exported), "the vision tower was not exported"
+    assert getattr(vlm, LAYERWISE_EXPORTER_ATTR, None) is None
+    assert getattr(language_model, LAYERWISE_EXPORTER_ATTR, None) is None
+
+
+def test_exporter_root_widens_the_checkpoint_to_the_parent(tmp_path):
+    """Rooting the exporter at the parent is what puts the shards in its namespace."""
+    torch.manual_seed(0)
+    parent = get_tiny_llama(num_hidden_layers=NUM_LAYERS).cuda().eval()
+    parent.config.architectures = ["LlamaForCausalLM"]
+    inner = parent.model
+
+    export_dir = tmp_path / "fused"
+    _layerwise_quantize(inner, _layerwise_cfg(export_dir, tmp_path / "ckpt"), export_model=parent)
+
+    exported = _load_checkpoint(export_dir)
+    assert any(k.startswith("model.layers.") for k in exported), (
+        "layer keys lost the parent namespace"
+    )
+    assert any(k.startswith("lm_head") for k in exported), "the parent's tail was not exported"
+
+
 def test_index_resolves_every_key_to_the_shard_holding_it(tmp_path):
     """A loader resolves keys through the index; tensor equality never exercises that.
 
@@ -257,7 +419,7 @@ def test_index_resolves_every_key_to_the_shard_holding_it(tmp_path):
     still fails in vLLM or transformers.
     """
     export_dir = tmp_path / "fused"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt"))
 
     weight_map = json.loads((export_dir / "model.safetensors.index.json").read_text())["weight_map"]
     on_disk = {}
@@ -272,7 +434,7 @@ def test_index_resolves_every_key_to_the_shard_holding_it(tmp_path):
 def test_layerwise_export_replaces_resume_artifacts(tmp_path):
     """The shards are the resume artifact, so per-layer weight copies are not written."""
     checkpoint_dir = tmp_path / "ckpt"
-    mtq.quantize(_build_model(), _layerwise_cfg(tmp_path / "fused", checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(tmp_path / "fused", checkpoint_dir))
 
     assert not list(checkpoint_dir.rglob("weights.pt"))
     assert not list(checkpoint_dir.rglob("quantizer_buffers.pt"))
@@ -292,13 +454,13 @@ def test_resume_skips_exported_layers(tmp_path, baseline_checkpoint):
     # Die partway, the way a lost GPU session would: only the committed boundary is
     # resumable, so rewinding a *finished* run's manifest would not reproduce this state.
     with _dies_at_layer(2), pytest.raises(RuntimeError, match="interrupted"):
-        mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+        _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
     assert (export_dir / layer_shard_name(1)).is_file(), "layer 1 was never committed"
     assert not (export_dir / layer_shard_name(2)).exists(), "layer 2 should not have landed"
 
     # Shards 0..1 are on disk and must be reused rather than recalculated.
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
     _assert_same_checkpoint(baseline_checkpoint, _load_checkpoint(export_dir))
 
@@ -306,7 +468,7 @@ def test_resume_skips_exported_layers(tmp_path, baseline_checkpoint):
 def test_resume_without_matching_shards_fails_fast(tmp_path):
     """Mismatched checkpoint/export dirs must fail before recalibrating, not at the end."""
     checkpoint_dir = tmp_path / "ckpt"
-    mtq.quantize(_build_model(), _layerwise_cfg(tmp_path / "fused", checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(tmp_path / "fused", checkpoint_dir))
 
     manifest_path = checkpoint_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -314,8 +476,8 @@ def test_resume_without_matching_shards_fails_fast(tmp_path):
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(RuntimeError, match="shards are missing"):
-        mtq.quantize(
-            _build_model(), _layerwise_cfg(tmp_path / "empty_export", checkpoint_dir), _calib
+        _layerwise_quantize(
+            _build_model(), _layerwise_cfg(tmp_path / "empty_export", checkpoint_dir)
         )
 
 
@@ -327,7 +489,7 @@ def test_complete_manifest_finalizes_without_recalibrating(tmp_path, baseline_ch
     """
     export_dir = tmp_path / "fused"
     checkpoint_dir = tmp_path / "ckpt"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
     # What a crash after the final ckpt.save looks like: every shard and a complete
     # manifest on disk, but no tail, index or config yet.
@@ -336,7 +498,7 @@ def test_complete_manifest_finalizes_without_recalibrating(tmp_path, baseline_ch
     layer_mtimes = {p.name: p.stat().st_mtime for p in export_dir.glob("model-layer-*.safetensors")}
     assert layer_mtimes
 
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
     # The layer shards must be reused verbatim, not rewritten.
     for name, mtime in layer_mtimes.items():
@@ -352,7 +514,7 @@ def test_shards_without_resume_record_refuse(tmp_path, damage):
     """
     export_dir = tmp_path / "fused"
     checkpoint_dir = tmp_path / "ckpt"
-    mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+    _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
     manifest = checkpoint_dir / "manifest.json"
     if damage == "deleted":
@@ -363,7 +525,7 @@ def test_shards_without_resume_record_refuse(tmp_path, damage):
         manifest.write_text(json.dumps(record))
 
     with pytest.raises(RuntimeError, match="no usable resume record"):
-        mtq.quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir), _calib)
+        _layerwise_quantize(_build_model(), _layerwise_cfg(export_dir, checkpoint_dir))
 
 
 def test_export_without_checkpoint_dir_may_overwrite(tmp_path):
@@ -421,8 +583,8 @@ def test_moe_export_matches(tmp_path):
     export_hf_checkpoint(mtq.quantize(_build_moe_model(), base, _calib), export_dir=baseline_dir)
 
     export_dir = tmp_path / "fused"
-    mtq.quantize(
-        _build_moe_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg()), _calib
+    _layerwise_quantize(
+        _build_moe_model(), _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg())
     )
 
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))
@@ -442,10 +604,9 @@ def test_export_consumes_the_model_without_affecting_the_checkpoint(tmp_path):
     export_hf_checkpoint(mtq.quantize(_build_model(), base, _calib), export_dir=baseline_dir)
 
     export_dir = tmp_path / "fused"
-    model = mtq.quantize(
+    model = _layerwise_quantize(
         _build_model(),
         _layerwise_cfg(export_dir, tmp_path / "ckpt", base=_nvfp4_cfg()),
-        _calib,
     )
 
     _assert_same_checkpoint(_load_checkpoint(baseline_dir), _load_checkpoint(export_dir))

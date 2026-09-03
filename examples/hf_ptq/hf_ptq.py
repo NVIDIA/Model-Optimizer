@@ -40,6 +40,7 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
+    layerwise_export_block,
     load_mtp_weights,
     mlflow_run,
     mtp_layer_prefixes_from_checkpoint,
@@ -78,6 +79,7 @@ from modelopt.torch.export import (
     has_spec_opt,
     save_expert_token_count_table,
 )
+from modelopt.torch.export.layerwise_export import LayerwiseExporter
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
@@ -778,6 +780,10 @@ def mono_quantize(
                     else None,
                 )
 
+        if args.layerwise_export:
+            # Announces itself on the model; calibration and the export both pick it up there.
+            LayerwiseExporter(full_model, args.export_path)
+
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
@@ -796,27 +802,23 @@ def mono_quantize(
         warnings.warn("Skipping quantization: model is already quantized.")
 
 
-def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> None:
-    """Refuse layerwise export before calibration starts, not after it writes a checkpoint.
+def assert_layerwise_export_compatible(args, full_model, algorithm) -> None:
+    """Refuse layerwise export before calibration starts, not after the run is paid for.
 
-    Layerwise export writes the finished checkpoint during calibration, so anything that
-    would rewrite or contradict that checkpoint afterwards has to be caught here -- once
-    calibration begins, the user has already paid for the whole run.
+    Layerwise export writes each layer's shard during calibration and finishes the checkpoint
+    in finalize() afterwards, so anything that would rewrite or contradict that checkpoint has
+    to be caught here -- once calibration begins, the user has already paid for the whole run.
     """
-    if is_multimodal_model(full_model):
-        raise NotImplementedError(
-            "layerwise.export_dir does not support multimodal models: calibration runs on the "
-            "extracted language model, so the shards and config.json would describe that "
-            "submodel rather than the full VLM, and the VLM export path would then "
-            "overwrite config.json with the unquantized source config."
-        )
-
-    if mtp_layer_prefixes:
-        raise NotImplementedError(
-            f"layerwise.export_dir does not support models with MTP layers {mtp_layer_prefixes}: "
-            "their exclusions and any orphaned MTP weights are applied after calibration, by "
-            "which point every shard and the quant config are already written."
-        )
+    block = layerwise_export_block(algorithm)
+    if block is not None:
+        entries = algorithm if isinstance(algorithm, list) else [algorithm]
+        owner = next(e for e in entries if isinstance(e, dict) and e.get("layerwise") is block)
+        if not owner.get("method"):
+            raise NotImplementedError(
+                "layerwise.export_dir needs a calibration method: without one there is no "
+                "per-layer pass to write the shards, so the export would find nothing. Set "
+                "algorithm.method, or export without layerwise.export_dir."
+            )
 
     if has_spec_opt(full_model):
         raise NotImplementedError(
@@ -855,6 +857,27 @@ def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> 
             )
 
 
+def save_source_config(args, export_path) -> None:
+    """Copy the source model's config to the export path, for VLMs the exporters skip."""
+    print(f"Saving original model config to {export_path}")
+    config_kwargs = {"trust_remote_code": args.trust_remote_code}
+    if args.attn_implementation is not None:
+        config_kwargs["attn_implementation"] = args.attn_implementation
+    AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
+
+
+def save_processor_config(args, export_path) -> None:
+    """Copy the processor config, without which a VLM checkpoint cannot preprocess images."""
+    try:
+        print(f"Saving processor config to {export_path}")
+        AutoProcessor.from_pretrained(
+            args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+        ).save_pretrained(export_path)
+    except Exception as e:
+        print(f"Warning: Could not save processor config: {e}")
+        print("This is normal for some VLM architectures that don't use AutoProcessor")
+
+
 def export_quantized(
     args: argparse.Namespace,
     full_model: torch.nn.Module,
@@ -880,29 +903,12 @@ def export_quantized(
             print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
             return
 
-        # Check if the model is a multimodal/VLM model
-        is_vlm = is_multimodal_model(full_model)
-
-        if is_vlm:
-            # Save original model config and the processor config to the export path for VLMs.
-            print(f"Saving original model config to {export_path}")
-
-            config_kwargs = {"trust_remote_code": args.trust_remote_code}
-            if args.attn_implementation is not None:
-                config_kwargs["attn_implementation"] = args.attn_implementation
-            AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(
-                export_path
-            )
-
-            # Try to save processor config if available
-            try:
-                print(f"Saving processor config to {export_path}")
-                AutoProcessor.from_pretrained(
-                    args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
-                ).save_pretrained(export_path)
-            except Exception as e:
-                print(f"Warning: Could not save processor config: {e}")
-                print("This is normal for some VLM architectures that don't use AutoProcessor")
+        if is_multimodal_model(full_model):
+            # Per-layer export writes its own config.json with quantization_config, which
+            # the source config would replace; it never writes a processor config.
+            if not args.layerwise_export:
+                save_source_config(args, export_path)
+            save_processor_config(args, export_path)
 
         start_time = time.time()
         is_tensorrt_llm_export = (
@@ -957,22 +963,11 @@ def export_quantized(
                 if mtp_layer_prefixes:
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
-                if args.layerwise_export:
-                    if mtp_state_dict:
-                        raise NotImplementedError(
-                            "layerwise.export_dir does not support models with MTP weights: "
-                            "they are loaded after calibration has already written every "
-                            "shard, so they would be missing from the checkpoint. Export "
-                            "without layerwise.export_dir."
-                        )
-                    # Calibration already wrote every shard, the index and the configs.
-                    print(f"Layerwise export already wrote the checkpoint to {export_path}")
-                else:
-                    export_hf_checkpoint(
-                        full_model,
-                        export_dir=export_path,
-                        extra_state_dict=mtp_state_dict,
-                    )
+                export_hf_checkpoint(
+                    full_model,
+                    export_dir=export_path,
+                    extra_state_dict=mtp_state_dict,
+                )
 
                 if args.qformat == "w4a16_nvfp4":
                     warnings.warn(
@@ -1231,7 +1226,17 @@ def quantize_main(
     is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
 
     # The value is a placeholder, replaced with --export_path below; presence is the switch.
-    args.layerwise_export = any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs)
+    args.layerwise_export = any(
+        cfg.get("export_dir") is not None and cfg.get("enable", False) for cfg in layerwise_cfgs
+    )
+    if not args.layerwise_export and any(
+        cfg.get("export_dir") is not None for cfg in layerwise_cfgs
+    ):
+        warnings.warn(
+            "layerwise.export_dir is set but layerwise.enable is not, so there is no "
+            "per-layer pass to write the shards: the whole-model export runs instead, which "
+            "holds the full state dict in host memory."
+        )
     if args.layerwise_export:
         if isinstance(recipe, ModelOptAutoQuantizeRecipe):
             # Only the mono-quantize path retargets export_dir and runs the refusals;
@@ -1368,9 +1373,8 @@ def quantize_main(
         # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if args.layerwise_export and not mtp_layer_prefixes:
-            # Only the FSDP2 loader flags these before quantization. Per-layer export has
-            # to refuse *before* calibration, or the run writes a complete-looking
-            # checkpoint and only then discovers it is missing the MTP weights.
+            # Only the FSDP2 loader flags these before quantization, and the exclusions must
+            # be in quant_cfg before mtq.quantize converts the first layer.
             mtp_layer_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
@@ -1382,7 +1386,7 @@ def quantize_main(
         # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
         # still in it, two --export_path values would share one checkpoint dir.
         if args.layerwise_export:
-            assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
+            assert_layerwise_export_compatible(args, full_model, quant_cfg.get("algorithm"))
             quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
             print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
             # The shards are only a resume artifact if the manifest that names the resume

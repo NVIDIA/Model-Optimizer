@@ -2087,12 +2087,23 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
-    # Before calibration, so unsupported models fail in seconds not hours.
-    exporter = None
-    if export_dir is not None:
-        from modelopt.torch.export.layerwise_export import LayerwiseExporter
+    from modelopt.torch.export.layerwise_export import LAYERWISE_EXPORTER_ATTR, LayerwiseExporter
 
-        exporter = LayerwiseExporter(model, export_dir)
+    exporter = None
+    finalize_hint = ""
+    if export_dir is not None:
+        # Only the pass that sets export_dir drives it: an earlier layerwise pass must not
+        # convert layers a later one still has to calibrate.
+        exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+        if exporter is None:
+            exporter = LayerwiseExporter(model, export_dir)
+            # Only for one built here: a caller that announced its own finishes it too.
+            finalize_hint = (
+                f" Call finalize() on model.{LAYERWISE_EXPORTER_ATTR} to write the tail "
+                "shard, the index and the config artifacts; it does not load until then."
+            )
+        # Before calibration, so unsupported models fail in seconds not hours.
+        exporter.bind(calibrated_layers=list(transformer_layers))
 
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
@@ -2106,8 +2117,10 @@ def layerwise_calibrate(
     if exporter is not None and _reconcile_export_with_resume(
         exporter, checkpoint_dir, start_layer, num_layers
     ):
-        exporter.finalize()
-        print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
+        warn_rank_0(
+            f"Layerwise export: every layer shard in {exporter.export_dir} is already "
+            f"written.{finalize_hint}"
+        )
         return
 
     layer_pbar = tqdm(
@@ -2206,8 +2219,9 @@ def layerwise_calibrate(
         ckpt.full_restore(transformer_layers, model)
 
     if exporter is not None:
-        exporter.finalize()
-        print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
+        warn_rank_0(
+            f"Layerwise export: wrote every layer shard to {exporter.export_dir}.{finalize_hint}"
+        )
         if start_layer > 0:
             warn_rank_0(
                 f"This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} "
