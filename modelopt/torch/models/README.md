@@ -34,9 +34,14 @@ register(
 )
 ```
 
-Then add it to the import list in `__init__.py`, and add a row to
-`EXPECTED_MOE_VARIANTS` in `tests/unit/torch/models/test_model_specs.py` — an
-exhaustive-table test fails otherwise.
+Then add it to the import list in `__init__.py`. Two tables in
+`tests/unit/torch/models/` are checked for exhaustiveness and fail until you extend
+them:
+
+- `EXPECTED_MOE_VARIANTS` in `test_model_specs.py` — pins the spec's values.
+- `IN_TRANSFORMERS` (or `UNCHECKABLE`, with a reason) in
+  `test_specs_vs_transformers.py` — says whether the spec can be validated against
+  the transformers definition.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
