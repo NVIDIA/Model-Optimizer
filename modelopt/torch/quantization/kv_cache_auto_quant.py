@@ -343,7 +343,11 @@ def _freeze_existing_quantizers(model: nn.Module, candidate_quantizers: list[Ten
 
 
 def _get_logits(
-    forward_step: Callable[[nn.Module, Any], torch.Tensor], model: nn.Module, data: Any
+    forward_step: Callable[[nn.Module, Any], torch.Tensor],
+    model: nn.Module,
+    data: Any,
+    *,
+    validate_finite: bool = True,
 ) -> torch.Tensor:
     logits = forward_step(model, data)
     if not isinstance(logits, torch.Tensor):
@@ -353,7 +357,7 @@ def _get_logits(
             "KV-cache AutoQuant forward_step must return logits with a non-empty vocabulary "
             "dimension."
         )
-    if not torch.isfinite(logits).all():
+    if validate_finite and not torch.isfinite(logits).all():
         raise ValueError("KV-cache AutoQuant encountered NaN or Inf logits.")
     return logits
 
@@ -723,6 +727,7 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         }
         scored_tokens = 0
         scored_steps = 0
+        all_logits_finite: torch.Tensor | None = None
         iterator = tqdm(
             self.config["data_loader"],
             total=self.config["num_score_steps"],
@@ -732,14 +737,20 @@ class AutoQuantizeKVSearcher(BaseSearcher):
         for data in iterator:
             if scored_steps >= self.config["num_score_steps"]:
                 break
-            logits_ref = _get_logits(self.config["forward_step"], self.model, data)
+            logits_ref = _get_logits(
+                self.config["forward_step"], self.model, data, validate_finite=False
+            )
+            batch_logits_finite = torch.isfinite(logits_ref).all()
             log_prob_ref = torch.log_softmax(logits_ref.float(), dim=-1)
             scored_tokens += logits_ref.numel() // logits_ref.shape[-1]
 
             for hparam in self._hparams:
                 for candidate_index, candidate_name in enumerate(candidate_names):
                     hparam.active = candidate_index
-                    logits_quant = _get_logits(self.config["forward_step"], self.model, data)
+                    logits_quant = _get_logits(
+                        self.config["forward_step"], self.model, data, validate_finite=False
+                    )
+                    batch_logits_finite.logical_and_(torch.isfinite(logits_quant).all())
                     if logits_quant.shape != logits_ref.shape:
                         raise ValueError(
                             "KV-cache AutoQuant forward_step returned different reference and "
@@ -757,10 +768,17 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                         score if previous_score is None else previous_score + score
                     )
                     hparam.use_reference()
+            if all_logits_finite is None:
+                all_logits_finite = batch_logits_finite
+            else:
+                all_logits_finite.logical_and_(batch_logits_finite)
             scored_steps += 1
 
         if scored_steps == 0 or scored_tokens == 0:
             raise ValueError("KV-cache AutoQuant data_loader produced no scoring batches.")
+        assert all_logits_finite is not None
+        if not all_logits_finite:
+            raise ValueError("KV-cache AutoQuant encountered NaN or Inf logits.")
 
         self.layers = {}
         for hparam in self._hparams:
