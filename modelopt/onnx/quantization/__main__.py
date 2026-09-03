@@ -463,6 +463,18 @@ def get_parser() -> argparse.ArgumentParser:
             "set. Example: '--fp16 --workspace=4096'"
         ),
     )
+    autotune_group.add_argument(
+        "--autotune_network_timeout_minutes",
+        type=int,
+        default=10,
+        help="Timeout used for network commands when performing remote auto tuning, mainly relevant for scp",
+    )
+    autotune_group.add_argument(
+        "--autotune_remote_engine_path",
+        type=str,
+        default="trtexec_benchmark_model.trt",
+        help="Path used for storing temporary TensorRT engine files for remote profiling",
+    )
     return argparser
 
 
@@ -569,6 +581,8 @@ def main():
         autotune_warmup_runs=args.autotune_warmup_runs,
         autotune_timing_runs=args.autotune_timing_runs,
         autotune_trtexec_args=args.autotune_trtexec_args,
+        autotune_network_timeout_minutes=args.autotune_network_timeout_minutes,
+        autotune_remote_engine_path=args.autotune_remote_engine_path,
         input_shapes_profile=args.input_shapes_profile,
         model_id=args.model_id,
         trust_remote_code=args.trust_remote_code,

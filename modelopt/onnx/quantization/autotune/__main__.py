@@ -109,6 +109,8 @@ def run_autotune() -> int:
         warmup_runs=args.warmup_runs,
         timing_runs=args.timing_runs,
         trtexec_args=trtexec_args,
+        network_timeout_minutes=args.network_timeout_minutes,
+        remote_engine_path=args.remote_engine_path,
     )
 
     if benchmark_instance is None:
@@ -313,6 +315,18 @@ Examples:
         default=None,
         help="Additional command-line arguments to pass to trtexec as a single quoted string. "
         "Example: --trtexec_benchmark_args '--fp16 --workspace=4096 --verbose'",
+    )
+    trt_group.add_argument(
+        "--network_timeout_minutes",
+        type=int,
+        default=10,
+        help="Timeout used for network commands when performing remote auto tuning, mainly relevant for scp",
+    )
+    trt_group.add_argument(
+        "--remote_engine_path",
+        type=str,
+        default="trtexec_benchmark_model.trt",
+        help="Path used for storing temporary TensorRT engine files for remote profiling",
     )
 
     # Logging
