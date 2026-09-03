@@ -30,6 +30,7 @@ is neither checkable nor listed fails ``test_every_moe_model_type_is_classified`
 coverage cannot erode silently as models are added.
 """
 
+import functools
 import importlib
 import inspect
 
@@ -47,12 +48,6 @@ from modelopt.torch.models import get_specs
 UNCHECKABLE = {
     "arctic": "trust_remote_code model; not shipped in transformers",
     "deepseek": "trust_remote_code model; not shipped in transformers",
-}
-
-# model_type -> the transformers package directory holding its modeling module, when it
-# differs from the model type itself (a text-only checkpoint of a VLM reuses the VLM's).
-MODULE_OVERRIDES = {
-    "gemma4_text": "gemma4",
 }
 
 # Model types that have been in transformers long enough to exist in every version this
@@ -80,9 +75,30 @@ def _moe_variants():
     ]
 
 
+@functools.cache
+def _package_name(model_type: str) -> str:
+    """The transformers package directory for ``model_type``.
+
+    A model type is not always its own directory: sub-model types live with their parent
+    (``gemma3_text`` in ``gemma3``) and a few are spelled differently (``kosmos-2`` in
+    ``kosmos2``). transformers resolves this with ``model_type_to_module_name``, backed
+    by its SPECIAL_MODEL_TYPE_TO_MODULE_NAME table -- ``CONFIG_MAPPING[model_type]``
+    would fail to import otherwise. Deferring to it keeps that knowledge upstream
+    instead of duplicating a table here that goes stale as sub-model types are added.
+
+    Falls back to the identity spelling if the helper ever moves, which costs at most
+    the coverage of a sub-model type whose parent package is checked anyway.
+    """
+    try:
+        from transformers.models.auto.configuration_auto import model_type_to_module_name
+    except ImportError:
+        return model_type.replace("-", "_")
+    return model_type_to_module_name(model_type)
+
+
 def _modeling_module(model_type: str):
     """Import ``transformers.models.<pkg>.modeling_<pkg>``, or None if absent."""
-    pkg = MODULE_OVERRIDES.get(model_type, model_type)
+    pkg = _package_name(model_type)
     try:
         return importlib.import_module(f"transformers.models.{pkg}.modeling_{pkg}")
     except ImportError:
