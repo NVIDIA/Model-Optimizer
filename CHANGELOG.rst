@@ -6,7 +6,7 @@ Changelog
 
 **Bug Fixes**
 
-- Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first step when KV-cache decoding is off, including the automatic fallback under sequence parallelism. Every step recomputes the full prefix there, so generation silently ignored the image; the inputs are now replayed on each of those steps. No other ModelOpt feature is affected -- calibration, MMLU scoring and the example scripts pass vision inputs through ``megatron_prefill`` or generate text-only.
+- Fix ``megatron_generate`` dropping the VLM vision inputs (``pixel_values`` / ``image_grid_thw`` / ``image_sizes``) after the first generated token when KV-cache decoding is off, including the automatic fallback under sequence parallelism, which made generation silently ignore the image. No other ModelOpt feature is affected.
 
 0.47 (2026-09-xx)
 ^^^^^^^^^^^^^^^^^
