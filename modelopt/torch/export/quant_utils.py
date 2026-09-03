@@ -375,11 +375,14 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
     return kv_bias
 
 
-def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.Tensor | None]:
+def get_kv_cache_scaling_factor(
+    self_attention_module: nn.Module, clamp_fp8_scales: bool = True
+) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:
         self_attention_module: The self attention module to get the K and V BMM scaling factors from.
+        clamp_fp8_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
 
     Returns:
         The K and V BMM scaling factors.
@@ -397,7 +400,9 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
     # For FP8, we recommend default KV-cache scaling factor to be 1. The
     # asymmetric format applies this only to K; V remains NVFP4.
     kv_cache_dtype = get_kv_cache_dtype(self_attention_module)
-    if kv_cache_dtype == KV_CACHE_FP8:
+    if not clamp_fp8_scales:
+        fp8_indices = ()
+    elif kv_cache_dtype == KV_CACHE_FP8:
         fp8_indices = range(len(scaling_factors))
     elif kv_cache_dtype == KV_CACHE_FP8_K_NVFP4_V:
         fp8_indices = (0,)

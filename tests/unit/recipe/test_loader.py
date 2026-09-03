@@ -160,27 +160,58 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
-_BUILTIN_PTQ_RECIPES = [
-    "general/ptq/fp8_default-kv_fp8",
-    "general/ptq/fp8_default-kv_fp8_cast",
-    "general/ptq/int4_blockwise_weight_only",
-    "general/ptq/nvfp4_act_headroom-kv_fp8_cast",
-    "general/ptq/nvfp4_default-kv_fp8",
-    "general/ptq/nvfp4_default-kv_fp8_cast",
-    "general/ptq/nvfp4_default-kv_nvfp4_cast",
-    "general/ptq/nvfp4_default-kv_none-gptq",
-    "general/ptq/nvfp4_experts_only-kv_fp8",
-    "general/ptq/nvfp4_experts_only-kv_fp8_cast",
-    "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
-    "huggingface/models/mistralai/Mistral-Medium-3.5-128B/ptq/nvfp4-max-calib",
-    "general/ptq/nvfp4_mlp_only-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_omlp_only-kv_fp8",
-    "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_weight_only-kv_fp16",
-    "general/ptq/nvfp4_weight_only-kv_fp8_cast",
-]
+def test_load_recipe_huggingface_models_backward_compat_alias():
+    """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
+    top-level ``models/`` tier.
+
+    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
+    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
+    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
+    pip-installed users, not just source checkouts.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("models/*/*/ptq/*.yaml"))
+    new_path = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
+    old_path = "huggingface/" + new_path  # huggingface/models/<org>/<model>/ptq/<file>
+
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    recipe = load_recipe(old_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def _all_shipped_ptq_recipe_paths():
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    root = files("modelopt_recipes")
+    paths = []
+    for path in sorted(Path(str(root)).rglob("*.yaml")):
+        rel = path.relative_to(str(root))
+        # Units/presets under configs/ are fragments, not standalone recipes.
+        if rel.parts[0] == "configs":
+            continue
+        raw = _load_raw_config(path)
+        # List-shaped fragments (layer-pattern units) are not recipes.
+        if not isinstance(raw, dict):
+            continue
+        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+            paths.append(str(rel.with_suffix("")))
+    return paths
+
+
+# Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
+# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# never drift as recipes are added, moved, or removed.
+_BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
+
+
+def test_ptq_recipes_are_discovered():
+    """Discovery must find recipes; otherwise the parametrized smoke tests below get an
+    empty parameter set and silently *skip* (pytest default) instead of running."""
+    assert _BUILTIN_PTQ_RECIPES, (
+        "No shipped PTQ recipes discovered under modelopt_recipes/ — recipe discovery is broken."
+    )
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
@@ -1979,25 +2010,7 @@ def test_kv_autoquantize_rejects_cost_excluded_layers():
         )
 
 
-def _all_shipped_ptq_recipe_paths():
-    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
-    root = files("modelopt_recipes")
-    paths = []
-    for path in sorted(Path(str(root)).rglob("*.yaml")):
-        rel = path.relative_to(str(root))
-        # Units/presets under configs/ are fragments, not standalone recipes.
-        if rel.parts[0] == "configs":
-            continue
-        raw = _load_raw_config(path)
-        # List-shaped fragments (layer-pattern units) are not recipes.
-        if not isinstance(raw, dict):
-            continue
-        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
-            paths.append(str(rel.with_suffix("")))
-    return paths
-
-
-@pytest.mark.parametrize("recipe_path", _all_shipped_ptq_recipe_paths())
+@pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_shipped_ptq_recipe_algorithm_config_constructs(recipe_path):
     """Every shipped PTQ recipe's ``algorithm`` must build its calibration config class.
 

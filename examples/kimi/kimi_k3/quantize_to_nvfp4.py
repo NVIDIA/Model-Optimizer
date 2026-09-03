@@ -72,7 +72,7 @@ Usage (CPU partition, no GPU needed; ``--jobs`` shards convert in parallel):
     python quantize_to_nvfp4.py \\
         --source_ckpt /path/to/Kimi-K3 \\
         --output_ckpt /path/to/Kimi-K3-NVFP4 \\
-        --recipe huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention \\
+        --recipe models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention \\
         --jobs 8
 """
 
@@ -161,7 +161,7 @@ _FP8_MAX = 448.0
 _FP8_PB_BLOCK = 128
 _NVFP4_BLOCK = 16  # NVFP4 block size (elements)
 
-_PUBLISHED_RECIPE = "huggingface/models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
+_PUBLISHED_RECIPE = "models/moonshotai/Kimi-K3/ptq/nvfp4_experts-fp8_pb_attention"
 
 
 def _conversion_settings_from_recipe(recipe_path: str) -> dict[str, Any]:
