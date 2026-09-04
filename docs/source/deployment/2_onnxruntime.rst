@@ -18,8 +18,8 @@ Choose the EP that best matches your model, hardware and deployment requirements
 TensorRT-RTX calibration backends
 =================================
 
-ModelOpt uses the legacy TensorRT-RTX EP by default. To use the standalone EP ABI plugin
-instead, install the TensorRT-RTX ABI package and pass
+ModelOpt currently uses the legacy TensorRT-RTX EP by default. The standalone EP ABI plugin will
+become the default in a future release. To use the ABI EP now, install its package and pass
 ``--calibration_eps NvTensorRtRtx --trt_rtx_backend abi``. ModelOpt registers the plugin
 only when this backend is selected; CUDA EP calibration remains available independently.
 See the `TensorRT-RTX EP ABI documentation
