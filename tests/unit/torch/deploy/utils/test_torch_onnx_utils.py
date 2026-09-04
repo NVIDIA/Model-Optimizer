@@ -87,16 +87,16 @@ def _make_fp8_model(source_dtype, kind="fp8"):
         model.register_buffer("unused_fp32_buffer", torch.ones(1))
         if kind == "parameters":
             model.register_parameter("unused_fp32_parameter", nn.Parameter(torch.ones(1)))
-        with torch.no_grad():
-            model[0].weight.fill_(1e-38 if source_dtype == torch.bfloat16 else 1.0)
-    return (
-        mtq.quantize(
-            model,
-            config,
-            forward_loop=lambda quantized_model: quantized_model(sample_input),
-        ),
-        sample_input,
+    quantized_model = mtq.quantize(
+        model,
+        config,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
     )
+    if kind != "format":
+        # Keep calibration nonzero while exercising Conv scale underflow during export.
+        with torch.no_grad():
+            quantized_model[0].weight.fill_(1e-38 if source_dtype == torch.bfloat16 else 1.0)
+    return quantized_model, sample_input
 
 
 def _export_fp8_model(source_dtype, weights_dtype):
