@@ -406,6 +406,20 @@ checkpoint's** quant config verbatim:
   Q4_K/Q5_0 linears → NVFP4 W4A4 (attention q/k/v/o kept uniform so export can
   fuse them), the Q6_K MLP `down_proj` layers → FP8 W8A8, embeddings → NVFP4
   W4A16, `lm_head` → FP8 W8A16, and the F32 tensors (conv1d, norms) → BF16.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_only-kv_fp8_cast`** is the
+  NVFP4 config for `zai-org/GLM-5.3-Flash`, a `glm5_next` VLM MoE with **hybrid
+  attention** — KDA (linear-attention) layers interleaved with NoPE sparse-MLA
+  layers. Routed experts → NVFP4 W4A4; KV cache → FP8 cast; everything else,
+  including the MTP block inlined as decoder layer 45, stays BF16. It carries
+  the experts-only scope rather than a mixed-precision map, and pins
+  `layerwise.enable=false`, which this VLM requires because its decoder layers
+  nest under `model.language_model.layers`.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`**
+  widens that scope to the dense MLP as well. `mlp_layer_types` marks only layers
+  0-2 `dense`, so this adds just 9 modules (`mlp.gate_proj` / `up_proj` /
+  `down_proj`) on top of the routed experts. The vision tower reuses those same
+  leaf names, so a single `*visual*` disable is appended **last** to keep
+  `model.visual.*` in BF16 — the experts-only variant needs no such rule.
 
 *Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
 different component types — or individual layers** — and hardcode the precise

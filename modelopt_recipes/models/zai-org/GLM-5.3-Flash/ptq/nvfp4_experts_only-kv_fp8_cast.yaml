@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Recipe for zai-org/GLM-5.3-Flash: NVFP4 on the routed experts only, FP8 KV cache.
+#
+# GLM-5.3-Flash is a `glm5_next` VLM MoE -- 45 decoder layers, 288 routed experts, and
+# HYBRID attention: KDA (linear-attention) layers interleaved with NoPE sparse-MLA
+# layers. It needs transformers >= 5.16.1 (earlier releases cannot parse the config).
+#
+# Quantized: the routed experts only, W4A4 -- both the weight and the input quantizers
+# are NVFP4 -- plus an FP8 KV cache in cast mode. Everything else stays BF16: the dense
+# MLP, shared experts, the router gate, both attention families, the vision tower,
+# embeddings and lm_head.
+#
+# The quant_cfg is deliberately minimal. `base_disable_all` sets every quantizer to
+# `enable: false`, and the only entries after it re-enable the routed experts and the KV
+# cache -- so nothing else needs listing. In particular the shared `default_disabled_quantizers`
+# unit is not imported: every pattern it turns off (router gates, `lm_head`, the linear-attn
+# `conv1d` and `in_proj_a`/`in_proj_b`, ...) is already off and is not matched by
+# `*.experts.*`. Note `*.experts.*` requires a literal `.experts.`, so `mlp.shared_experts.*`
+# does not match it and the shared experts stay BF16. The same literal is why the vision tower
+# needs no explicit disable here: it is a dense ViT whose 224 modules carry no `experts` in any
+# name, so `*.experts.*` cannot reach `model.visual.*`. The wider
+# `nvfp4_experts_dense_mlp-kv_fp8_cast` sibling does need one -- its `*mlp.*_proj*` patterns
+# match the vision tower's identically named `gate_proj`/`up_proj`/`down_proj` leaves.
+#
+# Two model-specific notes:
+#
+# * `layerwise.enable=false` is required, not incidental. This is a VLM, so the decoder
+#   layers nest under `model.language_model.layers` and layerwise_calibrate cannot find
+#   them.
+#
+# * The MTP head is inlined as decoder layer 45 and is NOT quantized. The config declares
+#   `num_hidden_layers: 45`, so transformers builds layers 0-44 and never instantiates
+#   layer 45; no quantizer attaches to it and it stays BF16.
+
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  nvfp4: configs/numerics/nvfp4
+  kv_fp8_cast: configs/ptq/units/kv_fp8_cast
+
+metadata:
+  recipe_type: ptq
+  description: >-
+    GLM-5.3-Flash: NVFP4 (W4A4) on the routed experts only, plus an FP8 KV cache in cast
+    mode using constant amax; max calibration. The dense MLP, shared experts, router gate,
+    KDA and MLA attention, vision tower, embeddings, lm_head and the inlined MTP layer all
+    stay BF16.
+quantize:
+  algorithm:
+    method: max
+    # Max calibration is fast and does not typically need checkpointing.
+    # layerwise.enable=false required for VLMs where the decoder layers are nested under
+    # `model.language_model.layers` (layerwise_calibrate can't find them otherwise).
+    layerwise: {enable: false}
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: '*.experts.*weight_quantizer'
+      cfg:
+        $import: nvfp4
+    - quantizer_name: '*.experts.*input_quantizer'
+      cfg:
+        $import: nvfp4
+    - $import: kv_fp8_cast
