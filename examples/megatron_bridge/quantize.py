@@ -73,6 +73,7 @@ from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
 from modelopt.torch.utils.plugins.mbridge import (
     get_language_model,
+    keep_gpt_output_layer_extra_state,
     load_mbridge_model_from_hf,
     use_moe_grouped_gemm,
 )
@@ -290,6 +291,9 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    # A quantized output_layer cannot otherwise be written to a GPT Megatron checkpoint.
+    keep_gpt_output_layer_extra_state()
+
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )

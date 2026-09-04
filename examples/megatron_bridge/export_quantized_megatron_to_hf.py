@@ -45,6 +45,7 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.export import export_mcore_gpt_to_hf
 from modelopt.torch.utils import print_args, print_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
+    keep_gpt_output_layer_extra_state,
     load_mbridge_model_from_hf,
     load_modelopt_megatron_checkpoint,
     use_moe_grouped_gemm,
@@ -110,6 +111,10 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
+    # Needed on load too: sharded_state_dict backs the load plan, so without it a
+    # quantized output_layer is silently restored unquantized.
+    keep_gpt_output_layer_extra_state()
+
     trust_remote_code = is_safe_repo(
         trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
     )

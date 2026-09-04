@@ -58,6 +58,7 @@ from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.plugins.mbridge import (
     is_vlm_config,
+    keep_gpt_output_layer_extra_state,
     load_modelopt_megatron_checkpoint,
     set_moe_expert_layout,
     use_moe_grouped_gemm,
@@ -341,6 +342,9 @@ def _tokenizer_prepends_bos(args) -> bool:
 
 
 def main(args: argparse.Namespace):
+    # QAD saves and resumes checkpoints whose student may have a quantized output_layer.
+    keep_gpt_output_layer_extra_state()
+
     student_has_modelopt_state = args.student_megatron_path is not None and has_modelopt_state(
         args.student_megatron_path
     )
