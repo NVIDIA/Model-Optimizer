@@ -287,21 +287,14 @@ def main():
 
         _register_ray_env_vars()
 
-        # ModelOpt expert fakequant needs a decomposed MoE backend so both expert
-        # GEMMs are visible during calibration -- but only when weight quantization
-        # (QUANT_CFG) is actually requested; a KV-cache-only quant_cfg never touches
-        # expert weights, and forcing a backend choice is wrong when the user picked
-        # one deliberately (e.g. a dense model, where moe_backend is moot).
+        # ModelOpt expert fakequant needs a decomposed MoE backend so both expert GEMMs are
+        # visible during calibration -- but only when weight quantization (QUANT_CFG) is
+        # actually requested; a KV-cache-only quant_cfg never touches expert weights.
+        # Default to triton; an explicit --moe_backend still wins (and the flag is moot on
+        # dense models, where nothing dispatches through it).
         if modelopt_args.modelopt_quant_cfg and _vllm_supports_moe_backend():
-            moe_backend_value = _find_flag_value(rest_argv, "--moe-backend", "--moe_backend")
-            if moe_backend_value is None:
-                raise SystemExit(
-                    "QUANT_CFG/--modelopt-quant-cfg is set, but no --moe_backend was given. "
-                    "ModelOpt expert fakequant needs a decomposed MoE backend (both expert "
-                    "GEMMs must be visible during calibration) -- if your model has MoE "
-                    "experts, rerun with --moe_backend triton. If it's a dense model, pass "
-                    "any --moe_backend value explicitly to acknowledge and skip this check."
-                )
+            if _find_flag_value(rest_argv, "--moe-backend", "--moe_backend") is None:
+                rest_argv = [*rest_argv, "--moe_backend", "triton"]
 
     sys.argv = ["vllm", *rest_argv]
     from vllm.entrypoints.cli.main import main as vllm_main
