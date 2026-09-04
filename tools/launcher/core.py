@@ -602,6 +602,11 @@ def build_slurm_executor(
     if segment is not None:
         optional_kwargs["segment"] = segment
 
+    additional_parameters = dict(getattr(slurm_config, "additional_parameters", None) or {})
+    dependency = getattr(slurm_config, "dependency", None)
+    if dependency:
+        additional_parameters["dependency"] = dependency
+
     executor = run.SlurmExecutor(
         account=slurm_config.account,
         partition=slurm_config.partition,
@@ -618,11 +623,7 @@ def build_slurm_executor(
         retries=0,
         packager=packager,
         srun_args=slurm_config.srun_args,
-        additional_parameters=(
-            {"dependency": slurm_config.dependency}
-            if getattr(slurm_config, "dependency", None)
-            else {}
-        ),
+        additional_parameters=additional_parameters,
         **optional_kwargs,
     )
     if getattr(slurm_config, "requeue", False):

@@ -1,8 +1,12 @@
-job_name: dspark.qwen3.5-9b-synthesize
+# Synthesize Qwen3.5-35B-A3B conversations dataset for DSpark training.
+
+job_name: qwen3.5-35b-a3b-dspark-synthesis
 
 pipeline:
   global_vars:
-    hf_model: /hf-local/Qwen/Qwen3.5-9B
+    hf_model: /hf-local/Qwen/Qwen3.5-35B-A3B
+    hf_data: /hf-local/nvidia/Nemotron-Post-Training-Dataset-v2/default.jsonl
+    output_dir: /hf-local/modelopt/qwen3.5-35b-a3b-dspark-synthesis
 
   task_0:
     script: common/vllm/query.sh
@@ -22,17 +26,18 @@ pipeline:
       - "8192"
       - --
       - --data
-      - /hf-local/nvidia/Nemotron-Post-Training-Dataset-v2/default.jsonl
+      - <<global_vars.hf_data>>
       - --save
-      - /hf-local/modelopt/qwen3.5-9b-synth-v2
+      - <<global_vars.output_dir>>
       - --num-shards
-      - "192"
+      - "384"
       - --shard-id
       - $SLURM_ARRAY_TASK_ID
       - --thinking-control
       - chat-template-kwargs
+      - --response-mode
+      - thinking
       - "--sampling-params '{\"temperature\":1.0,\"top_p\":0.95,\"top_k\":20,\"presence_penalty\":1.5}'"
-      - "--non-thinking-sampling-params '{\"temperature\":0.7,\"top_p\":0.8,\"top_k\":20,\"presence_penalty\":1.5}'"
       - --num-proc
       - "64"
       - --max-tokens
@@ -45,8 +50,8 @@ pipeline:
       _factory_: slurm_factory
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: null
+      gpus_per_node: 8
       time: 04:00:00
-      container: <project_path>/dspark-training/.cache/containers/vllm-openai-latest.sqsh
-      array: "0-191%96"
+      container: vllm/vllm-openai:v0.27.1
+      array: "0-383%192"
       requeue: true

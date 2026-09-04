@@ -107,9 +107,7 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
 def _accuracy_counts(logits, target_ids, eval_mask):
     """Return correct/valid token counts for each draft position."""
     keep = eval_mask > 0.5
-    correct = ((logits.argmax(dim=-1) == target_ids) & keep).sum(
-        dim=(0, 1), dtype=torch.float32
-    )
+    correct = ((logits.argmax(dim=-1) == target_ids) & keep).sum(dim=(0, 1), dtype=torch.float32)
     valid = keep.sum(dim=(0, 1), dtype=torch.float32)
     return correct, valid
 

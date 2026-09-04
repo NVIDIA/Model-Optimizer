@@ -73,6 +73,7 @@ dflash:
   dflash_self_logit_distillation: false
   # gamma for exponential loss decay (block_size=16 -> 7).
   dflash_loss_decay_factor: 7.0
+  dflash_loss_objective: decay
   # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
   dflash_mask_token_id: 151669
   # Three-term loss weights (DeepSpec defaults: L1/TVD-dominant).

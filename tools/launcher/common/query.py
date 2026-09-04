@@ -55,9 +55,7 @@ class LLM:
                 enable_thinking=False,
             )
         else:
-            self.generate(
-                messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True
-            )
+            self.generate(messages=[{"role": "user", "content": "Hello! /no_think"}], verbose=True)
 
     def _ensure_client(self):
         """Reinitialize the HTTP client if we've been forked into a new process.

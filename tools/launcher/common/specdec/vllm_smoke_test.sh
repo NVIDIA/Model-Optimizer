@@ -28,6 +28,7 @@
 #   VLLM_PORT       — server port (default: 8000)
 #   MAX_MODEL_LEN    — optional maximum context length
 #   ENFORCE_EAGER    — set to "1" to disable compile and CUDA graphs
+#   SERVER_STARTUP_TIMEOUT — server startup timeout in seconds (default: 600)
 #   REASONING_PARSER — reasoning parser (e.g., "qwen3" for Qwen3.5)
 #   DISABLE_PREFIX_CACHING — set to "1" to disable prefix caching
 #   SMOKE_PROFILE — profile label printed in results (default: "greedy")
@@ -63,6 +64,7 @@ METHOD=${SPEC_METHOD:-eagle}
 NUM_SPEC=${NUM_SPEC_TOKENS:-15}
 PORT=${VLLM_PORT:-8000}
 TP=${TP_SIZE:-1}
+SERVER_STARTUP_TIMEOUT=${SERVER_STARTUP_TIMEOUT:-600}
 
 echo "=== vLLM Speculative Decoding Smoke Test ==="
 echo "Method: ${METHOD}"
@@ -115,7 +117,7 @@ SERVER_PID=$!
 
 # Wait for server
 echo "Waiting for vLLM server..."
-for i in $(seq 1 180); do
+for i in $(seq 1 "$SERVER_STARTUP_TIMEOUT"); do
     if curl -s http://localhost:${PORT}/health > /dev/null 2>&1; then
         echo "Server ready after ${i}s"
         break

@@ -356,7 +356,7 @@ class TestDSparkExporter:
         mismatches = {
             field: (
                 training_config[field],
-                runtime_config[field] if field in runtime_config else "<missing>",
+                runtime_config.get(field, "<missing>"),
             )
             for field in training_config.keys() - metadata
             if field not in runtime_config or training_config[field] != runtime_config[field]
