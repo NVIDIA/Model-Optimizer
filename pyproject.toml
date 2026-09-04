@@ -60,12 +60,14 @@ onnx = [
     "onnx-graphsurgeon>=0.6.1",
     "onnx~=1.21.0",
     "onnxconverter-common~=1.16.0",
+    # Python 3.10 support for ModelOpt ONNX is deprecated and will be removed in a future release.
+    # Native Windows ARM64 does not support ModelOpt ONNX on Python 3.10.
     # ORT for Windows x64
     "onnxruntime-gpu==1.22.0; platform_system == 'Windows' and platform_machine == 'AMD64'",
     # ORT host and standalone TensorRT-RTX ABI EP for native Windows ARM64.
     "onnxruntime~=1.24.2; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
     "onnxruntime-ep-nv-tensorrt-rtx-cu13==0.4.0; python_version > '3.10' and platform_system == 'Windows' and platform_machine == 'ARM64'",
-    # ORT with Python <= 3.10
+    # ORT with Python <= 3.10 on supported platforms
     "onnxruntime~=1.22.0; python_version <= '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
     "onnxruntime-gpu~=1.22.0; python_version <= '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
     # ORT with Python > 3.10
