@@ -1488,6 +1488,9 @@ class GPTModelExporter:
                 if _gated_subnames is None:
                     shards = [(expert_prefix, weight, weight_scale_cpu)]
                 else:
+                    assert weight.shape[0] % 2 == 0, (
+                        f"gated expert weight has odd first dim {weight.shape[0]}"
+                    )
                     half = weight.shape[0] // 2
                     if weight_scale_cpu is None or weight_scale_cpu.dim() == 0:
                         scales = (weight_scale_cpu, weight_scale_cpu)
