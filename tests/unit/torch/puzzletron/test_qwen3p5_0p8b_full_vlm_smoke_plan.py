@@ -542,8 +542,24 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     assert nodes["bounded_result"]["config"]["row_manifest"] == (
         "profile:core-3_344-examples_r1-vllm"
     )
-    assert nodes["selected"]["input"] == "short_v2_256"
-    assert nodes["selected"]["type"] == "filter"
+    assert nodes["selected"] == {
+        "type": "filter",
+        "input": "short_v2_256",
+        "mode": "aggregate_rank",
+        "metrics": [
+            {
+                "metric": (
+                    "short_v2_256.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
+                ),
+                "direction": "maximize",
+            },
+            {
+                "metric": "short_v2_256.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
+                "direction": "maximize",
+            },
+        ],
+        "top_k": 1,
+    }
     assert stages["post.candidate-evaluation.bounded_serving"].parents == (
         "post.candidate-evaluation.bounded_result",
     )
@@ -590,6 +606,8 @@ def test_qwen3p5_0p8b_vlm_campaign_extensions_are_separate_and_review_gated(
     }
     assert nodes["approve_512"]["input"] == "bounded_serving"
     assert nodes["approve_1024"]["input"] == "extended_result"
+    assert "best" not in nodes
+    assert nodes["extension_serving"]["input"] == "final_result"
     assert [row["steps"] for row in nodes["final_result"]["config"]["milestones"]] == [
         64,
         128,

@@ -230,9 +230,12 @@ post_mip:
         selected:
           type: filter
           input: short_v2_256
-          mode: top_k
-          metric: short_v2_256.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
-          direction: maximize
+          mode: aggregate_rank
+          metrics:
+            - metric: short_v2_256.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract
+              direction: maximize
+            - metric: short_v2_256.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none
+              direction: maximize
           top_k: 1
 
         bounded_result:

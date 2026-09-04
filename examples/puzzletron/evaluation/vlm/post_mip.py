@@ -374,7 +374,7 @@ def _evaluate_single_run(
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
         raise RuntimeError(invalid_run_message)
-    payload = {**runs[0], "profile_path": str(profile_path)}
+    payload = _with_evaluation_identity(runs[0], profile_path)
     if include_checkpoint:
         payload["checkpoint"] = str(args.checkpoint)
     return payload

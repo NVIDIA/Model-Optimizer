@@ -200,7 +200,8 @@ Every LM-loss-retained candidate follows one resumable trajectory from the same
 immutable pre-KD materialized checkpoint. AutoModel optimizer state is
 preserved while the cumulative step limit advances through 64, 128, and 256
 updates. Candidate selection happens automatically after all three checkpoints
-have been evaluated, using the configured 256-step RealWorldQA score. The
+have been evaluated, using equal-rank aggregation of the configured 256-step
+RealWorldQA and MMMU scores. The
 placement-bound all-axis sentinel follows an independent trajectory, so it
 cannot be removed by the LM-loss top-k screen.
 
