@@ -168,6 +168,40 @@ def test_grouped_routing_module_is_not_claimed():
     assert not _is_expert_indexed_moe_linear(_MoeFusedLinear())
 
 
+def test_extra_forward_parameters_are_not_claimed():
+    """The replacement forward is exactly ``(x, expert_id)``.
+
+    Anything else the caller could pass — a keyword-only `router_state`, `*args`,
+    `**kwargs` — would raise `TypeError` once the module is converted.
+    """
+
+    class _WithRouterState(_SyntheticMoELinear):
+        def forward(self, x, expert_id, *, router_state=None):
+            return x
+
+    class _WithKwargs(_SyntheticMoELinear):
+        def forward(self, x, expert_id, **kwargs):
+            return x
+
+    for cls in (_WithRouterState, _WithKwargs):
+        assert not _is_expert_indexed_moe_linear(
+            cls(NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE)
+        ), cls.__name__
+
+
+def test_transposed_weight_layout_is_not_claimed():
+    """`[num_experts, in_features, out_features]` would rebuild each expert from wrong slices."""
+
+    class _TransposedMoELinear(_SyntheticMoELinear):
+        def __init__(self, num_experts, in_features, out_features):
+            super().__init__(num_experts, in_features, out_features)
+            self.weight = nn.Parameter(torch.randn(num_experts, in_features, out_features) * 0.02)
+
+    assert not _is_expert_indexed_moe_linear(
+        _TransposedMoELinear(NUM_EXPERTS, HIDDEN_SIZE, MOE_INTERMEDIATE_SIZE)
+    )
+
+
 def test_offloaded_weights_are_refused_not_silently_corrupted():
     """Accelerate offload leaves `weight` on meta, with the value in the module's hook.
 

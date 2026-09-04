@@ -1962,16 +1962,22 @@ def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
         return False
     if not all(hasattr(module, attr) for attr in ("num_experts", "in_features", "out_features")):
         return False
+    # The wrapper rebuilds the weight as `num_experts` Linears of (out_features, in_features),
+    # so a 3-D weight laid out any other way would silently copy the wrong slices.
+    if tuple(weight.shape) != (module.num_experts, module.out_features, module.in_features):
+        return False
     try:
         params = list(inspect.signature(type(module).forward).parameters.values())[1:]
     except (TypeError, ValueError):
         return False
-    positional = [
-        p
-        for p in params
-        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty
-    ]
-    return len(positional) == 2 and positional[1].name == "expert_id"
+    # The replacement forward is exactly `(x, expert_id)`, so anything the caller could pass
+    # beyond those two — a keyword-only `router_state`, *args, **kwargs — would raise once
+    # converted. Require the signature to match what the wrapper can honour.
+    return (
+        len(params) == 2
+        and all(p.kind is p.POSITIONAL_OR_KEYWORD and p.default is p.empty for p in params)
+        and params[1].name == "expert_id"
+    )
 
 
 def register_moe_linear_on_the_fly(model):
