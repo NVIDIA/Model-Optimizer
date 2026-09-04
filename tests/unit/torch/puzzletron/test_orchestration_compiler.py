@@ -133,9 +133,7 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
 
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1", 2])
-def test_compile_rejects_incompatible_generated_execution_schema(
-    tmp_configs, schema_version
-) -> None:
+def test_compile_rejects_incompatible_execution_schema(tmp_configs, schema_version) -> None:
     experiment_path, runner_path, execution_path = tmp_configs
     payload = yaml.safe_load(execution_path.read_text())
     payload["execution"]["schema_version"] = schema_version
@@ -148,9 +146,8 @@ def test_compile_rejects_incompatible_generated_execution_schema(
             execution=load_execution_config(execution_path),
         )
     assert str(error.value) == (
-        f"Unsupported execution schema {schema_version!r}; expected 1. Regenerate the campaign "
-        "bundles using the "
-        "setup --resume command in the generated campaign README."
+        f"Unsupported execution schema {schema_version!r}; expected 1. Update the execution "
+        "config to a supported schema version."
     )
 
 
@@ -214,7 +211,7 @@ def test_named_mip_plan_uses_the_public_worker_on_the_cpu_route(tmp_configs) -> 
     assert submission.argv[submission.argv.index("--worker-stage") + 1] == "mip"
 
 
-def test_named_mip_ranges_select_available_geometry(tmp_configs) -> None:
+def test_compile_accepts_named_mip_ranges_that_select_available_geometry(tmp_configs) -> None:
     experiment_path, runner_path, _execution_path = tmp_configs
     experiment = _write_named_mip_experiment(experiment_path)
     search = experiment["mip"]["runs"]["params-90"]["search_space"]
@@ -229,10 +226,12 @@ def test_named_mip_ranges_select_available_geometry(tmp_configs) -> None:
         stage_filter="mip",
     )
 
-    assert plan.stages[0].resource == "cpu"
+    assert plan.stages[0].stage_id == "mip"
 
 
-def test_named_mip_validates_effective_variant_search_space(tmp_configs) -> None:
+def test_compile_accepts_valid_variant_overrides_of_the_named_mip_search_space(
+    tmp_configs,
+) -> None:
     experiment_path, runner_path, _execution_path = tmp_configs
     experiment = _write_named_mip_experiment(experiment_path)
     run = experiment["mip"]["runs"]["params-90"]
@@ -247,15 +246,14 @@ def test_named_mip_validates_effective_variant_search_space(tmp_configs) -> None
         stage_filter="mip",
     )
 
-    assert plan.stages[0].resource == "cpu"
+    assert plan.stages[0].stage_id == "mip"
 
 
 @pytest.mark.parametrize(("selector", "value"), [("embedding", [768]), ("depth", [1])])
 def test_named_mip_rejects_stale_matrix_selector(
     tmp_configs, selector: str, value: list[int]
 ) -> None:
-    _experiment_path, runner_path, _execution_path = tmp_configs
-    experiment_path = _experiment_path.parent / "campaign" / "production" / "experiment.yaml"
+    experiment_path, runner_path, _execution_path = tmp_configs
     experiment = _write_named_mip_experiment(experiment_path)
     run = experiment["mip"]["runs"]["params-90"]
     run["variants"] = {"stale": {"matrix": {selector: [value]}}}
@@ -270,7 +268,7 @@ def test_named_mip_rejects_stale_matrix_selector(
         )
 
     assert str(error.value).startswith(f"mip.runs.params-90.variants.stale.matrix.{selector}")
-    assert f"puzzletron_setup_v2.py --resume {experiment_path.parent.parent}" in str(error.value)
+    assert "update the named-MIP configuration" in str(error.value)
 
 
 @pytest.mark.parametrize(
@@ -287,8 +285,7 @@ def test_named_mip_rejects_stale_matrix_selector(
     ],
 )
 def test_compile_rejects_stale_named_mip_geometry(tmp_configs, case: str, error_path: str) -> None:
-    _experiment_path, runner_path, _execution_path = tmp_configs
-    experiment_path = _experiment_path.parent / "campaign" / "production" / "experiment.yaml"
+    experiment_path, runner_path, _execution_path = tmp_configs
     experiment = _write_named_mip_experiment(experiment_path)
     if case == "empty_driver":
         experiment["embedding_pruning"] = {"enabled": False, "widths": []}
@@ -317,7 +314,7 @@ def test_compile_rejects_stale_named_mip_geometry(tmp_configs, case: str, error_
         )
 
     assert str(error.value).startswith(error_path)
-    assert f"puzzletron_setup_v2.py --resume {experiment_path.parent.parent}" in str(error.value)
+    assert "update the named-MIP configuration" in str(error.value)
 
 
 @pytest.mark.parametrize(

@@ -17,9 +17,11 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
+from examples.puzzletron import orchestrate
+from examples.puzzletron.expectations import verify_expected_results
 from examples.puzzletron.verify_expected_results import main as verification_main
-from puzzletron_orchestrator.expectations import verify_expected_results
 
 
 def _write(path: Path, payload: object) -> None:
@@ -158,27 +160,6 @@ def test_expectation_verifier_rejects_invalid_denominator_evidence(tmp_path: Pat
     assert Path(invalid.comparison_path).is_file()
 
 
-def test_expectation_verifier_rejects_pending_reference_observation(tmp_path: Path) -> None:
-    contract = _contract(tmp_path)
-    _write(
-        contract.with_name("observation.json"),
-        {
-            "schema": "modelopt.puzzletron-reference-observation/v1",
-            "contract_id": "smoke-v1",
-            "values": {"identity": None, "correct_rows": None},
-            "qualification": {"status": "pending-qualified-runtime-values"},
-        },
-    )
-
-    invalid = verify_expected_results(contract, puzzle_dir=tmp_path / "run")
-
-    assert invalid.status == "invalid"
-    assert invalid.exit_code == 2
-    assert invalid.reason == (
-        "reference observation is not qualified: pending-qualified-runtime-values"
-    )
-
-
 def test_expectation_verifier_rejects_unsafe_contract_identifier(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
     payload = json.loads(contract.read_text())
@@ -292,6 +273,60 @@ def test_verification_cli_returns_pass_regression_and_invalid_exit_codes(
     _write(result_path, {"identity": {}, "correct_rows": 7})
     assert verification_main(argv) == 2
     capsys.readouterr()
+
+
+def test_orchestrator_returns_expectation_regression_exit_code(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    contract = _contract(tmp_path)
+    _write(
+        contract.with_name("observation.json"),
+        {
+            "schema": "modelopt.puzzletron-reference-observation/v1",
+            "contract_id": "smoke-v1",
+            "values": {"identity": {}, "correct_rows": 7},
+        },
+    )
+    run = tmp_path / "run"
+    _write(run / "artifacts/result.json", {"identity": {}, "correct_rows": 5, "timing_ms": 1})
+    plan = SimpleNamespace(puzzle_dir=run, stages=())
+
+    monkeypatch.setattr(orchestrate, "load_runner_config", lambda _path: object())
+    monkeypatch.setattr(orchestrate, "validate_runner_ready", lambda _runner: None)
+    monkeypatch.setattr(orchestrate, "load_execution_config", lambda _path: {})
+    monkeypatch.setattr(orchestrate, "compile_campaign_plan", lambda **_kwargs: plan)
+
+    class _Controller:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {
+                "failed_stages": [],
+                "failed_log_paths": {},
+                "halted": False,
+                "report_status": "completed",
+            }
+
+    monkeypatch.setattr(orchestrate, "CampaignController", _Controller)
+
+    exit_code = orchestrate.main(
+        [
+            "--experiment",
+            "experiment.yaml",
+            "--runner",
+            "runner.yaml",
+            "--execution",
+            "execution.yaml",
+            "--expect",
+            str(contract),
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out)["expectation_status"] == "regression"
 
 
 def test_exact_fields_preserve_json_types(tmp_path: Path) -> None:

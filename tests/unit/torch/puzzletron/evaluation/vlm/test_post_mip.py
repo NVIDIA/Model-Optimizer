@@ -50,7 +50,9 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
         )
         result_path = output_root / "result.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
+        result_path.write_text(
+            json.dumps({"sample_counts": {"modelopt_vlm_benchmark_realworldqa": 2}})
+        )
         return {
             "metrics": {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5},
             "result_path": str(result_path),
@@ -77,6 +79,28 @@ def test_post_mip_realworldqa_adapter_runs_pinned_profile(monkeypatch, tmp_path)
     assert captured["settings"]["topology"] == {"tensor_parallel_size": 1}
     assert result["metrics"] == {"modelopt_vlm_benchmark_realworldqa.accuracy": 0.5}
     assert result["profile_path"] == str(output / "profile.json")
+    assert result["contract"]["batch_size"] == 1
+    assert result["contract"]["model_backend"] == "vllm"
+    assert result["contract"]["post_mip_runner_overrides"] == {
+        "dtype": "bfloat16",
+        "topology": {"tensor_parallel_size": 1},
+    }
+
+
+def test_post_mip_evidence_rejects_incomplete_frozen_rows(tmp_path):
+    contract = dict.fromkeys(post_mip._PROFILE_CONTRACT_FIELDS)
+    contract.update(
+        source_tasks=["realworldqa"],
+        quick_selected_rows=2,
+        quick_row_identities={"realworldqa": [{}, {}]},
+        quick_task_denominators={"realworldqa": {"selected_rows": 2}},
+        repetitions=1,
+    )
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps({"sample_counts": {"modelopt_vlm_benchmark_realworldqa": 1}}))
+
+    with pytest.raises(RuntimeError, match="do not match its exact-row profile"):
+        post_mip._evaluation_evidence(result_path, contract)
 
 
 def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
@@ -91,7 +115,14 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
     def fake_evaluate(args, *, settings_overrides, preflight_callback):
         captured["invocations"] += 1
         captured.update(args=args, settings_overrides=settings_overrides)
-        preflight_callback({"profile": suites.EVALUATION_PROFILE, "sample_limit": None})
+        profile = dict.fromkeys(post_mip._PROFILE_CONTRACT_FIELDS)
+        profile.update(
+            profile=suites.EVALUATION_PROFILE,
+            source_tasks=["realworldqa", "mmmu_val"],
+            sample_limit=100,
+            repetitions=2,
+        )
+        preflight_callback(profile)
         runs = []
         score_offset = (captured["invocations"] - 1) * 0.2
         for index, realworldqa_score in enumerate(
@@ -101,7 +132,10 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
             result_path.write_text(
                 json.dumps(
                     {
-                        "sample_counts": {"realworldqa": 100, "mmmu_val": 100},
+                        "sample_counts": {
+                            "modelopt_vlm_benchmark_realworldqa": 100,
+                            "modelopt_vlm_benchmark_mmmu_val": 100,
+                        },
                         "mmmu_parser_audit": {
                             "sample_count": 100,
                             "status_counts": {"parsed": 90, "fallback_random": 10},
@@ -149,7 +183,10 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
     assert summary["profile"] == post_mip.TASK_PREFIX100_REPEAT2_PROFILE
     assert summary["metrics"] == result["metrics"]
     assert summary["result_paths"] == result["run_result_paths"]
-    assert summary["sample_counts"] == {"mmmu_val": 200, "realworldqa": 200}
+    assert summary["sample_counts"] == {
+        "modelopt_vlm_benchmark_mmmu_val": 200,
+        "modelopt_vlm_benchmark_realworldqa": 200,
+    }
     assert summary["mmmu_parser_audit"] == {
         "sample_count": 200,
         "status_counts": {"fallback_random": 20, "parsed": 180},

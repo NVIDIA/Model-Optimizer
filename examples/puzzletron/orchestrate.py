@@ -29,6 +29,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from examples.puzzletron.expectations import (  # noqa: E402
+    ExpectationResult,
+    verify_expected_results,
+)
 from puzzletron_orchestrator.compiler import (  # noqa: E402
     compile_campaign_plan,
     load_execution_config,
@@ -179,8 +183,24 @@ def main(argv: list[str] | None = None) -> int:
         overrides=args.override,
         once=args.once,
         max_iterations=args.max_iterations,
-        expectation_contract=args.expect,
     )
+    if args.expect is not None:
+        if result.get("report_status") == "completed":
+            expectation = verify_expected_results(args.expect, puzzle_dir=plan.puzzle_dir)
+        else:
+            expectation = ExpectationResult(
+                status="skipped",
+                exit_code=2,
+                comparison_path=None,
+                reason="campaign did not reach clean completion",
+            )
+        result.update(expectation.as_dict())
+        if expectation.exit_code:
+            result["halted"] = True
+            logger.error(
+                "campaign expectation verification "
+                f"{expectation.status}: {expectation.reason or 'comparison failed'}"
+            )
     failed_stages = list(result.get("failed_stages") or ())
     if failed_stages:
         logger.error(f"failed stage(s): {', '.join(failed_stages)}")

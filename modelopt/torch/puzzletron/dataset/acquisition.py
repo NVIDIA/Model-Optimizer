@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -359,6 +360,82 @@ def _default_vlm_sample_loader(
     )
 
 
+def _vlm_materialization_is_complete(
+    output_dir: Path,
+    manifest: Mapping[str, Any],
+) -> bool:
+    """Validate the Nemotron-VLM payload before reusing an acquisition."""
+
+    sample_count = manifest.get("sample_count")
+    images = manifest.get("images")
+    acquisition = manifest.get("acquisition")
+    requested_samples = acquisition.get("num_samples") if isinstance(acquisition, dict) else None
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count <= 0
+        or not isinstance(manifest.get("samples_sha256"), str)
+        or manifest.get("image_count") != sample_count
+        or not isinstance(acquisition, dict)
+        or acquisition.get("adapter") != "nemotron_vlm_v2"
+        or isinstance(requested_samples, bool)
+        or requested_samples != sample_count
+        or not isinstance(images, list)
+        or len(images) != sample_count
+    ):
+        return False
+
+    try:
+        samples_payload = (output_dir / "samples.json").read_bytes()
+        samples = json.loads(samples_payload)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if (
+        hashlib.sha256(samples_payload).hexdigest() != manifest["samples_sha256"]
+        or not isinstance(samples, list)
+        or len(samples) != sample_count
+    ):
+        return False
+
+    referenced_images = []
+    for sample in samples:
+        if not isinstance(sample, dict) or not isinstance(sample.get("conversation"), list):
+            return False
+        for message in sample["conversation"]:
+            if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                return False
+            for item in message["content"]:
+                if not isinstance(item, dict):
+                    return False
+                if item.get("type") == "image":
+                    if not isinstance(item.get("image"), str):
+                        return False
+                    referenced_images.append(item["image"])
+
+    recorded_images = []
+    root = output_dir.resolve()
+    for image in images:
+        if not isinstance(image, dict):
+            return False
+        relative_value = image.get("path")
+        digest = image.get("sha256")
+        if not isinstance(relative_value, str) or not isinstance(digest, str):
+            return False
+        relative = Path(relative_value)
+        if relative.is_absolute() or ".." in relative.parts:
+            return False
+        path = output_dir / relative
+        try:
+            if not path.is_file() or not path.resolve().is_relative_to(root):
+                return False
+            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                return False
+        except OSError:
+            return False
+        recorded_images.append(relative.as_posix())
+    return sorted(recorded_images) == sorted(referenced_images)
+
+
 def materialize_nemotron_vlm_dataset(
     spec: VlmAcquisitionSpec,
     *,
@@ -367,7 +444,6 @@ def materialize_nemotron_vlm_dataset(
 ) -> dict[str, Any]:
     """Materialize a bounded, row-proportional Nemotron image-conversation subset."""
 
-    from ..orchestration.dataset_payload import vlm_materialization_is_complete
     from .multimodal import (
         materialize_normalized_conversation_samples,
         normalize_nemotron_vlm_sample,
@@ -382,7 +458,7 @@ def materialize_nemotron_vlm_dataset(
     identity = spec.identity(revision=revision)
     reused = _reuse_or_reject(spec.output_dir, identity)
     if reused is not None:
-        if not vlm_materialization_is_complete(spec.output_dir, reused):
+        if not _vlm_materialization_is_complete(spec.output_dir, reused):
             raise ValueError(
                 f"existing materialization payload is incomplete or corrupt: {spec.output_dir}"
             )

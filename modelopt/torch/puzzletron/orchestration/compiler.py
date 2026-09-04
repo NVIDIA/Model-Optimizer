@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import math
 import re
-import shlex
 from collections.abc import Sequence
 from dataclasses import asdict
 from difflib import get_close_matches
@@ -256,8 +255,8 @@ def _validate_execution_payload(execution: Mapping[str, Any]) -> None:
     ):
         raise ValueError(
             f"Unsupported execution schema {schema_version!r}; expected "
-            f"{_SUPPORTED_EXECUTION_SCHEMA_VERSION}. Regenerate the campaign bundles using the "
-            "setup --resume command in the generated campaign README."
+            f"{_SUPPORTED_EXECUTION_SCHEMA_VERSION}. Update the execution config to a supported "
+            "schema version."
         )
     defaults = _required_mapping(execution.get("defaults", {}), path="execution.defaults")
     _reject_unknown_fields(defaults, _EXECUTION_DEFAULT_FIELDS, path="execution.defaults")
@@ -711,26 +710,10 @@ def _validate_mip_resource_override(
     )
 
 
-def _named_mip_regeneration_error(path: str, message: str, *, experiment_path: Path) -> ValueError:
-    campaign_dir = experiment_path.parent.parent
-    if (
-        experiment_path.name == "experiment.yaml"
-        and experiment_path.parent.name in {"smoke", "production"}
-        and not campaign_dir.name.startswith(".puzzletron-v2-")
-    ):
-        resume_command = (
-            "python examples/puzzletron/puzzletron_setup_v2.py --resume "
-            f"{shlex.quote(str(campaign_dir))}"
-        )
-        recovery = f"regenerate both bundles with `{resume_command}`"
-    else:
-        recovery = (
-            "fix these named-MIP fields, or, for a setup-generated config, run the exact "
-            "resume command in the generated campaign README"
-        )
+def _named_mip_validation_error(path: str, message: str) -> ValueError:
     return ValueError(
         f"{path} {message}. This campaign uses the current named width/depth MIP interface; "
-        f"{recovery}, then rerun the orchestrator dry-run"
+        "update the named-MIP configuration, then rerun the orchestrator dry-run"
     )
 
 
@@ -739,43 +722,34 @@ def _validate_named_mip_search_domains(
     *,
     widths: tuple[int, ...],
     maximum_depth: int,
-    experiment_path: Path,
 ) -> None:
     for run_id, raw_run in runs.items():
         if raw_run is False:
             continue
         run_path = f"mip.runs.{run_id}"
         if not isinstance(raw_run, Mapping):
-            raise _named_mip_regeneration_error(
-                run_path, "must be a mapping or false", experiment_path=experiment_path
-            )
+            raise _named_mip_validation_error(run_path, "must be a mapping or false")
         variants = raw_run.get("variants") or {}
         if not isinstance(variants, Mapping):
-            raise _named_mip_regeneration_error(
-                f"{run_path}.variants", "must be a mapping", experiment_path=experiment_path
-            )
+            raise _named_mip_validation_error(f"{run_path}.variants", "must be a mapping")
         for variant_id, variant in variants.items():
             if not isinstance(variant, Mapping):
-                raise _named_mip_regeneration_error(
+                raise _named_mip_validation_error(
                     f"{run_path}.variants.{variant_id}",
                     "must be a mapping",
-                    experiment_path=experiment_path,
                 )
     try:
         variants = expand_mip_variants({"runs": runs})
     except (TypeError, ValueError) as error:
-        raise _named_mip_regeneration_error(
-            "mip.runs", str(error), experiment_path=experiment_path
-        ) from error
+        raise _named_mip_validation_error("mip.runs", str(error)) from error
     for variant in variants:
         search = _mapping(variant.config.get("search_space"))
         try:
             select_mip_values(search.get("embedding"), widths, "embedding")
         except (TypeError, ValueError) as error:
-            raise _named_mip_regeneration_error(
+            raise _named_mip_validation_error(
                 variant.selector_path("embedding"),
                 f"must use configured embedding_pruning.widths={list(widths)}",
-                experiment_path=experiment_path,
             ) from error
         raw_depth = search.get("depth")
         if isinstance(raw_depth, Mapping) and set(raw_depth) != {"range"}:
@@ -783,16 +757,13 @@ def _validate_named_mip_search_domains(
         try:
             select_mip_values(raw_depth, tuple(range(maximum_depth + 1)), "depth")
         except (TypeError, ValueError) as error:
-            raise _named_mip_regeneration_error(
+            raise _named_mip_validation_error(
                 variant.selector_path("depth"),
                 f"must select removals between 0 and the configured maximum {maximum_depth}",
-                experiment_path=experiment_path,
             ) from error
 
 
-def _validate_named_mip_geometry(
-    experiment_config: Mapping[str, Any], *, experiment_path: Path
-) -> None:
+def _validate_named_mip_geometry(experiment_config: Mapping[str, Any]) -> None:
     """Reject stale named-MIP bundles before worker launch."""
 
     mip = _mapping(experiment_config.get("mip"))
@@ -800,33 +771,26 @@ def _validate_named_mip_geometry(
     embedding = _mapping(experiment_config.get("embedding_pruning"))
     if not isinstance(runs, Mapping) or not runs:
         if embedding.get("enabled"):
-            raise _named_mip_regeneration_error(
+            raise _named_mip_validation_error(
                 "mip.runs",
                 "must define at least one active named solve for the enabled scenario driver",
-                experiment_path=experiment_path,
             )
         return
     if not any(run is not False for run in runs.values()):
-        raise _named_mip_regeneration_error(
-            "mip.runs",
-            "must define at least one active named solve",
-            experiment_path=experiment_path,
-        )
+        raise _named_mip_validation_error("mip.runs", "must define at least one active named solve")
 
     model_info = _mapping(experiment_config.get("model_info"))
     hidden_size = model_info.get("hidden_size")
     num_layers = model_info.get("num_hidden_layers")
     if not isinstance(hidden_size, int) or isinstance(hidden_size, bool) or hidden_size < 1:
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "model_info.hidden_size",
             "must contain the positive inspected teacher width",
-            experiment_path=experiment_path,
         )
     if not isinstance(num_layers, int) or isinstance(num_layers, bool) or num_layers < 1:
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "model_info.num_hidden_layers",
             "must contain the positive inspected teacher depth",
-            experiment_path=experiment_path,
         )
 
     raw_widths = embedding.get("widths")
@@ -835,25 +799,22 @@ def _validate_named_mip_geometry(
         or not isinstance(raw_widths, Sequence)
         or isinstance(raw_widths, (str, bytes))
     ):
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "embedding_pruning",
             "must enable the scenario driver and list the inspected teacher width",
-            experiment_path=experiment_path,
         )
     if any(
         not isinstance(width, int) or isinstance(width, bool) or width < 1 for width in raw_widths
     ):
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "embedding_pruning.widths",
             "must contain only positive integer widths",
-            experiment_path=experiment_path,
         )
     widths = tuple(int(width) for width in raw_widths)
     if not widths or hidden_size not in widths or max(widths) != hidden_size:
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "embedding_pruning.widths",
             f"must include teacher hidden_size={hidden_size} as its largest width",
-            experiment_path=experiment_path,
         )
 
     depth = _mapping(experiment_config.get("depth_importance") or experiment_config.get("depth"))
@@ -863,26 +824,23 @@ def _validate_named_mip_geometry(
         depth.get("expected_initial_sublayers") if granularity == "subblock" else num_layers
     )
     if not isinstance(teacher_depth, int) or isinstance(teacher_depth, bool) or teacher_depth < 1:
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "depth_importance.expected_initial_sublayers",
             "must contain the positive inspected teacher sublayer depth",
-            experiment_path=experiment_path,
         )
     if (
         not isinstance(maximum, int)
         or isinstance(maximum, bool)
         or not 0 <= maximum < teacher_depth
     ):
-        raise _named_mip_regeneration_error(
+        raise _named_mip_validation_error(
             "depth_importance.max_subblocks_to_remove",
             f"must be a non-negative count below the inspected teacher limit {teacher_depth}",
-            experiment_path=experiment_path,
         )
     _validate_named_mip_search_domains(
         runs,
         widths=widths,
         maximum_depth=maximum,
-        experiment_path=experiment_path,
     )
 
 
@@ -899,7 +857,7 @@ def compile_campaign_plan(
     _validate_execution_payload(execution)
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
-    _validate_named_mip_geometry(experiment_config, experiment_path=experiment_path)
+    _validate_named_mip_geometry(experiment_config)
     required_mip_resource = mip_resource(experiment_config)
     puzzle_dir = Path(
         experiment_config.get("puzzle_dir")

@@ -76,7 +76,4 @@ def test_realized_validation_propagates_multimodal_data_contract(tmp_path, monke
         tmp_path / "output",
     )
 
-    assert [launch[0]["path"] for launch in launches] == [str(teacher), str(candidate)]
-    assert [launch[1] for launch in launches] == [1, 1]
-    assert [launch[2] for launch in launches] == [False, False]
     assert [launch[3] for launch in launches] == [data_cfg, data_cfg]

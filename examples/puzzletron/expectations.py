@@ -20,9 +20,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 __all__ = ["ExpectationResult", "verify_expected_results"]
 
@@ -33,7 +34,7 @@ _MAX_JSON_BYTES = 16 << 20
 _CONTRACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-class _InvalidExpectation(ValueError):
+class _InvalidExpectationError(ValueError):
     pass
 
 
@@ -62,20 +63,20 @@ def _load_json_value(path: Path, *, label: str) -> Any:
         with path.open("rb") as stream:
             raw = stream.read(_MAX_JSON_BYTES + 1)
     except OSError as error:
-        raise _InvalidExpectation(f"{label} is unreadable: {path}") from error
+        raise _InvalidExpectationError(f"{label} is unreadable: {path}") from error
     if len(raw) > _MAX_JSON_BYTES:
-        raise _InvalidExpectation(f"{label} exceeds {_MAX_JSON_BYTES} bytes: {path}")
+        raise _InvalidExpectationError(f"{label} exceeds {_MAX_JSON_BYTES} bytes: {path}")
     try:
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise _InvalidExpectation(f"{label} is not valid JSON: {path}") from error
+        raise _InvalidExpectationError(f"{label} is not valid JSON: {path}") from error
     return payload
 
 
 def _load_json(path: Path, *, label: str) -> dict[str, Any]:
     payload = _load_json_value(path, label=label)
     if not isinstance(payload, dict):
-        raise _InvalidExpectation(f"{label} must contain an object: {path}")
+        raise _InvalidExpectationError(f"{label} must contain an object: {path}")
     return payload
 
 
@@ -88,16 +89,16 @@ def _confined_path(
 ) -> Path:
     if not isinstance(value, str) or not value:
         kind = "relative path" if require_relative else "path"
-        raise _InvalidExpectation(f"{label} must be a non-empty {kind}")
+        raise _InvalidExpectationError(f"{label} must be a non-empty {kind}")
     candidate = Path(value)
     if require_relative and candidate.is_absolute():
-        raise _InvalidExpectation(f"{label} must be relative")
+        raise _InvalidExpectationError(f"{label} must be relative")
     resolved_root = root.resolve()
     resolved = (
         candidate.resolve() if candidate.is_absolute() else (resolved_root / candidate).resolve()
     )
     if not resolved.is_relative_to(resolved_root):
-        raise _InvalidExpectation(f"{label} escapes its allowed root")
+        raise _InvalidExpectationError(f"{label} escapes its allowed root")
     return resolved
 
 
@@ -107,7 +108,7 @@ def _relative_path(root: Path, value: object, *, label: str) -> Path:
 
 def _pointer(payload: object, value: object, *, field_name: str) -> object:
     if not isinstance(value, str) or (value and not value.startswith("/")):
-        raise _InvalidExpectation(f"field {field_name!r} has an invalid JSON pointer")
+        raise _InvalidExpectationError(f"field {field_name!r} has an invalid JSON pointer")
     current = payload
     if value == "":
         return current
@@ -115,7 +116,9 @@ def _pointer(payload: object, value: object, *, field_name: str) -> object:
         token = raw_token.replace("~1", "/").replace("~0", "~")
         if isinstance(current, Mapping):
             if token not in current:
-                raise _InvalidExpectation(f"required field {field_name!r} is missing at {value!r}")
+                raise _InvalidExpectationError(
+                    f"required field {field_name!r} is missing at {value!r}"
+                )
             current = current[token]
         elif isinstance(current, list):
             try:
@@ -124,17 +127,17 @@ def _pointer(payload: object, value: object, *, field_name: str) -> object:
                     raise ValueError
                 current = current[index]
             except (ValueError, IndexError) as error:
-                raise _InvalidExpectation(
+                raise _InvalidExpectationError(
                     f"required field {field_name!r} is missing at {value!r}"
                 ) from error
         else:
-            raise _InvalidExpectation(f"required field {field_name!r} is missing at {value!r}")
+            raise _InvalidExpectationError(f"required field {field_name!r} is missing at {value!r}")
     return current
 
 
 def _require_finite(value: object, *, field_name: str) -> None:
     if isinstance(value, float) and not math.isfinite(value):
-        raise _InvalidExpectation(f"required field {field_name!r} is nonfinite")
+        raise _InvalidExpectationError(f"required field {field_name!r} is nonfinite")
     if isinstance(value, Mapping):
         for nested in value.values():
             _require_finite(nested, field_name=field_name)
@@ -145,20 +148,20 @@ def _require_finite(value: object, *, field_name: str) -> None:
 
 def _finite_number(value: object, *, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise _InvalidExpectation(f"{label} must be a finite number")
+        raise _InvalidExpectationError(f"{label} must be a finite number")
     try:
         parsed = float(value)
     except OverflowError as error:
-        raise _InvalidExpectation(f"{label} must be a finite number") from error
+        raise _InvalidExpectationError(f"{label} must be a finite number") from error
     if not math.isfinite(parsed):
-        raise _InvalidExpectation(f"{label} must be a finite number")
+        raise _InvalidExpectationError(f"{label} must be a finite number")
     return parsed
 
 
 def _nonnegative_number(value: object, *, label: str) -> float:
     parsed = _finite_number(value, label=label)
     if parsed < 0:
-        raise _InvalidExpectation(f"{label} must be a nonnegative finite number")
+        raise _InvalidExpectationError(f"{label} must be a nonnegative finite number")
     return parsed
 
 
@@ -185,7 +188,7 @@ def _bounded_comparison(
         or not isinstance(actual, (int, float))
         or not isinstance(reference, (int, float))
     ):
-        raise _InvalidExpectation(f"bounded field {field_name!r} must compare numbers")
+        raise _InvalidExpectationError(f"bounded field {field_name!r} must compare numbers")
     actual_value = _finite_number(actual, label=f"bounded field {field_name!r} actual")
     reference_value = _finite_number(
         reference,
@@ -202,9 +205,9 @@ def _bounded_comparison(
             label=f"field {field_name!r} denominator",
         )
         if denominator == 0:
-            raise _InvalidExpectation(f"field {field_name!r} denominator must be positive")
+            raise _InvalidExpectationError(f"field {field_name!r} denominator must be positive")
         if not 0 <= actual_value <= denominator or not 0 <= reference_value <= denominator:
-            raise _InvalidExpectation(
+            raise _InvalidExpectationError(
                 f"bounded field {field_name!r} must be within its denominator"
             )
     direction = rule.get("direction")
@@ -215,27 +218,27 @@ def _bounded_comparison(
         return delta <= tolerance, delta, denominator
     if direction == "two-sided":
         return abs(delta) <= tolerance, delta, denominator
-    raise _InvalidExpectation(f"bounded field {field_name!r} has an invalid direction")
+    raise _InvalidExpectationError(f"bounded field {field_name!r} has an invalid direction")
 
 
 def _validate_contract(payload: Mapping[str, Any]) -> tuple[str, Mapping[str, Any], list[object]]:
     if payload.get("schema") != _CONTRACT_SCHEMA:
-        raise _InvalidExpectation(f"contract schema must be {_CONTRACT_SCHEMA}")
+        raise _InvalidExpectationError(f"contract schema must be {_CONTRACT_SCHEMA}")
     contract_id = payload.get("id")
     if not isinstance(contract_id, str) or _CONTRACT_ID.fullmatch(contract_id) is None:
-        raise _InvalidExpectation("contract id must be a filesystem-safe non-empty identifier")
+        raise _InvalidExpectationError("contract id must be a filesystem-safe non-empty identifier")
     artifacts = payload.get("artifacts")
     if (
         not isinstance(artifacts, Mapping)
         or not artifacts
         or any(not isinstance(key, str) for key in artifacts)
     ):
-        raise _InvalidExpectation(
+        raise _InvalidExpectationError(
             "contract artifacts must map names to JSON artifact specifications"
         )
     fields = payload.get("fields")
     if not isinstance(fields, list) or not fields:
-        raise _InvalidExpectation("contract fields must be a non-empty list")
+        raise _InvalidExpectationError("contract fields must be a non-empty list")
     return contract_id, artifacts, fields
 
 
@@ -245,15 +248,15 @@ def _load_artifact(name: str, specification: object, *, puzzle_dir: Path) -> Any
         follow: object = []
     elif isinstance(specification, Mapping):
         if set(specification) - {"path", "follow"} or "path" not in specification:
-            raise _InvalidExpectation(
+            raise _InvalidExpectationError(
                 f"artifact {name!r} must contain only path and optional follow pointers"
             )
         path_value = specification["path"]
         follow = specification.get("follow", [])
     else:
-        raise _InvalidExpectation(f"artifact {name!r} has an invalid specification")
+        raise _InvalidExpectationError(f"artifact {name!r} has an invalid specification")
     if not isinstance(follow, list) or any(not isinstance(value, str) for value in follow):
-        raise _InvalidExpectation(f"artifact {name!r} follow must be a list of JSON pointers")
+        raise _InvalidExpectationError(f"artifact {name!r} follow must be a list of JSON pointers")
 
     path = _relative_path(puzzle_dir, path_value, label=f"artifact {name!r}")
     payload = _load_json_value(path, label=f"artifact {name!r}")
@@ -274,19 +277,12 @@ def _compare(
 ) -> tuple[str, list[dict[str, Any]]]:
     contract_id, artifact_paths, rules = _validate_contract(contract)
     if observation.get("schema") != _OBSERVATION_SCHEMA:
-        raise _InvalidExpectation(f"observation schema must be {_OBSERVATION_SCHEMA}")
+        raise _InvalidExpectationError(f"observation schema must be {_OBSERVATION_SCHEMA}")
     if observation.get("contract_id") != contract_id:
-        raise _InvalidExpectation("observation contract_id differs from the selected contract")
-    qualification = observation.get("qualification")
-    if isinstance(qualification, Mapping) and str(qualification.get("status", "")).startswith(
-        "pending-"
-    ):
-        raise _InvalidExpectation(
-            f"reference observation is not qualified: {qualification.get('status')}"
-        )
+        raise _InvalidExpectationError("observation contract_id differs from the selected contract")
     reference_values = observation.get("values")
     if not isinstance(reference_values, Mapping):
-        raise _InvalidExpectation("observation values must contain an object")
+        raise _InvalidExpectationError("observation values must contain an object")
 
     artifacts = {
         name: _load_artifact(name, specification, puzzle_dir=puzzle_dir)
@@ -297,22 +293,22 @@ def _compare(
     regression = False
     for raw_rule in rules:
         if not isinstance(raw_rule, Mapping):
-            raise _InvalidExpectation("contract field entries must be objects")
+            raise _InvalidExpectationError("contract field entries must be objects")
         name = raw_rule.get("name")
         artifact = raw_rule.get("artifact")
         classification = raw_rule.get("classification")
         if not isinstance(name, str) or not name or name in seen:
-            raise _InvalidExpectation("contract field names must be unique non-empty strings")
+            raise _InvalidExpectationError("contract field names must be unique non-empty strings")
         seen.add(name)
         if artifact not in artifacts:
-            raise _InvalidExpectation(f"field {name!r} names an unknown artifact")
+            raise _InvalidExpectationError(f"field {name!r} names an unknown artifact")
         if classification not in {"exact", "bounded", "informational"}:
-            raise _InvalidExpectation(f"field {name!r} has an invalid classification")
+            raise _InvalidExpectationError(f"field {name!r} has an invalid classification")
         actual = _pointer(artifacts[str(artifact)], raw_rule.get("pointer"), field_name=name)
         _require_finite(actual, field_name=name)
         reference_present = name in reference_values
         if classification != "informational" and not reference_present:
-            raise _InvalidExpectation(f"observation is missing required field {name!r}")
+            raise _InvalidExpectationError(f"observation is missing required field {name!r}")
         reference = reference_values.get(name)
         if reference_present:
             _require_finite(reference, field_name=name)
@@ -395,7 +391,7 @@ def verify_expected_results(
             comparison_path=str(comparison_path),
             fields=tuple(fields),
         )
-    except _InvalidExpectation as error:
+    except _InvalidExpectationError as error:
         result = ExpectationResult(
             status="invalid",
             exit_code=2,

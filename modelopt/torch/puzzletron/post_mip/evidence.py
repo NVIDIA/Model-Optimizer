@@ -37,23 +37,6 @@ __all__ = [
 if TYPE_CHECKING:
     from .records import CandidateRevision
 
-_PROFILE_FIELDS = (
-    "profile",
-    "suite",
-    "lmms_eval_revision",
-    "source_tasks",
-    "dataset_revisions",
-    "frame_policy",
-    "generation_policy",
-    "backend_limitations",
-    "output_budget_contract",
-    "sample_limit",
-    "quick_selected_rows",
-    "quick_row_identities",
-    "quick_task_denominators",
-    "quick_manifest_sha256",
-    "repetitions",
-)
 _EXPOSURE_FIELDS = (
     "cumulative_steps",
     "global_batch_size",
@@ -199,6 +182,20 @@ def exact_checkpoint_evidence(checkpoint: str | Path) -> dict[str, Any]:
     )
 
 
+def _versioned_payload(result: Mapping[str, Any], field: str) -> dict[str, Any] | None:
+    """Return one evaluator-owned contract or evidence payload without interpreting it."""
+
+    value = result.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(f"downstream evaluator {field} must be a mapping")
+    schema = value.get("schema")
+    if not isinstance(schema, str) or not schema:
+        raise ValueError(f"downstream evaluator {field} must declare a non-empty schema")
+    return canonicalize(value)
+
+
 def _selected_json(path: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
     if not path:
         return None
@@ -212,18 +209,12 @@ def downstream_evaluation_identity(
     reference_checkpoint: str | Path,
     profile: Any,
     evaluator_revision: Any,
-    settings: Mapping[str, Any],
     candidate: Mapping[str, Any],
     reference: Mapping[str, Any],
     reference_checkpoint_fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    """Bind one comparison to its checkpoints, training, data, and evaluator."""
+    """Bind one comparison to its checkpoints, training, and evaluator-owned evidence."""
 
-    evaluator_settings = {
-        key: copy.deepcopy(value)
-        for key, value in settings.items()
-        if key not in {"row_manifest", "timeout_seconds"}
-    }
     return canonicalize(
         {
             "candidate_checkpoint_fingerprint": checkpoint_fingerprint(
@@ -239,15 +230,11 @@ def downstream_evaluation_identity(
             "evaluator": {
                 "profile": profile,
                 "revision": evaluator_revision,
-                "settings": evaluator_settings,
-                "resolved_profile": _selected_json(candidate.get("profile_path"), _PROFILE_FIELDS),
+                "contract": _versioned_payload(candidate, "contract"),
             },
-            "evaluation_evidence": _selected_json(
-                candidate.get("result_path"), ("sample_counts", "mmmu_parser_audit")
-            ),
-            "reference_evaluation_evidence": _selected_json(
-                reference.get("result_path"), ("sample_counts", "mmmu_parser_audit")
-            ),
+            "reference_evaluator_contract": _versioned_payload(reference, "contract"),
+            "evaluation_evidence": _versioned_payload(candidate, "evidence"),
+            "reference_evaluation_evidence": _versioned_payload(reference, "evidence"),
         }
     )
 
@@ -257,10 +244,9 @@ def evaluation_contract(
     *,
     label: str,
     expected_profile: str,
-    expected_manifest_sha256: str,
     expected_reference_fingerprint: str,
 ) -> dict[str, Any]:
-    """Validate and project the fields that must match across evaluations."""
+    """Validate and project the generic fields that must match across evaluations."""
 
     if not isinstance(identity, Mapping):
         raise RuntimeError(f"{label} evaluation identity must be a mapping")
@@ -269,23 +255,14 @@ def evaluation_contract(
         raise RuntimeError(f"{label} evaluation identity is missing evaluator")
     if not evaluator.get("revision"):
         raise RuntimeError(f"{label} evaluation identity is missing evaluator revision")
-    evaluator_settings = evaluator.get("settings")
-    resolved_profile = evaluator.get("resolved_profile")
-    if not isinstance(evaluator_settings, Mapping) or not isinstance(resolved_profile, Mapping):
-        raise RuntimeError(
-            f"{label} evaluation identity is missing evaluator settings or resolved profile"
-        )
-    missing = set(_PROFILE_FIELDS) - resolved_profile.keys()
-    if missing:
-        raise RuntimeError(
-            f"{label} evaluation identity resolved profile is missing {sorted(missing)}"
-        )
+    evaluator_contract = evaluator.get("contract")
+    reference_contract = identity.get("reference_evaluator_contract")
+    if not isinstance(evaluator_contract, Mapping) or not isinstance(reference_contract, Mapping):
+        raise RuntimeError(f"{label} evaluation identity is missing evaluator-owned contracts")
+    if evaluator_contract != reference_contract:
+        raise RuntimeError(f"{label} candidate and reference evaluator contracts differ")
     if evaluator.get("profile") != expected_profile:
         raise RuntimeError(f"{label} evaluation profile differs from the result contract")
-    if evaluator_settings.get("row_manifest_sha256") != expected_manifest_sha256:
-        raise RuntimeError(f"{label} evaluator row manifest differs from the result contract")
-    if resolved_profile.get("quick_manifest_sha256") != expected_manifest_sha256:
-        raise RuntimeError(f"{label} resolved row manifest differs from the result contract")
     if identity.get("reference_checkpoint_fingerprint") != expected_reference_fingerprint:
         raise RuntimeError(f"{label} reference checkpoint differs from the result contract")
     return canonicalize(
@@ -294,8 +271,7 @@ def evaluation_contract(
             "evaluator": {
                 "profile": evaluator["profile"],
                 "revision": evaluator["revision"],
-                "settings": evaluator_settings,
-                "resolved_profile": resolved_profile,
+                "contract": evaluator_contract,
             },
         }
     )

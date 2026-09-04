@@ -27,7 +27,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from puzzletron_orchestrator.expectations import verify_expected_results  # noqa: E402
+from examples.puzzletron.expectations import verify_expected_results  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:

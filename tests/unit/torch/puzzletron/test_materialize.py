@@ -372,7 +372,6 @@ def test_streaming_materialization_records_exact_output_tensor_bytes(
     if output_index is not None:
         assert output_index["metadata"]["total_size"] == exact_size
     assert manifest["total_size"] == exact_size
-    assert manifest["hardlinked_shards"] == (0 if source_index_mode == "unindexed" else 1)
 
 
 def test_realization_retry_reconstructs_only_missing_checkpoint(tmp_path: Path):

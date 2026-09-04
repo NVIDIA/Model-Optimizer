@@ -15,6 +15,7 @@
 
 """Tests for post-MIP execution, including managed downstream evaluation."""
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -501,6 +502,38 @@ def test_aiperf_consumes_request_count_without_forwarding_setup_only_keys(
     }
 
 
+def test_aiperf_rejects_repetitions_with_different_metric_sets(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "modelopt.torch.puzzletron.benchmarks.run_aiperf_sweep",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                concurrency=1,
+                workload={},
+                metrics={"latency": 1.0, "throughput": 2.0},
+                raw_artifacts={},
+            ),
+            SimpleNamespace(
+                concurrency=1,
+                workload={},
+                metrics={"latency": 1.1},
+                raw_artifacts={},
+            ),
+        ],
+    )
+    node = SimpleNamespace(
+        node_id="serving",
+        flow_id="params",
+        config={"config": {"concurrency": [1], "topology": {"gpu_group_size": 1}}},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    with pytest.raises(RuntimeError, match="repetitions produced different metrics"):
+        runner._aiperf({"puzzle_dir": str(tmp_path)}, node, source, "execution")
+
+
 def test_downstream_evaluation_delegates_to_generic_checkpoint_evaluator(monkeypatch, tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -593,8 +626,19 @@ def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_p
 
     def fake_evaluate(args, *, settings_overrides, preflight_callback):
         captured.update(args=args, settings=settings_overrides)
-        preflight_callback({"status": "ready"})
-        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": "result.json"}]}
+        profile = dict.fromkeys(post_mip._PROFILE_CONTRACT_FIELDS)
+        profile.update(
+            profile="fixture",
+            source_tasks=["fixture"],
+            quick_selected_rows=1,
+            quick_row_identities={"fixture": [{}]},
+            quick_task_denominators={"fixture": {"selected_rows": 1}},
+            repetitions=1,
+        )
+        preflight_callback(profile)
+        result_path = tmp_path / "output" / "result.json"
+        result_path.write_text(json.dumps({"sample_counts": {"modelopt_vlm_benchmark_fixture": 1}}))
+        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": str(result_path)}]}
 
     monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
     result = post_mip.evaluate_short_v1_checkpoint(
@@ -650,15 +694,27 @@ def test_short_v3_profile_uses_vllm_and_binds_the_embedded_row_manifest_digest(
 
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
-    exact_rows = contracts.load_profile("short-vllm-v2").exact_rows
+    exact_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert exact_rows is not None
     expected_digest = post_mip.suites.manifest_sha256(exact_rows)
     captured = {}
 
     def fake_evaluate(args, *, settings_overrides, preflight_callback):
         captured.update(args=args, settings=settings_overrides)
-        preflight_callback({"quick_manifest_sha256": expected_digest, "status": "ready"})
-        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": "result.json"}]}
+        profile = dict.fromkeys(post_mip._PROFILE_CONTRACT_FIELDS)
+        profile.update(
+            profile="fixture",
+            quick_manifest_sha256=expected_digest,
+            source_tasks=["fixture"],
+            quick_selected_rows=1,
+            quick_row_identities={"fixture": [{}]},
+            quick_task_denominators={"fixture": {"selected_rows": 1}},
+            repetitions=1,
+        )
+        preflight_callback(profile)
+        result_path = tmp_path / "output" / "result.json"
+        result_path.write_text(json.dumps({"sample_counts": {"modelopt_vlm_benchmark_fixture": 1}}))
+        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": str(result_path)}]}
 
     monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
     result = post_mip.evaluate_frozen_campaign_v3_checkpoint(
@@ -667,7 +723,7 @@ def test_short_v3_profile_uses_vllm_and_binds_the_embedded_row_manifest_digest(
         settings={"row_manifest_sha256": expected_digest, "batch_size": 1},
     )
 
-    assert captured["args"].profile == "short-vllm-v2"
+    assert captured["args"].profile == "core-3_344-examples_r1-vllm"
     assert captured["args"].quick_manifest is None
     assert captured["settings"] == {}
     assert result["checkpoint"] == str(checkpoint)
@@ -690,47 +746,19 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
     def fake_evaluate(checkpoint_path, *, output_root, settings):
         calls.append((Path(checkpoint_path), output_root, settings))
         score = 0.4 if Path(checkpoint_path) == candidate else 0.5
-        parser_status = "parsed" if Path(checkpoint_path) == candidate else "fallback_random"
         result_path = tmp_path / f"{Path(checkpoint_path).name}.json"
-        result_path.write_text(
-            json.dumps(
-                {
-                    "mmmu_parser_audit": {
-                        "sample_count": 1,
-                        "status_counts": {parser_status: 1},
-                    },
-                    "sample_counts": {"ifeval": 1},
-                }
-            )
-        )
-        profile_path = tmp_path / f"{Path(checkpoint_path).name}-profile.json"
-        profile_path.write_text(
-            json.dumps(
-                {
-                    "profile": "fixture",
-                    "suite": "fixture",
-                    "lmms_eval_revision": "lmms-revision",
-                    "source_tasks": ["ifeval"],
-                    "dataset_revisions": {"ifeval": "dataset-revision"},
-                    "frame_policy": None,
-                    "generation_policy": {"temperature": 0, "do_sample": False},
-                    "backend_limitations": [],
-                    "output_budget_contract": {
-                        "ifeval": {
-                            "adapter": "fixture",
-                            "effective_max_new_tokens": 16,
-                        }
-                    },
-                    "sample_limit": 8,
-                    "quick_manifest_sha256": "a" * 64,
-                    "repetitions": 1,
-                }
-            )
-        )
+        result_path.write_text(json.dumps({"raw": "adapter-owned"}))
         return {
             "metrics": {"ifeval.accuracy": score},
             "result_path": str(result_path),
-            "profile_path": str(profile_path),
+            "contract": {
+                "schema": "fixture.evaluator-contract/v1",
+                "dataset_revision": "dataset-revision",
+            },
+            "evidence": {
+                "schema": "fixture.evaluation-evidence/v1",
+                "sample_ids": ["example-1"],
+            },
         }
 
     monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
@@ -746,28 +774,32 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
         reference_checkpoint=reference,
         profile=None,
         evaluator_revision="source-revision",
-        settings={"tasks": ["ifeval"]},
         candidate=fake_evaluate(candidate, output_root=tmp_path, settings={"tasks": ["ifeval"]}),
         reference=fake_evaluate(reference, output_root=tmp_path, settings={"tasks": ["ifeval"]}),
     )
     assert identity["architecture_id"] == "architecture"
     assert identity["kd"] == {"producer_node": "kd_256", "exposure": None}
     assert identity["evaluator"]["revision"] == "source-revision"
-    assert identity["evaluator"]["resolved_profile"]["dataset_revisions"] == {
-        "ifeval": "dataset-revision"
-    }
-    assert identity["evaluator"]["resolved_profile"]["backend_limitations"] == []
-    assert identity["evaluator"]["resolved_profile"]["output_budget_contract"] == {
-        "ifeval": {"adapter": "fixture", "effective_max_new_tokens": 16}
+    assert identity["evaluator"]["contract"] == {
+        "schema": "fixture.evaluator-contract/v1",
+        "dataset_revision": "dataset-revision",
     }
     assert identity["evaluation_evidence"] == {
-        "mmmu_parser_audit": {"sample_count": 1, "status_counts": {"parsed": 1}},
-        "sample_counts": {"ifeval": 1},
+        "schema": "fixture.evaluation-evidence/v1",
+        "sample_ids": ["example-1"],
     }
-    assert identity["reference_evaluation_evidence"] == {
-        "mmmu_parser_audit": {"sample_count": 1, "status_counts": {"fallback_random": 1}},
-        "sample_counts": {"ifeval": 1},
-    }
+    assert identity["reference_evaluation_evidence"] == identity["evaluation_evidence"]
+    invalid_candidate = fake_evaluate(candidate, output_root=tmp_path, settings={})
+    del invalid_candidate["evidence"]["schema"]
+    with pytest.raises(ValueError, match="evidence must declare a non-empty schema"):
+        runner._downstream_evaluation_identity(
+            source=source,
+            reference_checkpoint=reference,
+            profile=None,
+            evaluator_revision="source-revision",
+            candidate=invalid_candidate,
+            reference=fake_evaluate(reference, output_root=tmp_path, settings={}),
+        )
     calls.clear()
     node = SimpleNamespace(
         node_id="full_benchmarks",
@@ -1041,23 +1073,19 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
     teacher = tmp_path / "teacher"
     teacher.mkdir()
     reference_fingerprint = runner._checkpoint_fingerprint(teacher)
-    profile = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
-    quick_row_identities = {
-        "realworldqa": [{"source_sample_id": f"test:{index}"} for index in range(8)],
-        "mmmu_val": [{"source_sample_id": f"validation:{index}"} for index in range(8)],
-        "mvbench": [
-            {
-                "source_sample_id": f"action_sequence:{index}",
-                "leaf_task": "mvbench_action_sequence",
-            }
-            for index in range(8)
-        ],
+    profile = "fixture_profile"
+    evaluator_contract = {
+        "schema": "fixture.evaluator-contract/v1",
+        "dataset": {"revision": "dataset-revision", "selection_sha256": "a" * 64},
+        "generation": {"do_sample": False},
     }
-    sample_counts = {
-        "modelopt_vlm_benchmark_mmmu_val": 8,
-        "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
-        "modelopt_vlm_benchmark_realworldqa": 8,
-    }
+
+    def evaluation_evidence(checkpoint):
+        return {
+            "schema": "fixture.evaluation-evidence/v1",
+            "checkpoint": checkpoint,
+            "outcomes": {"completed": 24, "failed": 0},
+        }
 
     def evaluation_identity(steps):
         return {
@@ -1065,58 +1093,13 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
             "reference_checkpoint_fingerprint": reference_fingerprint,
             "architecture_id": architecture_id,
             "kd": {"producer_node": f"kd_{steps}", "exposure": {"cumulative_steps": steps}},
-            "evaluation_evidence": {
-                "sample_counts": sample_counts,
-                "mmmu_parser_audit": {
-                    "sample_count": 8,
-                    "status_counts": {"fallback_random": 1, "parsed": 7},
-                },
-            },
-            "reference_evaluation_evidence": {
-                "sample_counts": sample_counts,
-                "mmmu_parser_audit": {
-                    "sample_count": 8,
-                    "status_counts": {"invalid_open": 1, "parsed": 7},
-                },
-            },
+            "evaluation_evidence": evaluation_evidence(f"student-{steps}"),
+            "reference_evaluation_evidence": evaluation_evidence("teacher"),
+            "reference_evaluator_contract": copy.deepcopy(evaluator_contract),
             "evaluator": {
                 "profile": profile,
                 "revision": "source-revision",
-                "settings": {"batch_size": 1, "row_manifest_sha256": "a" * 64},
-                "resolved_profile": {
-                    "profile": profile,
-                    "suite": "quick",
-                    "lmms_eval_revision": "lmms-revision",
-                    "source_tasks": ["realworldqa", "mmmu_val", "mvbench"],
-                    "dataset_revisions": {
-                        "realworldqa": "revision-a",
-                        "mmmu_val": "revision-b",
-                        "mvbench": "revision-c",
-                    },
-                    "frame_policy": {"mvbench": 32},
-                    "generation_policy": {"do_sample": False},
-                    "backend_limitations": [],
-                    "output_budget_contract": {
-                        "mmmu_val": {
-                            "adapter": "qwen3_5",
-                            "effective_max_new_tokens": 128,
-                        },
-                        "realworldqa": {
-                            "adapter": "qwen3_5",
-                            "effective_max_new_tokens": 16,
-                        },
-                    },
-                    "sample_limit": None,
-                    "quick_selected_rows": 24,
-                    "quick_row_identities": quick_row_identities,
-                    "quick_task_denominators": {
-                        "mmmu_val": {"selected_rows": 8, "population_rows": 900},
-                        "mvbench": {"selected_rows": 8, "population_rows": 4000},
-                        "realworldqa": {"selected_rows": 8, "population_rows": 765},
-                    },
-                    "quick_manifest_sha256": "a" * 64,
-                    "repetitions": 1,
-                },
+                "contract": copy.deepcopy(evaluator_contract),
             },
         }
 
@@ -1178,8 +1161,6 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
                 "pre_kd_source": "materialized",
                 "pre_kd_evaluation": "pre_kd_short_v1",
                 "profile": profile,
-                "row_manifest": "/frozen/short-v1.json",
-                "row_manifest_sha256": "a" * 64,
                 "reference_checkpoint": str(teacher),
                 "reference_cache_id": "teacher",
                 "milestones": [
@@ -1210,7 +1191,7 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
     assert manifest["pre_kd"]["evaluation_identity"] == evaluation_identity(0)
     assert manifest["pre_kd"]["evaluation_metrics"] == {"accuracy": 0.1}
     assert [row["steps"] for row in manifest["milestones"]] == [64, 128, 256]
-    assert manifest["evaluation_identity"]["row_manifest_sha256"] == "a" * 64
+    assert manifest["evaluation_contract"]["evaluator"]["contract"] == evaluator_contract
     assert [row["evaluation_identity"] for row in manifest["milestones"]] == [
         evaluation_identity(64),
         evaluation_identity(128),
@@ -1219,21 +1200,11 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
 
     def expected_evaluation_result(accuracy):
         return {
-            "candidate_evidence": {
-                "mmmu_parser_audit": {
-                    "sample_count": 8,
-                    "status_counts": {"fallback_random": 1, "parsed": 7},
-                },
-                "sample_counts": sample_counts,
-            },
+            "candidate_evidence": evaluation_evidence(
+                "student-0" if accuracy == 0.1 else f"student-{int(accuracy * 1000)}"
+            ),
             "metrics": {"accuracy": accuracy},
-            "reference_evidence": {
-                "mmmu_parser_audit": {
-                    "sample_count": 8,
-                    "status_counts": {"invalid_open": 1, "parsed": 7},
-                },
-                "sample_counts": sample_counts,
-            },
+            "reference_evidence": evaluation_evidence("teacher"),
         }
 
     assert manifest["exact_result"] == {
@@ -1253,11 +1224,6 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
             "pre_kd_checkpoint_fingerprint": "student-0",
             "reference_checkpoint_fingerprint": reference_fingerprint,
         },
-        "denominators": {
-            "mmmu_val": {"population_rows": 900, "selected_rows": 8},
-            "mvbench": {"population_rows": 4000, "selected_rows": 8},
-            "realworldqa": {"population_rows": 765, "selected_rows": 8},
-        },
         "evaluation_results": {
             "milestones": [
                 {"steps": steps, **expected_evaluation_result(steps / 1000)}
@@ -1266,21 +1232,9 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
             "pre_kd": expected_evaluation_result(0.1),
         },
         "evaluator_contract": {
-            "backend_limitations": [],
-            "evaluator_revision": "source-revision",
-            "generation_policy": {"do_sample": False},
-            "lmms_eval_revision": "lmms-revision",
-            "output_budget_contract": {
-                "mmmu_val": {
-                    "adapter": "qwen3_5",
-                    "effective_max_new_tokens": 128,
-                },
-                "realworldqa": {
-                    "adapter": "qwen3_5",
-                    "effective_max_new_tokens": 16,
-                },
-            },
+            "contract": evaluator_contract,
             "profile": profile,
+            "revision": "source-revision",
         },
         "kd_exposure": [{"cumulative_steps": steps} for steps in (64, 128, 256)],
         "parameter_counts": {
@@ -1296,18 +1250,6 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
             "tensor_count": 1,
             "tensor_shapes": {"model.weight": {"dtype": "BF16", "shape": [2, 3]}},
         },
-        "row_outcomes": {
-            "expected": 24,
-            "failed": 0,
-            "milestone_sample_counts": [
-                sample_counts,
-                sample_counts,
-                sample_counts,
-            ],
-            "missing": 0,
-            "pre_kd_sample_counts": sample_counts,
-        },
-        "selected_sample_ids": quick_row_identities,
         "stage_completion": {
             "milestones": [
                 {"evaluation": "success", "kd": "success", "steps": steps}
@@ -1330,30 +1272,17 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
         )
     monkeypatch.setattr(runner, "_exact_checkpoint_evidence", checkpoint_evidence)
 
-    missing_audit = evaluation_identity(128)
-    del missing_audit["evaluation_evidence"]["mmmu_parser_audit"]
-    (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": missing_audit}))
-    with pytest.raises(RuntimeError, match="invalid MMMU parser-audit evidence"):
+    missing_evidence = evaluation_identity(128)
+    del missing_evidence["evaluation_evidence"]
+    (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": missing_evidence}))
+    with pytest.raises(RuntimeError, match="missing evaluator-owned candidate evidence"):
         runner._aggregate_result_manifest(
             {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "missing-audit-execution"
         )
 
-    wrong_distribution = evaluation_identity(128)
-    wrong_distribution["evaluation_evidence"]["sample_counts"] = {
-        **sample_counts,
-        "modelopt_vlm_benchmark_mvbench_action_sequence": 7,
-        "modelopt_vlm_benchmark_realworldqa": 9,
-    }
-    (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": wrong_distribution}))
-    with pytest.raises(RuntimeError, match="sample counts do not match"):
-        runner._aggregate_result_manifest(
-            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "wrong-counts-execution"
-        )
-
     mismatched = evaluation_identity(128)
-    mismatched["evaluator"]["resolved_profile"]["dataset_revisions"]["mmmu_val"] = (
-        "different-revision"
-    )
+    mismatched["evaluator"]["contract"]["dataset"]["revision"] = "different-revision"
+    mismatched["reference_evaluator_contract"]["dataset"]["revision"] = "different-revision"
     (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": mismatched}))
     with pytest.raises(RuntimeError, match="128-step evaluation contract differs from pre-KD"):
         runner._aggregate_result_manifest(
@@ -1404,7 +1333,8 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path
     )
     second_identity = evaluation_identity(0)
     second_identity["architecture_id"] = second_architecture_id
-    second_identity["evaluator"]["resolved_profile"]["lmms_eval_revision"] = "other-revision"
+    second_identity["evaluator"]["contract"]["dataset"]["revision"] = "other-revision"
+    second_identity["reference_evaluator_contract"]["dataset"]["revision"] = "other-revision"
     second_comparison = tmp_path / "comparison-second-pre-kd.json"
     second_comparison.write_text(json.dumps({"identity": second_identity}))
     ledger.observations["pre_kd_short_v1"][second_materialized] = NodeObservation(

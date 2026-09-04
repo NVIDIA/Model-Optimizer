@@ -207,41 +207,6 @@ def _seed_convert_complete(run_dir: Path, write_terminal_manifest, config: dict)
     (run_dir / "subblock_library.json").write_text("[]\n")
 
 
-def _write_expectation_contract(tmp_path: Path, expected_report: object) -> Path:
-    contract = tmp_path / "expected" / "contract.json"
-    contract.parent.mkdir(parents=True, exist_ok=True)
-    contract.write_text(
-        json.dumps(
-            {
-                "schema": "modelopt.puzzletron-expected-results/v1",
-                "id": "controller-v1",
-                "observation": "observation.json",
-                "artifacts": {
-                    "report": "artifacts/campaign_report/report_manifest.json",
-                },
-                "fields": [
-                    {
-                        "name": "report",
-                        "artifact": "report",
-                        "pointer": "",
-                        "classification": "exact",
-                    }
-                ],
-            }
-        )
-    )
-    contract.with_name("observation.json").write_text(
-        json.dumps(
-            {
-                "schema": "modelopt.puzzletron-reference-observation/v1",
-                "contract_id": "controller-v1",
-                "values": {"report": expected_report},
-            }
-        )
-    )
-    return contract
-
-
 def _seed_sort_complete(run_dir: Path, write_terminal_manifest, config: dict) -> None:
     write_terminal_manifest(run_dir, "sort", config=config)
     sorted_dir = run_dir / "ckpts" / "sorted_teacher"
@@ -750,62 +715,6 @@ def test_controller_preserves_live_job_when_cancel_fails(tmp_path: Path):
     assert controller.shutdown(reason="test-failure") == 0
     assert controller.store.list_attempts("convert")[-1]["status"] == JobState.RUNNING.value
     assert len(controller.store.list_live_handles()) == 1
-
-
-def test_expectation_regression_makes_an_otherwise_complete_campaign_fatal(
-    tmp_path: Path,
-) -> None:
-    plan = replace(_compile_test_plan(tmp_path, stage_filter="convert"), stages=())
-    contract = _write_expectation_contract(tmp_path, {"qualified": True})
-
-    result = CampaignController(
-        plan,
-        executor=_FakeExecutor(),
-        poll_interval_seconds=0.01,
-    ).run(expectation_contract=contract)
-
-    assert result["report_status"] == "completed"
-    assert result["expectation_status"] == "regression"
-    assert result["expectation_exit_code"] == 1
-    assert result["halted"] is True
-
-
-def test_expectation_verification_reuses_the_sealed_report_on_resume(tmp_path: Path) -> None:
-    plan = replace(_compile_test_plan(tmp_path, stage_filter="convert"), stages=())
-    contract = _write_expectation_contract(tmp_path, {})
-    first_executor = _TrackingFakeExecutor()
-
-    first = CampaignController(
-        plan,
-        executor=first_executor,
-        poll_interval_seconds=0.01,
-    ).run(expectation_contract=contract)
-    second_executor = _TrackingFakeExecutor()
-    second = CampaignController(
-        plan,
-        executor=second_executor,
-        poll_interval_seconds=0.01,
-    ).run(expectation_contract=contract)
-
-    assert first["expectation_status"] == second["expectation_status"] == "passed"
-    assert first["expectation_exit_code"] == second["expectation_exit_code"] == 0
-    assert first_executor.submitted_stage_ids == ["final_report"]
-    assert second_executor.submitted_stage_ids == []
-
-
-def test_expectation_verification_treats_incomplete_campaign_as_invalid(tmp_path: Path) -> None:
-    plan = _compile_test_plan(tmp_path, stage_filter="convert")
-    contract = _write_expectation_contract(tmp_path, {})
-
-    result = CampaignController(
-        plan,
-        executor=_FakeExecutor(),
-        poll_interval_seconds=0.01,
-    ).run(once=True, expectation_contract=contract)
-
-    assert result["expectation_status"] == "skipped"
-    assert result["expectation_exit_code"] == 2
-    assert result["report_status"] == "skipped"
 
 
 def test_slurm_cancel_batches_job_ids(tmp_path: Path, monkeypatch):

@@ -28,10 +28,34 @@ from modelopt.torch.puzzletron.dataset.acquisition import (
     materialize_nemotron_vlm_dataset,
 )
 from modelopt.torch.puzzletron.manifest import stage_manifest_from_config, write_stage_manifest
+from modelopt.torch.puzzletron.orchestration.dataset_payload import record_file_inventory
 from modelopt.torch.puzzletron.stage_runner import StageResult
 from modelopt.torch.puzzletron.stages.graph import StageSkipReason, stage_is_enabled
 
 __all__ = ["prepare_dataset_stage"]
+
+
+def _completion_inventories(output: Path, evaluation_data: list[dict]) -> dict:
+    """Seal stage-owned payloads without exposing dataset policy to orchestration."""
+
+    inventories = [record_file_inventory(output)]
+    for row in evaluation_data:
+        snapshot = Path(row["snapshot"]).expanduser().absolute()
+        inventories.append(
+            record_file_inventory(snapshot, allowed_symlink_root=snapshot.parent.parent)
+        )
+        media_root = row.get("media_root")
+        if media_root:
+            inventories.append(
+                record_file_inventory(
+                    media_root,
+                    ignored_names=(".modelopt_vlm_benchmark_preparation.json",),
+                )
+            )
+    return {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": inventories,
+    }
 
 
 def prepare_dataset_stage(config: dict) -> StageResult:
@@ -114,6 +138,7 @@ def prepare_dataset_stage(config: dict) -> StageResult:
             "acquisition": result["acquisition"],
             "evaluation_hf_home": str(evaluation_hf_home) if evaluation_hf_home else None,
             "evaluation_data": evaluation_data,
+            "completion": _completion_inventories(output, evaluation_data),
         }
     )
     write_stage_manifest(manifest_path, manifest)

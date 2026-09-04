@@ -22,11 +22,11 @@ import json
 import os
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from typing import Any
 
 from examples.puzzletron.evaluation import checkpoint
@@ -65,6 +65,199 @@ _FROZEN_CAMPAIGN_PROFILE_V2 = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_froze
 _FROZEN_CAMPAIGN_PROFILE_V3 = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
 _REPRODUCIBILITY_SMOKE_PROFILE = "qwen35_vlm_core3_24row_smoke_v1"
 _REPRODUCIBILITY_SMOKE_PROFILE_V2 = "qwen35_vlm_core3_24row_smoke_v2"
+_PROFILE_CONTRACT_FIELDS = (
+    "profile",
+    "profile_name",
+    "profile_schema",
+    "profile_fingerprint",
+    "model_pin",
+    "profile_population_rows",
+    "suite",
+    "lmms_eval_revision",
+    "model_backend",
+    "source_tasks",
+    "profile_task",
+    "profile_task_shard",
+    "dataset_revisions",
+    "frame_policy",
+    "generation_policy",
+    "backend_limitations",
+    "output_budget_contract",
+    "sample_limit",
+    "quick_selected_rows",
+    "quick_row_identities",
+    "quick_task_denominators",
+    "quick_manifest_sha256",
+    "judge_free_mmvu_rows",
+    "short_repetitions",
+    "repetitions",
+    "batch_size",
+    "judge_policy",
+    "network_policy",
+    "post_mip_runner_overrides",
+)
+_MMMU_PARSER_STATUSES = {"fallback_random", "invalid_open", "parsed", "parsed_open"}
+
+
+def _evaluation_contract(profile_path: Path) -> dict[str, Any]:
+    """Project stable Qwen VLM evaluator inputs for core comparability checks."""
+
+    payload = json.loads(profile_path.read_text())
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("Qwen VLM evaluator profile must contain an object")
+    missing = set(_PROFILE_CONTRACT_FIELDS) - payload.keys()
+    if missing:
+        raise RuntimeError(f"Qwen VLM evaluator profile is missing {sorted(missing)}")
+    return {
+        "schema": "modelopt.puzzletron.qwen35-vlm-evaluator-contract/v1",
+        **{field: payload[field] for field in _PROFILE_CONTRACT_FIELDS},
+    }
+
+
+def _expected_sample_counts(contract: Mapping[str, Any]) -> dict[str, int]:
+    """Resolve the exact generated-task counts encoded by a frozen Qwen profile."""
+
+    source_tasks = contract.get("source_tasks")
+    denominators = contract.get("quick_task_denominators")
+    identities = contract.get("quick_row_identities")
+    expected_rows = contract.get("quick_selected_rows")
+    repetitions = contract.get("repetitions")
+    if (
+        not isinstance(source_tasks, list)
+        or not source_tasks
+        or any(not isinstance(task, str) or not task for task in source_tasks)
+        or isinstance(repetitions, bool)
+        or not isinstance(repetitions, int)
+        or repetitions <= 0
+    ):
+        raise RuntimeError("Qwen VLM evaluator profile has invalid task-count evidence")
+    if denominators is None and identities is None and expected_rows is None:
+        sample_limit = contract.get("sample_limit")
+        if (
+            isinstance(sample_limit, bool)
+            or not isinstance(sample_limit, int)
+            or sample_limit <= 0
+            or any(task in {"mvbench", "video_mmmu"} for task in source_tasks)
+        ):
+            raise RuntimeError("Qwen VLM evaluator profile has invalid task-count evidence")
+        return {
+            f"modelopt_vlm_benchmark_{task}": sample_limit * repetitions
+            for task in sorted(source_tasks)
+        }
+    if (
+        not isinstance(denominators, Mapping)
+        or not isinstance(identities, Mapping)
+        or set(source_tasks) != set(denominators)
+        or set(source_tasks) != set(identities)
+    ):
+        raise RuntimeError("Qwen VLM evaluator profile has invalid exact-row task evidence")
+    expected: dict[str, int] = {}
+    for source_task in source_tasks:
+        denominator = denominators.get(source_task)
+        rows = identities.get(source_task)
+        selected = denominator.get("selected_rows") if isinstance(denominator, Mapping) else None
+        if (
+            not isinstance(source_task, str)
+            or isinstance(selected, bool)
+            or not isinstance(selected, int)
+            or selected <= 0
+            or not isinstance(rows, list)
+            or len(rows) != selected
+        ):
+            raise RuntimeError("Qwen VLM evaluator profile has invalid exact-row task evidence")
+        if source_task in {"mvbench", "video_mmmu"}:
+            for row in rows:
+                leaf = row.get("leaf_task") if isinstance(row, Mapping) else None
+                if not isinstance(leaf, str) or not leaf.startswith(f"{source_task}_"):
+                    raise RuntimeError(
+                        "Qwen VLM evaluator profile has invalid exact-row task evidence"
+                    )
+                task = f"modelopt_vlm_benchmark_{leaf}"
+                expected[task] = expected.get(task, 0) + repetitions
+        else:
+            expected[f"modelopt_vlm_benchmark_{source_task}"] = selected * repetitions
+    if (
+        isinstance(expected_rows, bool)
+        or not isinstance(expected_rows, int)
+        or sum(expected.values()) != expected_rows * repetitions
+    ):
+        raise RuntimeError("Qwen VLM evaluator profile has invalid exact-row task evidence")
+    return dict(sorted(expected.items()))
+
+
+def _evaluation_evidence(result_path: str | Path, contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and project Qwen VLM row-completion evidence."""
+
+    payload = json.loads(Path(result_path).read_text())
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("Qwen VLM evaluator result must contain an object")
+    counts = payload.get("sample_counts")
+    if (
+        not isinstance(counts, Mapping)
+        or not counts
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value <= 0
+            or int(value) != value
+            for value in counts.values()
+        )
+    ):
+        raise RuntimeError("Qwen VLM evaluator result has invalid sample-count evidence")
+    normalized_counts = {str(task): int(value) for task, value in sorted(counts.items())}
+    if normalized_counts != _expected_sample_counts(contract):
+        raise RuntimeError("Qwen VLM evaluator sample counts do not match its exact-row profile")
+    evidence: dict[str, Any] = {
+        "schema": "modelopt.puzzletron.qwen35-vlm-evaluation-evidence/v1",
+        "sample_counts": normalized_counts,
+    }
+    source_tasks = contract.get("source_tasks")
+    if not isinstance(source_tasks, list) or "mmmu_val" not in source_tasks:
+        return evidence
+    audit = payload.get("mmmu_parser_audit")
+    sample_count = audit.get("sample_count") if isinstance(audit, Mapping) else None
+    status_counts = audit.get("status_counts") if isinstance(audit, Mapping) else None
+    expected_mmmu_samples = normalized_counts.get("modelopt_vlm_benchmark_mmmu_val")
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or sample_count <= 0
+        or not isinstance(expected_mmmu_samples, int)
+        or sample_count != expected_mmmu_samples
+        or not isinstance(status_counts, Mapping)
+        or not status_counts
+        or any(
+            status not in _MMMU_PARSER_STATUSES
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            for status, count in status_counts.items()
+        )
+        or sum(status_counts.values()) != sample_count
+    ):
+        raise RuntimeError("Qwen VLM evaluator result has invalid MMMU parser-audit evidence")
+    evidence["mmmu_parser_audit"] = {
+        "sample_count": sample_count,
+        "status_counts": {
+            str(status): int(count) for status, count in sorted(status_counts.items())
+        },
+    }
+    return evidence
+
+
+def _with_evaluation_identity(result: Mapping[str, Any], profile_path: Path) -> dict[str, Any]:
+    """Attach adapter-owned comparison inputs and observed evidence."""
+
+    contract = _evaluation_contract(profile_path)
+    result_path = result.get("result_path")
+    if not isinstance(result_path, (str, Path)):
+        raise RuntimeError("Qwen VLM evaluator result is missing result_path")
+    return {
+        **result,
+        "profile_path": str(profile_path),
+        "contract": contract,
+        "evidence": _evaluation_evidence(result_path, contract),
+    }
 
 
 def _run_profile(
@@ -138,6 +331,12 @@ def _run_profile(
                 "frozen 344-row campaign manifest SHA256 differs from the campaign identity: "
                 f"{report.get('quick_manifest_sha256')} != {expected_manifest_sha256}"
             )
+        report = {
+            **report,
+            "post_mip_runner_overrides": {
+                key: settings[key] for key in sorted(_RUNNER_OVERRIDES) if key in settings
+            },
+        }
         checkpoint.write_generated(
             profile_path,
             json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -219,8 +418,7 @@ def evaluate_frozen_campaign_checkpoint(
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
         raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
     return {
-        **runs[0],
-        "profile_path": str(profile_path),
+        **_with_evaluation_identity(runs[0], profile_path),
         "checkpoint": str(args.checkpoint),
     }
 
@@ -262,8 +460,7 @@ def _evaluate_single_run_profile(
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
         raise RuntimeError(f"pinned VLM profile {evaluation_profile} returned an invalid run count")
     return {
-        **runs[0],
-        "profile_path": str(profile_path),
+        **_with_evaluation_identity(runs[0], profile_path),
         "checkpoint": str(args.checkpoint),
     }
 
@@ -353,7 +550,7 @@ def evaluate_realworldqa_checkpoint(
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
         raise RuntimeError("pinned RealWorldQA profile returned an invalid run count")
-    return {**runs[0], "profile_path": str(profile_path)}
+    return _with_evaluation_identity(runs[0], profile_path)
 
 
 def evaluate_realworldqa_mmmu_prefix100_checkpoint(
@@ -412,13 +609,15 @@ def evaluate_realworldqa_mmmu_prefix100_checkpoint(
             "suite": args.suite,
         },
     )
-    return {
-        "metrics": metrics,
-        "profile": _BOUNDED_REPEATED_PROFILE,
-        "profile_path": str(profile_path),
-        "result_path": str(summary_path),
-        "run_result_paths": result_paths,
-    }
+    return _with_evaluation_identity(
+        {
+            "metrics": metrics,
+            "profile": _BOUNDED_REPEATED_PROFILE,
+            "result_path": str(summary_path),
+            "run_result_paths": result_paths,
+        },
+        profile_path,
+    )
 
 
 def evaluate_e2e_full_eval_checkpoint(

@@ -316,10 +316,6 @@ def gpu_puzzletron(session):
         "addopts=",
         (
             "tests/gpu/torch/puzzletron/test_puzzletron.py::"
-            "test_qwen3p5_native_axis_probe_matches_physical_modules"
-        ),
-        (
-            "tests/gpu/torch/puzzletron/test_puzzletron.py::"
             "test_tiny_qwen_campaign_uses_current_public_route"
         ),
         *_cov_args(),

@@ -36,7 +36,6 @@ from .compiler import _resolve_artifact_settling_timeout_seconds, plan_to_dict
 from .dashboard import StageView, format_duration, progress_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
 from .executors.slurm import render_slurm_attempt_script
-from .expectations import ExpectationResult, verify_expected_results
 from .identity import stable_hash
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
@@ -1366,7 +1365,6 @@ class CampaignController:
         overrides: list[str] | None = None,
         once: bool = False,
         max_iterations: int | None = None,
-        expectation_contract: str | Path | None = None,
     ) -> dict[str, Any]:
         """Run the controller until all stages complete or a fatal failure occurs."""
 
@@ -1564,34 +1562,12 @@ class CampaignController:
             if clean_completion
             else FinalReportResult(status="skipped")
         )
-        expectation_result: ExpectationResult | None = None
-        if expectation_contract is not None and clean_completion:
-            if report_result.status != "completed":
-                expectation_result = ExpectationResult(
-                    status="invalid",
-                    exit_code=2,
-                    comparison_path=None,
-                    reason="required final campaign report generation failed",
-                )
-            else:
-                expectation_result = verify_expected_results(
-                    expectation_contract,
-                    puzzle_dir=self.plan.puzzle_dir,
-                )
-            if expectation_result.exit_code:
-                halted = True
-                self.logger.error(
-                    "campaign expectation verification "
-                    f"{expectation_result.status}: {expectation_result.reason or 'comparison failed'}"
-                )
         if detached:
             self.logger.shutdown(
                 "controller detached; jobs remain active and the same command will recover them"
             )
         elif cancelled:
             self.logger.shutdown("campaign stopped by user; rerun the same command to resume")
-        elif expectation_result is not None and expectation_result.exit_code:
-            self.logger.error("campaign halted after expectation verification failure")
         elif halted:
             self.logger.error("campaign halted after a stage failure")
         elif self._manual_waiting is not None:
@@ -1615,15 +1591,4 @@ class CampaignController:
             "iterations": iterations,
             **report_result.as_dict(),
         }
-        if expectation_result is not None:
-            result.update(expectation_result.as_dict())
-        elif expectation_contract is not None:
-            result.update(
-                ExpectationResult(
-                    status="skipped",
-                    exit_code=2,
-                    comparison_path=None,
-                    reason="campaign did not reach clean completion",
-                ).as_dict()
-            )
         return result

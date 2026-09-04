@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dependency-light validation for materialized Puzzletron dataset payloads."""
+"""Dependency-light validation for stage-owned file inventories."""
 
 from __future__ import annotations
 
@@ -23,136 +23,168 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-__all__ = ["vlm_materialization_is_complete"]
+__all__ = ["file_inventories_are_complete", "record_file_inventory"]
 
-_VALIDATED_PAYLOADS: dict[Path, tuple[Any, ...]] = {}
-
-
-def _payload_signature(
-    root: Path,
-    manifest: Mapping[str, Any],
-) -> tuple[Any, ...] | None:
-    try:
-        manifest_digest = hashlib.sha256(
-            json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-        ).hexdigest()
-        paths = [root / "samples.json"]
-        for image in manifest.get("images", []):
-            if not isinstance(image, Mapping) or not isinstance(image.get("path"), str):
-                return None
-            relative = Path(image["path"])
-            if relative.is_absolute() or ".." in relative.parts:
-                return None
-            paths.append(root / relative)
-        stats = []
-        for path in paths:
-            stat = path.stat()
-            stats.append(
-                (
-                    str(path),
-                    stat.st_dev,
-                    stat.st_ino,
-                    stat.st_size,
-                    stat.st_mtime_ns,
-                    stat.st_ctime_ns,
-                )
-            )
-    except (OSError, TypeError, ValueError):
-        return None
-    return (manifest_digest, *stats)
+_SCHEMA = "modelopt.puzzletron.file-inventories/v1"
+_VALIDATED_INVENTORIES: dict[Path, tuple[Any, ...]] = {}
 
 
-def vlm_materialization_is_complete(
-    output_dir: str | Path,
-    manifest: Mapping[str, Any],
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def record_file_inventory(
+    root: str | Path,
     *,
-    cache_success: bool = False,
-) -> bool:
-    """Return whether a VLM materialization matches its recorded payload manifest."""
+    ignored_names: tuple[str, ...] = (),
+    allowed_symlink_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Record the regular files below ``root`` for later completion checks."""
 
-    root = Path(output_dir).expanduser().absolute()
-    signature = _payload_signature(root, manifest)
-    if signature is None:
+    root = Path(root).expanduser().absolute()
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"inventory root must be a regular directory: {root}")
+    symlink_root = (
+        Path(allowed_symlink_root).expanduser().resolve()
+        if allowed_symlink_root is not None
+        else None
+    )
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.name in ignored_names or (path.is_dir() and not path.is_symlink()):
+            continue
+        if path.is_symlink():
+            try:
+                inspected = path.resolve(strict=True)
+            except OSError as error:
+                raise ValueError(f"inventory symlink is invalid: {path}") from error
+            if symlink_root is None or not inspected.is_relative_to(symlink_root):
+                raise ValueError(f"inventory symlink escapes its allowed root: {path}")
+            kind = "symlink"
+            target = inspected.relative_to(symlink_root).as_posix()
+        elif path.is_file():
+            inspected = path
+            kind = "file"
+            target = None
+        else:
+            raise ValueError(f"inventory path must be a regular file: {path}")
+        stat = inspected.stat()
+        entry = {
+            "path": path.relative_to(root).as_posix(),
+            "kind": kind,
+            "bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+            "sha256": _sha256(inspected),
+        }
+        if target is not None:
+            entry["target"] = target
+        files.append(entry)
+    if not files:
+        raise ValueError(f"inventory root contains no files: {root}")
+    return {
+        "root": str(root),
+        "ignored_names": list(ignored_names),
+        "allowed_symlink_root": str(symlink_root) if symlink_root is not None else None,
+        "files": files,
+    }
+
+
+def _inventory_is_complete(inventory: object) -> bool:
+    if not isinstance(inventory, Mapping):
         return False
-    if cache_success and _VALIDATED_PAYLOADS.get(root) == signature:
-        return True
-    sample_count = manifest.get("sample_count")
-    samples_sha256 = manifest.get("samples_sha256")
-    image_count = manifest.get("image_count")
-    images = manifest.get("images")
-    acquisition = manifest.get("acquisition")
-    requested_samples = acquisition.get("num_samples") if isinstance(acquisition, Mapping) else None
+    root_value = inventory.get("root")
+    entries = inventory.get("files")
+    ignored_names = inventory.get("ignored_names", [])
+    symlink_root_value = inventory.get("allowed_symlink_root")
     if (
-        isinstance(sample_count, bool)
-        or not isinstance(sample_count, int)
-        or sample_count <= 0
-        or not isinstance(samples_sha256, str)
-        or isinstance(image_count, bool)
-        or not isinstance(image_count, int)
-        or image_count != sample_count
-        or not isinstance(acquisition, Mapping)
-        or acquisition.get("adapter") != "nemotron_vlm_v2"
-        or isinstance(requested_samples, bool)
-        or not isinstance(requested_samples, int)
-        or requested_samples != sample_count
-        or not isinstance(images, list)
-        or len(images) != image_count
+        not isinstance(root_value, str)
+        or not isinstance(entries, list)
+        or not entries
+        or not isinstance(ignored_names, list)
+        or any(not isinstance(name, str) for name in ignored_names)
     ):
         return False
-
-    try:
-        samples_payload = (root / "samples.json").read_bytes()
-        samples = json.loads(samples_payload)
-    except (OSError, json.JSONDecodeError):
-        return False
-    if (
-        hashlib.sha256(samples_payload).hexdigest() != samples_sha256
-        or not isinstance(samples, list)
-        or len(samples) != sample_count
-    ):
+    root = Path(root_value).expanduser().absolute()
+    symlink_root = (
+        Path(symlink_root_value).expanduser().resolve()
+        if isinstance(symlink_root_value, str)
+        else None
+    )
+    if root.is_symlink() or not root.is_dir():
         return False
 
-    referenced_images: list[str] = []
-    for sample in samples:
-        if not isinstance(sample, Mapping):
+    expected_paths = []
+    inspected_files = []
+    signature_items = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
             return False
-        conversation = sample.get("conversation")
-        if not isinstance(conversation, list):
-            return False
-        for message in conversation:
-            if not isinstance(message, Mapping) or not isinstance(message.get("content"), list):
-                return False
-            for item in message["content"]:
-                if not isinstance(item, Mapping):
-                    return False
-                if item.get("type") == "image":
-                    path = item.get("image")
-                    if not isinstance(path, str):
-                        return False
-                    referenced_images.append(path)
-
-    recorded_images: list[str] = []
-    for image in images:
-        if not isinstance(image, Mapping):
-            return False
-        relative_value = image.get("path")
-        digest = image.get("sha256")
+        relative_value = entry.get("path")
+        digest = entry.get("sha256")
         if not isinstance(relative_value, str) or not isinstance(digest, str):
             return False
         relative = Path(relative_value)
-        if relative.is_absolute() or ".." in relative.parts:
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
             return False
         path = root / relative
         try:
-            if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            if entry.get("kind") == "symlink":
+                if symlink_root is None or not path.is_symlink():
+                    return False
+                inspected = path.resolve(strict=True)
+                if not inspected.is_relative_to(symlink_root) or inspected.relative_to(
+                    symlink_root
+                ).as_posix() != entry.get("target"):
+                    return False
+            elif entry.get("kind") == "file":
+                if path.is_symlink() or not path.is_file():
+                    return False
+                inspected = path
+            else:
                 return False
-            if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            stat = inspected.stat()
+            if stat.st_size != entry.get("bytes"):
                 return False
         except OSError:
             return False
-        recorded_images.append(relative.as_posix())
+        expected_paths.append(relative.as_posix())
+        inspected_files.append((inspected, digest))
+        signature_items.append(
+            (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        )
 
-    complete = sorted(recorded_images) == sorted(referenced_images)
-    if complete and cache_success:
-        _VALIDATED_PAYLOADS[root] = signature
-    return complete
+    observed_paths = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if not (path.is_dir() and not path.is_symlink()) and path.name not in ignored_names
+    )
+    if sorted(expected_paths) != observed_paths:
+        return False
+    inventory_digest = hashlib.sha256(
+        json.dumps(inventory, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    signature = (inventory_digest, *signature_items)
+    if _VALIDATED_INVENTORIES.get(root) == signature:
+        return True
+    if any(_sha256(path) != digest for path, digest in inspected_files):
+        return False
+    _VALIDATED_INVENTORIES[root] = signature
+    return True
+
+
+def file_inventories_are_complete(payload: object) -> bool:
+    """Return whether every file inventory emitted by a stage is still current."""
+
+    if not isinstance(payload, Mapping) or payload.get("schema") != _SCHEMA:
+        return False
+    inventories = payload.get("inventories")
+    return (
+        isinstance(inventories, list)
+        and bool(inventories)
+        and all(_inventory_is_complete(inventory) for inventory in inventories)
+    )

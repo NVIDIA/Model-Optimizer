@@ -486,14 +486,22 @@ def compact_gated_delta_net_forward(
         position_ids=None,
         qkv_format=None,
         cu_seqlens=None,
+        cu_seqlens_cpu=None,
         indices=None,
         seq_index=None,
         **kwargs,
     ):
-        del cache_position, position_ids, qkv_format, seq_index
+        del cache_position, position_ids
         if kwargs:
             raise TypeError(f"Unsupported compact GDN forward arguments: {sorted(kwargs)}")
-        if cu_seqlens is not None or indices is not None:
+        if (
+            qkv_format not in (None, "bshd")
+            or seq_idx is not None
+            or seq_index is not None
+            or cu_seqlens is not None
+            or cu_seqlens_cpu is not None
+            or indices is not None
+        ):
             raise RuntimeError(
                 "Compact native GDN packed execution is not supported; refusing to score "
                 "reduced geometry"
@@ -573,7 +581,7 @@ def compact_gated_delta_net_forward(
                     weight=conv_weight.squeeze(1),
                     bias=conv_bias,
                     activation=self.activation,
-                    seq_idx=seq_idx,
+                    seq_idx=None,
                 )
             else:
                 mixed_qkv = F.silu(

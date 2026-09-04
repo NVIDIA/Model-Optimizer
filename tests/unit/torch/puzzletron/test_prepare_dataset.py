@@ -85,9 +85,13 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
         task = "realworldqa"
         repository = catalog[task]["repository"]
         revision = catalog[task]["revision"]
-        snapshot = root / "hub" / "datasets--lmms-lab--RealWorldQA" / "snapshots" / revision
+        repository_cache = root / "hub" / "datasets--lmms-lab--RealWorldQA"
+        snapshot = repository_cache / "snapshots" / revision
         snapshot.mkdir(parents=True)
-        (snapshot / "dataset-info.json").write_text("{}")
+        blob = repository_cache / "blobs" / "dataset-info"
+        blob.parent.mkdir()
+        blob.write_text("{}")
+        (snapshot / "dataset-info.json").symlink_to(blob)
         return [
             {
                 "task": task,
@@ -109,12 +113,16 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
     result = module.prepare_dataset_stage(config)
 
     assert result.status == "success"
+    monkeypatch.delenv("HF_HOME")
     assert stage_is_complete(config, "prepare_dataset")
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["outputs"]["sample_count"] == 8
     assert manifest["outputs"]["acquisition"]["revision"] == "pinned-sha"
     assert manifest["outputs"]["evaluation_hf_home"] == str(hf_home)
     assert [row["task"] for row in manifest["outputs"]["evaluation_data"]] == ["realworldqa"]
+
+    (output / "samples.json").write_text("corrupt")
+    assert not stage_is_complete(config, "prepare_dataset")
 
 
 def test_prepare_dataset_stage_requires_runner_hf_home_for_evaluations(tmp_path, monkeypatch):
