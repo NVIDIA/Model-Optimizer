@@ -36,7 +36,7 @@ metadata:
 quantize:
   algorithm:
     method: max
-    layerwise: false
+    layerwise: {enable: false}
   quant_cfg:
     - $import: base_disable_all
     - quantizer_name: '*moe*weight_quantizer'
