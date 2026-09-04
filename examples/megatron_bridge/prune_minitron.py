@@ -46,16 +46,7 @@ import sys
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-
-try:  # nemo:26.08+
-    from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
-
-    # MambaModelProvider subclasses HybridModelProvider on nemo:26.08+, so the tuple covers both.
-    _HYBRID_PROVIDER_TYPES: tuple[type, ...] = (MambaModelProvider, HybridModelProvider)
-except ImportError:  # nemo:26.06 and earlier
-    _HYBRID_PROVIDER_TYPES = (MambaModelProvider,)
-
+from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -75,7 +66,7 @@ from modelopt.torch.utils import (
     print_rank_0,
     warn_rank_0,
 )
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.mbridge import get_language_model, load_mbridge_model_from_hf
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -439,8 +430,7 @@ def main(args: argparse.Namespace):
 
     # For VLMs (e.g. Qwen3-VL), only the language model is pruned; the vision tower is left intact.
     # hidden_size is shared with the vision->LM projector, so it is skipped
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: pruning model.language_model only; all non-language-model components "
@@ -593,7 +583,7 @@ def main(args: argparse.Namespace):
         mto.ModeloptStateManager.remove_state(language_model)
     if is_vlm:
         _log_vlm_param_breakdown(unwrapped_model, language_model, "after pruning")
-    if isinstance(provider, _HYBRID_PROVIDER_TYPES):
+    if isinstance(provider, HybridModelProvider):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(unwrapped_model, "hybrid_override_pattern")
@@ -696,7 +686,7 @@ def main(args: argparse.Namespace):
                 )
         # Only older remote-code configs need this; native configs carry the cadence in layer_types.
         if (
-            isinstance(provider, _HYBRID_PROVIDER_TYPES)
+            isinstance(provider, HybridModelProvider)
             and not hasattr(text_cfg, "layer_types")
             and hasattr(text_cfg, "hybrid_override_pattern")
         ):
@@ -712,12 +702,7 @@ def main(args: argparse.Namespace):
 
         # Config-only bridge (hf_keys=None) keeps the embedding task when transformers' saved key
         # differs from the bridge mapping (NemotronH's backbone.embedding vs ...embeddings).
-        use_config_only_export = (
-            hasattr(AutoBridge, "from_hf_config")
-            and isinstance(provider, _HYBRID_PROVIDER_TYPES)
-            and not is_vlm
-        )
-        if use_config_only_export:
+        if isinstance(provider, HybridModelProvider) and not is_vlm:
             pruned_bridge = AutoBridge.from_hf_config(hf_cfg)
             # save_hf_pretrained reads trust_remote_code off the bridge to fetch source artifacts;
             # from_hf_config can't infer it since AutoConfig consumes the kwarg.
@@ -726,12 +711,6 @@ def main(args: argparse.Namespace):
                 model, args.output_hf_path, source_path=args.hf_model_name_or_path
             )
         else:
-            if isinstance(provider, _HYBRID_PROVIDER_TYPES) and not is_vlm:
-                warn_rank_0(
-                    "Megatron-Bridge lacks config-only HF export; falling back to the dummy-model "
-                    "path, which cannot round-trip a pruned native NemotronH config. Use "
-                    "transformers<5 or a newer Megatron-Bridge if the save fails."
-                )
             dummy_model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
             dummy_model_cls.from_config(
                 hf_cfg, trust_remote_code=args.trust_remote_code

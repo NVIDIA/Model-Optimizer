@@ -252,6 +252,68 @@ def is_fsdp2_model(model) -> bool:
     return any(isinstance(m, FSDPModule) for m in model.modules())
 
 
+def _off_dtype_params(model) -> set[torch.nn.Parameter]:
+    """Params whose dtype differs from the model's dominant (by element count) param dtype.
+
+    FSDP2 needs one dtype per shard group, but HF models routinely keep a few params in fp32 for
+    stability (e.g. MoE router gates). Pass these to ``fully_shard(ignored_params=...)``.
+
+    TODO: Drop this and shard the off-dtype params once a stable PyTorch release includes FSDP2
+    mixed-precision parameter dtype support (already on nightly).
+    """
+    numel_by_dtype: dict[torch.dtype, int] = {}
+    for param in model.parameters():
+        numel_by_dtype[param.dtype] = numel_by_dtype.get(param.dtype, 0) + param.numel()
+    if len(numel_by_dtype) <= 1:
+        return set()
+
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
+    dominant = max(numel_by_dtype, key=lambda d: numel_by_dtype[d])
+    off_dtype = {n: p for n, p in model.named_parameters() if p.dtype != dominant}
+    off_numel = sum(numel_by_dtype[d] for d in numel_by_dtype if d != dominant)
+    names = sorted(off_dtype)
+    warn_rank_0(
+        f"Model has mixed parameter dtypes {set(numel_by_dtype)}; FSDP2 needs one dtype per shard "
+        f"group, so {len(names)} non-{dominant} parameter(s) "
+        f"({100 * off_numel / sum(numel_by_dtype.values()):.2f}% of elements) will stay replicated "
+        f"rather than sharded: {names[:3]}{' ...' if len(names) > 3 else ''}"
+    )
+    return set(off_dtype.values())
+
+
+def _move_to_fsdp_device(model, params: set[torch.nn.Parameter]) -> None:
+    """Move ``params`` onto the device FSDP2 computes on for ``model``.
+
+    ``fully_shard`` only moves the params it manages, so ignored ones would be stranded on
+    whatever device the caller built the model on. Meta params are left alone for deferred init.
+
+    The device comes from a sharded param's mesh rather than its local shard: under
+    ``cpu_offload`` the shard rests on CPU while compute still happens on the accelerator.
+    """
+    # Lazy import: logging imports this module at top level (circular).
+    from modelopt.torch.utils.logging import warn_rank_0
+
+    mesh = next((p.device_mesh for p in model.parameters() if isinstance(p, DTensor)), None)
+    if mesh is None:
+        warn_rank_0(
+            f"FSDP2 sharded no parameter of {type(model).__name__}, so the compute device for "
+            f"{len(params)} unsharded off-dtype parameter(s) cannot be determined; leaving them "
+            "where they are. Move them to the compute device or the forward will fail."
+        )
+        return
+
+    device = (
+        torch.device("cpu")
+        if mesh.device_type == "cpu"
+        else torch.device(mesh.device_type, getattr(torch, mesh.device_type).current_device())
+    )
+    for param in params:
+        if not param.is_meta and param.device != device:
+            param.data = param.data.to(device)
+
+
 def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False):
     """Auto-detect a HF causal-LM's decoder layers and FSDP2 ``fully_shard`` each one.
 
@@ -259,6 +321,11 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
     sharded instead of replicated per rank; pass ``shard_root=False`` to leave the root replicated
     (only decoder layers sharded). Returns the detected decoder layers so callers can reuse the
     detection result.
+
+    Parameters whose dtype differs from the model's dominant one are excluded from the wrap (see
+    :func:`_off_dtype_params`), since FSDP2 rejects a shard group that mixes dtypes. They stay
+    replicated and are moved onto the shards' device, which ``fully_shard`` does not do for the
+    params it ignores.
     """
     # Lazy import: layerwise_calib imports this module at top level (circular).
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
@@ -274,6 +341,9 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fsdp_kwargs["mp_policy"] = mp_policy
     if cpu_offload:
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+    ignored_params = _off_dtype_params(model)
+    if ignored_params:
+        fsdp_kwargs["ignored_params"] = ignored_params
 
     # Snapshot/restore config.architectures: some HF builders mutate it during fully_shard.
     config = getattr(model, "config", None)
@@ -282,6 +352,8 @@ def fsdp2_wrap(model, shard_root=True, mp_policy=None, cpu_offload: bool = False
         fully_shard(layer, **fsdp_kwargs)
     if shard_root:
         fully_shard(model, **fsdp_kwargs)
+    if ignored_params:
+        _move_to_fsdp_device(model, ignored_params)
     if config is not None and architectures:
         config.architectures = architectures
 

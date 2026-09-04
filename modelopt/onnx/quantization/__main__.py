@@ -381,6 +381,8 @@ def get_parser() -> argparse.ArgumentParser:
         choices=["quick", "default", "extensive"],
         help=(
             "If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes. "
+            "Candidates are benchmarked in the requested runtime precision, and calibrated Q/DQ is retained only "
+            "when it meets the 1.02x performance threshold; otherwise the output has no Q/DQ. "
             "Available modes (presets 'schemes_per_region', 'warmup_runs', and 'timing_runs' values): "
             "  - 'quick': fewer schemes and benchmark runs for quick exploration; "
             "  - 'default': balanced, recommended for most cases; "

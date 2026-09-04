@@ -368,7 +368,7 @@ can be converted into searchable units:
     # number of moe experts, moe ffn hidden size, moe shared expert intermediate size,
     # and depth of the model.
     megatron.core.models.gpt.GPTModel
-    megatron.core.models.mamba.MambaModel
+    megatron.core.models.hybrid.HybridModel
 
 Generating a search space
 ^^^^^^^^^^^^^^^^^^^^^^^^^

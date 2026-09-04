@@ -562,6 +562,11 @@ class _QuantFusedMoEBase(QuantModule):
         )
         self.parallel_state = create_parallel_state()
 
+    def iter_weights_for_calibration(self):
+        """Yield the fused MoE weights with their corresponding quantizers."""
+        yield self.w13_weight, self.w13_weight_quantizer
+        yield self.w2_weight, self.w2_weight_quantizer
+
     def invoke_fused_moe_quantized(
         self,
         A: torch.Tensor,  # noqa: N803

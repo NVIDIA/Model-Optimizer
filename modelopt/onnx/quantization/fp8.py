@@ -28,23 +28,23 @@ from onnxruntime.quantization import CalibrationMethod
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 import modelopt.onnx.utils as onnx_utils
-from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.graph_utils import (
-    convert_fp16_io,
     expand_node_names_from_patterns,
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
     get_concat_eliminated_tensors,
     get_tensor_producer_nodes,
-    insert_fp8_mha_casts,
-    remove_output_initializers,
     remove_partial_input_qdq,
 )
 from modelopt.onnx.quantization.int8 import _find_nodes_to_quantize
 from modelopt.onnx.quantization.ort_patching import _quantize_static as quantize_static
 from modelopt.onnx.quantization.ort_utils import configure_ort
+from modelopt.onnx.quantization.precision_utils import (
+    _convert_to_runtime_precision,
+    _upgrade_opset_21,
+)
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes
 
 
@@ -128,36 +128,8 @@ def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
 
 def upgrade_opset_21(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Modifies the ONNX graph such that it follows the opset 21 requirements.
-
-    This is necessary for FP8+FP16 quantization since FP8 QuantizeLinear/DequantizeLinear ops do not support FP16
-    scaling factors until opset 21.
-    """
-    logger.info("Upgrading model to opset 21")
-    graph = gs.import_onnx(onnx_model)
-
-    for node in graph.nodes:
-        # QuantizeLinear/DequantizeLinear op with FP16 scales are only supported with empty domain
-        # and opset_import version=21.
-        if node.op in {"QuantizeLinear", "DequantizeLinear"}:
-            node.domain = ""
-
-        # ReduceMean op no longer has "axes" attribute in opset 21. Instead, it should be the second input tensor.
-        if node.op == "ReduceMean" and "axes" in node.attrs:
-            axes = gs.Constant(
-                name=node.name + "_axes", values=np.array(node.attrs["axes"], dtype=np.int64)
-            )
-            del node.attrs["axes"]
-            node.inputs.append(axes)
-
-    onnx_model = gs.export_onnx(graph)
-
-    # Set opset_import version to 21.
-    for opset_import in onnx_model.opset_import:
-        if opset_import.domain == "":
-            opset_import.version = 21
-
-    return onnx_model
+    """Modify an FP8 graph to satisfy opset 21 requirements."""
+    return _upgrade_opset_21(onnx_model)
 
 
 def quantize(
@@ -326,37 +298,17 @@ def quantize(
         remove_partial_input_qdq(graph, no_quantize_inputs)
         onnx_model = gs.export_onnx(graph)
 
-    if high_precision_dtype in ["fp16", "bf16"]:
-        # We need to convert float to float16/bfloat16 so as to speed up layers like LayerNorm or GroupNorm.
-        logger.info(f"Converting float tensors to {high_precision_dtype}")
-        graph = gs.import_onnx(onnx_model)
-        remove_output_initializers(graph, onnx_model.graph.initializer)
-        convert_fp16_io(graph)
-        onnx_model = gs.export_onnx(graph)
-
-        # Convert to fp16/bf16 model.
-        onnx_model = convert_to_f16(
-            onnx_model,
-            keep_io_types=not direct_io_types,
-            op_block_list=op_types_to_exclude_fp16 or [],
-            tensor_block_dict=custom_ops_to_cast_fp32 or {},
-            low_precision_type=high_precision_dtype,
-            trt_plugins=trt_extra_plugin_lib_paths,
-            opset=opset,
-        )
-
-        current_opsets = {opset.domain: opset.version for opset in onnx_model.opset_import}
-        opset_of_default_onnx_domain = current_opsets.get("", 0)
-        if opset_of_default_onnx_domain < 19:
-            # We need to convert the ONNX model to opset 19+ since FP8 QuantizeLinear/DequantizeLinear ops do not
-            # support FP16 scaling factors until opset 19. So, converting here to opset-21 (19+).
-            onnx_model = upgrade_opset_21(onnx_model)
-
-        if mha_accumulation_dtype == "fp32":
-            # Insert Cast nodes in MHA's BMM1 and BMM2's input and output tensors because
-            # The compiler only has FP32 accumulation kernels for FP8 MHAs.
-            logger.info("Inserting Cast nodes to enable FP8+FP16 MHA")
-            onnx_model = insert_fp8_mha_casts(onnx_model)
+    onnx_model = _convert_to_runtime_precision(
+        onnx_model,
+        quantize_mode="fp8",
+        high_precision_dtype=high_precision_dtype,
+        direct_io_types=direct_io_types,
+        op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+        custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+        trt_extra_plugin_lib_paths=trt_extra_plugin_lib_paths,
+        opset=opset,
+        mha_accumulation_dtype=mha_accumulation_dtype,
+    )
 
     if nodes_to_quantize:
         onnx_model = int8_to_fp8(onnx_model)

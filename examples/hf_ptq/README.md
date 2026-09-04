@@ -97,7 +97,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 
 ### Hugging Face Supported Models
 
-| Model | fp8 | int8_sq | int4_awq | w4a8_awq<sup>1</sup> | nvfp4<sup>5</sup> |
+| Model | fp8 | int8_smoothquant | int4_awq | w4a8_awq_beta<sup>1</sup> | nvfp4<sup>5</sup> |
 | :---: | :---: | :---: | :---: | :---: | :---: |
 | LLAMA 3.x | ✅ | ❌ | ✅ | ✅<sup>3</sup> | ✅ |
 | LLAMA 4 <sup>6</sup> | ✅ | ❌ | ❌ | ❌ | ✅ |
@@ -111,6 +111,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3, 3.5 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| Kimi K3<sup>15</sup> | - | - | - | - | ✅ |
 | GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | MiniMax M2.1 | - | - | - | - | ✅ |
@@ -120,12 +121,13 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Llava (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | - |
 | Qwen2, 2.5-VL (VLM)<sup>11</sup> | ✅ | ✅<sup>12</sup> | ✅ | ✅ | ✅ |
+| Qwen3-VL, Qwen3.5 (VLM)<sup>11,14</sup> | ✅ | - | - | - | - |
 | Gemma 3 (VLM)<sup>11</sup> | ✅ | - | - | - | - |
 | Nemotron VL (VLM)<sup>11,13</sup> | ✅ | - | - | - | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
 
-> *<sup>1.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.* \
+> *<sup>1.</sup>The w4a8_awq_beta is an experimental quantization scheme that may result in a higher accuracy penalty.* \
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \
 > *<sup>3.</sup>W4A8_AWQ is only available on some models but not all* \
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
@@ -135,18 +137,21 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.* \
 > *<sup>9.</sup>Running Whisper model with transformers>=5.0 requires [torchcodec](https://github.com/meta-pytorch/torchcodec?tab=readme-ov-file#installing-cuda-enabled-torchcodec) and other system packages (e.g. ffmpeg).* \
 > *<sup>10.</sup>GPT-OSS ships with native MXFP4 weights; NVFP4 export is produced via the closed-form `--cast_mxfp4_to_nvfp4` cast (see [MXFP4 → NVFP4 cast](#mxfp4--nvfp4-cast-for-gpt-oss)).* \
-> *<sup>11.</sup>Vision-language model (VLM): only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
-> *<sup>12.</sup>For VLMs, `int8_sq` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
-> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).*
+> *<sup>11.</sup>Vision-language model (VLM): by default, only the language model is quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see [VLM quantization](#vlm-quantization)).* \
+> *<sup>12.</sup>For VLMs, `int8_smoothquant` only supports TensorRT-LLM checkpoint export and is not compatible with the TensorRT-LLM torch backend.* \
+> *<sup>13.</sup>Nemotron VL automatically calibrates with image-text pairs; see [VLM calibration with image-text pairs](#vlm-calibration-with-image-text-pairs-eg-nemotron-vl).* \
+> *<sup>14.</sup>Qwen3-VL and dense Qwen3.5 VLM checkpoints support opt-in FP8 vision encoder quantization through model-specific recipes. Vision Linear layers, including primary and deepstack merger Linears where present, are quantized; patch embedding and vision-attention BMMs remain in high precision. MoE variants are not validated by these recipes.* \
+> *<sup>15.</sup>Kimi K3 uses the calibration-free [streaming converter](../kimi/README.md) because its routed experts are released as packed MXFP4 tensors; it does not use the in-memory `hf_ptq.py` flow.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
 > *Vision-language models (VLMs) are listed in the support matrix above (rows marked `(VLM)`). PTQ for
-> VLMs is handled by the same `hf_ptq.py` entry point and shell script as LLMs — the language model is
-> quantized while the vision encoder is kept in high precision. Pass `--vlm` to the shell script (see
-> [VLM quantization](#vlm-quantization)). For detailed TensorRT-LLM torch backend multimodal support,
+> VLMs is handled by the same `hf_ptq.py` entry point and shell script as LLMs. By default, the
+> language model is quantized while the vision branch remains in high precision. Dense Qwen3-VL
+> and dense Qwen3.5 VLM checkpoints additionally support the opt-in FP8 recipes documented under
+> [VLM quantization](#vlm-quantization). For detailed TensorRT-LLM torch backend multimodal support,
 > please refer to [this doc](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend).*
 
 ## Framework Scripts
@@ -162,7 +167,7 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 scripts/huggingface_example.sh --model $HF_PATH --quant <QFORMAT> --tp [1|2|4|8]
 ```
 
-Supported `QFORMAT` values: `fp8`, `fp8_pc_pt`, `fp8_pb_wo`, `int8`, `int8_sq`, `int8_wo`, `int4_awq`, `w4a8_awq`, `nvfp4`, `nvfp4_awq`, `nvfp4_mse`, `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4_omlp_only`, `nvfp4_svdquant`, `nvfp4_local_hessian`, `w4a8_nvfp4_fp8`, `w4a8_mxfp4_fp8`, `mxfp8`.
+`QFORMAT` accepts any preset basename under [`modelopt_recipes/configs/ptq/presets/model/`](../../modelopt_recipes/configs/ptq/presets/model) — e.g. `fp8`, `fp8_per_channel_per_token`, `fp8_2d_blockwise_weight_only`, `int8`, `int8_smoothquant`, `int8_weight_only`, `int4_awq`, `w4a8_awq_beta`, `nvfp4`, `nvfp4_awq_lite`, `nvfp4_w4a4_weight_mse_fp8_sweep`, `nvfp4_mlp_only`, `nvfp4_experts_only`, `nvfp4_omlp_only`, `nvfp4_svdquant`, `nvfp4_w4a4_weight_local_hessian`, `w4a8_nvfp4_fp8`, `w4a8_mxfp4_fp8`, `mxfp8`.
 
 > *By default `trust_remote_code` is set to false. Please turn it on if model calibration and eval requires it using `--trust_remote_code`.*
 
@@ -256,6 +261,12 @@ The cast pins each NVFP4 block's `scale_2 = 2^(k_max - 8)` and `_amax = 6 * 2^k_
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
 
+#### Kimi K3
+
+[PTQ for Kimi K3](../kimi/README.md) shows how to cast the source MXFP4 routed
+experts to NVFP4 and quantize KDA/MLA attention weights to 128x128 block FP8
+without loading the full model or running calibration.
+
 #### VLM quantization
 
 Vision-language models are quantized through the same script. Add `--vlm` so the script runs the
@@ -265,10 +276,48 @@ TensorRT-LLM multimodal quickstart as the deploy smoke test instead of the text-
 scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> --quant fp8 --vlm
 ```
 
-Supported `--quant` values for VLMs are `fp8`, `nvfp4`, `int8_sq`, `int4_awq`, and `w4a8_awq` (see
-the `(VLM)` rows in the [Support Matrix](#hugging-face-supported-models)).
+Supported `--quant` values for VLMs are `fp8`, `nvfp4`, `int8_smoothquant`, `int4_awq`, and
+`w4a8_awq_beta` (see the `(VLM)` rows in the [Support Matrix](#hugging-face-supported-models)).
 
-> *This consolidates the former `examples/vlm_ptq` example, which now forwards here.*
+By default, `hf_ptq.py` applies `--qformat` only to the language model. Model-specific recipes
+add FP8 quantization of the vision branch for validated Qwen3-VL and dense Qwen3.5 checkpoints.
+Use the recipe directory matching the checkpoint's `model_type`: `qwen3_vl` or `qwen3_5`.
+
+```bash
+# Vision encoder only: FP8 vision Linears and merger, BF16 LLM and KV cache.
+python hf_ptq.py \
+  --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
+  --recipe huggingface/qwen3_vl/ptq/fp8_vision-kv_none \
+  --calib_with_images \
+  --calib_size 512 \
+  --skip_generate \
+  --export_path <quantized-checkpoint>
+
+# Joint vision encoder + language model FP8 with FP8 KV-cache cast.
+python hf_ptq.py \
+  --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
+  --recipe huggingface/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast \
+  --calib_with_images \
+  --calib_size 512 \
+  --skip_generate \
+  --export_path <quantized-checkpoint>
+```
+
+`fp8_vision-kv_none` starts from all quantizers disabled and enables FP8 only for `nn.Linear`
+weights and inputs under the `visual` branch, including the primary merger and any deepstack
+mergers. The language model, KV cache, patch embedding, and vision-attention QK/softmax/AV
+operations stay in high precision.
+`fp8_vision_lm-kv_fp8_cast` applies the standard FP8 model recipe to both model branches and enables FP8
+KV-cache cast, while keeping patch embedding and vision-attention operands in high precision.
+Other precision combinations can be expressed by composing the same recipe units in a custom
+recipe; no model-specific Python path is required.
+
+The exported checkpoint requires an inference runtime that supports quantized vision encoder
+Linears. Runtime-specific vision-attention quantization is separate from this ModelOpt checkpoint.
+Use the direct `hf_ptq.py` commands above for these recipes; the generic multimodal quickstart is
+not a serving validation for a vision-quantized checkpoint. Both examples pass `--skip_generate`
+because the script's text-only preview does not forward the image tensors used during calibration.
+For a Qwen3.5 checkpoint, replace `qwen3_vl` with `qwen3_5` in the recipe path.
 
 #### VLM calibration with image-text pairs (e.g., Nemotron VL)
 
@@ -289,6 +338,10 @@ The same flag is exposed by the shell script:
 ```bash
 scripts/huggingface_example.sh --model <model> --quant nvfp4 --vlm --calib_with_images --trust_remote_code
 ```
+
+With `--calib_with_images`, calibration batches always pass through the complete VLM so image
+features reach the component selected by the preset or recipe. This also applies to the default
+language-model-only path: its quantizers are exercised by the complete multimodal forward.
 
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.
 This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
@@ -358,17 +411,6 @@ search-disabled layers, and cost-excluded layers — see
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
 `modelopt_recipes/huggingface/<model>/auto_quantize/`.
-
-> *Migration: prefer an AutoQuantize `--recipe`. The `--auto_quantize_bits`, `--auto_quantize_method`,
-> `--auto_quantize_score_size`, `--auto_quantize_cost_model`, and `--auto_quantize_active_moe_expert_ratio`
-> CLI flags are **deprecated but still work** — they are converted into an `AutoQuantizeConfig` on the fly
-> (with a `DeprecationWarning`) and will be removed in a future release. They map to recipe fields:
-> `--auto_quantize_bits` → `constraints.effective_bits`, `--auto_quantize_method` → `auto_quantize_method`,
-> `--auto_quantize_score_size` → `score_size`, `--auto_quantize_cost_model` → `constraints.cost_model`,
-> `--auto_quantize_active_moe_expert_ratio` → `constraints.cost.active_moe_expert_ratio`, and the
-> `--qformat fp8,nvfp4` candidate list → `candidate_formats`. When converted, the shared base
-> `disabled_layers` and `cost_excluded_layers` patterns are appended automatically. `--auto_quantize_checkpoint`
-> is unchanged. Start from a shipped recipe under `modelopt_recipes/general/auto_quantize/`.*
 
 [Script](./scripts/huggingface_example.sh)
 

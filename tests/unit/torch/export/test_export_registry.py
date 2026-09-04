@@ -303,10 +303,10 @@ def test_process_quantized_modules_exports_via_registry():
         assert weight.dtype == torch.float8_e4m3fn
 
 
-def test_export_context_caches_are_per_instance():
-    model = nn.Linear(2, 2)
-    ctx_a = ExportContext(model=model, dtype=torch.float16)
-    ctx_b = ExportContext(model=model, dtype=torch.float16)
-    ctx_a.tied_cache[123] = model
-    assert ctx_b.tied_cache == {}
-    assert ctx_b.moe_tied_cache == {}
+def test_export_context_carries_no_resolver():
+    # Tied-weight dedup is driven by the driver's resolver (fed to sync_tied_input_amax /
+    # postprocess_state_dict), not by handlers, so ExportContext no longer builds or holds
+    # a resolver. Building one per context would be dead work (handlers never read it) and,
+    # for large models, an avoidable O(#modules x #patterns x #params) alias-map pass.
+    ctx = ExportContext(model=nn.Linear(2, 2), dtype=torch.float16)
+    assert not hasattr(ctx, "resolver")

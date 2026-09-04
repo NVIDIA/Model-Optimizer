@@ -30,17 +30,21 @@ try:
 except ImportError:
     pytest.skip("accelerate not available", allow_module_level=True)
 
+from _test_utils.torch.quantization.tied_modules import (
+    make_tied_linear_pair,
+    wrap_in_parent_with_tied_keys,
+)
+
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
+from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.quant_utils import _postprocess_single_tensor
-from modelopt.torch.export.registry import ExportContext
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.export.unified_export_hf_streaming import (
     _parse_shard_size,
     _StreamingShardWriter,
 )
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
-from modelopt.torch.quantization.utils import core_utils
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 
 # ---------------------------------------------------------------------------
@@ -56,6 +60,37 @@ def _make_offloaded_linear(dim: int = 16):
     add_hook_to_module(linear, hook)
     set_module_tensor_to_device(linear, "weight", "meta")
     return linear, weights_map
+
+
+def _offload_module(module):
+    """Offload ``module`` like accelerate does: real weight to ``weights_map``, ``.weight`` to a meta Parameter."""
+    weights_map = {"weight": module.weight.data.clone().cpu()}
+    hook = AlignDevicesHook(execution_device="cpu", offload=True, weights_map=weights_map)
+    add_hook_to_module(module, hook)
+    set_module_tensor_to_device(module, "weight", "meta")
+
+
+# ---------------------------------------------------------------------------
+# tied-weight alias map under offload
+# ---------------------------------------------------------------------------
+
+
+def test_tied_weight_map_from_hf_map_survives_offload():
+    """TiedWeightMap reads HF's name-based all_tied_weights_keys, so offload does not change it."""
+    enc, dec = make_tied_linear_pair(in_features=16, out_features=16)
+    model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True)
+
+    assert not has_accelerate_offload(model)
+    assert TiedWeightMap(model).alias_to_canonical == {"encoder.weight": "decoder.weight"}
+
+    _offload_module(model.encoder)
+    _offload_module(model.decoder)
+    assert has_accelerate_offload(model)
+
+    # The map is a plain name dict on the model; offload metas the weights but not the attribute.
+    tied_map = TiedWeightMap(model)
+    assert tied_map.alias_to_canonical == {"encoder.weight": "decoder.weight"}
+    assert tied_map.group_key("encoder.weight") == "decoder.weight"
 
 
 # ---------------------------------------------------------------------------
@@ -301,37 +336,13 @@ def test_postprocess_scale_squeezed():
 # ---------------------------------------------------------------------------
 
 
-def test_export_context_dedup_follows_weight_residency():
-    """Pointer-keyed dedup is enabled only while weights stay resident.
-
-    An offloaded module's weights are freed when its materialization window closes, so a
-    recycled address would alias an unrelated module. Tied-weight export is therefore
-    supported on the resident path only, matching what FSDP2 already does.
-    """
-    resident_ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert resident_ctx.tied_cache == {}
-    assert resident_ctx.moe_tied_cache == {}
-
-    offloaded, _ = _make_offloaded_linear()
-    offloaded_ctx = ExportContext(model=offloaded, dtype=torch.float16)
-    assert offloaded_ctx.tied_cache is None
-    assert offloaded_ctx.moe_tied_cache is None
-
-
-def test_export_context_dedup_disabled_for_fsdp2(monkeypatch):
-    """FSDP2 shards recycle addresses, so its dedup opt-out must survive the offload rework."""
-    monkeypatch.setattr(core_utils, "is_fsdp2_model", lambda _: True)
-
-    ctx = ExportContext(model=nn.Linear(8, 8), dtype=torch.float16)
-    assert ctx.tied_cache is None
-    assert ctx.moe_tied_cache is None
-
-
 def test_tied_weights_exported_independently_without_cache():
-    """With dedup off, tied modules each pack their own weight instead of aliasing.
+    """Tied dense modules each pack their own weight instead of aliasing.
 
-    Guards the offload path: an alias would make two shard entries share storage, which
-    the writer must then drop or copy. Independent tensors keep both keys intact.
+    Dense ties are no longer deduped at pack time (the duplicate is dropped by name in
+    postprocess_state_dict), so both sides pack independently to byte-identical tensors.
+    This checks the packing behavior only; it does not construct an offloaded model or
+    drive the streaming export path.
     """
     shared = nn.Parameter(torch.randn(16, 16))
     first, second = nn.Linear(16, 16, bias=False), nn.Linear(16, 16, bias=False)
@@ -339,7 +350,7 @@ def test_tied_weights_exported_independently_without_cache():
 
     for linear in (first, second):
         mtq.quantize(linear, mtq.FP8_DEFAULT_CFG, lambda m: m(torch.randn(1, 16)))
-        _export_quantized_weight(linear, torch.float16, _tied_cache=None)
+        _export_quantized_weight(linear, torch.float16)
 
     assert first.weight.data_ptr() != second.weight.data_ptr()
     assert torch.equal(first.weight, second.weight)

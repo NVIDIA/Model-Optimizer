@@ -42,7 +42,13 @@ from urllib.parse import urlparse
 import modelopt
 from modelopt.torch.utils.logging import TeeStream
 
-__all__ = ["MlflowRunLogger", "current_user", "default_experiment_name", "validate_tracking_uri"]
+__all__ = [
+    "MlflowRunLogger",
+    "command_text",
+    "current_user",
+    "default_experiment_name",
+    "validate_tracking_uri",
+]
 
 # MLflow experiment names are stored in a VARCHAR(256) column by the SQL-backed stores. The
 # per-component cap stops one pathological component from crowding out the others; the name
@@ -188,9 +194,14 @@ def _git_sha() -> str:
     return "unknown"
 
 
-def _command_text() -> str:
-    """The invocation, as a copy-pasteable line."""
-    lines = [shlex.join([sys.executable, *_redact_argv(sys.argv)])]
+def command_text(argv: list[str] | None = None) -> str:
+    """The invocation, as a copy-pasteable line, with credentials masked.
+
+    *argv* defaults to this process's own ``sys.argv``. Pass another process's argv when the
+    run is opened somewhere the user never typed a command -- a worker subprocess, whose own
+    ``sys.argv`` is an implementation detail rather than a reproducible invocation.
+    """
+    lines = [shlex.join([sys.executable, *_redact_argv(sys.argv if argv is None else argv)])]
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if world_size > 1:
         lines += [
@@ -343,6 +354,20 @@ class MlflowRunLogger:
         finally:
             self.finish(status, files=files, metrics=metrics)
 
+    def log_text(self, artifact_path: str, text: str) -> None:
+        """Upload *text* as an artifact while the run is open, best-effort.
+
+        For a value that is only settled midway through the run and is worth having even if
+        the run later crashes -- the quantization config a calibration is about to apply,
+        say. :meth:`start` and :meth:`finish` cover everything known at the two ends.
+        """
+        if not self.enabled or self._run is None:
+            return
+        try:
+            self._log_texts({artifact_path: text})
+        except Exception as e:
+            print(f"[mlflow] WARNING: could not upload {artifact_path}: {e}")
+
     def _abort_run(self) -> None:
         """End a run that failed before :meth:`start` returned, so it is not left RUNNING."""
         if self._run is None:
@@ -431,7 +456,7 @@ class MlflowRunLogger:
         # The version is a tag as well, for searching; the artifact travels with the run.
         self._log_texts(
             {
-                "command.txt": _command_text(),
+                "command.txt": command_text(),
                 "version.txt": f"{modelopt.__version__}\n",
                 **(texts or {}),
             }

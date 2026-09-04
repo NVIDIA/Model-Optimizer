@@ -155,14 +155,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import (
-    AliasChoices,
-    Field,
-    ValidationInfo,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -761,6 +754,23 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    export_dir: str | None = ModeloptField(
+        default=None,
+        title="Export each layer's quantized checkpoint as soon as it is calibrated.",
+        description=(
+            "If set, each decoder layer is written to a quantized HF checkpoint shard in "
+            "this directory the moment its calibration finishes, leaving a complete, "
+            "loadable checkpoint when the last layer lands. Removes the separate "
+            "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Combined with ``checkpoint_dir``, an interrupted run resumes without "
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
+            "weight-tied quantized modules, multimodal and MTP models raise "
+            "NotImplementedError. The model left in memory afterwards is not valid for "
+            "inference if the run resumed."
+        ),
+    )
+
     calib_mutates_weights: bool = ModeloptField(
         default=True,
         title="Whether layerwise calibration mutates layer weights.",
@@ -774,15 +784,7 @@ class LayerwiseConfig(ModeloptBaseConfig):
 
 
 def _coerce_layerwise_input(value):
-    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
-    if isinstance(value, bool):
-        warnings.warn(
-            "Passing the layerwise field as a bool is deprecated; use a dict, "
-            "e.g. `{'enable': True}`.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return {"enable": value}
+    """Normalize a raw ``layerwise`` value to a dict."""
     if value is None:
         return {}
     if isinstance(value, LayerwiseConfig):
@@ -822,61 +824,18 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     layerwise: LayerwiseConfig = Field(
         default_factory=LayerwiseConfig,
-        validation_alias=AliasChoices("layerwise", "use_sequential"),
         title="Layerwise calibration configuration.",
         description=(
             "Nested config controlling layer-by-layer calibration. Pass a dict, "
-            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
-            "accepted for backward compatibility but deprecated."
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_layerwise_checkpoint_dir(cls, data):
-        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
-
-        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
-        """
-        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
-            return data
-        warnings.warn(
-            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
-            "nest it under `layerwise.checkpoint_dir` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        data = dict(data)
-        flat_dir = data.pop("layerwise_checkpoint_dir")
-        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
-        # otherwise the alias value is silently dropped when AliasChoices picks the
-        # newly-written ``layerwise`` key over ``use_sequential``.
-        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
-        layerwise = _coerce_layerwise_input(raw_layerwise)
-        existing = layerwise.get("checkpoint_dir")
-        if existing is not None and existing != flat_dir:
-            raise ValueError(
-                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
-                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
-            )
-        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
-        return data
 
     @field_validator("layerwise", mode="before")
     @classmethod
     def _coerce_layerwise(cls, value):
-        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
-
-    @model_validator(mode="after")
-    def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
-        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
-            raise ValueError(
-                "layerwise.checkpoint_dir requires layerwise.enable=True. "
-                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
-            )
-        return self
 
     @model_validator(mode="after")
     def _validate_non_mutating_layerwise_supported(self):
@@ -963,7 +922,7 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP keeps a per-expert weight quantizer "
+            "one effective weight amax. TEGroupedLinear keeps a per-expert weight quantizer "
             "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
         ),
     )

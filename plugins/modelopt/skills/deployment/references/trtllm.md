@@ -51,7 +51,7 @@ directly together with a ModelOpt-quantized checkpoint.
 ### Workflow
 
 1. Quantize the checkpoint with ModelOpt PTQ (including AutoQuant / mixed precision) via
-   `examples/llm_ptq` (`hf_ptq.py` / `scripts/huggingface_example.sh`), which produces a
+   `examples/hf_ptq` (`hf_ptq.py` / `scripts/huggingface_example.sh`), which produces a
    unified HuggingFace checkpoint with `hf_quant_config.json`.
 2. Deploy that checkpoint with TensorRT-LLM's AutoDeploy backend (see the upstream
    `examples/auto_deploy` docs for the current API and `trtllm-serve` flags).
