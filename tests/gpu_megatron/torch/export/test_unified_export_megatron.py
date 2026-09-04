@@ -684,6 +684,25 @@ def _assert_per_expert_experts_complete(export_dir) -> None:
     assert not incomplete, f"experts missing projections: {sorted(incomplete.items())[:4]}"
 
 
+def test_verify_exported_keys_cannot_see_a_dropped_sibling_under_an_expanded_container(tmp_path):
+    """Documented limit: the check is prefix-level, so a sibling dropped under a container that
+    was already expanded is invisible here. _assert_per_expert_experts_complete covers that.
+    """
+    source, export = tmp_path / "src", tmp_path / "exp"
+    _write_index(
+        source, ["model.layers.0.mlp.experts.gate_up_proj", "model.layers.0.mlp.experts.down_proj"]
+    )
+    _write_index(
+        export,
+        [
+            "model.layers.0.mlp.experts.0.gate_proj.weight",
+            "model.layers.0.mlp.experts.0.up_proj.weight",
+        ],
+    )  # down_proj dropped
+
+    _make_exporter_for_key_check(num_layers=1)._verify_exported_keys(str(export), str(source))
+
+
 def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
     exporter = object.__new__(GPTModelExporter)
     exporter.dtype = torch.bfloat16
