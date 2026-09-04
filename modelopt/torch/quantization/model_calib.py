@@ -20,6 +20,7 @@ import math
 import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from functools import partial
 from typing import Any, TypeAlias
 
@@ -34,6 +35,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _hide_modules_from_traversal,
     _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
@@ -2084,6 +2086,20 @@ def layerwise_calibrate(
             "Layerwise calibration requires a model with identifiable transformer layers."
         )
 
+    decoder_owned_ids = {id(module) for layer in transformer_layers for module in layer.modules()}
+    has_enabled_outside_quantizer = any(
+        isinstance(module, TensorQuantizer)
+        and module.is_enabled
+        and id(module) not in decoder_owned_ids
+        for module in model.modules()
+    )
+
+    if export_dir is not None and has_enabled_outside_quantizer:
+        raise ValueError(
+            "Layerwise export does not support enabled quantizers outside transformer layers. "
+            "Calibrate without export_dir, then export the completed model separately."
+        )
+
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
@@ -2204,6 +2220,27 @@ def layerwise_calibrate(
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    if has_enabled_outside_quantizer:
+        if any(device == "disk" for device in getattr(model, "hf_device_map", {}).values()):
+            warn_rank_0(
+                "Layerwise calibration found enabled quantizers outside transformer layers. "
+                "The required full-model calibration pass may be slow because disk-offloaded "
+                "decoder weights can be streamed for every batch."
+            )
+
+        with _hide_modules_from_traversal(model, transformer_layers):
+            if qdq_from_prev:
+                calib_func(model, forward_loop, **calib_kwargs)
+            else:
+                with ExitStack() as stack:
+                    for layer in transformer_layers:
+                        stack.enter_context(
+                            set_quantizer_by_cfg_context(
+                                layer, [{"quantizer_name": "*", "enable": False}]
+                            )
+                        )
+                    calib_func(model, forward_loop, **calib_kwargs)
 
     if exporter is not None:
         exporter.finalize()
