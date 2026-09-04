@@ -164,6 +164,27 @@ search-space syntax and [configuration overrides](configuration_overrides.md)
 for temporary changes. Change campaign inputs before launch; do not patch
 resolved or generated artifacts inside an existing run root.
 
+In this guide, hidden width means the model's transformer hidden size.
+Heterogeneous FFN width is a separate axis that selects per-layer FFN
+intermediate sizes; changing one does not implicitly change the other.
+
 Keep the model revision, frozen evaluator profile, KD exposure, and serving
 workload fixed when comparing candidates. Changing any of them creates a
 different experiment.
+
+The campaign evaluates saved checkpoints automatically and records the results
+with each candidate. To check a checkpoint outside the campaign, follow
+[VLM checkpoint evaluation](vlm_checkpoint_evaluation.md). That guide owns
+environment and cache preflight, suite selection, exact commands, result files,
+and diagnosis.
+
+Use guided setup when you need help resolving the model, dataset, and site
+settings. The [setup wizard guide](setup_wizard.md) owns its invocation,
+profiles, inputs, and generated files. Select Qwen 3.5 0.8B and the
+Nemotron-VLM v2 image-text dataset to generate this route with site-specific
+settings. Hidden (residual/embedding) width, attention, GDN, and depth are
+available through guided customization. Among the tracked routes, attention
+and GDN reductions are enabled only by `vlm_campaign.yaml`.
+Inspect every customized plan with `--dry-run` before launch. See
+[configuration and overrides](configuration_overrides.md) for persistent and
+temporary changes.
