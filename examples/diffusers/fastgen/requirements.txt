@@ -3,10 +3,9 @@
 # The one thing that's NOT shipped with Model-Optimizer is nemo_automodel.
 
 diffusers==0.38.0
-# NeMo AutoModel supplies the parent recipe, FSDP2 wrapping, checkpointer, and the unmodified
-# upstream diffusion helpers used by the shared data/preprocessing code. These versions are the
-# public APIs tested by both DMD2 and PDD.
+# NeMo AutoModel supplies the parent recipe, FSDP2 wrapping, checkpointer, and upstream diffusion
+# data helpers. PDD's guarded setup compatibility seam is validated against release 0.5.0.
 nemo_automodel[diffusion]==0.5.0
 
-# Optional but recommended for training logs.
+# Optional but recommended for the smoke and training logs.
 wandb

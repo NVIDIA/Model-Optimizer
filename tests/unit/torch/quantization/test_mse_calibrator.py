@@ -686,6 +686,25 @@ class TestRegisterFP8SweepCalibrator:
 
         assert isinstance(cal, calib.MseCalibrator)
 
+    def test_dynamic_mxfp8_skipped_by_mse_calibration(self):
+        q = TensorQuantizer(
+            QuantizerAttributeConfig(
+                num_bits=(4, 3),
+                block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            ),
+            amax=torch.tensor(2.0),
+        )
+
+        cal = _make_weight_mse_calibrator(
+            q,
+            step_size=0.1,
+            start_multiplier=0.25,
+            stop_multiplier=4.0,
+            fp8_scale_sweep=False,
+        )
+
+        assert cal is None
+
     def test_max_calibrate_bootstraps_non_nvfp4_dead_weight_quantizer(self):
         """Non-NVFP4 weights skipped by the forward loop still get weight amax."""
 

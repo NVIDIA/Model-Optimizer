@@ -16,6 +16,7 @@
 """Quantization utilities."""
 
 import copy
+import itertools
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -25,10 +26,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
-from torch.distributed.tensor import Replicate
+from torch.distributed.tensor import DTensor, Replicate
 
 from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
+from modelopt.torch.utils.network import temporarily_remove_accelerate_hook
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -213,21 +215,25 @@ def reduce_sum(input, axis=None, keepdims=True):
 def representative_weight_quantizer(module: nn.Module, weight_name: str = "weight"):
     """Return the representative weight quantizer for ``weight_name`` on ``module``.
 
-    Handles two layouts:
+    Handles three layouts:
 
     - singular ``<name>_weight_quantizer`` — standard ``nn.Linear`` / ``_QuantLinear``.
+    - singular ``<name>_weight_quantizer`` that is a ``GroupedQuantizer`` — TEGroupedLinear
+      fused experts (one quantizer per expert); the first is representative.
     - plural ``<name>_weight_quantizers`` (``nn.ModuleList``) — fused-experts modules
       (``_QuantFusedExperts``) hold one ``TensorQuantizer`` per expert. Per-expert
       formats are identical, so the first element is representative.
 
     Returns ``None`` if no matching quantizer is found.
     """
-    from ..nn import SequentialQuantizer, TensorQuantizer
+    from ..nn import GroupedQuantizer, SequentialQuantizer, TensorQuantizer
 
     singular = quantizer_attr_names(weight_name).weight_quantizer
     q = getattr(module, singular, None)
     if isinstance(q, (TensorQuantizer, SequentialQuantizer)):
         return q
+    if isinstance(q, GroupedQuantizer) and len(q) > 0:
+        return q[0]
 
     plural = getattr(module, singular + "s", None)
     if isinstance(plural, nn.ModuleList) and len(plural) > 0:
@@ -426,11 +432,14 @@ def _get_fsdp2_mesh(module: nn.Module):
         return None
 
     fsdp_state = _get_module_state(module)
-    if (
-        fsdp_state._fsdp_param_group
-        and fsdp_state._fsdp_param_group.post_forward_mesh_info is not None
-    ):
-        return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
+    pg = fsdp_state._fsdp_param_group
+    if pg is None:
+        return None
+    # A root FSDP module has reshard_after_forward=False by default, so its
+    # post_forward_mesh_info is None; fall back to the sharding mesh (mesh_info),
+    # which is the same FSDP shard mesh (post_forward_mesh_info is only the reshard target).
+    mesh_info = pg.post_forward_mesh_info or pg.mesh_info
+    return mesh_info.mesh if mesh_info is not None else None
 
 
 def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
@@ -486,7 +495,24 @@ def _set_parameter(module: nn.Module, name: str, value: nn.Parameter):
 
 
 @contextmanager
-def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.Module):
+def _fsdp2_unshard_context(fsdp_module: FSDPModule):
+    """Unshard an FSDP2 module without replacing individual DTensor parameters."""
+    fsdp_param_group = fully_shard.state(fsdp_module)._fsdp_param_group
+    was_sharded = fsdp_param_group.is_sharded
+    if was_sharded:
+        fsdp_module.unshard()
+    try:
+        with _disable_fsdp_unshard_reshard(fsdp_module):
+            yield
+    finally:
+        if was_sharded:
+            fsdp_module.reshard()
+
+
+@contextmanager
+def fsdp2_weight_access_and_writeback_context(
+    module: nn.Module, root_model: nn.Module, writeback: bool = True
+):
     """Context manager for FSDP2 weight access and writeback.
 
     Gathers sharded DTensor parameters across FSDP/HSDP shards so they can be
@@ -496,11 +522,14 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
     If TP is implemented with DTensor, the weight will be a local tensor of the
     TP DTensor under this context.
     """
-    assert isinstance(root_model, torch.distributed.fsdp.FSDPModule), "We only support FSDP2"
-
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
     fsdp_module = _get_enclosing_fsdp_module(module, root_model)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
+    if not writeback:
+        with _fsdp2_unshard_context(fsdp_module):
+            yield
+        return
+
     fsdp_device_mesh = _get_fsdp2_mesh(fsdp_module)
     fsdp_dim = fsdp_device_mesh.ndim
 
@@ -515,32 +544,54 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
             assert (
                 fsdp_device_mesh.mesh_dim_names == original_device_mesh.mesh_dim_names[:fsdp_dim]
             ), "FSDP2 mesh should be a slice of DTensor's device mesh."
-        collected = param.redistribute(
+        unsharded_dtensor = param.redistribute(
             placements=[Replicate()] * fsdp_dim + list(original_placements[fsdp_dim:]),
             device_mesh=original_device_mesh,
         )
-        originals[name] = (param, collected, original_placements, original_device_mesh)
-        _set_parameter(module, name, nn.Parameter(collected.to_local()))
-
-    yield
-
-    # Write back and restore original DTensor parameters.
-    for name, (
-        original_param,
-        collected,
-        original_placements,
-        original_device_mesh,
-    ) in originals.items():
-        original_param.to_local().data.copy_(
-            collected.redistribute(
-                placements=original_placements, device_mesh=original_device_mesh
-            ).to_local()
+        unsharded_tensor = unsharded_dtensor.to_local()
+        # cpu_offload: gathered shard is on CPU; mirror to GPU for forward.
+        needs_gpu_copy = unsharded_tensor.device.type == "cpu" and torch.cuda.is_available()
+        gpu_tensor = (
+            unsharded_tensor.to(torch.cuda.current_device()) if needs_gpu_copy else unsharded_tensor
         )
-        _set_parameter(module, name, original_param)
+        cpu_writeback_tensor = unsharded_tensor if needs_gpu_copy else None
+        originals[name] = (
+            param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        )
+        _set_parameter(module, name, nn.Parameter(gpu_tensor))
+
+    try:
+        yield
+    finally:
+        # Write back and restore original DTensor parameters. Runs on both success
+        # and exception so the module never lingers with the temporary local params.
+        for name, (
+            original_param,
+            unsharded_dtensor,
+            original_placements,
+            original_device_mesh,
+            cpu_writeback_tensor,
+            gpu_tensor,
+        ) in originals.items():
+            if cpu_writeback_tensor is not None:
+                cpu_writeback_tensor.data.copy_(gpu_tensor.data.to(cpu_writeback_tensor.device))
+            original_param.to_local().data.copy_(
+                unsharded_dtensor.redistribute(
+                    placements=original_placements, device_mesh=original_device_mesh
+                ).to_local()
+            )
+            _set_parameter(module, name, original_param)
 
 
 @contextmanager
-def enable_weight_access_and_writeback(module, root_model, name_to_module: dict | None = None):
+def enable_weight_access_and_writeback(
+    module, root_model, name_to_module: dict | None = None, writeback: bool = True
+):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
@@ -554,16 +605,18 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
             total cost when called in a loop. This causes significant CPU overhead on large
             models, particularly Sparse MoE architectures where each expert is typically
             implemented as its own module.
+        writeback: Whether modified weights must be written back to the owning sharded/offload
+            representation when exiting the context.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model)
+        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback)
     elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
         from ..plugins.accelerate import weight_access_and_writeback_context
 
-        context = weight_access_and_writeback_context(module)
+        context = weight_access_and_writeback_context(module, writeback)
     else:
         context = nullcontext()
 
@@ -571,19 +624,63 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
         yield
 
 
+def requires_weight_materialization(module, root_model, name_to_module: dict | None = None) -> bool:
+    """Whether ``module``'s own weights are currently unreadable and need a window.
+
+    Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
+    deciding *whether* to open a window agree with what opening one would do. Two things
+    must hold: the module owns tensors that are not directly readable right now
+    (offloaded to meta, or a sharded ``DTensor``), and a context exists that can
+    materialize them. Modules already materialized are excluded -- re-entering a window
+    would re-run export handlers over already-packed weights.
+    """
+    if not any(
+        t is not None and (t.is_meta or isinstance(t, DTensor))
+        for t in itertools.chain(module._parameters.values(), module._buffers.values())
+    ):
+        return False
+    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
+        return True
+    if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
+        return True
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None:
+        return False
+    from ..plugins.accelerate import _get_offload_hook
+
+    return _get_offload_hook(hook) is not None
+
+
+def has_accelerate_offload(module: nn.Module) -> bool:
+    """Return True if any module in ``module`` has a CPU- or disk-offload accelerate hook."""
+    try:
+        from ..plugins.accelerate import _get_offload_hook
+    except ImportError:
+        return False
+
+    return any(
+        _get_offload_hook(getattr(m, "_hf_hook", None)) is not None for m in module.modules()
+    )
+
+
 @contextmanager
-def persistent_materialization(layer):
+def persistent_materialization(layer, writeback: bool = True):
     """Keep all layer weights materialized on GPU for the duration.
 
     Suppresses per-forward weight transfers so that N calibration batches
     pay the cost of one load/unload instead of N.
 
-    - **FSDP2**: patches ``FSDPParamGroup.unshard/reshard`` to no-ops, then
-      gathers weights once via ``enable_weight_access_and_writeback``.
-    - **Accelerate**: materializes weights and sets ``hook.offload = False``
-      so per-forward hooks skip materialization/offloading.
+    - **FSDP2**: gathers weights once via ``enable_weight_access_and_writeback``,
+      then patches ``FSDPParamGroup.unshard/reshard`` to no-ops.
+    - **Accelerate**: materializes weights, sets ``hook.offload = False``,
+      and bypasses the layer's top-level accelerate hook while the weights are
+      materialized.
     """
-    with _disable_fsdp_unshard_reshard(layer), enable_weight_access_and_writeback(layer, layer):
+    with (
+        enable_weight_access_and_writeback(layer, layer, writeback=writeback),
+        _disable_fsdp_unshard_reshard(layer),
+        temporarily_remove_accelerate_hook(layer),
+    ):
         yield
 
 
@@ -616,8 +713,9 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
     1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
        and writes it back, so every expert shares the same input amax.
     2. If ``sync_weight_amax`` is True, also syncs ``weight_quantizer`` amax across
-       experts (max across experts). This matches TEGroupedMLP behavior where all
-       experts share a single weight quantizer.
+       experts (max across experts), so the layer ends up with one effective weight
+       scale. Off by default: experts otherwise keep an independent amax each, which
+       is also what ``TEGroupedLinear``'s per-expert ``GroupedQuantizer`` does.
     3. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
@@ -647,7 +745,10 @@ def sync_moe_expert_amax(experts, sync_weight_amax=False):
             if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
                 weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
                 if weight is not None:
-                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
+                    # max_calibrate invokes the forward_loop synchronously, so capturing
+                    # ``weight`` by closure (rather than a default arg) is safe and lets mypy
+                    # infer the lambda type.
+                    max_calibrate(module, lambda m: m(weight), distributed_sync=False)
 
 
 @contextmanager
@@ -714,22 +815,30 @@ def _disable_fsdp_unshard_reshard(layer):
         yield
 
 
-def get_prefixed_param_names(parent_model, target_module):
+def build_param_index(model):
+    """Map ``id(param)`` to its ``(position, name)`` in ``model.named_parameters()``.
+
+    Lets callers resolve many modules against one walk of the parameters instead of one walk
+    each; the position keeps "first in ``named_parameters()`` order" resolvable.
+    """
+    return {id(param): (i, name) for i, (name, param) in enumerate(model.named_parameters())}
+
+
+def get_prefixed_param_names(parent_model, target_module, param_index=None):
     """Get parameter names for a target module prefixed with the parent model name.
 
     This function is used to get full parameter name from FSDPParam module_info which stores the
     unprefixed parameter name.
 
+    Pass ``param_index`` (see :func:`build_param_index`) when resolving many target modules
+    against the same parent, so the parent's parameters are walked once rather than per module.
     """
+    if param_index is None:
+        param_index = build_param_index(parent_model)
     target_ids = {id(p) for p in target_module.parameters()}
-    return next(
-        (
-            name.rsplit(".", 1)[0]
-            for name, param in parent_model.named_parameters()
-            if id(param) in target_ids
-        ),
-        None,  # default value if no match
-    )
+    # Lowest position == first in named_parameters() order, matching a linear scan's result.
+    match = min((param_index[pid] for pid in target_ids if pid in param_index), default=None)
+    return match[1].rsplit(".", 1)[0] if match is not None else None
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
@@ -742,10 +851,14 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
     Returns:
         dict: Full parameter name → FSDP parameter.
     """
+    # Built once per call, not once per FSDPParam: export resolves every quantized module, so the
+    # per-param walk made this quadratic in (params x modules) and stalled MoE exports for hours.
+    # It cannot be cached across calls -- callers swap in quantized params between them.
+    param_index = build_param_index(model)
     mapping = {}
     for param in fsdp_param_list:
         # Get the module name
-        module_name = get_prefixed_param_names(model, param._module_info.module)
+        module_name = get_prefixed_param_names(model, param._module_info.module, param_index)
         if module_name is not None:
             # Get the parameter name from _module_info and construct full param name
             param_name = param._module_info.param_name

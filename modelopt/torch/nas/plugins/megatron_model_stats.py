@@ -37,11 +37,10 @@ Hybrid pattern characters (from ``megatron.core.ssm.mamba_hybrid_layer_allocatio
 
 import io
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
-from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.models.mamba.mamba_model import MambaModel
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import (
     get_expert_tensor_and_model_parallel_group,
     get_expert_tensor_parallel_rank,
@@ -55,6 +54,9 @@ from rich.table import Table
 
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils import num2hrb, print_rank_0
+
+if TYPE_CHECKING:
+    from megatron.core.models.gpt.gpt_model import GPTModel
 
 __all__ = [
     "mcore_memory_footprint_mb",
@@ -394,14 +396,23 @@ def mcore_param_count(
     # GatedDeltaNet (linear-attention) hybrid, e.g. Qwen3-Next / Qwen3.5: every ``linear_attention_freq``-th
     # layer keeps full attention, the rest use GatedDeltaNet linear attention.
     experimental_attention_variant: str | None = _get("experimental_attention_variant", None)
-    linear_attention_freq: int | None = _get("linear_attention_freq", None)
+    # ``linear_attention_freq`` is either an int interval (every N-th layer is full attention) or an
+    # explicit per-layer pattern (list; 1 = linear_attention / GatedDeltaNet, 0 = full_attention).
+    linear_attention_freq: int | list[int] | None = _get("linear_attention_freq", None)
     is_gdn = experimental_attention_variant == "gated_delta_net" and bool(linear_attention_freq)
+
+    def _is_linear_attention_layer(i: int) -> bool:
+        """Whether layer ``i`` uses GatedDeltaNet linear attention (vs full attention)."""
+        if isinstance(linear_attention_freq, (list, tuple)):
+            return bool(linear_attention_freq[i])
+        return (i + 1) % linear_attention_freq != 0
+
     # Multi-Latent Attention (MLA), e.g. DeepSeek / Kimi: low-rank compressed q/kv projections.
     multi_latent_attention: bool = _get("multi_latent_attention", False)
 
     def _attn_params(i: int) -> int:
         """Params for the attention sublayer of layer ``i`` (GatedDeltaNet / MLA / standard)."""
-        if is_gdn and (i + 1) % linear_attention_freq != 0:
+        if is_gdn and _is_linear_attention_layer(i):
             return _gated_delta_net_layer_params(
                 hidden_size,
                 _get("linear_num_key_heads"),
@@ -495,7 +506,7 @@ def mcore_param_count(
             total += layer_t
             active += layer_a
     else:
-        # ---- Hybrid / MambaModel: layer type is encoded in the pattern ----
+        # ---- HybridModel: layer type is encoded in the pattern ----
         layer_chars = parse_main_layer_chars(hybrid_layer_pattern, num_layers)
 
         for i, char in enumerate(layer_chars):
@@ -549,8 +560,8 @@ def mcore_param_count(
     return total, active
 
 
-def mcore_param_count_live(model: GPTModel | MambaModel) -> int:
-    """Count parameters in a live MCore GPTModel or MambaModel (reduced across TP, EP, ETP, and PP ranks)."""
+def mcore_param_count_live(model: "GPTModel | HybridModel") -> int:
+    """Count parameters in a live MCore LLM model (reduced across TP, EP, ETP, and PP ranks)."""
     if isinstance(model, DynamicModule):
         raise RuntimeError(
             "mcore_param_count_live does not support DynamicModule. "
@@ -709,7 +720,7 @@ def mcore_memory_footprint_mb(
 
 
 def print_mcore_model_stats(
-    model: "GPTModel | MambaModel",
+    model: "GPTModel | HybridModel",
     label: str = "Model",
     seq_length: int = 4096,
     batch_size: int = 1,
@@ -718,7 +729,7 @@ def print_mcore_model_stats(
     """Print total params, active params, and memory footprint for an MCore model.
 
     Args:
-        model: GPTModel or MambaModel to print stats for.
+        model: MCore LLM model to print stats for.
         label: Label prefix for the output line (e.g. ``"Original"``, ``"Pruned"``).
         seq_length: Sequence length for KV-cache / Mamba-state memory estimate.
         batch_size: Batch size for KV-cache / Mamba-state memory estimate.
@@ -726,7 +737,7 @@ def print_mcore_model_stats(
     """
     hybrid_layer_pattern: str | None = None
     config_overrides: dict = {}
-    if isinstance(model, MambaModel):
+    if isinstance(model, HybridModel):
         hybrid_key = (
             "hybrid_override_pattern"
             if hasattr(model, "hybrid_override_pattern")

@@ -27,6 +27,8 @@ This example takes an ONNX model as input, along with the necessary quantization
    pip install -r requirements.txt
    ```
 
+> **CUDA 12.x / 13.x:** ModelOpt-Windows installs CUDA 12 packages (`cupy-cuda12x`, CUDA 12 `onnxruntime-gpu`) by default. To run on CUDA 13.x, switch to CUDA 13 packages (`cupy-cuda13x`, `onnxruntime-gpu>=1.27`) with a matching CUDA 13 toolkit and cuDNN. See the [standalone installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_standalone.html) for details.
+
 ## Prepare ORT-GenAI Compatible Base Model
 
 You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI-compatible base model in ONNX format. See example command-line below:

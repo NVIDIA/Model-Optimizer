@@ -24,11 +24,7 @@ Two test groups:
 from types import SimpleNamespace
 
 import pytest
-from _test_utils.torch.megatron.models import (
-    HAS_MAMBA,
-    get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
-)
+from _test_utils.torch.megatron.models import HAS_MAMBA, get_mcore_gpt_model, get_mcore_hybrid_model
 
 from modelopt.torch.nas.plugins.megatron_model_stats import (
     mcore_memory_footprint_mb,
@@ -287,6 +283,16 @@ class TestMcoreParamCountFormulas:
             _BASE_CFG, _V, num_layers=4, num_moe_experts=None, **_GDN_OVERRIDES
         )
         assert total == _BASE_UNTIED + 3 * (_GDN + _DENSE_MLP) + (_ATTN + _DENSE_MLP)
+        # Real Qwen3.5 configs store the pattern as an explicit per-layer list (1=linear/GDN, 0=full)
+        # instead of an int cadence; the equivalent list ([1,1,1,0] == freq 4 here) must match.
+        total_list, _ = mcore_param_count(
+            _BASE_CFG,
+            _V,
+            num_layers=4,
+            num_moe_experts=None,
+            **{**_GDN_OVERRIDES, "linear_attention_freq": [1, 1, 1, 0]},
+        )
+        assert total_list == total
 
     def test_gated_delta_net_differs_from_plain_attention(self):
         # Without the variant flag, the same layers are counted as plain attention (no GDN dispatch).
@@ -496,13 +502,13 @@ def test_formula_total_matches_gpt_moe_model(dist_workers, parallelism, num_gpus
     dist_workers.run(_test_formula_matches_gpt_moe_model, parallelism=parallelism)
 
 
-def _test_formula_matches_mamba_model(rank, size, parallelism):
+def _test_formula_matches_hybrid_model(rank, size, parallelism):
     hidden_size = 64
     mamba_head_dim = 16
     mamba_num_heads = hidden_size // mamba_head_dim  # 4
     pattern = "ME*-"  # 4-layer hybrid
 
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1 if parallelism != "tp" else size,
         pipeline_model_parallel_size=1 if parallelism != "pp" else size,
         expert_model_parallel_size=1 if parallelism != "ep" else size,
@@ -513,7 +519,7 @@ def _test_formula_matches_mamba_model(rank, size, parallelism):
         mamba_head_dim=mamba_head_dim,
         mamba_num_heads=mamba_num_heads,
         vocab_size=128,
-        hybrid_override_pattern=pattern,
+        hybrid_layer_pattern=pattern,
         moe_grouped_gemm=False,
         num_moe_experts=4,
         moe_ffn_hidden_size=64,
@@ -536,10 +542,10 @@ def _test_formula_matches_mamba_model(rank, size, parallelism):
 
 
 @pytest.mark.parametrize("parallelism", ["tp", "pp", "ep"])
-def test_formula_matches_mamba_model(dist_workers, parallelism, num_gpus):
-    """Builds a non-MoE hybrid MambaModel; formula must match the live param count."""
+def test_formula_matches_hybrid_model(dist_workers, parallelism, num_gpus):
+    """Builds a Mamba/MoE/attention/MLP HybridModel; formula must match the live param count."""
     if num_gpus == 1 and parallelism != "tp":
         pytest.skip("Skipping as redundant test on 1 GPU")
     if not HAS_MAMBA:
         pytest.skip("Mamba not installed")
-    dist_workers.run(_test_formula_matches_mamba_model, parallelism=parallelism)
+    dist_workers.run(_test_formula_matches_hybrid_model, parallelism=parallelism)

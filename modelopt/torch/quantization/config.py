@@ -155,14 +155,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Literal, TypeAlias
 
-from pydantic import (
-    AliasChoices,
-    Field,
-    ValidationInfo,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
+from pydantic import Field, ValidationInfo, field_serializer, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.opt.config_loader import load_config
@@ -761,17 +754,37 @@ class LayerwiseConfig(ModeloptBaseConfig):
         ),
     )
 
+    export_dir: str | None = ModeloptField(
+        default=None,
+        title="Export each layer's quantized checkpoint as soon as it is calibrated.",
+        description=(
+            "If set, each decoder layer is written to a quantized HF checkpoint shard in "
+            "this directory the moment its calibration finishes, leaving a complete, "
+            "loadable checkpoint when the last layer lands. Removes the separate "
+            "``export_hf_checkpoint()`` pass and its full-precision intermediate. "
+            "Combined with ``checkpoint_dir``, an interrupted run resumes without "
+            "re-exporting finished layers. Supports FP8 and NVFP4 on single-process "
+            "models, resident or accelerate-offloaded; AWQ, SVDQuant, multi-process jobs, "
+            "weight-tied quantized modules, multimodal and MTP models raise "
+            "NotImplementedError. The model left in memory afterwards is not valid for "
+            "inference if the run resumed."
+        ),
+    )
+
+    calib_mutates_weights: bool = ModeloptField(
+        default=True,
+        title="Whether layerwise calibration mutates layer weights.",
+        description=(
+            "Set to False only for algorithms that update solely "
+            "``TensorQuantizer._amax`` (max, mse, local_hessian). Rejected for "
+            "weight-mutating algorithms (GPTQ, AWQ, SmoothQuant) where it would "
+            "silently lose updates on resume."
+        ),
+    )
+
 
 def _coerce_layerwise_input(value):
-    """Normalize a raw ``layerwise`` value to a dict; warn on deprecated bool."""
-    if isinstance(value, bool):
-        warnings.warn(
-            "Passing the layerwise field as a bool is deprecated; use a dict, "
-            "e.g. `{'enable': True}`.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return {"enable": value}
+    """Normalize a raw ``layerwise`` value to a dict."""
     if value is None:
         return {}
     if isinstance(value, LayerwiseConfig):
@@ -783,6 +796,11 @@ def _coerce_layerwise_input(value):
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
+
+    # Whether this algorithm mutates ``layer.weight`` during calibration. Amax-only
+    # algorithms (max/mse/local_hessian) set this False; it gates whether
+    # ``layerwise.calib_mutates_weights=False`` is allowed.
+    _mutates_weights: ClassVar[bool] = True
 
     method: Literal[None] = ModeloptField(
         None,
@@ -806,59 +824,27 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     layerwise: LayerwiseConfig = Field(
         default_factory=LayerwiseConfig,
-        validation_alias=AliasChoices("layerwise", "use_sequential"),
         title="Layerwise calibration configuration.",
         description=(
             "Nested config controlling layer-by-layer calibration. Pass a dict, "
-            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``. Bool input is "
-            "accepted for backward compatibility but deprecated."
+            "e.g. ``{'enable': True, 'checkpoint_dir': '/path'}``."
         ),
     )
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_layerwise_checkpoint_dir(cls, data):
-        """Merge the legacy flat ``layerwise_checkpoint_dir`` key into ``layerwise``.
-
-        Raises if both the flat key and a nested ``checkpoint_dir`` are set with conflicting values.
-        """
-        if not isinstance(data, dict) or "layerwise_checkpoint_dir" not in data:
-            return data
-        warnings.warn(
-            "Passing `layerwise_checkpoint_dir` at the top level is deprecated; "
-            "nest it under `layerwise.checkpoint_dir` instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        data = dict(data)
-        flat_dir = data.pop("layerwise_checkpoint_dir")
-        # Resolve the legacy ``use_sequential`` alias before writing ``layerwise``,
-        # otherwise the alias value is silently dropped when AliasChoices picks the
-        # newly-written ``layerwise`` key over ``use_sequential``.
-        raw_layerwise = data.pop("layerwise", data.pop("use_sequential", None))
-        layerwise = _coerce_layerwise_input(raw_layerwise)
-        existing = layerwise.get("checkpoint_dir")
-        if existing is not None and existing != flat_dir:
-            raise ValueError(
-                f"Conflicting checkpoint_dir: layerwise_checkpoint_dir={flat_dir!r} "
-                f"differs from layerwise.checkpoint_dir={existing!r}. Set only one."
-            )
-        data["layerwise"] = {**layerwise, "checkpoint_dir": flat_dir}
-        return data
 
     @field_validator("layerwise", mode="before")
     @classmethod
     def _coerce_layerwise(cls, value):
-        """Coerce ``layerwise=bool/None`` to dict form; also handles the alias path."""
+        """Coerce ``layerwise=None``/``LayerwiseConfig`` to dict form."""
         return _coerce_layerwise_input(value)
 
     @model_validator(mode="after")
-    def validate_layerwise_checkpoint_dir(self):
-        """Raise if layerwise.checkpoint_dir is set but layerwise.enable is False."""
-        if self.layerwise.checkpoint_dir is not None and not self.layerwise.enable:
+    def _validate_non_mutating_layerwise_supported(self):
+        """Enforce the ``calib_mutates_weights=False`` whitelist."""
+        if not self.layerwise.calib_mutates_weights and self._mutates_weights:
             raise ValueError(
-                "layerwise.checkpoint_dir requires layerwise.enable=True. "
-                "Set layerwise.enable=True or remove layerwise.checkpoint_dir."
+                f"Algorithm '{self.method}' mutates layer weights in-place; "
+                "calib_mutates_weights=False would lose those updates on resume. "
+                "Only max/mse/local_hessian (amax-only) support this flag."
             )
         return self
 
@@ -920,6 +906,8 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     See `Integer Quantization <https://arxiv.org/pdf/2004.09602>`_ for the concepts.
     """
 
+    _mutates_weights: ClassVar[bool] = False
+
     method: Literal["max"] = ModeloptField("max")
 
     distributed_sync: bool | None = ModeloptField(
@@ -934,8 +922,25 @@ class MaxCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
         description=(
             "If True, max-calibration synchronizes the weight quantizer amax across local "
             "experts within each SequentialMLP layer, so all experts in that layer share "
-            "one effective weight amax. TEGroupedMLP already fuses experts into a single "
-            "GEMM with one weight quantizer, so this flag is irrelevant there."
+            "one effective weight amax. TEGroupedLinear keeps a per-expert weight quantizer "
+            "(GroupedQuantizer) whose amax follows the same expert-parallel sync rule."
+        ),
+    )
+
+    skip_forward_without_activation_calib: bool = ModeloptField(
+        default=False,
+        title="Skip the calibration forward when no activation quantizer needs data.",
+        description=(
+            "If True, max calibration skips the ``forward_loop`` entirely when no enabled "
+            "quantizer collects data-driven activation statistics — e.g. an experts-only recipe "
+            "whose activation quantizers all use ``constant_amax`` / ``use_constant_amax``, "
+            "dynamic, or MX (MXFP4/MXFP8) quantization. Weight calibration still runs on the "
+            "weight tensors directly, so the quantized weights are unchanged; only the wasted "
+            "forward is avoided. "
+            "Opt-in (default False) because the provided ``forward_loop`` can carry side "
+            "effects the caller relies on — most notably materializing sharded parameters under "
+            "DeepSpeed ZeRO-3 — so enable it per-recipe when the calibration data is known to be "
+            "unnecessary."
         ),
     )
 
@@ -950,6 +955,8 @@ class MseCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
 
     When fp8_scale_sweep is enabled for a supported FP8-scale format, step_size is ignored.
     """
+
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["mse"] = ModeloptField("mse")
 
@@ -1002,6 +1009,8 @@ class LocalHessianCalibConfig(_SharedStatesConfig, QuantizeAlgorithmConfig):
     - ``H = X @ X.T`` is the local Hessian computed from input activations X
 
     """
+
+    _mutates_weights: ClassVar[bool] = False
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
 
@@ -1249,6 +1258,81 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
 
 
 _ScaleCalibConfig: TypeAlias = MaxCalibConfig | MseCalibConfig | LocalHessianCalibConfig
+
+
+class NVFP4ActHeadroomCalibConfig(QuantizeAlgorithmConfig):
+    """Config for the ``nvfp4_act_headroom`` calibration algorithm.
+
+    Calibrates the per-tensor global scale of NVFP4 *activation* (input) quantizers so that
+    the calibrated range sits in the lower part of the FP8 block-scale range, leaving headroom
+    above it for activations larger than any seen during calibration. Weight quantizers and
+    all non-NVFP4 quantizers are calibrated with plain ``max``.
+
+    The top of the calibrated range is ``upper_percentile`` (default 99.99) rather than the
+    literal maximum, so rare blocks far above the rest are clipped instead of dragging the
+    global scale up until every other block flushes to zero.
+
+    See :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>` for the formula.
+    """
+
+    _mutates_weights: ClassVar[bool] = False
+
+    method: Literal["nvfp4_act_headroom"] = ModeloptField("nvfp4_act_headroom")
+
+    anchor_percentile: float = ModeloptField(
+        default=1.0,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the anchor.",
+        description=(
+            "The global scale is anchored to this percentile of the per-block amax "
+            "distribution. Lower values anchor further into the low tail, which yields a "
+            "smaller global scale and less headroom."
+        ),
+    )
+
+    upper_percentile: float = ModeloptField(
+        default=99.99,
+        gt=0.0,
+        le=100.0,
+        title="Percentile of the per-block activation amaxes used as the top of the range.",
+        description=(
+            "The global scale is floored at this percentile, so per-block amaxes above it are "
+            "clipped. The default excludes the rarest blocks on purpose: chasing a lone outlier "
+            "pushes every other block's FP8 block scale below subnormal. Set to 100 to use the "
+            "literal observed max, which guarantees no calibration data is clipped."
+        ),
+    )
+
+    rho: float = ModeloptField(
+        default=16384.0,
+        gt=0.0,
+        lt=28672.0,
+        title="Headroom factor applied to the anchor (amax = rho * anchor).",
+        description=(
+            "Larger rho leaves more headroom above the calibrated range and less room below "
+            "it. Must stay below 28672, the FP8-E4M3 normal dynamic range."
+        ),
+    )
+
+    weight_scale_algorithm: _ScaleCalibConfig = ModeloptField(
+        default={"method": "max"},
+        title="Algorithm used to calibrate the weight scales.",
+        description=(
+            "Weight scales are set by an independent algorithm -- ``max`` (default), ``mse`` or "
+            "``local_hessian`` -- because this algorithm only decides the NVFP4 *activation* "
+            "global scale. Give the chosen algorithm's own options alongside ``method`` (for "
+            "example ``{'method': 'mse', 'fp8_scale_sweep': true}``); ``distributed_sync`` and "
+            "``shared_states`` belong to that weight calibration pass and are set there."
+        ),
+        validate_default=True,
+    )
+
+    @field_serializer("weight_scale_algorithm")
+    def _serialize_weight_scale_algorithm(self, value: _ScaleCalibConfig):
+        """Preserve the sparse public dict shape accepted by this field."""
+        return {"method": value.method, **value.model_dump(exclude={"method"}, exclude_unset=True)}
 
 
 class LSQConfig(QuantizeAlgorithmConfig):

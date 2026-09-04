@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Muse Glimmer language-model search over W4A16 NVFP4 Four-Over-Six, FP8,
+# and BF16 fallback. Vision and unmatched module families remain BF16.
+
+# modelopt-schema: modelopt.recipe.config.ModelOptAutoQuantizeRecipe
+imports:
+  base_disable_all: configs/ptq/units/base_disable_all
+  base_disabled_layers: configs/auto_quantize/units/base_disabled_layers
+  base_cost_excluded_layers: configs/auto_quantize/units/base_cost_excluded_layers
+  default_disabled_quantizers: configs/ptq/units/default_disabled_quantizers
+  fp8_quantizers: configs/ptq/units/w8a8_fp8_fp8
+  nvfp4_four_over_six: configs/numerics/nvfp4_four_over_six
+
+metadata:
+  recipe_type: auto_quantize
+  description: >-
+    Muse Glimmer language-model W4A16 NVFP4 Four-Over-Six, FP8, and BF16
+    fallback search at 5.5 weight-effective bits. Use --kv_cache_qformat none.
+
+# Unmatched modules retain this BF16-by-default baseline. The searched language-model
+# families start from W4A16 NVFP4 and are reassigned by AutoQuantize below.
+quantize:
+  effective_bits: 4.5
+  algorithm:
+    method: mse
+    fp8_scale_sweep: false
+    start_multiplier: 1.0
+    stop_multiplier: 1.5
+    step_size: 0.5
+  quant_cfg:
+    - $import: base_disable_all
+    - quantizer_name: "*language_model.layers.*.mlp*.weight_quantizer"
+      cfg:
+        $import: nvfp4_four_over_six
+    - quantizer_name: "*language_model.layers.*.self_attn.*_proj.weight_quantizer"
+      cfg:
+        $import: nvfp4_four_over_six
+    - quantizer_name: "*lm_head*.weight_quantizer"
+      cfg:
+        $import: nvfp4_four_over_six
+    - $import: default_disabled_quantizers
+
+auto_quantize:
+  constraints:
+    effective_bits: 5.5
+    cost_model: weight
+
+  module_search_spaces:
+    - module_name_patterns:
+        - "*language_model.layers.*.mlp*"
+        - "*language_model.layers.*.self_attn.*_proj"
+        - "*lm_head*"
+      candidate_formats:
+        - effective_bits: 4.5
+          algorithm:
+            method: mse
+            fp8_scale_sweep: false
+            start_multiplier: 1.0
+            stop_multiplier: 1.5
+            step_size: 0.5
+          quant_cfg:
+            - $import: base_disable_all
+            - quantizer_name: "*weight_quantizer"
+              cfg:
+                $import: nvfp4_four_over_six
+        - algorithm: max
+          quant_cfg:
+            - $import: base_disable_all
+            - $import: fp8_quantizers
+      allow_no_quant: true
+
+  auto_quantize_method: gradient
+  score_size: 128
+
+  disabled_layers:
+    - $import: base_disabled_layers
+
+  cost_excluded_layers:
+    - $import: base_cost_excluded_layers

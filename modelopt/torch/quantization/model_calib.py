@@ -21,7 +21,7 @@ import time
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -34,16 +34,24 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils.layerwise_calib import (
     LayerActivationCollector,
     _CheckpointState,
+    _reconcile_export_with_resume,
 )
 from modelopt.torch.utils import print_rank_0, warn_rank_0
-from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
+from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 from modelopt.torch.utils.distributed import is_initialized as dist_is_initialized
 from modelopt.torch.utils.distributed import size as dist_size
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
-from .calib import MseCalibrator, NVFP4MSECalibrator, _Calibrator
+from .calib import MseCalibrator, NVFP4ActHeadroomCalibrator, NVFP4MSECalibrator, _Calibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import (
+    AnyQuantizer,
+    GroupedQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     SHARED_PATTERNS,
     SharedWeightGlobalAmaxState,
@@ -66,6 +74,7 @@ __all__ = [
     "local_hessian_calibrate",
     "lsq",
     "max_calibrate",
+    "nvfp4_act_headroom_calibrate",
     "smoothquant",
     "svdquant",
 ]
@@ -208,7 +217,7 @@ def _has_expert_parallelism(module: nn.Module) -> bool:
 
 
 def _iter_leaf_quantizers(quantizer):
-    if isinstance(quantizer, SequentialQuantizer):
+    if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
         for _q in quantizer:
             yield from _iter_leaf_quantizers(_q)
         return
@@ -254,6 +263,51 @@ def _should_sync_amax_across_ep(
     return True
 
 
+def _needs_activation_forward_for_max_calib(model: nn.Module) -> bool:
+    """Return True if any enabled quantizer still needs a calibration forward pass.
+
+    Weight quantizers are calibrated directly on the weight tensors by
+    :func:`weight_only_quantize`, so they never need the data forward. An activation-side
+    quantizer (input/output/BMM) needs it when it collects data-driven statistics during the
+    forward, which :func:`finish_stats_collection` does in two ways:
+
+    - **amax**: loaded for a quantizer that has a calibrator and is not dynamic (top-level
+      ``type: dynamic``), MX (MXFP4/MXFP8, whose E8M0 per-block scales are dynamic and which
+      carry no per-tensor amax), or pinned to a constant amax
+      (``use_constant_amax`` / ``constant_amax``);
+    - **static bias**: loaded for a quantizer with a static ``bias_calibrator``. Constant-amax
+      quantizers are exempted from calibration entirely (they ``continue`` before the bias
+      block), so only non-constant quantizers with a static bias need the forward for it.
+
+    When this returns False (e.g. an experts-only recipe whose activation quantizers all use
+    ``constant_amax``), the calibration forward can be skipped entirely and only weight
+    calibration is performed.
+    """
+    for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+        # Weight quantizers (incl. SequentialQuantizer stages named ``weight_quantizer.<i>``)
+        # are calibrated on the weight tensor directly, not via the data forward.
+        if any(part.endswith("weight_quantizer") for part in name.split(".")):
+            continue
+
+        is_constant = (
+            module._use_constant_amax or getattr(module, "_constant_amax", None) is not None
+        )
+
+        # A static bias calibrator collects data during the forward. Constant-amax quantizers
+        # skip bias calibration, so only non-constant quantizers with a static bias need it.
+        if not is_constant and module.bias_calibrator is not None and module.bias_type == "static":
+            return True
+
+        # amax is data-driven only for a calibrated, non-dynamic, non-MX, non-constant quantizer.
+        if is_constant or module._dynamic or module.is_mx_format:
+            continue
+        if getattr(module, "_calibrator", None) is not None:
+            return True
+    return False
+
+
 @torch.no_grad()
 def max_calibrate(
     model: nn.Module,
@@ -261,6 +315,7 @@ def max_calibrate(
     distributed_sync=True,
     sync_expert_weight_amax=False,
     shared_states: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+    skip_forward_without_activation_calib: bool = False,
 ):
     """Calibrate the model using max.
 
@@ -274,6 +329,11 @@ def max_calibrate(
         shared_states: Optional dict keyed by shared-state name. ``"weight_global_amax"`` is
             implemented today and accepts ``{"patterns": [...]}``; omitted patterns use
             ``SHARED_PATTERNS``, while an empty list disables the state.
+        skip_forward_without_activation_calib: If True, skip the (potentially expensive)
+            ``forward_loop`` when no enabled quantizer needs data-driven activation statistics
+            (see :func:`_needs_activation_forward_for_max_calib`). Weight calibration still runs.
+            Only opt-in for the top-level ``max`` path; algorithms that always need activations
+            (MSE, local Hessian, SmoothQuant, SVDQuant, GPTQ) call this with the default False.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -292,7 +352,15 @@ def max_calibrate(
     enable_stats_collection(model)
     weight_only_quantize(model)
     if forward_loop is not None:
-        forward_loop(model)
+        if skip_forward_without_activation_calib and not _needs_activation_forward_for_max_calib(
+            model
+        ):
+            print_rank_0(
+                "max_calibrate: all enabled activation quantizers use constant/dynamic amax; "
+                "skipping the calibration forward pass (weight-only calibration)."
+            )
+        else:
+            forward_loop(model)
     finish_stats_collection(model)
 
     # Sync quantizer amax across local experts within each rank (for SequentialMLP)
@@ -317,12 +385,12 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state, parent_name, child_name):
         """Sync amax across DP (always) and EP (filtered — see _should_sync_amax_across_ep)."""
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_dp_ep(_q, parallel_state, parent_name, child_name)
             return
@@ -336,7 +404,7 @@ def max_calibrate(
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child_name, child in module.named_children():
-                if isinstance(child, TensorQuantizer | SequentialQuantizer):
+                if isinstance(child, AnyQuantizer):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state, name, child_name)
     # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
@@ -358,7 +426,7 @@ def max_calibrate(
         parallel_state: ParallelState,
     ):
         # Syncing amax across TP for sequential quantizer
-        if isinstance(quantizer, SequentialQuantizer):
+        if isinstance(quantizer, (SequentialQuantizer, GroupedQuantizer)):
             for _q in quantizer:
                 sync_quantizer_amax_across_tp(
                     _q, linear_name, quantizer_type, axes_for_sync, parallel_state
@@ -431,6 +499,144 @@ def max_calibrate(
     _finalize_with_shared_state(model, weight_patterns)
 
 
+def _is_nvfp4_dynamic_activation_quantizer(module: nn.Module) -> bool:
+    """True for an enabled NVFP4 (E2M1 + E4M3 scale) dynamic-block quantizer leaf.
+
+    These carry their per-tensor global scale in ``_amax`` and are calibrated like plain max
+    (the quantizer itself is not ``_dynamic``; only its per-block scales are).
+    """
+    if not isinstance(module, TensorQuantizer):
+        return False
+    if getattr(module, "_disabled", False) or getattr(module, "_dynamic", False):
+        return False
+    block_sizes = module.block_sizes
+    return (
+        block_sizes is not None
+        and block_sizes.get("type", None) == "dynamic"
+        and module.num_bits == (2, 1)
+        and block_sizes.get("scale_bits", None) == (4, 3)
+    )
+
+
+def _is_nvfp4_dynamic_input_quantizer(name: str, module: nn.Module) -> bool:
+    """True for a plain NVFP4 dynamic-block *input* quantizer.
+
+    :class:`SequentialQuantizer` activation quantizers are not supported by this algorithm and
+    are rejected in :func:`_swap_in_nvfp4_act_headroom_calibrators` rather than matched here.
+    """
+    return name.endswith("input_quantizer") and _is_nvfp4_dynamic_activation_quantizer(module)
+
+
+def _swap_in_nvfp4_act_headroom_calibrators(
+    model: nn.Module, *, anchor_percentile: float, upper_percentile: float, rho: float
+) -> list[tuple[nn.Module, Any]]:
+    """Swap in an :class:`NVFP4ActHeadroomCalibrator` for each qualifying NVFP4 input quantizer.
+
+    Returns ``(quantizer, original_calibrator)`` pairs so the caller can restore them.
+    """
+    # Validate before mutating anything, so a rejected model is left untouched. A
+    # SequentialQuantizer wraps several quantizers over one activation; this algorithm derives a
+    # single global scale per tensor and has no defined behavior for that composition, so reject
+    # it explicitly instead of silently leaving those activations on plain max.
+    for name, module in model.named_modules():
+        if not name.endswith("input_quantizer") or not isinstance(module, SequentialQuantizer):
+            continue
+        if any(_is_nvfp4_dynamic_activation_quantizer(q) for q in _iter_leaf_quantizers(module)):
+            raise NotImplementedError(
+                f"nvfp4_act_headroom does not support SequentialQuantizer activation quantizers, "
+                f"but {name!r} is one wrapping an NVFP4 dynamic-block quantizer. Use a single "
+                f"activation quantizer config for these modules, or calibrate with 'max'."
+            )
+
+    swapped: list[tuple[nn.Module, Any]] = []
+    for name, module in model.named_modules():
+        if not _is_nvfp4_dynamic_input_quantizer(name, module):
+            continue
+        swapped.append((module, module._calibrator))
+        module._calibrator = NVFP4ActHeadroomCalibrator(
+            module.num_bits,
+            None,
+            module._unsigned,
+            block_size=module.block_sizes.get(-1, 16),
+            anchor_percentile=anchor_percentile,
+            upper_percentile=upper_percentile,
+            rho=rho,
+        )
+    return swapped
+
+
+@torch.no_grad()
+def nvfp4_act_headroom_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    *,
+    anchor_percentile: float = 1.0,
+    upper_percentile: float = 99.99,
+    rho: float = 16384.0,
+    weight_scale_algorithm: Any = None,
+):
+    """Calibrate NVFP4 activation global scales with headroom.
+
+    For NVFP4 dynamic-block *input* quantizers, the per-tensor global scale is derived from
+    the distribution of per-block activation amaxes so that headroom is left above the
+    calibrated range (see :class:`NVFP4ActHeadroomCalibrator
+    <modelopt.torch.quantization.calib.NVFP4ActHeadroomCalibrator>`).
+
+    Weight scales are an orthogonal concern and are delegated to ``weight_scale_algorithm``,
+    so a recipe can combine this activation policy with ``max``, ``mse`` or ``local_hessian``
+    weights. Each of those runs max calibration first, so the activation collectors installed
+    here are populated in that pass and any later refinement touches only weights.
+
+    Args:
+        model: model to be calibrated.
+        forward_loop: callable that runs calibration data through the model.
+        anchor_percentile: percentile of the per-block amaxes used as the anchor.
+        upper_percentile: percentile of the per-block amaxes used as the top of the calibrated
+            range; ``100`` uses the literal observed max.
+        rho: headroom factor; ``amax = rho * anchor``. Must be in ``(0, 28672)``.
+        weight_scale_algorithm: config for the algorithm that calibrates the *weight* scales --
+            ``{"method": "max"}`` (the default), ``"mse"`` or ``"local_hessian"``, plus that
+            algorithm's own options such as ``distributed_sync`` and ``shared_states``.
+            ``None`` is treated as ``{"method": "max"}``.
+
+    Raises:
+        NotImplementedError: if an NVFP4 activation quantizer is a ``SequentialQuantizer``,
+            which this algorithm does not support.
+
+    .. note::
+        Under data parallelism the per-rank scales are combined with a ``MAX`` all-reduce, so
+        the result is the largest per-rank headroom scale rather than the scale implied by
+        pooling every rank's per-block distribution.
+    """
+    swapped = _swap_in_nvfp4_act_headroom_calibrators(
+        model, anchor_percentile=anchor_percentile, upper_percentile=upper_percentile, rho=rho
+    )
+    if not swapped:
+        warn_rank_0(
+            "nvfp4_act_headroom: no NVFP4 dynamic-block input quantizer matched, so this is "
+            "equivalent to plain max calibration. Check that the recipe enables NVFP4 "
+            "activation quantizers."
+        )
+    print_rank_0(
+        f"nvfp4_act_headroom: calibrating {len(swapped)} NVFP4 activation quantizer(s) "
+        f"(anchor_percentile={anchor_percentile}, upper_percentile={upper_percentile}, "
+        f"rho={rho})."
+    )
+    # max_calibrate runs the forward loop once: the swapped-in calibrators accumulate their
+    # per-block histograms in the same pass that collects max stats for every other quantizer.
+    # The calibrators are restored afterwards so this algorithm does not leak into a later
+    # calibration of the same model, and so a repeat run starts from a fresh histogram.
+    # Default to max rather than the helper's own default, so selecting this activation policy
+    # never silently changes how weights are calibrated.
+    try:
+        _run_weight_scale_calibration(
+            model, forward_loop, weight_scale_algorithm or {"method": "max"}
+        )
+    finally:
+        for quantizer, original_calibrator in swapped:
+            quantizer._calibrator = original_calibrator
+
+
 def _mse_quant_func(x, amax, quantizer):
     """Quantization function for MSE calibration."""
     original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
@@ -476,6 +682,7 @@ def _make_weight_mse_calibrator(
         not isinstance(weight_quantizer, TensorQuantizer)
         or not weight_quantizer.is_enabled
         or weight_quantizer._dynamic
+        or weight_quantizer.is_mx_format  # MX formats do not use a global scale
         or weight_quantizer._calibrator is None
         or getattr(weight_quantizer, "_amax", None) is None
     ):
@@ -1854,18 +2061,15 @@ def layerwise_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
 
-    If ``checkpoint_dir`` is passed (via ``calib_kwargs``), per-layer checkpoints
-    are saved after each layer completes. On restart, calibration resumes from
-    the last completed layer.
-
-    ``get_qdq_activations_from_prev_layer`` (via ``calib_kwargs``) controls
-    whether the cached inputs handed to layer N+1 come from a forward through
-    the just-calibrated layer with quantizers active (True; e.g. GPTQ) or
-    temporarily disabled (False; matches non-layerwise max-calib semantics).
+    Every knob arrives through ``calib_kwargs`` from :class:`LayerwiseConfig`, which
+    documents them; ``export_dir`` additionally leaves the model in export form, so it
+    must not be used for inference afterwards.
     """
     checkpoint_dir = calib_kwargs.pop("checkpoint_dir", None)
+    export_dir = calib_kwargs.pop("export_dir", None)
     qdq_from_prev = calib_kwargs.pop("get_qdq_activations_from_prev_layer", False)
     save_every = calib_kwargs.pop("save_every", 1)
+    calib_mutates_weights = calib_kwargs.pop("calib_mutates_weights", True)
 
     if forward_loop is None:
         raise ValueError(
@@ -1883,19 +2087,46 @@ def layerwise_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Layerwise calibration: Found {num_layers} transformer layers")
 
+    # Before calibration, so unsupported models fail in seconds not hours.
+    exporter = None
+    if export_dir is not None:
+        from modelopt.torch.export.layerwise_export import LayerwiseExporter
+
+        exporter = LayerwiseExporter(model, export_dir)
+
     ckpt = _CheckpointState.from_folder(
         checkpoint_dir,
         num_layers,
         save_every=save_every,
+        calib_mutates_weights=calib_mutates_weights,
+        save_layer_state=exporter is None,
     )
     start_layer = ckpt.start_layer if ckpt else 0
 
-    input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    if exporter is not None and _reconcile_export_with_resume(
+        exporter, checkpoint_dir, start_layer, num_layers
+    ):
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: finalized existing shards in {export_dir}")
+        return
 
-    resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+    layer_pbar = tqdm(
+        total=num_layers,
+        initial=start_layer,
+        desc="Layerwise calibration",
+        disable=not is_master(),
+        dynamic_ncols=True,
+    )
+
+    def _set_layer_status(status: str):
+        layer_pbar.set_postfix_str(status, refresh=True)
+
+    input_getter = LayerActivationCollector(model, status_callback=_set_layer_status)
 
     try:
+        input_getter._patch_all_layers(decoder_layers=transformer_layers)
+        resumed_inputs = ckpt.setup_resume(transformer_layers) if ckpt and start_layer > 0 else None
+
         # Bootstrap: get first layer's inputs (or use resumed inputs).
         layer_inputs = input_getter.get_first_layer_inputs(
             start_layer, resumed_inputs, forward_loop
@@ -1925,7 +2156,7 @@ def layerwise_calibrate(
 
             is_last = layer_idx + 1 >= num_layers
 
-            with persistent_materialization(layer):
+            with persistent_materialization(layer, writeback=calib_mutates_weights):
                 # qdq_from_prev=False: capture before calib_func so the forward
                 # replay uses the original FP weights. Disable quantizers too in
                 # case any pre-calibration observer behavior would perturb the
@@ -1949,20 +2180,39 @@ def layerwise_calibrate(
                     next_inputs = input_getter.cache_outputs_for_next_layer_calib(
                         layer, forward_loop
                     )
+                    if exporter is not None:
+                        # As above, for the fusion probe. Only when one runs: without an
+                        # exporter nothing touches the layer before _set_layer_states does.
+                        layer._layerwise_calib.mode = "original"
                 elif is_last:
                     next_inputs = None
+
+                # After the next-layer capture in both orderings: final state.
+                if exporter is not None:
+                    exporter.export_layer(layer_idx, layer, layer_inputs)
 
                 if ckpt:
                     ckpt.save(layer_idx, model, transformer_layers, next_inputs)
 
+            layer_pbar.update(1)
             del layer_inputs
             torch.cuda.empty_cache()
             layer_inputs = next_inputs  # noqa: F841 (used in next iteration's closure)
     finally:
         input_getter._unpatch_all_layers()
+        layer_pbar.close()
 
     if ckpt:
         ckpt.full_restore(transformer_layers, model)
+
+    if exporter is not None:
+        exporter.finalize()
+        print_rank_0(f"Layerwise export: wrote quantized checkpoint to {export_dir}")
+        if start_layer > 0:
+            warn_rank_0(
+                f"This run resumed at layer {start_layer}, so layers 0..{start_layer - 1} "
+                "were never re-calibrated; their shards come from the earlier run."
+            )
 
     print_rank_0("Layerwise calibration completed")
 
@@ -2050,8 +2300,11 @@ def gptq(
     print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
 
 
-def _run_scale_calibration(model, forward_loop, scale_algorithm):
-    """Run scale calibration."""
+def _run_weight_scale_calibration(model, forward_loop, scale_algorithm):
+    """Run the weight-scale calibration algorithm.
+
+    These algorithms set *weight* scales; activation scales are the caller's concern.
+    """
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
@@ -2094,7 +2347,7 @@ def lsq(
         tied_amax: If True, pre and post share a single tensor.
         quantize_pre_scale: If False, skip FP8 quantization for the LSQ pre scale.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm)
+    _run_weight_scale_calibration(model, forward_loop, scale_algorithm)
 
     name_to_module = dict(model.named_modules())
     seen_modules: set[int] = set()

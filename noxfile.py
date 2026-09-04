@@ -40,11 +40,18 @@ TORCH_VERSIONS = {
     "torch_211": "torchvision~=0.26.0",
     "torch_212": "torchvision~=0.27.0",
     "torch_213": "torchvision~=0.28.0",
+    "torch_214": "torchvision~=0.29.0",
 }
 
+# Extra install pins applied per transformers matrix entry (installed after the base
+# ``.[all,dev-test]`` install to constrain that env).
 TRANSFORMERS_VERSIONS = {
-    "tf_latest": "transformers~=5.12.0",
-    "tf_min": "transformers~=4.56.0",
+    "tf_latest": ("transformers~=5.14.0",),
+    # transformers 4.57 caps ``huggingface_hub<1.0``, but ``diffusers>=0.40`` requires
+    # ``huggingface_hub>=1.23``. Bound diffusers to a hub<1.0-compatible release so this env
+    # stays internally consistent; otherwise diffusers' pipeline import fails and diffusers
+    # models silently misroute to the LLM path on export.
+    "tf_min": ("transformers~=4.57.0", "diffusers<0.40"),
 }
 
 
@@ -63,9 +70,9 @@ _CPU_ONLY_ENV = {"CUDA_VISIBLE_DEVICES": ""}
 def unit(session, torch_ver, tf_ver):
     """Unit tests — parametrized over torch and transformers versions."""
     session.install(TORCH_VERSIONS[torch_ver], "-e", ".[all,dev-test]")
-    tf_pin = TRANSFORMERS_VERSIONS[tf_ver]
-    if tf_pin:
-        session.install(tf_pin)
+    tf_pins = TRANSFORMERS_VERSIONS[tf_ver]
+    if tf_pins:
+        session.install(*tf_pins)
     session.run("python", "-m", "pytest", "tests/unit", *_cov_args(), env=_CPU_ONLY_ENV)
 
 
@@ -126,10 +133,10 @@ def gpu(session):
     session.run("python", "-m", "pytest", "tests/gpu", *_cov_args())
 
 
-# Container: nvcr.io/nvidia/nemo:26.04 or later
+# Container: nvcr.io/nvidia/nemo:26.08 or later
 @nox.session(venv_backend="none")
 def gpu_megatron(session):
-    # nemo:26.04 has transformers 5.x but system-wide installed trtllm 1.2.0 which does not support it causing import errors
+    # NeMo containers have transformers 5.x but a system-wide installed trtllm which does not support it causing import errors
     session.run("pip", "uninstall", "-y", "tensorrt_llm")
     # Pre-installed nvidia-modelopt shadows the editable install
     session.run("pip", "uninstall", "-y", "nvidia-modelopt")

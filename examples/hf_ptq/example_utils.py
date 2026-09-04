@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import copy
 import glob
 import hashlib
@@ -20,14 +21,17 @@ import inspect
 import json
 import logging
 import os
-import shutil
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import torch
 import transformers
+import yaml
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from safetensors import safe_open
@@ -41,16 +45,126 @@ from transformers import (
     ProcessorMixin,
 )
 
+from modelopt.recipe import load_recipe
 from modelopt.torch.export.model_utils import is_multimodal_model
+from modelopt.torch.export.plugins.hf_checkpoint_utils import copy_non_safetensor_files_from_ckpt
 
 try:
     from huggingface_hub import snapshot_download
 except ImportError:
     snapshot_download = None
 
+from modelopt.torch.utils import distributed as dist_utils
+from modelopt.torch.utils.mlflow import (
+    MlflowRunLogger,
+    default_experiment_name,
+    validate_tracking_uri,
+)
+
 logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
+
+_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS = [
+    "*.jinja",
+    "*.json",
+    "*.md",
+    "*.model",
+    "*.py",
+    "*.tiktoken",
+    "*.txt",
+    "LICENSE*",
+    "NOTICE*",
+]
+_HF_PTQ_WEIGHT_FILE_PATTERNS = (
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.bin.index.json",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.npy",
+    "*.npz",
+    "*.onnx",
+    "*.pb",
+    "*.pickle",
+    "*.pkl",
+    "*.pt",
+    "*.pth",
+    "*.tar",
+    "*.tar.bz2",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tflite",
+    "*.tgz",
+    "*.zip",
+)
+_HF_PTQ_EXPORT_OWNED_FILES = {
+    "config.json",
+    "hf_quant_config.json",
+    "quant_config.json",
+    "quantization_config.json",
+    "quantize_config.json",
+    "recipe.yaml",
+    "recipe.yml",
+}
+
+
+@dataclass
+class DistributedState:
+    """Example-local distributed state for model loading, dataloader sharding, and rank-0 output."""
+
+    rank: int
+    world_size: int
+    device: torch.device | str
+    is_main: bool
+
+
+def setup_distributed_args(args):
+    """Initialize and attach ``args.dist_state`` (single-process if FSDP2 off)."""
+    if getattr(args, "use_fsdp2", False):
+        # Raise the collective timeout above NCCL's 30-min default: rank 0's checkpoint write can
+        # exceed it, and PyTorch 2.8 has no per-call barrier() timeout (must be set at PG creation).
+        dist_utils.setup(timeout=timedelta(hours=2))
+        rank = dist_utils.rank()
+        args.dist_state = DistributedState(
+            rank=rank,
+            world_size=dist_utils.size(),
+            device=torch.device(f"cuda:{dist_utils.local_rank()}"),
+            is_main=rank == 0,
+        )
+    else:
+        args.dist_state = DistributedState(rank=0, world_size=1, device=args.device, is_main=True)
+
+
+def cleanup_distributed(args):
+    """Destroy the process group if ``--use_fsdp2`` set it up."""
+    if getattr(args, "use_fsdp2", False):
+        dist_utils.cleanup()
+
+
+def validate_fsdp2_supported(args, config):
+    """Raise ``NotImplementedError`` for model/CLI combos the FSDP2 path doesn't support yet."""
+    issues = []
+    if "vila" in args.pyt_ckpt_path.lower():
+        issues.append("VILA (custom builder + non-standard layer layout)")
+    if is_nemotron_vl(config) or _is_multimodal_config(config):
+        issues.append("multimodal / VL models (decoder layers not auto-detectable)")
+    if getattr(config, "quantization_config", None) is not None:
+        issues.append("pack-quantized / compressed-tensors checkpoints")
+    if getattr(args, "specdec_offline_dataset", None) is not None:
+        issues.append("speculative decoding (--specdec_offline_dataset)")
+    if getattr(args, "low_memory_mode", False):
+        issues.append("--low_memory_mode (redundant with FSDP2)")
+
+    if issues:
+        raise NotImplementedError(
+            "--use_fsdp2 does not support:\n  - "
+            + "\n  - ".join(issues)
+            + "\nRemove --use_fsdp2 or use a standard causal-LM checkpoint."
+        )
 
 
 def run_nemotron_vl_preview(
@@ -109,12 +223,6 @@ def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
-        or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
-        or hasattr(config, "vision_lora")  # Vision LoRA configurations
-        or hasattr(config, "audio_processor")  # Audio processing capabilities
-        or (
-            hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
-        )  # Image embedding layers
         or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
         or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
             "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
@@ -245,6 +353,20 @@ def is_speculative(hf_config):
     )
 
 
+def is_diffusion_gemma(hf_config) -> bool:
+    """Check if the model architecture is DiffusionGemma.
+
+    Underscores are ignored: the family is spelled ``diffusion_gemma`` in configs
+    and ``DiffusionGemma`` in class names. The nested ``text_config`` is checked too,
+    since multi-modal wrappers keep the family name there.
+    """
+    names = []
+    for cfg in (hf_config, getattr(hf_config, "text_config", None)):
+        names.append(getattr(cfg, "model_type", None) or "")
+        names.extend(getattr(cfg, "architectures", None) or [])
+    return any("diffusiongemma" in name.lower().replace("_", "") for name in names)
+
+
 def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTokenizerBase:
     print(f"Initializing tokenizer from {ckpt_path}")
 
@@ -370,6 +492,19 @@ def _apply_to_model_state_dict(
     if in_state_dict:
         model.load_state_dict(in_state_dict, strict=False)
     return out_state_dict
+
+
+def mtp_layer_prefixes_from_checkpoint(model_path: str) -> list[str]:
+    """MTP exclude-prefixes from a checkpoint's safetensors index (``[]`` if none); reads no tensors.
+
+    Local-index-only, matching :func:`load_mtp_weights`, so detection and re-attach stay in sync.
+    """
+    index_file = Path(model_path) / "model.safetensors.index.json"
+    if not index_file.exists():
+        return []
+    weight_map = json.load(open(index_file))["weight_map"]
+    mtp_keys = [k for k, v in weight_map.items() if "mtp" in k or "mtp" in v]
+    return list(_keys_to_prefixes(mtp_keys))
 
 
 def load_mtp_weights(
@@ -587,6 +722,17 @@ def _apply_dtype_to_config(model_kwargs, config_dtype, architecture, apply_confi
     return model_kwargs
 
 
+def _fmt_max_memory(max_memory: dict) -> str:
+    """Format a ``{device: bytes}`` budget dict into a human-readable string."""
+    parts = []
+    for key in sorted(max_memory.keys(), key=lambda k: (isinstance(k, str), k)):
+        val = max_memory[key]
+        label = f"{val / 1024**3:.1f} GiB" if isinstance(val, int) else str(val)
+        key_str = f"GPU {key}" if isinstance(key, int) else str(key)
+        parts.append(f"  {key_str}: {label}")
+    return "\n".join(parts)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -594,8 +740,20 @@ def get_model(
     trust_remote_code=False,
     use_seq_device_map=False,
     attn_implementation=None,
+    offload_folder=None,
+    max_cpu_memory_gb=None,
+    max_gpu_memory_gb=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    _disk_offload = offload_folder is not None
+    if _disk_offload and max_cpu_memory_gb is None:
+        warnings.warn(
+            "offload_folder is set but max_cpu_memory_gb is not specified. "
+            "CPU memory usage during model load will be unbounded. "
+            "Pass max_cpu_memory_gb to cap CPU usage.",
+            UserWarning,
+        )
 
     device_map = "auto"
     if device == "cpu":
@@ -623,6 +781,19 @@ def get_model(
     # Note: Forcibly converting the model precision between bf16 and fp16 may introduce accuracy drop
     model_kwargs = config_kwargs.copy()
     model_kwargs.setdefault("dtype", "auto")
+
+    # DiffusionGemma ties encoder/decoder weights. device_map "auto" (balanced) can split
+    # a tied pair across GPUs, leaving one side on the meta device and breaking generation.
+    # Sequential packs the model onto GPU 0 first (up to gpu_mem_percentage), keeping tied
+    # modules together for checkpoints that fit; larger ones can still spill and split a
+    # tied pair, and need an explicit single-device map. Multi-GPU only: a single-GPU split
+    # cannot separate a tied pair, and sequential would needlessly cap max_memory there.
+    if device != "cpu" and torch.cuda.device_count() > 1 and is_diffusion_gemma(hf_config):
+        print(
+            "Detected DiffusionGemma model. Using device_map='sequential'; the balanced "
+            "'auto' mapping can split its tied encoder/decoder weights across GPUs."
+        )
+        use_seq_device_map = True
 
     if use_seq_device_map:
         device_map = "sequential"
@@ -655,6 +826,20 @@ def get_model(
             if fmt == "pack-quantized":
                 return True
         return False
+
+    # Only the general load path below threads max_memory/offload_folder into
+    # from_pretrained; the specialized loaders build their own calls.
+    if _disk_offload and (
+        is_speculative(hf_config)
+        or has_pack_quantized_config(hf_config)
+        or get_original_hf_quant_method(hf_config) == "mxfp4"
+    ):
+        warnings.warn(
+            "offload_folder is ignored for speculative, pack-quantized, and MXFP4 "
+            "checkpoints: these use dedicated load paths that cannot offload. The model "
+            "will be loaded fully resident.",
+            UserWarning,
+        )
 
     if is_speculative(hf_config):
         model = AutoModelForCausalLM.from_pretrained(
@@ -700,7 +885,11 @@ def get_model(
             raise ValueError(f"Model config at {ckpt_path} has no architectures defined")
         architecture = hf_config.architectures[0]
 
-        if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+        # DeepSeek ships bundled modeling code, but the built-in class is what the
+        # disk-offload and streaming-export paths are validated against.
+        use_bundled_code = trust_remote_code and "Deepseek" in architecture
+
+        if not hasattr(transformers, architecture) or use_bundled_code:
             if not hasattr(transformers, architecture):
                 warnings.warn(
                     f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
@@ -737,24 +926,41 @@ def get_model(
             model = from_config(config_for_init, **model_kwargs2)
 
         max_memory = get_max_memory()
-        inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
 
-        on_cpu = "cpu" in inferred_device_map.values()
-
-        if on_cpu:
-            for _device in max_memory:
-                if isinstance(_device, int):
-                    max_memory[_device] *= gpu_mem_percentage
-
-            print(
-                "Model does not fit to the GPU mem. "
-                f"We apply the following memory limit for calibration: \n{max_memory}\n"
-                "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
-                "reduce the calibration `batch_size` manually."
-            )
+        if _disk_offload:
+            for _k in max_memory:
+                if isinstance(_k, int):
+                    if max_gpu_memory_gb is not None:
+                        max_memory[_k] = int(max_gpu_memory_gb * 1024**3)
+                    else:
+                        max_memory[_k] = int(max_memory[_k] * gpu_mem_percentage)
+            if max_cpu_memory_gb is not None:
+                max_memory["cpu"] = int(max_cpu_memory_gb * 1024**3)
             model_kwargs["max_memory"] = max_memory
+            print(
+                "Disk-offload mode enabled. "
+                f"Memory budgets: {_fmt_max_memory(max_memory)}\n"
+                f"Offload folder: {offload_folder}\n"
+                "Weights exceeding GPU+CPU budgets will be streamed from disk."
+            )
+        else:
+            inferred_device_map = infer_auto_device_map(model, max_memory=max_memory)
+            if "cpu" in inferred_device_map.values():
+                for _device in max_memory:
+                    if isinstance(_device, int):
+                        max_memory[_device] *= gpu_mem_percentage
+
+                print(
+                    "Model does not fit to the GPU mem. "
+                    f"We apply the following memory limit for calibration: \n{max_memory}\n"
+                    "If you hit GPU OOM issue, please adjust `gpu_mem_percentage` or "
+                    "reduce the calibration `batch_size` manually."
+                )
+                model_kwargs["max_memory"] = max_memory
 
         model_kwargs2 = _apply_dtype_to_config(model_kwargs, config_dtype, architecture)
+        if _disk_offload:
+            model_kwargs2["offload_folder"] = offload_folder
         model = auto_model_module.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -823,11 +1029,13 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
             try:
                 local_path = snapshot_download(
                     repo_id=model_name_or_path,
-                    allow_patterns=["*.py", "*.json"],  # Only download Python files and config
+                    allow_patterns=_HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
                 )
                 return local_path
             except Exception as e:
-                print(f"Warning: Could not download model files using snapshot_download: {e}")
+                print(
+                    f"Warning: Could not download checkpoint sidecars using snapshot_download: {e}"
+                )
 
         # Fallback: try to find in HuggingFace cache
         from transformers.utils import TRANSFORMERS_CACHE
@@ -862,49 +1070,31 @@ def _resolve_model_path(model_name_or_path: str, trust_remote_code: bool = False
     return model_name_or_path
 
 
-def copy_custom_model_files(source_path: str, export_path: str, trust_remote_code: bool = False):
-    """Copy processor/tokenizer artifacts (and, with trust_remote_code, custom code) to export.
+def copy_custom_model_files(
+    source_path: str,
+    export_path: str,
+    trust_remote_code: bool = False,
+    exclude_files: Iterable[str] | None = None,
+):
+    """Copy source checkpoint sidecar files to an HF PTQ export.
 
-    Processor and tokenizer *data* artifacts -- e.g. a VLM's ``preprocessor_config.json``,
-    ``merges.txt``/``vocab.json``, and the processor helper modules -- are needed by the
-    deployment stack (vLLM/SGLang) even when the model itself runs on native (non-remote)
-    transformers code. transformers 5.x restructured many VLM configs and no longer
-    re-saves these on ``save_pretrained`` for models loaded natively, so without copying
-    them a native-path export is missing e.g. ``preprocessor_config.json`` and fails to
-    load (``Can't load image processor``). These are copied regardless of
-    ``trust_remote_code``. Executable model/config code (``modeling*.py``,
-    ``configuration_*.py``, ``tokenization_*.py``, and other custom JSON) is only meaningful
-    with ``trust_remote_code`` and is copied only then. ``config.json`` and
-    ``model.safetensors.index.json`` are always skipped (handled by the export itself).
+    The HF PTQ script writes ModelOpt-owned metadata and quantized weights first, then
+    copies source checkpoint sidecars so tokenizer/processor files, remote-code modules,
+    README assets, parser plugins, and similar deployment files are preserved for both
+    native and ``trust_remote_code`` loads. Weight and weight-index files are skipped
+    to avoid copying the unquantized source weights. Export-owned metadata (``config.json``,
+    ``hf_quant_config.json``) and stale source quantization metadata are also skipped.
+    Source tokenizer and processor files intentionally still win because Transformers may
+    not regenerate all metadata in the source format. The exported ``tokenizer_config.json``
+    wins when it has a separate chat template. Callers that write a generation config can
+    exclude it; the TensorRT-LLM export retains the source generation config.
 
     Args:
         source_path: Path to the original model directory or HuggingFace model ID
         export_path: Path to the exported model directory
-        trust_remote_code: Whether trust_remote_code was used (gates the executable code files)
+        trust_remote_code: Passed to HuggingFace model-ID resolution; does not control copying.
+        exclude_files: Additional source file names to skip.
     """
-    # Deployment-critical processor/tokenizer artifacts: safe to copy regardless of
-    # trust_remote_code (data + processor helpers, not model code).
-    always_copy_patterns = [
-        "preprocessor_config.json",
-        "processor_config.json",
-        "image_processing*.py",
-        "processing_*.py",
-        "video_processing*.py",
-        "feature_extraction_*.py",
-        "added_tokens.json",
-        "special_tokens_map.json",
-        "vocab.json",
-        "merges.txt",
-        "tokenizer.model",
-    ]
-    # Executable custom model/config code + other custom JSON: only used with trust_remote_code.
-    code_patterns = [
-        "configuration_*.py",
-        "modeling*.py",
-        "tokenization_*.py",
-        "*.json",
-    ]
-
     # Resolve the source path (handles both local paths and HF model IDs)
     resolved_source_path = _resolve_model_path(source_path, trust_remote_code)
 
@@ -925,62 +1115,126 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Warning: Export directory {export_path} does not exist")
         return
 
-    patterns = [*always_copy_patterns, *(code_patterns if trust_remote_code else [])]
+    exclude_files = _HF_PTQ_EXPORT_OWNED_FILES | set(exclude_files or ())
+    if (export_dir / "chat_template.jinja").is_file():
+        exclude_files.add("tokenizer_config.json")
 
-    copied_files: list[str] = []
-    for pattern in patterns:
-        for file_path in source_dir.glob(pattern):
-            if file_path.is_file():
-                # Skip config.json and model.safetensors.index.json as they're handled separately
-                if file_path.name in ["config.json", "model.safetensors.index.json"]:
-                    continue
-                if file_path.name in copied_files:  # e.g. matched by both pattern lists
-                    continue
-                dest_path = export_dir / file_path.name
-                try:
-                    shutil.copy2(file_path, dest_path)
-                    copied_files.append(file_path.name)
-                    print(f"Copied custom model file: {file_path.name}")
-                except Exception as e:
-                    print(f"Warning: Failed to copy {file_path.name}: {e}")
+    copied_files = copy_non_safetensor_files_from_ckpt(
+        source_dir,
+        export_dir,
+        exclude_files=exclude_files,
+        exclude_patterns=_HF_PTQ_WEIGHT_FILE_PATTERNS,
+    )
 
     if copied_files:
-        print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
+        for file_name in copied_files:
+            print(f"Copied checkpoint sidecar file: {file_name}")
+        print(f"Successfully copied {len(copied_files)} checkpoint sidecar files to {export_path}")
     else:
-        print("No custom model files found to copy")
+        print("No checkpoint sidecar files found to copy")
 
 
-def _layerwise_checkpoint_dir_location(algorithm) -> tuple[str, str] | None:
-    """Return ``("flat"/"nested", checkpoint_dir)`` for the layerwise checkpoint dir, or None."""
-    if not isinstance(algorithm, dict):
+def _layerwise_blocks(algorithm) -> list[dict]:
+    """Every ``layerwise`` block in the algorithm, which may be one entry or a list."""
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [
+        e["layerwise"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("layerwise"), dict)
+    ]
+
+
+def recipe_layerwise_blocks(recipe) -> list[dict]:
+    """Every ``layerwise`` block in a recipe's algorithm(s), in order, normalized to dicts.
+
+    Reads the parsed *recipe*, where YAML gives plain dicts and the deprecated
+    ``--auto_quantize_*`` path gives config objects; :func:`_layerwise_blocks` reads the
+    resolved ``quant_cfg``, which is always dicts.
+    """
+    quantize = getattr(recipe, "quantize", None)
+    algorithm = getattr(quantize, "algorithm", None)
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    blocks = []
+    for entry in entries:
+        block = (
+            entry.get("layerwise") if isinstance(entry, dict) else getattr(entry, "layerwise", None)
+        )
+        if block is not None:
+            blocks.append(block if isinstance(block, dict) else block.model_dump())
+    return blocks
+
+
+def _layerwise_checkpoint_dir(algorithm) -> str | None:
+    """First ``layerwise.checkpoint_dir`` across the algorithm entries, or None."""
+    return next(
+        (b["checkpoint_dir"] for b in _layerwise_blocks(algorithm) if b.get("checkpoint_dir")),
+        None,
+    )
+
+
+def layerwise_export_block(algorithm) -> dict | None:
+    """The one ``layerwise`` block that owns per-layer export, or None.
+
+    Export finalizes each layer's shard during calibration, so a later pass would change
+    the model after its checkpoint was written: exactly one entry may set ``export_dir``,
+    and it must be the last.
+    """
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    exporting = [
+        (i, e["layerwise"])
+        for i, e in enumerate(entries)
+        if isinstance(e, dict)
+        and isinstance(e.get("layerwise"), dict)
+        and e["layerwise"].get("export_dir") is not None
+    ]
+    if not exporting:
         return None
-    flat = algorithm.get("layerwise_checkpoint_dir")
-    if flat is not None:
-        return "flat", flat
-    nested = algorithm.get("layerwise") or {}
-    ckpt = nested.get("checkpoint_dir") if isinstance(nested, dict) else None
-    return ("nested", ckpt) if ckpt is not None else None
+    if len(exporting) > 1:
+        raise ValueError(
+            f"{len(exporting)} algorithm entries set layerwise.export_dir; only one "
+            "calibration pass can own the exported checkpoint."
+        )
+    index, block = exporting[0]
+    if index != len(entries) - 1:
+        raise ValueError(
+            f"layerwise.export_dir is set on algorithm entry {index} of {len(entries)}; it "
+            "must be the last, since a later pass would change the model after its shards "
+            "were written."
+        )
+    return block
+
+
+def default_layerwise_resume_dir(quant_cfg: dict, export_path: str) -> tuple[dict, bool]:
+    """Derive ``layerwise.checkpoint_dir`` from ``export_path`` when unset.
+
+    A sibling, not a child: nothing deletes the resume state, so inside ``export_path`` it
+    would ship in the checkpoint. An explicit path is left alone.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    # The exporting block specifically: another pass's explicit checkpoint_dir says nothing
+    # about where this one resumes from.
+    block = layerwise_export_block(quant_cfg.get("algorithm"))
+    if block is None or block.get("checkpoint_dir") is not None:
+        return quant_cfg, False
+    block["checkpoint_dir"] = export_path.rstrip("/") + ".layerwise_resume"
+    return quant_cfg, True
 
 
 def needs_checkpoint_path_update(quant_cfg: dict) -> bool:
     """Check if quant_cfg has a layerwise checkpoint_dir that should be auto-resolved to a unique subpath."""
-    return _layerwise_checkpoint_dir_location(quant_cfg.get("algorithm")) is not None
+    return _layerwise_checkpoint_dir(quant_cfg.get("algorithm")) is not None
 
 
 def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]:
     """Append a unique ``<model_name>_<config_hash>`` subdirectory to the layerwise checkpoint_dir.
 
     Allows a single recipe to be reused across models without checkpoint collisions.
-    Supports both the legacy flat ``layerwise_checkpoint_dir`` and the nested
-    ``layerwise.checkpoint_dir`` shape, writing back to whichever the user provided.
     Must only be called when :func:`needs_checkpoint_path_update` returns True.
 
     Returns ``(updated_quant_cfg, resolved_path)`` so the caller can log or
     reference the resolved path without re-deriving the dict shape.
     """
-    location = _layerwise_checkpoint_dir_location(quant_cfg["algorithm"])
-    assert location is not None  # guaranteed by needs_checkpoint_path_update
-    shape, base_dir = location
+    assert needs_checkpoint_path_update(quant_cfg), "no layerwise.checkpoint_dir to resolve"
 
     name = model_path.rstrip("/")
     if "/" in name and not os.path.isabs(name):
@@ -989,12 +1243,164 @@ def resolve_checkpoint_dir(quant_cfg: dict, model_path: str) -> tuple[dict, str]
         name = Path(name).name
 
     config_hash = hashlib.sha256(json.dumps(quant_cfg, default=str).encode()).hexdigest()[:8]
-    resolved = os.path.join(base_dir, f"{name}_{config_hash}")
+    suffix = f"{name}_{config_hash}"
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    algo = quant_cfg["algorithm"]
-    if "layerwise_checkpoint_dir" in algo:
-        algo["layerwise_checkpoint_dir"] = resolved
-    if isinstance(algo.get("layerwise"), dict) and "checkpoint_dir" in algo["layerwise"]:
-        algo["layerwise"]["checkpoint_dir"] = resolved
+    # Each pass keeps its own base, so two layerwise passes cannot resolve onto one manifest.
+    exporting = layerwise_export_block(quant_cfg.get("algorithm"))
+    resolved = None
+    for block in _layerwise_blocks(quant_cfg.get("algorithm")):
+        if block.get("checkpoint_dir") is None:
+            continue
+        block["checkpoint_dir"] = os.path.join(block["checkpoint_dir"], suffix)
+        if resolved is None or block is exporting:
+            resolved = block["checkpoint_dir"]
+    assert resolved is not None  # needs_checkpoint_path_update found one above
     return quant_cfg, resolved
+
+
+def set_layerwise_export_dir(quant_cfg: dict, export_path: str) -> dict:
+    """Retarget layerwise per-layer export at ``export_path``.
+
+    The recipe opts in via ``layerwise.export_dir``; its value is a placeholder, since the
+    destination is per-run. Raises when nothing was retargeted: the caller decides to skip
+    the real export from a separately parsed recipe, so a silent no-op would leave
+    ``--export_path`` empty on a run reporting success.
+    """
+    quant_cfg = copy.deepcopy(quant_cfg)
+    algorithm = quant_cfg.get("algorithm")
+    block = layerwise_export_block(algorithm)
+    if block is None:
+        raise ValueError(
+            "layerwise export is enabled but no layerwise.export_dir was found to retarget "
+            f"in algorithm={algorithm!r}. The exported shards would go to the recipe's "
+            "placeholder path instead of --export_path."
+        )
+    block["export_dir"] = export_path
+    return quant_cfg
+
+
+def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
+    """Add the MLflow tracking flags."""
+    parser.add_argument(
+        "--mlflow",
+        default=None,
+        help=(
+            "Track this run on an MLflow server (e.g. https://<your-mlflow-server>/), "
+            "uploading the command, the resolved recipe, the run log and the quantization "
+            "summaries. MLflow's own $MLFLOW_TRACKING_URI enables tracking without this "
+            "flag, which overrides it. A URI taken from the environment is best-effort: if "
+            "it is unusable the run warns and continues untracked."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_experiment",
+        default=None,
+        help=(
+            "MLflow experiment name. Default: "
+            "$USER/hf_ptq/<checkpoint basename>-<recipe name, or --qformat if no --recipe>."
+        ),
+    )
+    parser.add_argument(
+        "--mlflow_run_name",
+        default=None,
+        help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
+    )
+
+
+def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """Settle where tracking is configured from, and name the experiment."""
+    # MLflow's own variable enables tracking on its own; --mlflow overrides it. Only the
+    # flag is a deliberate request, so only the flag is fatal when the URI is unusable: the
+    # variable is commonly exported for unrelated tooling and must not fail a quantization.
+    args.mlflow_required = args.mlflow is not None
+    args.mlflow = args.mlflow or os.environ.get("MLFLOW_TRACKING_URI") or None
+    if args.mlflow:
+        try:
+            args.mlflow = validate_tracking_uri(args.mlflow)
+        except ValueError as e:
+            if args.mlflow_required:
+                parser.error(f"--mlflow: {e}")
+            warnings.warn(f"Ignoring MLFLOW_TRACKING_URI, continuing untracked: {e}")
+            args.mlflow = None
+        else:
+            args.mlflow_experiment = args.mlflow_experiment or default_experiment_name(
+                "hf_ptq",
+                args.pyt_ckpt_path,
+                Path(args.recipe).stem if args.recipe else args.qformat,
+            )
+
+
+_MLFLOW_NON_PARAM_ARGS = frozenset(
+    {"dist_state", "mlflow", "mlflow_experiment", "mlflow_required", "mlflow_run_name"}
+)
+
+
+def _mlflow_run_inputs(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Params and start-time artifacts describing this PTQ run."""
+    params = {k: v for k, v in vars(args).items() if k not in _MLFLOW_NON_PARAM_ARGS}
+    # dist_state is an object, so record the one field worth searching on.
+    params["world_size"] = args.dist_state.world_size
+    texts = {}
+    if args.recipe:
+        # The resolved recipe, not the source file: a recipe may be a directory or use
+        # $imports, and only the resolved form is self-contained.
+        resolved = load_recipe(args.recipe).model_dump(mode="json")
+        texts["recipe/resolved_recipe.yaml"] = yaml.safe_dump(resolved, sort_keys=False)
+    return params, texts
+
+
+def _mlflow_logger(args: argparse.Namespace) -> MlflowRunLogger:
+    """Build this run's logger; inert unless --mlflow was given and this is the main rank."""
+    return MlflowRunLogger(
+        args.mlflow,
+        args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        enabled=bool(args.mlflow) and args.dist_state.is_main,
+        required=args.mlflow_required,
+    )
+
+
+def mlflow_run(args: argparse.Namespace) -> AbstractContextManager:
+    """Track this invocation for the duration of the block, or do nothing if untracked."""
+    logger = _mlflow_logger(args)
+    if not logger.enabled:
+        # Gathering the inputs re-reads the recipe, so keep it off the untracked path.
+        return nullcontext()
+    params, texts = _mlflow_run_inputs(args)
+    return logger.track(
+        params=params,
+        tags=_mlflow_run_tags(args),
+        texts=texts,
+        files=_mlflow_run_outputs(args),
+    )
+
+
+def _mlflow_run_tags(args: argparse.Namespace) -> dict[str, str]:
+    """Tags shared with the evaluation side, so a PTQ run and the evaluations of the
+    checkpoint it produced can be found together on one tracking server.
+
+    ``checkpoint_path`` is the checkpoint this run *writes*, because that is what an
+    evaluation is later pointed at (NEL takes ``deployment.checkpoint_path``); the input is
+    kept separately. It is resolved because ``--export_path`` defaults to a relative path,
+    which is useless as a join key.
+    """
+    return {
+        "model": Path(args.pyt_ckpt_path).name,
+        "checkpoint_path": str(Path(args.export_path).resolve()),
+        "source_checkpoint_path": args.pyt_ckpt_path,
+    }
+
+
+def _mlflow_run_outputs(args: argparse.Namespace) -> dict[str, Path]:
+    """Summaries written by post_quantize, keyed by artifact path.
+
+    Uploaded without the leading dot, which is awkward to browse in the MLflow UI. Missing
+    entries are skipped: the MoE table only exists for MoE models, and neither file is
+    written under ``--no-verbose``.
+    """
+    export_path = Path(args.export_path)
+    return {
+        "summary/quant_summary.txt": export_path / ".quant_summary.txt",
+        "summary/moe.html": export_path / ".moe.html",
+    }

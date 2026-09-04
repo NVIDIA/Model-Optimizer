@@ -21,6 +21,7 @@
 import io
 import json
 import os
+import re
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -28,13 +29,14 @@ from typing import Any
 
 import torch
 import torch.distributed
-from huggingface_hub import hf_hub_download
+from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 from modelopt import __version__
-from modelopt.torch.utils import import_plugin
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import GroupedQuantizer
+from modelopt.torch.utils import import_plugin, warn_rank_0
 
 from .convert_hf_config import convert_hf_quant_config_format
 from .model_config import (
@@ -52,8 +54,12 @@ from .plugins.hf_checkpoint_utils import (
     copy_non_safetensor_files_from_ckpt,
     load_multimodal_components,
 )
-from .plugins.mcore_common import all_mcore_hf_export_mapping
+from .plugins.mcore_common import (
+    all_mcore_hf_export_mapping,
+    all_mcore_hf_vision_passthrough_mapping,
+)
 from .plugins.mcore_custom import (
+    LLAVA_VISION_PREFIXES,
     CustomModuleMapping,
     get_safetensor,
     save_safetensors_by_layer_index,
@@ -78,12 +84,7 @@ with import_plugin("transformers", verbose=False):
 has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.models.gpt import GPTModel
-    from megatron.core.models.mamba import MambaModel
-
-    try:
-        from megatron.core.models.hybrid.hybrid_model import HybridModel
-    except ImportError:
-        HybridModel = MambaModel
+    from megatron.core.models.hybrid.hybrid_model import HybridModel
     from megatron.core.models.multimodal.llava_model import LLaVAModel
     from megatron.core.parallel_state import (
         get_data_parallel_rank,
@@ -125,6 +126,7 @@ class GPTModelExporter:
         dtype: The weights data type to export the unquantized layers.
         trust_remote_code: Whether to trust remote code in the HuggingFace pretrained model.
         moe_router_dtype: The data type of the MoE router. Can be "fp32", "fp64", or None (default to the model dtype).
+        clamp_kv_cache_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
     """
 
     def __init__(
@@ -135,9 +137,17 @@ class GPTModelExporter:
         dtype=torch.bfloat16,
         trust_remote_code: bool = False,
         moe_router_dtype: str | None = None,
+        clamp_kv_cache_scales: bool = True,
     ):
         """Create a GPTModel exporter instance."""
-        if not isinstance(model, (GPTModel, MambaModel, HybridModel, LLaVAModel)):
+        # VLM wrappers keep the decoder under ``.language_model``; only that is exported, the
+        # vision tower being copied from the HF checkpoint as-is.
+        language_model = (
+            model
+            if isinstance(model, (GPTModel, HybridModel))
+            else getattr(model, "language_model", None)
+        )
+        if not isinstance(language_model, (GPTModel, HybridModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
@@ -157,22 +167,26 @@ class GPTModelExporter:
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
 
         # Update hf_config
-        self._hf_text_config.num_hidden_layers = model.config.num_layers
-        self._hf_text_config.hidden_size = model.config.hidden_size
-        self._hf_text_config.head_dim = model.config.kv_channels
-        self._hf_text_config.num_attention_heads = model.config.num_attention_heads
-        self._hf_text_config.num_key_value_heads = model.config.num_query_groups
+        self._hf_text_config.num_hidden_layers = language_model.config.num_layers
+        self._hf_text_config.hidden_size = language_model.config.hidden_size
+        self._hf_text_config.head_dim = language_model.config.kv_channels
+        self._hf_text_config.num_attention_heads = language_model.config.num_attention_heads
+        self._hf_text_config.num_key_value_heads = language_model.config.num_query_groups
         self.is_multimodal = isinstance(model, LLaVAModel)
         if not self.is_multimodal:
-            self._hf_text_config.intermediate_size = model.config.ffn_hidden_size
+            self._hf_text_config.intermediate_size = language_model.config.ffn_hidden_size
         self._hf_quant_config: dict = {}
         self._hf_extra_config = None
         self.export_extra_modules = export_extra_modules
-        self.is_multimodal = isinstance(model, LLaVAModel)
-        self.model = model.language_model if self.is_multimodal else model
+        self.model = language_model
         self.dtype = dtype
         self.trust_remote_code = trust_remote_code
+        self.clamp_kv_cache_scales = clamp_kv_cache_scales
         self.arch = self._hf_config.architectures[0]
+        # ``None`` when there is no vision tower to copy through.
+        self.vision_passthrough_prefixes = all_mcore_hf_vision_passthrough_mapping.get(
+            self.arch, LLAVA_VISION_PREFIXES if self.is_multimodal else None
+        )
         # TODO: May modify this later according to what quantization exported ckpt is, currently only support BF16.
         if self.arch == "GptOssForCausalLM":
             if hasattr(self._hf_config, "quantization_config"):
@@ -397,14 +411,13 @@ class GPTModelExporter:
             # Merge the multimodal components into that shard so they land in a file
             # the index builder picks up (it scans shards 1..num_layers).
             first_layer_key = next(iter(layer_state_dicts))
-            if self.is_multimodal:
-                multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
-                layer_state_dicts[first_layer_key].update(multimodal_state_dict)
-            elif self.arch == "Qwen3VLForConditionalGeneration":
-                vision_state_dict = load_multimodal_components(
-                    pretrained_model_name_or_path, prefixes=("model.visual.",)
+            if self.vision_passthrough_prefixes is not None:
+                layer_state_dicts[first_layer_key].update(
+                    load_multimodal_components(
+                        pretrained_model_name_or_path,
+                        prefixes=self.vision_passthrough_prefixes,
+                    )
                 )
-                layer_state_dicts[first_layer_key].update(vision_state_dict)
 
         # Bracket the writer's config.json read-modify-write with barriers so peers
         # never observe a truncated file (also ensures export_dir exists).
@@ -427,6 +440,84 @@ class GPTModelExporter:
             save_directory=save_directory,
             name_template="model-{:05d}-of-{:05d}",
         )
+
+        # Every rank has written its shards; one rank now checks nothing was dropped. The result is
+        # shared so every rank raises together -- this is public API, and a lone raise would leave
+        # peers hanging in the next collective instead of surfacing the error.
+        torch.distributed.barrier()
+        failure = ""
+        if is_writer_rank:
+            try:
+                self._verify_exported_keys(save_directory, pretrained_model_name_or_path)
+            except Exception as e:
+                # Any escape would strand peers in the all_gather below, which is what this
+                # block exists to prevent.
+                failure = f"{type(e).__name__}: {e}"
+        if torch.distributed.is_initialized():
+            # all_gather rather than broadcast: the writer is not necessarily rank 0, and ``src``
+            # must be identical on every rank.
+            gathered: list = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(gathered, failure)
+            failure = next((f for f in gathered if f), "")
+        if failure:
+            raise RuntimeError(failure)
+
+    def _verify_exported_keys(self, save_directory, pretrained_model_name_or_path) -> None:
+        """Raise if the export dropped tensors the source has: a missing rule emits nothing."""
+        if pretrained_model_name_or_path is None:
+            return
+        source_dir = str(pretrained_model_name_or_path)
+        if os.path.isdir(source_dir):
+            source = _read_checkpoint_keys(source_dir)
+        else:
+            # A repo id is the documented invocation. Read the safetensors headers rather than
+            # downloading weights: the export deliberately never fetches them.
+            try:
+                source = set(get_safetensors_metadata(source_dir).weight_map)
+            except Exception:
+                warn_rank_0(
+                    f"Export self-check skipped: cannot read {pretrained_model_name_or_path}."
+                )
+                return
+        index_file = Path(save_directory) / "model.safetensors.index.json"
+        if not index_file.exists():
+            single = Path(save_directory) / "model.safetensors"
+            if not single.exists():
+                warn_rank_0("Export self-check skipped: no safetensors written.")
+                return
+            with safe_open(str(single), framework="pt", device="cpu") as f:
+                exported = set(f.keys())
+        else:
+            with open(index_file) as f:
+                exported = set(json.load(f)["weight_map"])
+        if not source:
+            warn_rank_0(f"Export self-check skipped: no tensor index found in {source_dir}.")
+            return
+
+        # Narrow on purpose: compare module prefixes, not tensor names, since a quantized source
+        # carries extras with no export counterpart, and only inside decoder layers, whose naming
+        # is stable. A dropped decoder module is the case that loads fine and produces garbage.
+        num_layers = self.model.config.num_layers
+        exported_modules = {key.rsplit(".", 1)[0] for key in exported}
+        missing = set()
+        for key in source - exported:
+            layer = re.search(r"\.layers\.(\d+)\.", key)
+            if layer is None:
+                continue  # see the note above: decoder layers only
+            if int(layer.group(1)) >= num_layers:
+                continue  # depth-pruned model: the source has layers this export does not
+            if key.rsplit(".", 1)[0] in exported_modules:
+                continue  # module is exported; this name is a source-side quantization artifact
+            if "rotary_emb" in key:
+                continue  # non-persistent buffer some conversions still ship
+            missing.add(key)
+        if missing:
+            raise RuntimeError(
+                f"Export dropped {len(missing)} tensor(s) present in "
+                f"{pretrained_model_name_or_path}, e.g. {sorted(missing)[:8]}. The checkpoint "
+                f"written to {save_directory} is incomplete -- the architecture has no export "
+                "rule for one of its decoder modules."
+            )
 
     @property
     def state_dict(self):
@@ -497,111 +588,209 @@ class GPTModelExporter:
             return None, None
         return fused_key, weight
 
-    def _get_transformer_layer_state_dict(self, layer, layer_id):
+    def _get_transformer_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.input_layernorm, IdentityOp):
-            self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+            self.rules["input_layernorm"](layer.input_layernorm, layer_id, is_mtp=is_mtp)
         else:
+            # GatedDeltaNet fuses the input layernorm into ``in_proj`` rather than ``linear_qkv``.
+            qkv_module = getattr(layer.self_attention, "linear_qkv", None)
+            if qkv_module is None:
+                qkv_module = getattr(layer.self_attention, "in_proj", None)
             fused_key, norm_weight = self._get_fused_norm_weight(
-                getattr(layer.self_attention, "linear_qkv", None),
+                qkv_module,
                 primary_key="fused_input_layernorm",
             )
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
                 if hasattr(layer.self_attention, "linear_q_proj"):
-                    self.rules["linear_q_proj"](layer.self_attention.linear_q_proj, layer_id)
+                    self.rules["linear_q_proj"](
+                        layer.self_attention.linear_q_proj, layer_id, is_mtp=is_mtp
+                    )
                 else:
                     self.rules["linear_q_down_proj"](
-                        layer.self_attention.linear_q_down_proj, layer_id
+                        layer.self_attention.linear_q_down_proj, layer_id, is_mtp=is_mtp
                     )
-                    self.rules["linear_q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                    self.rules["linear_q_up_proj"](layer.self_attention.linear_q_up_proj, layer_id)
+                    self.rules["linear_q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["linear_q_up_proj"](
+                        layer.self_attention.linear_q_up_proj, layer_id, is_mtp=is_mtp
+                    )
 
                 self.rules["linear_kv_down_proj"](
-                    layer.self_attention.linear_kv_down_proj, layer_id
+                    layer.self_attention.linear_kv_down_proj, layer_id, is_mtp=is_mtp
                 )
-                self.rules["linear_kv_layernorm"](layer.self_attention.kv_layernorm, layer_id)
-                self.rules["linear_kv_up_proj"](layer.self_attention.linear_kv_up_proj, layer_id)
-                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                self.rules["linear_kv_layernorm"](
+                    layer.self_attention.kv_layernorm, layer_id, is_mtp=is_mtp
+                )
+                self.rules["linear_kv_up_proj"](
+                    layer.self_attention.linear_kv_up_proj, layer_id, is_mtp=is_mtp
+                )
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id, is_mtp=is_mtp)
+            elif "linear_attn" in self.rules and hasattr(layer.self_attention, "in_proj"):
+                # GatedDeltaNet (Qwen3.5 linear attention): no q/k layernorm, no core_attention.
+                self._get_gated_delta_net_state_dict(layer, layer_id, is_mtp=is_mtp)
             else:
                 if layer.self_attention.q_layernorm is not None and not isinstance(
                     layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
                 ):
-                    self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                    self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
-                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+                    self.rules["q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["k_layernorm"](
+                        layer.self_attention.k_layernorm, layer_id, is_mtp=is_mtp
+                    )
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id, is_mtp=is_mtp)
                 if (
                     hasattr(layer.self_attention, "core_attention")
                     and "core_attention" in self.rules
                 ):  # KV cache quant export
-                    self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
-                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                    self.rules["core_attention"](
+                        layer.self_attention.core_attention, layer_id, is_mtp=is_mtp
+                    )
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id, is_mtp=is_mtp)
                 if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
                     self.rules["softmax_offset"](
-                        layer.self_attention.core_attention.softmax_offset, layer_id
+                        layer.self_attention.core_attention.softmax_offset, layer_id, is_mtp=is_mtp
                     )
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
-            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id, is_mtp=is_mtp)
         elif not isinstance(layer.mlp, IdentityOp) and "MoE" not in str(type(layer.mlp)):
             fused_key, norm_weight = self._get_fused_norm_weight(
                 getattr(layer.mlp, "linear_fc1", None),
                 primary_key="fused_pre_mlp_layernorm",
             )
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
-                self.rules["router"](layer.mlp.router, layer_id, dtype=self.moe_router_dtype)
+                self.rules["router"](
+                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype, is_mtp=is_mtp
+                )
                 if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
-                    self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                    self.rules["fc1_latent_proj"](
+                        layer.mlp.fc1_latent_proj, layer_id, is_mtp=is_mtp
+                    )
                 if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
-                    self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
+                    self.rules["fc2_latent_proj"](
+                        layer.mlp.fc2_latent_proj, layer_id, is_mtp=is_mtp
+                    )
                 if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
                     self.rules["shared_experts.linear_fc1"](
-                        layer.mlp.shared_experts.linear_fc1, layer_id
+                        layer.mlp.shared_experts.linear_fc1, layer_id, is_mtp=is_mtp
                     )
                     self.rules["shared_experts.linear_fc2"](
-                        layer.mlp.shared_experts.linear_fc2, layer_id
+                        layer.mlp.shared_experts.linear_fc2, layer_id, is_mtp=is_mtp
                     )
+                    if (
+                        "shared_experts.gate_weight" in self.rules
+                        and getattr(layer.mlp.shared_experts, "gate_weight", None) is not None
+                    ):
+                        self.rules["shared_experts.gate_weight"](
+                            layer.mlp.shared_experts.gate_weight, layer_id, is_mtp=is_mtp
+                        )
                 if hasattr(layer.mlp.experts, "local_experts"):
                     if not self.rules.get("use_packed_local_experts", False):
                         for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
                             self.rules["local_experts.linear_fc1"](
-                                expert.linear_fc1, layer_id, expert_id
+                                expert.linear_fc1, layer_id, expert_id, is_mtp=is_mtp
                             )
                             self.rules["local_experts.linear_fc2"](
-                                expert.linear_fc2, layer_id, expert_id
+                                expert.linear_fc2, layer_id, expert_id, is_mtp=is_mtp
                             )
                     else:
                         # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
-                            layer.mlp.experts.local_experts, layer_id
+                            layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
                         )
                         self.rules["local_experts.linear_fc2"](
-                            layer.mlp.experts.local_experts, layer_id
+                            layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
                         )
                 elif "experts.linear_fc1" in self.rules:
                     # TEGroupedMLP: experts use fused grouped GEMM with a single
                     # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
                     # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
                     # "local_experts.linear_fc1" which expects per-expert iteration.
-                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
-                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
+                    self.rules["experts.linear_fc1"](
+                        layer.mlp.experts.linear_fc1, layer_id, is_mtp=is_mtp
+                    )
+                    self.rules["experts.linear_fc2"](
+                        layer.mlp.experts.linear_fc2, layer_id, is_mtp=is_mtp
+                    )
+                else:
+                    # Otherwise the routed experts are dropped and the checkpoint looks valid.
+                    raise NotImplementedError(
+                        f"No export rule for {type(layer.mlp.experts).__name__} experts of "
+                        f"{self.arch}: fused (grouped GEMM) experts need an 'experts.linear_fc1' "
+                        "rule. Re-run quantization and export with --no_moe_grouped_gemm to build "
+                        "the experts as SequentialMLP instead."
+                    )
             else:
-                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
 
     def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
-        """Export the MTP module.
+        """Export the live MTP module, or copy it from the pretrained model if absent."""
+        model = getattr(self, "model", None)
+        mtp = getattr(model, "mtp", None)
+        if mtp is None or not hasattr(mtp, "layers") or len(mtp.layers) == 0:
+            return self._copy_mtp_state_dict_from_pretrained()
 
-        Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
-        """
-        # TODO Implement MTP export for quantized MTP
-        # Hacky version for now: copy MTP weights from pretrained model
+        # Inner layers reuse the base walker with is_mtp=True (retargets backbone -> mtp).
+        saved_state_dict = self._state_dict
+        self._state_dict = OrderedDict()
+        try:
+            for mtp_layer in mtp.layers:
+                # Some architectures (Qwen3.5) put a single TransformerLayer here, not a container.
+                inner = mtp_layer.mtp_model_layer
+                inner_layers = getattr(inner, "layers", None) or [inner]
+                first_id = inner_layers[0].layer_number - 1
+                last_id = inner_layers[-1].layer_number - 1
+
+                # Outer predictor projections attach to the first inner HF index.
+                if "mtp.enorm" in self.rules:
+                    self.rules["mtp.enorm"](mtp_layer.enorm, first_id)
+                if "mtp.hnorm" in self.rules:
+                    self.rules["mtp.hnorm"](mtp_layer.hnorm, first_id)
+                if "mtp.eh_proj" in self.rules:
+                    self.rules["mtp.eh_proj"](mtp_layer.eh_proj, first_id)
+
+                # Inner layers reuse the base decoder walker (is_mtp=True).
+                for inner in inner_layers:
+                    hf_layer_id = inner.layer_number - 1
+                    if isinstance(inner, MambaLayer):
+                        self._get_mamba_layer_state_dict(inner, hf_layer_id, is_mtp=True)
+                    elif isinstance(inner, TransformerLayer):
+                        self._get_transformer_layer_state_dict(inner, hf_layer_id, is_mtp=True)
+                    else:
+                        raise ValueError(
+                            "Only TransformerLayer or MambaLayer are supported in the MTP block."
+                        )
+
+                # The MTP block's own final layernorm attaches to the last inner HF index.
+                final_layernorm = getattr(mtp_layer, "final_layernorm", None)
+                if (
+                    "mtp.final_layernorm" in self.rules
+                    and final_layernorm is not None
+                    and not isinstance(final_layernorm, IdentityOp)
+                ):
+                    self.rules["mtp.final_layernorm"](final_layernorm, last_id)
+
+            mtp_state_dict = self._state_dict
+        finally:
+            self._state_dict = saved_state_dict
+
+        if len(mtp_state_dict) > 0:
+            print(f"Exported {len(mtp_state_dict)} MTP tensors from the live model")
+        return mtp_state_dict
+
+    def _copy_mtp_state_dict_from_pretrained(self) -> dict[str, torch.Tensor]:
+        """Copy the BF16 MTP weights from the pretrained model (used when there is no live MTP)."""
         mtp_state_dict = {}
         if not self._hf_pretrained_model_name:
             return mtp_state_dict
@@ -658,24 +847,34 @@ class GPTModelExporter:
             self.exclude_modules.append("mtp*")
         return mtp_state_dict
 
-    def _get_mamba_layer_state_dict(self, layer, layer_id):
+    def _get_gated_delta_net_state_dict(self, layer, layer_id, is_mtp=False):
+        """Export a GatedDeltaNet (Qwen3.5 linear-attention) layer's ``self_attention``."""
+        gdn = layer.self_attention
+        self.rules["linear_attn"](gdn, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.conv1d"](gdn.conv1d, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.A_log"](gdn.A_log, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.dt_bias"](gdn.dt_bias, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.out_norm"](gdn.out_norm, layer_id, is_mtp=is_mtp)
+        self.rules["linear_attn.out_proj"](gdn.out_proj, layer_id, is_mtp=is_mtp)
+
+    def _get_mamba_layer_state_dict(self, layer, layer_id, is_mtp=False):
         if not isinstance(layer.norm, IdentityOp):
-            self.rules["norm"](layer.norm, layer_id)
+            self.rules["norm"](layer.norm, layer_id, is_mtp=is_mtp)
         else:
             # TE spec: norm is fused into in_proj (QuantTELayerNormColumnParallelLinear).
             # Mamba uses the legacy single-key `fused_norm` rule (Nemotron-H style).
             fused_key, norm_weight = self._get_fused_norm_weight(layer.mixer.in_proj)
             if norm_weight is not None:
-                self.rules[fused_key](norm_weight, layer_id)
+                self.rules[fused_key](norm_weight, layer_id, is_mtp=is_mtp)
 
-        self.rules["mixer_norm"](layer.mixer.norm, layer_id)
-        self.rules["A_log"](layer.mixer.A_log, layer_id)
-        self.rules["D"](layer.mixer.D, layer_id)
-        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
+        self.rules["mixer_norm"](layer.mixer.norm, layer_id, is_mtp=is_mtp)
+        self.rules["A_log"](layer.mixer.A_log, layer_id, is_mtp=is_mtp)
+        self.rules["D"](layer.mixer.D, layer_id, is_mtp=is_mtp)
+        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id, is_mtp=is_mtp)
 
-        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id)
-        self.rules["in_proj"](layer.mixer.in_proj, layer_id)
-        self.rules["out_proj"](layer.mixer.out_proj, layer_id)
+        self.rules["conv1d"](_get_mamba_conv1d(layer.mixer), layer_id, is_mtp=is_mtp)
+        self.rules["in_proj"](layer.mixer.in_proj, layer_id, is_mtp=is_mtp)
+        self.rules["out_proj"](layer.mixer.out_proj, layer_id, is_mtp=is_mtp)
 
     def _get_medusa_heads_state_dict(self):
         medusa_heads = getattr(self.model, "medusa_heads", None)
@@ -793,7 +992,9 @@ class GPTModelExporter:
                 "qkv_slicing": self._qkv_slicing,
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
+                "gated_delta_net_slicing": self._gated_delta_net_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
+                "grouped_mlp_packing": self._grouped_mlp_packing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -936,6 +1137,16 @@ class GPTModelExporter:
         if layer_name not in self.exclude_modules:
             self.exclude_modules.append(layer_name)
 
+    @staticmethod
+    def _mtp_prefix(prefix: str) -> str:
+        """Rewrite a base-model target prefix (backbone/model root) to its MTP counterpart."""
+        if "backbone" in prefix:
+            return prefix.replace("backbone", "mtp", 1)
+        # Replace the root only: a VLM's "model.language_model." must not become "mtp.language_mtp.".
+        if prefix.startswith("model.language_model."):
+            return "mtp." + prefix[len("model.language_model.") :]
+        return prefix.replace("model", "mtp", 1)
+
     def _name_remapping(
         self,
         module: torch.nn.Module | torch.Tensor,
@@ -943,18 +1154,30 @@ class GPTModelExporter:
         skip_output_scale: bool = True,
         mapping={},
         dtype: torch.dtype | None = None,
+        is_mtp: bool = False,
+        zero_centered_gamma: bool = False,
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         if dtype is None:
             dtype = self.dtype
 
         if isinstance(module, torch.Tensor):
-            self._state_dict[prefix] = module
+            self._state_dict[prefix] = (module + 1.0) if zero_centered_gamma else module
             return
 
         name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
         self._record_layer_quant_config(prefix, qformat, block_size)
 
         weight = name_to_value.pop("weight")
+        if zero_centered_gamma:
+            # Megatron centres this gamma on 0, HF on 1. Assert, don't derive: the config flag
+            # is model-wide while this one is per-norm.
+            assert getattr(module, "zero_centered_gamma", False), (
+                f"{prefix} is mapped as zero-centered gamma but the module reports otherwise; "
+                "exporting would shift the weights by 1.0"
+            )
+            weight = weight + 1.0
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         if weight_scale is None:
@@ -982,8 +1205,10 @@ class GPTModelExporter:
                 self._state_dict[prefix + source_key] = val
 
     def _gated_mlp_slicing(
-        self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
+        self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj", is_mtp=False
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         name_to_value, qformat, block_size = self._get_quantized_state(
             module, self.dtype, prefix=prefix
         )
@@ -1043,8 +1268,90 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
-    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
-        """Export TEGroupedMLP weight0..weight{N-1} as one HF-style entry per expert.
+    def _grouped_mlp_packing(self, module, prefix, parallel_config=None, is_mtp=False):
+        """Pack TEGroupedLinear experts into one ``[num_experts, out, in]`` tensor (Qwen3.5 layout).
+
+        Reuses the per-expert path for the EP gather and per-expert quantizers, then stacks by
+        global expert id and re-quantizes once with the max scale, as ``_pack_name_remapping`` does.
+        """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        marker = "\x00pack\x00"
+        saved_state_dict = self._state_dict
+        self._state_dict = OrderedDict()
+        try:
+            qformat, block_size = self._grouped_mlp_slicing(
+                module,
+                marker + "{}",
+                parallel_config=parallel_config,
+                is_mtp=False,
+                quantize=False,
+                record_quant_config=False,
+            )
+            per_expert = self._state_dict
+        finally:
+            self._state_dict = saved_state_dict
+
+        def collect(suffix):
+            found = {}
+            for key, value in per_expert.items():
+                if not key.startswith(marker) or not key.endswith(suffix):
+                    continue
+                found[int(key[len(marker) :].split(".", 1)[0])] = value
+            return [found[i] for i in sorted(found)]
+
+        weights = collect(".weight")
+        if not weights:
+            return
+        handled = (".weight", ".weight_scale", ".weight_scale_2", ".input_scale")
+        unhandled = {k.split(".", 1)[1] for k in per_expert if not k.endswith(handled)}
+        assert not unhandled, (
+            f"{prefix}: grouped-expert packing has no rule for {sorted(unhandled)}"
+        )
+        # Record against the packed prefix, as _pack_name_remapping does for the other packed path.
+        if qformat in (None, QUANTIZATION_NONE):
+            self._record_excluded_module(prefix)
+        else:
+            assert block_size is not None
+            self._record_layer_quant_config(prefix, qformat, block_size)
+        scales, scales_2 = collect(".weight_scale"), collect(".weight_scale_2")
+        input_scales = collect(".input_scale")
+
+        # Quantize once over the stack, exactly as _pack_name_remapping does.
+        merged_weight = torch.stack(weights, dim=0)
+        if not scales:
+            self._state_dict[prefix] = merged_weight
+        else:
+            if scales_2:
+                # NVFP4 keeps each expert's block scales, rescaled onto the merged global scale.
+                merged_scale, merged_scale_2 = self._merge_nvfp4_expert_scales(scales, scales_2)
+            else:
+                merged_scale, merged_scale_2 = torch.max(torch.stack(scales, dim=0), dim=0)[0], None
+            self._state_dict[prefix] = to_quantized_weight(
+                merged_weight, merged_scale, qformat, merged_scale_2, block_size
+            )
+            # Same suffixes as _pack_name_remapping so both packed paths agree.
+            self._state_dict[prefix + "_weight_scale"] = merged_scale
+            if merged_scale_2 is not None:
+                self._state_dict[prefix + "_weight_scale_2"] = merged_scale_2
+        if input_scales:
+            self._state_dict[prefix + "_input_scale"] = torch.max(
+                torch.stack(input_scales, dim=0), dim=0
+            )[0]
+
+    def _grouped_mlp_slicing(
+        self,
+        module,
+        prefix,
+        parallel_config=None,
+        is_mtp=False,
+        quantize=True,
+        record_quant_config=True,
+    ):
+        """Export TEGroupedLinear weight0..weight{N-1} as one HF-style entry per expert.
+
+        ``quantize=False`` emits unquantized weights alongside the scales, which
+        ``_grouped_mlp_packing`` needs so it can quantize once over the stacked tensor.
 
         At EP>1, local ids are mapped to global via ``module.local_expert_indices``
         and per-expert state is ``all_gather_object``-ed across the EP group. All EP ranks
@@ -1052,25 +1359,24 @@ class GPTModelExporter:
 
         Reverse of _grouped_mlp_merging in the importer.
         """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         num_experts = module.num_gemms
-
-        # TEGroupedLinear doesn't have module.weight (it has weight0, weight1, ...).
-        # Temporarily assign weight = weight0 so _get_quantized_state can extract
-        # qformat, scales, and input_scale from the module's quantizers.
-        has_weight = hasattr(module, "weight")
-        if not has_weight:
-            module.weight = module.weight0
-        try:
-            name_to_value, qformat, block_size = self._get_quantized_state(
-                module, self.dtype, prefix=prefix
-            )
-            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
-            name_to_value.pop("weight", None)
-        finally:
-            if not has_weight and hasattr(module, "weight"):
-                delattr(module, "weight")
-
         state_dict = module.state_dict()
+
+        has_weight = hasattr(module, "weight")
+        grouped_wq = getattr(module, "weight_quantizer", None)
+        # Quantized TE grouped experts must be per-expert (GroupedQuantizer); None = unquantized MLP.
+        assert grouped_wq is None or isinstance(grouped_wq, GroupedQuantizer), (
+            f"TEGroupedLinear.weight_quantizer must be GroupedQuantizer or None, got "
+            f"{type(grouped_wq).__name__}; pre-0.47 single-quantizer checkpoints are not supported."
+        )
+        if grouped_wq is not None and num_experts > len(grouped_wq):
+            warn_rank_0(
+                f"TEGroupedLinear has {num_experts} local experts but only {len(grouped_wq)} "
+                f"per-expert weight quantizers; experts >= {len(grouped_wq)} reuse expert "
+                f"{len(grouped_wq) - 1}'s scales (TP/EP-mismatch fallback)."
+            )
 
         ep_size = (
             get_expert_model_parallel_world_size() if torch.distributed.is_initialized() else 1
@@ -1113,54 +1419,97 @@ class GPTModelExporter:
             )
             if missing_flag.item() != 0:
                 raise ValueError(
-                    f"TEGroupedMLP missing expert weights on at least one EP rank "
+                    f"TEGroupedLinear missing expert weights on at least one EP rank "
                     f"(local missing on rank {ep_rank}: {local_missing})"
                 )
         elif local_missing:
-            raise ValueError(f"TEGroupedMLP missing expert weights: {local_missing}")
+            raise ValueError(f"TEGroupedLinear missing expert weights: {local_missing}")
 
-        # Move shared scales/aux to CPU once so the gather payload avoids GPU clones.
-        weight_scale_cpu = weight_scale.detach().cpu().clone() if weight_scale is not None else None
-        weight_scale_2_cpu = (
-            weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
-        )
-        name_to_value_cpu = {
-            k: v.detach().cpu().clone() for k, v in name_to_value.items() if k != "output_scale"
-        }
+        # Per expert, temporarily assign weight = weight{i} and, for the per-expert
+        # quantizer layout (GroupedQuantizer), swap in that expert's own TensorQuantizer,
+        # so _get_quantized_state extracts each expert's own qformat/scales instead of
+        # applying weight0's scales to every expert.
+        local_expert_state: dict[str, torch.Tensor] = {}
+        seen_qformat = None
+        seen_block_size = None
+        # Dynamic quantizers we populate a temporary export-only amax on; reset in finally so
+        # export leaves module state unchanged (else a dynamic-NVFP4 quantizer keeps a stale max|W|).
+        temp_amax_wqs: list = []
+        try:
+            for local_id in range(num_experts):
+                global_id = local_expert_indices[local_id]
+                expert_prefix = prefix.format(global_id) + "."
+                weight_key = f"weight{local_id}"
+
+                module.weight = getattr(module, weight_key)
+                if grouped_wq is not None:
+                    module.weight_quantizer = grouped_wq[min(local_id, len(grouped_wq) - 1)]
+                    # Dynamic-NVFP4 per-expert quantizers carry no stored amax, but
+                    # weight_scale_2 derivation asserts one. Max-calibration weight amax
+                    # is exactly max(|W|), so compute it from this expert's weight.
+                    _wq = module.weight_quantizer
+                    if getattr(_wq, "_amax", None) is None and getattr(_wq, "is_enabled", False):
+                        _wq.amax = module.weight.detach().abs().max().float()
+                        temp_amax_wqs.append(_wq)
+
+                name_to_value, qformat, block_size = self._get_quantized_state(
+                    module, self.dtype, prefix=prefix
+                )
+                weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+                name_to_value.pop("weight", None)
+                seen_qformat, seen_block_size = qformat, block_size
+
+                weight = state_dict[weight_key].to(self.dtype).cpu()
+                weight_scale_cpu = (
+                    weight_scale.detach().cpu().clone() if weight_scale is not None else None
+                )
+                weight_scale_2_cpu = (
+                    weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
+                )
+
+                if weight_scale_cpu is None:
+                    local_expert_state[expert_prefix + "weight"] = weight
+                else:
+                    local_expert_state[expert_prefix + "weight"] = (
+                        weight
+                        if not quantize
+                        else to_quantized_weight(
+                            weight,
+                            weight_scale_cpu,
+                            qformat,
+                            weight_scale_2_cpu,
+                            block_size,
+                        )
+                    )
+                    local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
+
+                if weight_scale_2_cpu is not None:
+                    local_expert_state[expert_prefix + "weight_scale_2"] = (
+                        weight_scale_2_cpu.clone()
+                    )
+
+                for key, val in name_to_value.items():
+                    if key == "output_scale":
+                        continue
+                    local_expert_state[expert_prefix + key] = val.detach().cpu().clone()
+        finally:
+            for _wq in temp_amax_wqs:
+                _wq.reset_amax()
+            if grouped_wq is not None:
+                module.weight_quantizer = grouped_wq
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
 
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
-        # a TEGroupedMLP layer share qformat/block_size, so local values apply globally.
-        num_total_experts = num_experts * ep_size
-        for global_id in range(num_total_experts):
-            self._record_layer_quant_config(prefix.format(global_id) + ".", qformat, block_size)
-
-        local_expert_state: dict[str, torch.Tensor] = {}
-
-        for local_id in range(num_experts):
-            global_id = local_expert_indices[local_id]
-            expert_prefix = prefix.format(global_id) + "."
-            weight_key = f"weight{local_id}"
-
-            weight = state_dict[weight_key].to(self.dtype).cpu()
-
-            if weight_scale_cpu is None:
-                local_expert_state[expert_prefix + "weight"] = weight
-            else:
-                local_expert_state[expert_prefix + "weight"] = to_quantized_weight(
-                    weight,
-                    weight_scale_cpu,
-                    qformat,
-                    weight_scale_2_cpu,
-                    block_size,
+        # a TEGroupedLinear layer share qformat/block_size, so local values apply globally.
+        if seen_qformat is not None and record_quant_config:
+            assert seen_block_size is not None
+            num_total_experts = num_experts * ep_size
+            for global_id in range(num_total_experts):
+                self._record_layer_quant_config(
+                    prefix.format(global_id) + ".", seen_qformat, seen_block_size
                 )
-                local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
-
-            if weight_scale_2_cpu is not None:
-                local_expert_state[expert_prefix + "weight_scale_2"] = weight_scale_2_cpu.clone()
-
-            for key, val in name_to_value_cpu.items():
-                local_expert_state[expert_prefix + key] = val.clone()
 
         if ep_size > 1:
             # all_gather_object pickles trip on quantized uint8 tensors whose
@@ -1175,14 +1524,14 @@ class GPTModelExporter:
             )
             del local_bytes
             for b in gathered_bytes:
-                # weights_only=False: bytes are our own torch.save output from a sibling
-                # EP rank in this job's collective, not user-supplied. weights_only=True
-                # rejects quantized uint8 tensors (custom storage outside the allowlist).
-                s = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
-                self._state_dict.update(s)
+                # weights_only=False: our own torch.save output from a sibling EP rank
+                # in this job's collective, not user-supplied.
+                s_loaded = torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+                self._state_dict.update(s_loaded)
             del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
+        return seen_qformat, seen_block_size
 
     def _qkv_slicing(
         self,
@@ -1191,7 +1540,10 @@ class GPTModelExporter:
         q_proj_name="q_proj",
         k_proj_name="k_proj",
         v_proj_name="v_proj",
+        is_mtp=False,
     ):
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         name_to_value, qformat, block_size = self._get_quantized_state(
             module, self.dtype, prefix=prefix
         )
@@ -1216,7 +1568,11 @@ class GPTModelExporter:
         head_num = config.num_attention_heads
         head_size = config.kv_channels
         heads_per_group = head_num // num_query_groups
-        qkv_total_dim = head_num + 2 * num_query_groups
+        # Gated attention (Qwen3.5) packs a gate beside every query head, so a group holds
+        # [q, gate, k, v]; HF keeps the gate inside ``q_proj``.
+        output_gate = getattr(config, "attention_output_gate", False)
+        group_dim = (2 * heads_per_group if output_gate else heads_per_group) + 2
+        qkv_total_dim = num_query_groups * group_dim
 
         weight = name_to_value.pop("weight")
 
@@ -1238,12 +1594,24 @@ class GPTModelExporter:
 
         q_slice = torch.cat(
             [
-                torch.arange((heads_per_group + 2) * i, (heads_per_group + 2) * i + heads_per_group)
+                torch.arange(group_dim * i, group_dim * i + heads_per_group)
                 for i in range(num_query_groups_local)
             ]
         )
-        k_slice = torch.arange(heads_per_group, per_rank_qkv_dim, (heads_per_group + 2))
-        v_slice = torch.arange(heads_per_group + 1, per_rank_qkv_dim, (heads_per_group + 2))
+        gate_slice = (
+            torch.cat(
+                [
+                    torch.arange(
+                        group_dim * i + heads_per_group, group_dim * i + 2 * heads_per_group
+                    )
+                    for i in range(num_query_groups_local)
+                ]
+            )
+            if output_gate
+            else None
+        )
+        k_slice = torch.arange(group_dim - 2, per_rank_qkv_dim, group_dim)
+        v_slice = torch.arange(group_dim - 1, per_rank_qkv_dim, group_dim)
         ## Example of slices
         ## 7b: num_query_groups = head_num = 32,
         ## q_slice = [0, 3, 6, 9 , ... 90, 93]
@@ -1256,7 +1624,16 @@ class GPTModelExporter:
         slices = [q_slice, k_slice, v_slice]
         prefixes = [q_proj_prefix, k_proj_prefix, v_proj_prefix]
 
-        proj_weights = [weight[s].reshape(-1, hidden_size) for s in slices]
+        def _take(tensor, index, last_dim, with_gate=False):
+            """Gather ``index`` heads, appending the gate heads for q under gated attention."""
+            taken = tensor[index]
+            if with_gate:
+                taken = torch.cat([taken, tensor[gate_slice]], dim=1)
+            return taken.reshape(-1, last_dim)
+
+        gated = [output_gate, False, False]  # q carries the gate; k and v do not
+
+        proj_weights = [_take(weight, s, hidden_size, g) for s, g in zip(slices, gated)]
         proj_keys = [p + "weight" for p in prefixes]
 
         if weight_scale is None:
@@ -1271,10 +1648,8 @@ class GPTModelExporter:
                     [per_rank_qkv_dim, head_size, weight_scale_hidden_size]
                 )
                 proj_weight_scales = [
-                    weight_scale[s]
-                    .reshape(-1, weight_scale_hidden_size)
-                    .to(dtype=weight_scale_dtype)
-                    for s in slices
+                    _take(weight_scale, s, weight_scale_hidden_size, g).to(dtype=weight_scale_dtype)
+                    for s, g in zip(slices, gated)
                 ]
             else:
                 # per-tensor scaling
@@ -1310,7 +1685,7 @@ class GPTModelExporter:
                 # Slice bias similar to weight
                 bias = val.detach().clone()
                 bias = bias.reshape([per_rank_qkv_dim, head_size])
-                proj_biases = [bias[s].reshape(-1) for s in slices]
+                proj_biases = [_take(bias, s, 1, g).reshape(-1) for s, g in zip(slices, gated)]
                 proj_bias_keys = [q_proj_prefix + key, k_proj_prefix + key, v_proj_prefix + key]
                 for bias_tensor, bias_key in zip(proj_biases, proj_bias_keys):
                     self._state_dict[bias_key] = bias_tensor
@@ -1319,14 +1694,116 @@ class GPTModelExporter:
                 self._state_dict[k_proj_key] = val.detach().clone()
                 self._state_dict[v_proj_key] = val.detach().clone()
 
+    def _gated_delta_net_slicing(self, module, prefix, is_mtp=False):
+        """Split GatedDeltaNet's fused ``in_proj`` into HF's qkv / z / b / a projections.
+
+        Megatron packs ``[query, key, value, z, beta, alpha]``; sizes come from the module so TP
+        sharding needs no re-derivation.
+        """
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
+        in_proj = module.in_proj
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            in_proj, self.dtype, prefix=prefix
+        )
+
+        assert tuple(module.in_proj_split_names) == (
+            "query",
+            "key",
+            "value",
+            "z",
+            "beta",
+            "alpha",
+        ), (
+            f"Unexpected GatedDeltaNet in_proj layout {tuple(module.in_proj_split_names)}; the "
+            "split below assumes [query, key, value, z, beta, alpha]"
+        )
+        sections = dict(zip(module.in_proj_split_names, module.in_proj_split_sections))
+        split_sizes = [
+            sections["query"] + sections["key"] + sections["value"],
+            sections["z"],
+            sections["beta"],
+            sections["alpha"],
+        ]
+        proj_names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+        proj_prefixes = [prefix + name + "." for name in proj_names]
+        # The recipes keep the alpha / beta gates in BF16, but Megatron fuses all six sections
+        # behind one quantizer, so they can only be dropped here rather than by a quantizer_name.
+        keep_bf16 = {
+            p for p, n in zip(proj_prefixes, proj_names) if n in ("in_proj_a", "in_proj_b")
+        }
+
+        for proj_prefix in proj_prefixes:
+            if proj_prefix in keep_bf16:
+                self._record_excluded_module(proj_prefix)
+            else:
+                self._record_layer_quant_config(proj_prefix, qformat, block_size)
+        if qformat in (None, QUANTIZATION_NONE):
+            # Split the fused in_proj exclude entry into the per-HF-name projections.
+            self.exclude_modules = [
+                m for m in self.exclude_modules if m != prefix.removesuffix(".")
+            ]
+            for proj_prefix in proj_prefixes:
+                self._record_excluded_module(proj_prefix)
+
+        weight = name_to_value.pop("weight")
+        proj_weights = list(torch.split(weight, split_sizes, dim=0))
+        proj_keys = [p + "weight" for p in proj_prefixes]
+        weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+
+        if weight_scale is None:
+            for key, proj_weight in zip(proj_keys, proj_weights):
+                self._state_dict[key] = proj_weight
+        else:
+            if len(weight_scale.shape) > 0:
+                # Per-channel / per-block scales are laid out along the same (output) dim.
+                proj_scales = list(torch.split(weight_scale, split_sizes, dim=0))
+            else:
+                proj_scales = [weight_scale.detach().clone() for _ in proj_keys]
+            for proj_prefix, proj_weight, scale, key in zip(
+                proj_prefixes, proj_weights, proj_scales, proj_keys
+            ):
+                if proj_prefix in keep_bf16:
+                    self._state_dict[key] = proj_weight
+                    continue
+                self._state_dict[key] = to_quantized_weight(
+                    proj_weight, scale, qformat, weight_scale_2, block_size
+                )
+                self._state_dict[key + "_scale"] = scale
+
+        if weight_scale_2 is not None:
+            if len(weight_scale_2.shape) > 0:
+                raise ValueError("weight_scale_2 must be a scalar!")
+            for proj_prefix, key in zip(proj_prefixes, proj_keys):
+                if proj_prefix not in keep_bf16:
+                    self._state_dict[key + "_scale_2"] = weight_scale_2.detach().clone()
+
+        # weight and weight_scale have been popped; the rest (bias, input_scale, ...) is
+        # either split like the weight or replicated onto every projection.
+        for key, val in name_to_value.items():
+            if key == "bias":
+                for proj_bias, proj_prefix in zip(
+                    torch.split(val.detach().clone(), split_sizes, dim=0), proj_prefixes
+                ):
+                    self._state_dict[proj_prefix + key] = proj_bias
+            else:
+                for proj_prefix in proj_prefixes:
+                    if proj_prefix in keep_bf16:
+                        continue
+                    self._state_dict[proj_prefix + key] = val.detach().clone()
+
     def _self_attention_scaling(
-        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"
+        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale", is_mtp=False
     ):
         """KV cache scaling for CoreAttention module."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         k_scale_key = prefix + k_scale_name
         v_scale_key = prefix + v_scale_name
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
-            kv_scales = get_kv_cache_scaling_factor(module)
+            kv_scales = get_kv_cache_scaling_factor(
+                module, clamp_fp8_scales=self.clamp_kv_cache_scales
+            )
             if all(s is not None for s in kv_scales):
                 self._state_dict[k_scale_key] = kv_scales[0]
                 self._state_dict[v_scale_key] = kv_scales[1]
@@ -1336,8 +1813,30 @@ class GPTModelExporter:
                 # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
                 self.kv_cache_dtype = kv_cache_dtype
 
-    def _pack_name_remapping(self, module, prefix, layer_type=None):
-        """Pack name remapping into one tensor."""
+    @staticmethod
+    def _merge_nvfp4_expert_scales(scales: list, scales_2: list):
+        """Merge per-expert NVFP4 scales onto one global scale, preserving each expert's FP4 range.
+
+        Each expert's block scales were derived against its own ``scale_2``; rescaling them by
+        ``scale_2_i / scale_2_max`` keeps the quieter experts from losing a mantissa bit.
+        """
+        merged_scale_2 = torch.max(torch.stack(scales_2, dim=0), dim=0)[0].clamp_min(
+            torch.finfo(torch.float32).tiny
+        )
+        stacked_2 = torch.stack(scales_2, dim=0).reshape(-1, *([1] * scales[0].dim()))
+        # Rescaling only ever shrinks a block scale, so clamp before the cast: a block already
+        # near the E4M3 floor would otherwise flush to zero and take its weights with it.
+        rescaled = torch.stack(scales, dim=0).to(torch.float32) * (stacked_2 / merged_scale_2)
+        smallest = torch.finfo(scales[0].dtype).smallest_normal
+        merged_scale = torch.where(rescaled > 0, rescaled.clamp_min(smallest), rescaled).to(
+            scales[0].dtype
+        )
+        return merged_scale, merged_scale_2
+
+    def _pack_name_remapping(self, module, prefix, layer_type=None, is_mtp=False, transpose=True):
+        """Pack per-expert weights into one tensor; ``transpose`` for HF [E, in, out] layouts."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         weight_list = []
         weight_scale_list = []
         weight_scale_2_list = []
@@ -1362,10 +1861,10 @@ class GPTModelExporter:
 
         merged_weight = torch.stack(weight_list, dim=0)
 
-        # Transpose the last two dimensions to match HuggingFace format
-        # Megatron format: [num_experts, out_features, in_features]
-        # HF format: [num_experts, in_features, out_features]
-        merged_weight = merged_weight.transpose(-2, -1).contiguous()
+        # Megatron is [num_experts, out, in]; most HF layouts want [num_experts, in, out], but
+        # Qwen3.5 keeps Megatron's orientation.
+        if transpose:
+            merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
         if weight_scale_2_list[0] is None:
             merged_weight_scale_2 = None
@@ -1375,10 +1874,11 @@ class GPTModelExporter:
                 merged_weight_scale = None
         else:
             # NVFP4
-            merged_weight_scale_2 = torch.max(torch.stack(weight_scale_2_list, dim=0), dim=0)[0]
-            merged_weight_scale = torch.stack(weight_scale_list, dim=0)
-            # Transpose the scaling factors to match the transposed weights
-            merged_weight_scale = merged_weight_scale.transpose(-2, -1).contiguous()
+            merged_weight_scale, merged_weight_scale_2 = self._merge_nvfp4_expert_scales(
+                weight_scale_list, weight_scale_2_list
+            )
+            if transpose:
+                merged_weight_scale = merged_weight_scale.transpose(-2, -1).contiguous()
 
         if input_scale_list[0] is not None:
             merged_input_scale = torch.max(torch.stack(input_scale_list, dim=0), dim=0)[0]
@@ -1402,8 +1902,10 @@ class GPTModelExporter:
         if merged_input_scale is not None:
             self._state_dict[prefix + "_input_scale"] = merged_input_scale
 
-    def _pack_name_remapping_gpt_oss(self, module, prefix, layer_type=None):
+    def _pack_name_remapping_gpt_oss(self, module, prefix, layer_type=None, is_mtp=False):
         """Pack name remapping into one tensor."""
+        if is_mtp:
+            prefix = self._mtp_prefix(prefix)
         weight_list = []
         weight_scale_list = []
         weight_scale_2_list = []
@@ -1556,6 +2058,20 @@ class GPTModelExporter:
         return None
 
 
+def _read_checkpoint_keys(checkpoint_dir) -> set[str]:
+    """Tensor names in a local HuggingFace checkpoint, from its index or single safetensors file."""
+    directory = Path(checkpoint_dir)
+    index_file = directory / "model.safetensors.index.json"
+    if index_file.exists():
+        with open(index_file) as f:
+            return set(json.load(f)["weight_map"])
+    single_file = directory / "model.safetensors"
+    if single_file.exists():
+        with safe_open(str(single_file), framework="pt", device="cpu") as f:
+            return set(f.keys())
+    return set()
+
+
 def export_mcore_gpt_to_hf(
     model: torch.nn.Module,
     pretrained_model_name_or_path: str | os.PathLike,
@@ -1564,6 +2080,7 @@ def export_mcore_gpt_to_hf(
     export_dir: Path | str = tempfile.gettempdir(),
     trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
+    clamp_kv_cache_scales: bool = True,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
@@ -1577,6 +2094,7 @@ def export_mcore_gpt_to_hf(
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
         export_dir: The target export path.
+        clamp_kv_cache_scales: Whether to clamp FP8 KV cache scaling factors to at least 1.0.
     """
     exporter = GPTModelExporter(
         model,
@@ -1585,6 +2103,7 @@ def export_mcore_gpt_to_hf(
         dtype=dtype,
         trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
+        clamp_kv_cache_scales=clamp_kv_cache_scales,
     )
     if exporter.export_extra_modules:
         exporter.save_pretrained_extra_modules(export_dir)

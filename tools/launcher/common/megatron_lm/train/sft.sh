@@ -24,8 +24,9 @@ trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 ###################################################################################################
 
 # Quantization-Aware Distillation / SFT training on a quantized MCore checkpoint
-# (the output of common/megatron_lm/quantize/quantize.sh). Wraps the Megatron-LM
-# ModelOpt post-training train.sh example (QAT: --modelopt-enabled).
+# (the output of common/megatron_lm/quantize/quantize.sh). By default, wraps the
+# Megatron-LM ModelOpt post-training train.sh example (QAT: --modelopt-enabled).
+# Set MLM_TRAIN_SCRIPT=finetune to use finetune.sh for HF chat-template datasets.
 #
 # Extra flags (data/train/optim/eval, e.g. --sft, --seq-length, --lr,
 # --dist-ckpt-strictness) are forwarded as CLI args and assembled into
@@ -37,6 +38,7 @@ trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 #   MLM_MODEL_CKPT  Quantized MCore ckpt to load (default: /cicd/megatron-lm/${MLM_MODEL_CFG})
 #   MLM_MODEL_SAVE  Where to save the trained ckpt (default: MLM_MODEL_CKPT)
 #   HF_MODEL_CKPT   HF source ckpt for tokenizer/config (default: /hf-local/${MLM_MODEL_CFG})
+#   MLM_TRAIN_SCRIPT  Megatron-LM post_training/modelopt script: train (default) or finetune
 #   DP CP TP PP EP ETP  Parallelism (defaults from train.sh)
 
 if [[ -z ${MLM_MODEL_CFG} ]]; then
@@ -52,11 +54,22 @@ fi
 export MLM_MODEL_SAVE=${MLM_MODEL_SAVE:-${MLM_MODEL_CKPT}}
 export MLM_SKIP_INSTALL=1
 
-TRAIN_EXE="bash modules/Megatron-LM/examples/post_training/modelopt/train.sh"
+case "${MLM_TRAIN_SCRIPT:-train}" in
+    train)
+        TRAIN_EXE=(bash modules/Megatron-LM/examples/post_training/modelopt/train.sh)
+        ;;
+    finetune)
+        TRAIN_EXE=(bash modules/Megatron-LM/examples/post_training/modelopt/finetune.sh)
+        ;;
+    *)
+        echo "[ERROR] MLM_TRAIN_SCRIPT must be 'train' or 'finetune'." >&2
+        exit 1
+        ;;
+esac
 
-export MLM_EXTRA_ARGS=${@}
-echo "=== QAD/SFT training ${MLM_MODEL_CFG} (load ${MLM_MODEL_CKPT}) ==="
-${TRAIN_EXE} ${MLM_MODEL_CFG}
+export MLM_EXTRA_ARGS="$*"
+echo "=== QAD/SFT training ${MLM_MODEL_CFG} via ${MLM_TRAIN_SCRIPT:-train} (load ${MLM_MODEL_CKPT}) ==="
+"${TRAIN_EXE[@]}" "${MLM_MODEL_CFG}"
 
 ###################################################################################################
 

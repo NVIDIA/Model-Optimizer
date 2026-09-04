@@ -24,6 +24,15 @@ jobs:
       - name: Secret Scanning
         uses: trufflesecurity/trufflehog@v3.90.5
         with:
-          extra_args: --results=verified,unknown
+          # Exclude lob: its `(live|test)_[a-zA-Z0-9_]{35}` pattern matches any pytest function
+          # whose name happens to be exactly 35 characters after `test_`, and it reports them as
+          # verified. Only nightly sees them, since it scans all history while PRs scan their diff.
+          extra_args: --results=verified,unknown --exclude-detectors=lob
       - name: Run code quality checks
-        run: pip install nox uv && nox -s pre_commit_all
+        run: |
+          # torch 2.14 breaks this env: torchvision::nms fails to register, which disables
+          # modelopt's transformers plugin and takes the ARGUMENTS.md hook down with it.
+          echo "torch<2.14" > /tmp/pip-constraints.txt
+          # Both: nox builds the session venv with uv, which reads UV_CONSTRAINT, not PIP_CONSTRAINT.
+          export PIP_CONSTRAINT=/tmp/pip-constraints.txt UV_CONSTRAINT=/tmp/pip-constraints.txt
+          pip install nox uv && nox -s pre_commit_all

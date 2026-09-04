@@ -24,7 +24,6 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-from modelopt.torch.opt.config_loader import load_config
 from modelopt.torch.quantization.config import QuantizeConfig  # noqa: TC001
 from modelopt.torch.speculative.config import DFlashConfig, EagleConfig, MedusaConfig
 from modelopt.torch.speculative.plugins.hf_training_args import DataArguments as SpecDataArgs
@@ -38,6 +37,7 @@ __all__ = [
     "AutoQuantizeConfig",
     "AutoQuantizeConstraints",
     "AutoQuantizeCost",
+    "AutoQuantizeModuleSearchSpace",
     "ModelOptAutoQuantizeRecipe",
     "ModelOptDFlashRecipe",
     "ModelOptEagleRecipe",
@@ -129,24 +129,6 @@ class ModelOptPTQRecipe(ModelOptRecipeBase):
 LayerPatternList = list[str]
 
 
-def _load_layer_pattern_list(config_path: str) -> list[str]:
-    """Load a ``list[str]`` layer-pattern unit (e.g. AutoQuantize base disabled/cost-excluded).
-
-    Relies on the unit's ``modelopt-schema: ...LayerPatternList`` comment (like
-    _load_quantizer_cfg_dict_list) rather than an explicit ``list[str]`` schema_type.
-    """
-    return list(load_config(config_path))
-
-
-# Base AutoQuantize layer-pattern sets, loaded once (used by the deprecated --auto_quantize_* CLI shim).
-AUTOQUANT_BASE_DISABLED_LAYERS: list[str] = _load_layer_pattern_list(
-    "configs/auto_quantize/units/base_disabled_layers"
-)
-AUTOQUANT_BASE_COST_EXCLUDED_LAYERS: list[str] = _load_layer_pattern_list(
-    "configs/auto_quantize/units/base_cost_excluded_layers"
-)
-
-
 class AutoQuantizeCost(ModeloptBaseConfig):
     """Cost-model parameters (the ``cost`` sub-dict of ``mtq.auto_quantize`` constraints)."""
 
@@ -191,6 +173,46 @@ class AutoQuantizeConstraints(ModeloptBaseConfig):
         return v
 
 
+class AutoQuantizeModuleSearchSpace(ModeloptBaseConfig):
+    """Candidate formats selectable for modules matching one or more name patterns."""
+
+    module_name_patterns: LayerPatternList = ModeloptField(
+        default=[],
+        title="Module name patterns",
+        description="Glob patterns matched against quantizable module names. A grouped AutoQuantize "
+        "decision must match a rule for every module in the group or for none of them.",
+        validate_default=True,
+    )
+    candidate_formats: list[QuantizeConfig] = ModeloptField(
+        default=[],
+        title="Module candidate quantization formats",
+        description="Formats selectable for matching modules. These override the top-level "
+        "candidate_formats for the matching AutoQuantize decision group.",
+        validate_default=True,
+    )
+    allow_no_quant: bool = ModeloptField(
+        default=True,
+        title="Allow no-quant selection",
+        description="Whether BF16/no-quant is selectable for matching modules. AutoQuantize keeps "
+        "an internal no-quant baseline for sensitivity scoring and cost normalization even when "
+        "this is false.",
+    )
+
+    @field_validator("module_name_patterns")
+    @classmethod
+    def _at_least_one_module_pattern(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 module_name_pattern")
+        return v
+
+    @field_validator("candidate_formats")
+    @classmethod
+    def _at_least_one_module_candidate(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
+        if not v:
+            raise ValueError("module_search_spaces requires at least 1 candidate_format")
+        return v
+
+
 class AutoQuantizeConfig(ModeloptBaseConfig):
     """Schema for the ``auto_quantize`` block of an AutoQuantize recipe."""
 
@@ -201,10 +223,17 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
     candidate_formats: list[QuantizeConfig] = ModeloptField(
         default=[],
         title="Candidate quantization formats",
-        description="Per-layer search space; each entry is a full QuantizeConfig. At least 1 "
-        "required — bf16/no-quant is always an implicit additional choice, so a single format "
-        "(e.g. [fp8]) yields a {fp8, bf16} per-layer search.",
+        description="Fallback per-layer search space for modules not matched by "
+        "module_search_spaces. Each entry is a full QuantizeConfig. BF16/no-quant is always an "
+        "implicit additional choice. Omit this field when the parent recipe supplies a fixed "
+        "quantize baseline and explicitly lists every searched family in module_search_spaces.",
         validate_default=True,
+    )
+    module_search_spaces: list[AutoQuantizeModuleSearchSpace] = ModeloptField(
+        default=[],
+        title="Module-specific search spaces",
+        description="Optional per-module overrides for candidate formats and BF16/no-quant "
+        "selectability. Matching is performed after runtime-fusion grouping.",
     )
     auto_quantize_method: Literal["gradient", "kl_div"] = ModeloptField(
         default="gradient",
@@ -236,17 +265,14 @@ class AutoQuantizeConfig(ModeloptBaseConfig):
         "the --kv_cache_qformat CLI flag when omitted.",
     )
 
-    @field_validator("candidate_formats")
-    @classmethod
-    def _at_least_one_candidate(cls, v: list[QuantizeConfig]) -> list[QuantizeConfig]:
-        # mtq.auto_quantize always adds an implicit bf16/no-quant choice per layer, so a single
-        # explicit format already gives a real {format, bf16} search; only an empty list is invalid.
-        if not v:
+    @model_validator(mode="after")
+    def _has_search_space(self):
+        if not self.candidate_formats and not self.module_search_spaces:
             raise ValueError(
-                "auto_quantize requires at least 1 candidate_format (bf16/no-quant is always an "
-                "implicit additional choice). For uniform quantization, use a PTQ recipe instead."
+                "auto_quantize requires candidate_formats or at least one module_search_spaces "
+                "entry. For uniform quantization, use a PTQ recipe instead."
             )
-        return v
+        return self
 
 
 class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
@@ -254,10 +280,40 @@ class ModelOptAutoQuantizeRecipe(ModelOptRecipeBase):
 
     metadata: RecipeMetadataConfig = _metadata_field(RecipeType.AUTO_QUANTIZE)
 
+    quantize: QuantizeConfig | None = ModeloptField(
+        default=None,
+        title="Fixed PTQ baseline",
+        description="Optional normal PTQ QuantizeConfig for modules outside the explicit "
+        "AutoQuantize module_search_spaces. Fixed and searched modules are calibrated, scored, "
+        "costed, and exported in one integrated AutoQuantize operation.",
+    )
+
     auto_quantize: AutoQuantizeConfig = Field(
         title="AutoQuantize config",
         description="AutoQuantize search configuration. Required.",
     )
+
+    @model_validator(mode="after")
+    def _validate_fixed_and_searched_spaces(self):
+        has_fixed_baseline = self.quantize is not None
+        has_global_search = bool(self.auto_quantize.candidate_formats)
+        if has_fixed_baseline and has_global_search:
+            raise ValueError(
+                "An AutoQuantize recipe with a fixed quantize baseline must omit top-level "
+                "auto_quantize.candidate_formats and explicitly list searched modules under "
+                "auto_quantize.module_search_spaces."
+            )
+        if has_fixed_baseline and not self.auto_quantize.module_search_spaces:
+            raise ValueError(
+                "An AutoQuantize recipe with a fixed quantize baseline requires at least one "
+                "auto_quantize.module_search_spaces entry."
+            )
+        if not has_fixed_baseline and not has_global_search:
+            raise ValueError(
+                "An AutoQuantize recipe without a fixed quantize baseline requires top-level "
+                "auto_quantize.candidate_formats for unmatched modules."
+            )
+        return self
 
 
 class ModelOptSpeculativeRecipeBase(ModelOptRecipeBase):

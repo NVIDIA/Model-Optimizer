@@ -22,10 +22,10 @@ The process is as follows:
   3. (Optional) Compress weights to a real low-bit representation.
   4. Save the quantized model as a Megatron checkpoint (with ModelOpt state). The checkpoint can be
      reloaded for further training (QAT / distillation) or converted to a HuggingFace (unified)
-     checkpoint for deployment with `export.py` (see that script for TensorRT-LLM / vLLM / SGLang).
+     checkpoint for deployment with `export_quantized_megatron_to_hf.py` (for TensorRT-LLM / vLLM / SGLang).
 
 Tensor / pipeline / expert parallelism are all supported here — the Megatron checkpoint is saved
-sharded and can be re-sharded on load (e.g. `export.py` reloads it at TP=1 for the HF export).
+sharded and can be re-sharded on load (e.g. `export_quantized_megatron_to_hf.py` reloads it at TP=1 for the HF export).
 
 Example usage to quantize Qwen3-8B to NVFP4 on 2 GPUs (Tensor Parallelism = 2):
     1024 samples from default dataset are used for calibration (sequence length = 4096).
@@ -48,7 +48,8 @@ Equivalent run using a YAML recipe (authoritative for quant_cfg + algorithm + KV
         --seq_length 4096 \
         --export_megatron_path /tmp/Qwen3-8B-NVFP4-megatron
 
-To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, run `export.py`.
+To convert the saved Megatron checkpoint to a deployable HuggingFace checkpoint, use
+`export_quantized_megatron_to_hf.py`.
 
 To see the full usage for advanced configurations, run:
     torchrun --nproc_per_node 1 quantize.py --help
@@ -61,6 +62,7 @@ import copy
 import gc
 
 import torch
+from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from transformers import AutoProcessor
 
 import modelopt.torch.quantization as mtq
@@ -69,7 +71,11 @@ from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.recipe.presets import KV_CACHE_NONE, KV_QUANT_CFG_CHOICES, QUANT_CFG_CHOICES
 from modelopt.torch.utils import print_args, print_rank_0, warn_rank_0
 from modelopt.torch.utils.dataset_utils import get_supported_datasets
-from modelopt.torch.utils.plugins.mbridge import load_mbridge_model_from_hf
+from modelopt.torch.utils.plugins.mbridge import (
+    get_language_model,
+    load_mbridge_model_from_hf,
+    use_moe_grouped_gemm,
+)
 from modelopt.torch.utils.plugins.megatron_calibration import (
     get_megatron_calibration_forward_loop,
     get_megatron_vlm_calibration_forward_loop,
@@ -95,6 +101,15 @@ def get_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
+    parser.add_argument(
+        "--no_moe_grouped_gemm",
+        action="store_true",
+        help=(
+            "Force SequentialMLP for MoE experts instead of the fused TEGroupedMLP (grouped GEMM). "
+            "By default grouped GEMM is used unless the architecture cannot export it to "
+            "HuggingFace, in which case SequentialMLP is selected automatically."
+        ),
+    )
     parser.add_argument(
         "--export_megatron_path",
         type=str,
@@ -123,9 +138,9 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--quant_cfg",
         type=str,
-        default="fp8",
+        default=None,
         help=(
-            f"Quantization config. Preset names / short aliases: {', '.join(QUANT_CFG_CHOICES)}. "
+            f"Quantization config. Preset names: {', '.join(QUANT_CFG_CHOICES)}. "
             "You can also pass any full config name exposed by modelopt (e.g. FP8_DEFAULT_CFG). "
             "Ignored when --recipe is set."
         ),
@@ -239,7 +254,7 @@ def get_quant_config(args: argparse.Namespace) -> dict:
         mtq_config = getattr(mtq, args.quant_cfg)
     else:
         raise ValueError(
-            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name / short alias "
+            f"Unsupported --quant_cfg '{args.quant_cfg}'. Choose a preset name "
             f"({', '.join(QUANT_CFG_CHOICES)}) or a full config name from {mtq.config.choices}."
         )
 
@@ -275,9 +290,20 @@ def get_quant_config(args: argparse.Namespace) -> dict:
 
 
 def main(args: argparse.Namespace):
+    trust_remote_code = is_safe_repo(
+        trust_remote_code=args.trust_remote_code, hf_path=args.hf_model_name_or_path
+    )
+
+    moe_grouped_gemm = use_moe_grouped_gemm(
+        args.hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        force_sequential=args.no_moe_grouped_gemm,
+    )
+
     bridge, _provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf(
         hf_model_name_or_path=args.hf_model_name_or_path,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=trust_remote_code,
+        moe_grouped_gemm=moe_grouped_gemm,
         provider_overrides={
             "tensor_model_parallel_size": args.tp_size,
             "pipeline_model_parallel_size": args.pp_size,
@@ -292,8 +318,7 @@ def main(args: argparse.Namespace):
     )
 
     # Only the language model is quantized (vision tower + projector stay full precision)
-    language_model = getattr(unwrapped_model, "language_model", unwrapped_model)
-    is_vlm = language_model is not unwrapped_model
+    language_model, is_vlm = get_language_model(unwrapped_model)
     if is_vlm:
         warn_rank_0(
             "VLM detected: quantizing `model.language_model` only (vision tower left in full precision)."
@@ -376,7 +401,7 @@ def main(args: argparse.Namespace):
         # VLMs: drive the full VLM forward on image-text pairs so the language model's quantizers
         # see vision-conditioned activations (we still quantize the LM only).
         processor = AutoProcessor.from_pretrained(
-            args.hf_model_name_or_path, trust_remote_code=args.trust_remote_code
+            args.hf_model_name_or_path, trust_remote_code=trust_remote_code
         )
         forward_loop = get_megatron_vlm_calibration_forward_loop(
             unwrapped_model,  # full VLM (vision encoder + projector + language model)
@@ -411,12 +436,18 @@ def main(args: argparse.Namespace):
         model,
         args.export_megatron_path,
         hf_tokenizer_path=args.hf_model_name_or_path,
-        hf_tokenizer_kwargs={"trust_remote_code": args.trust_remote_code},
+        hf_tokenizer_kwargs={"trust_remote_code": trust_remote_code},
     )
-    print_rank_0(
-        f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. "
-        "To deploy this model (TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export.py"
-    )
+    if is_vlm:
+        print_rank_0(
+            f"\nSaved quantized VLM to {args.export_megatron_path} in Megatron format. To deploy this "
+            "model, convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py."
+        )
+    else:
+        print_rank_0(
+            f"\nSaved quantized model to {args.export_megatron_path} in Megatron format. To deploy this model "
+            "(TensorRT-LLM / vLLM / SGLang), convert it to a Unified HF ckpt with export_quantized_megatron_to_hf.py"
+        )
 
     # Sanity-check generation with the fake-quantized model. Skipped when --compress is set: the
     # weights are now real low-bit and megatron_generate may not support compressed forward for
@@ -447,5 +478,7 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except BaseException:
+        dist.abort()  # peers may be stuck in a collective this rank will never reach
     finally:
         dist.cleanup()

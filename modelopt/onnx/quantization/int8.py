@@ -18,6 +18,7 @@
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -26,7 +27,6 @@ from onnx_graphsurgeon.ir.node import Node
 from onnxruntime.quantization import CalibrationMethod
 from onnxruntime.quantization.calibrate import CalibrationDataReader
 
-from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.quantization.calib_utils import import_scales_from_calib_cache
 from modelopt.onnx.quantization.graph_utils import (
@@ -50,6 +50,7 @@ from modelopt.onnx.quantization.partitioning import (
     find_quantizable_nodes,
     get_skipped_output_layers,
 )
+from modelopt.onnx.quantization.precision_utils import _convert_to_runtime_precision
 from modelopt.onnx.quantization.qdq_utils import has_qdq_nodes, replace_scale_values
 
 
@@ -139,6 +140,7 @@ def quantize(
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
+    input_shapes_profile: Sequence[dict[str, str]] | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -177,6 +179,7 @@ def quantize(
             calibration_data_reader,
             calibration_eps,
             calibration_shapes,
+            input_shapes_profile,
         )
         nodes_to_exclude.extend(matmul_nodes_to_exclude)  # type: ignore[union-attr]
         logger.debug(f"Excluding {len(matmul_nodes_to_exclude)} MatMul nodes due to GEMV pattern")
@@ -201,6 +204,7 @@ def quantize(
         calibrate_per_node,
         custom_ops_to_quantize,
         kwargs.get("op_types_needing_output_quant"),
+        input_shapes_profile,
     )
     logger.info(f"Quantizable op types: {[t for t in quantizable_op_types if t in op_types]}")
 
@@ -296,19 +300,16 @@ def quantize(
         if calibration_cache_path:
             replace_scale_values(onnx_model.graph, act_scales_dict)
 
-    if high_precision_dtype in ["fp16", "bf16"]:
-        # We need to convert float to float16 so as to speed up layers like LayerNorm or GroupNorm.
-        logger.info(f"Converting float32 tensors to {high_precision_dtype}")
-        # Note: from convert_to_f16's perspective, high_precision_dtype is the precision to reduce to from FP32
-        onnx_model = convert_to_f16(
-            onnx_model,
-            keep_io_types=not direct_io_types,
-            op_block_list=op_types_to_exclude_fp16 or [],
-            tensor_block_dict=custom_ops_to_cast_fp32 or {},
-            low_precision_type=high_precision_dtype,
-            trt_plugins=trt_extra_plugin_lib_paths,
-            opset=opset,
-        )
+    onnx_model = _convert_to_runtime_precision(
+        onnx_model,
+        quantize_mode="int8",
+        high_precision_dtype=high_precision_dtype,
+        direct_io_types=direct_io_types,
+        op_types_to_exclude_fp16=op_types_to_exclude_fp16,
+        custom_ops_to_cast_fp32=custom_ops_to_cast_fp32,
+        trt_extra_plugin_lib_paths=trt_extra_plugin_lib_paths,
+        opset=opset,
+    )
 
     if nodes_to_quantize:
         logger.info(f"Quantization completed successfully in {time.time() - t_start} seconds")

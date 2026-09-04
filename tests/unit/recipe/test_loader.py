@@ -22,6 +22,7 @@ import sys
 import types
 from fnmatch import fnmatch
 from importlib.resources import files
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +38,7 @@ from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
 from modelopt.torch.fastgen import PDDConfig, load_pdd_config
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
+from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
 
 # ---------------------------------------------------------------------------
 # Static YAML fixtures
@@ -181,25 +183,58 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
-_BUILTIN_PTQ_RECIPES = [
-    "general/ptq/fp8_default-kv_fp8",
-    "general/ptq/fp8_default-kv_fp8_cast",
-    "general/ptq/int4_blockwise_weight_only",
-    "general/ptq/nvfp4_default-kv_fp8",
-    "general/ptq/nvfp4_default-kv_fp8_cast",
-    "general/ptq/nvfp4_default-kv_nvfp4_cast",
-    "general/ptq/nvfp4_default-kv_none-gptq",
-    "general/ptq/nvfp4_experts_only-kv_fp8",
-    "general/ptq/nvfp4_experts_only-kv_fp8_cast",
-    "general/ptq/nvfp4_experts_only-kv_fp8_layerwise",
-    "general/ptq/nvfp4_mlp_only-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
-    "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_omlp_only-kv_fp8",
-    "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
-    "general/ptq/nvfp4_weight_only-kv_fp16",
-    "general/ptq/nvfp4_weight_only-kv_fp8_cast",
-]
+def test_load_recipe_huggingface_models_backward_compat_alias():
+    """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
+    top-level ``models/`` tier.
+
+    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
+    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
+    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
+    pip-installed users, not just source checkouts.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("models/*/*/ptq/*.yaml"))
+    new_path = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
+    old_path = "huggingface/" + new_path  # huggingface/models/<org>/<model>/ptq/<file>
+
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    recipe = load_recipe(old_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def _all_shipped_ptq_recipe_paths():
+    """Every shipped PTQ recipe, discovered from disk rather than a hardcoded list."""
+    root = files("modelopt_recipes")
+    paths = []
+    for path in sorted(Path(str(root)).rglob("*.yaml")):
+        rel = path.relative_to(str(root))
+        # Units/presets under configs/ are fragments, not standalone recipes.
+        if rel.parts[0] == "configs":
+            continue
+        raw = _load_raw_config(path)
+        # List-shaped fragments (layer-pattern units) are not recipes.
+        if not isinstance(raw, dict):
+            continue
+        if (raw.get("metadata") or {}).get("recipe_type") == "ptq":
+            paths.append(str(rel.with_suffix("")))
+    return paths
+
+
+# Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
+# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# never drift as recipes are added, moved, or removed.
+_BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
+
+
+def test_ptq_recipes_are_discovered():
+    """Discovery must find recipes; otherwise the parametrized smoke tests below get an
+    empty parameter set and silently *skip* (pytest default) instead of running."""
+    assert _BUILTIN_PTQ_RECIPES, (
+        "No shipped PTQ recipes discovered under modelopt_recipes/ — recipe discovery is broken."
+    )
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
@@ -236,6 +271,41 @@ def test_nvfp4_mlp_only_novit_recipe_disables_vision_quantizers():
     }
 
     assert {"*visual*", "*vision_tower*"} <= disabled_quantizers
+
+
+@pytest.mark.parametrize(
+    "recipe_path",
+    [
+        "general/ptq/nvfp4_mlp_only-kv_fp8",
+        "general/ptq/nvfp4_mlp_only-novit-kv_fp8",
+        "general/ptq/nvfp4_mlp_only-kv_fp8_cast",
+        "general/ptq/nvfp4_mlp_only_mse-kv_fp8_cast",
+        "general/ptq/nvfp4_omlp_only-kv_fp8",
+        "general/ptq/nvfp4_omlp_only-kv_fp8_cast",
+    ],
+)
+def test_nvfp4_mlp_only_recipes_match_nemotron_h_dense_mlp(recipe_path):
+    recipe = load_recipe(recipe_path)
+    enabled_patterns = [
+        entry["quantizer_name"]
+        for entry in recipe.quantize.model_dump()["quant_cfg"]
+        if entry["enable"]
+    ]
+
+    for quantizer_name in (
+        "backbone.layers.0.mixer.up_proj.weight_quantizer",
+        "backbone.layers.0.mixer.up_proj.input_quantizer",
+        "backbone.layers.0.mixer.down_proj.weight_quantizer",
+        "backbone.layers.0.mixer.down_proj.input_quantizer",
+    ):
+        assert any(fnmatch(quantizer_name, pattern) for pattern in enabled_patterns)
+
+    for quantizer_name in (
+        "backbone.layers.0.mixer.in_proj.weight_quantizer",
+        "backbone.layers.0.mixer.out_proj.input_quantizer",
+        "backbone.layers.0.mixer.shared_experts.up_proj.weight_quantizer",
+    ):
+        assert not any(fnmatch(quantizer_name, pattern) for pattern in enabled_patterns)
 
 
 @pytest.mark.parametrize(
@@ -1752,6 +1822,7 @@ def test_load_recipe_autoquantize_minimal(tmp_path):
     assert aq.constraints.cost_model == "weight"
     assert aq.constraints.cost is None
     assert len(aq.candidate_formats) == 2
+    assert aq.module_search_spaces == []
 
 
 def test_load_recipe_autoquantize_active_moe_cost_roundtrip(tmp_path):
@@ -1800,7 +1871,7 @@ def test_load_recipe_autoquantize_empty_candidates_raises(tmp_path):
         "auto_quantize:\n  constraints:\n    effective_bits: 4.8\n"
         "  candidate_formats: []\n"
     )
-    with pytest.raises(ValueError, match="at least 1"):
+    with pytest.raises(ValueError, match="candidate_formats or at least one"):
         load_recipe(bad)
 
 
@@ -1838,6 +1909,56 @@ def test_load_recipe_autoquantize_builtin_active_moe():
     assert all(c.effective_bits is None for c in aq.candidate_formats)
 
 
+def test_load_recipe_autoquantize_module_search_spaces():
+    """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
+    recipe = load_recipe(
+        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+    )
+    aq = recipe.auto_quantize
+    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    assert recipe.quantize is not None
+    assert recipe.quantize == model_ptq.quantize
+    assert aq.candidate_formats == []
+    assert len(aq.module_search_spaces) == 1
+    (searched,) = aq.module_search_spaces
+    assert searched.module_name_patterns == [
+        "*mlp.shared_expert*",
+        "*linear_attn*",
+        "*self_attn*",
+        "*lm_head*",
+    ]
+    assert len(searched.candidate_formats) == 2
+    assert searched.allow_no_quant is False
+
+
+def test_load_recipe_autoquantize_fixed_baseline_rejects_global_fallback(tmp_path):
+    recipe_file = tmp_path / "fixed-and-global.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 6.0\n"
+        "  candidate_formats:\n    - algorithm: max\n      quant_cfg: []\n"
+        "  module_search_spaces:\n"
+        "    - module_name_patterns: ['*mlp*']\n"
+        "      candidate_formats:\n        - algorithm: max\n          quant_cfg: []\n"
+    )
+
+    with pytest.raises(ValueError, match="must omit top-level"):
+        load_recipe(recipe_file)
+
+
+def test_load_recipe_autoquantize_fixed_baseline_requires_explicit_search(tmp_path):
+    recipe_file = tmp_path / "fixed-only.yml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: auto_quantize\n"
+        "quantize:\n  algorithm: max\n  quant_cfg: []\n"
+        "auto_quantize:\n  constraints:\n    effective_bits: 6.0\n"
+    )
+
+    with pytest.raises(ValueError, match="candidate_formats or at least one"):
+        load_recipe(recipe_file)
+
+
 @pytest.mark.parametrize(
     "recipe_path",
     [
@@ -1854,3 +1975,22 @@ def test_load_recipe_autoquantize_builtin_general(recipe_path):
     assert isinstance(recipe, ModelOptAutoQuantizeRecipe)
     assert len(recipe.auto_quantize.candidate_formats) >= 2
     assert recipe.auto_quantize.auto_quantize_method in ("gradient", "kl_div")
+    # Both shared base units must be spliced in: the removed --auto_quantize_* CLI shim appended
+    # them unconditionally, so a general recipe is the migration target and must match it. Without
+    # cost_excluded_layers a VL/MTP model counts its vision tower in the effective-bits denominator.
+    assert "*output_layer*" in recipe.auto_quantize.disabled_layers
+    assert recipe.auto_quantize.cost_excluded_layers == ["*visual*", "*mtp*", "*vision_tower*"]
+
+
+@pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
+def test_shipped_ptq_recipe_algorithm_config_constructs(recipe_path):
+    """Every shipped PTQ recipe's ``algorithm`` must build its calibration config class.
+
+    ``QuantizeConfig.algorithm`` accepts a bare dict, so ``load_recipe`` alone never constructs
+    ``QuantizeAlgorithmConfig`` — a malformed algorithm block loads fine here and only blows up
+    later inside ``mtq.quantize``. This walks the same path ``apply_mode`` does so a schema break
+    (e.g. a legacy ``layerwise: false`` bool) fails at test time instead of at calibration time.
+    """
+    algorithm = load_recipe(recipe_path).quantize.algorithm
+    for mode_name, mode_cfg in get_modelike_from_algo_cfg(algorithm):
+        CalibrateModeRegistry[mode_name].config_class(**mode_cfg)

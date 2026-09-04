@@ -19,20 +19,27 @@ import copy
 import types
 from abc import ABC
 from collections.abc import Callable, Sequence
+from functools import partial
 
 import torch
 import torch.nn as nn
 import transformer_engine as te
 from megatron.core.extensions.transformer_engine import (
+    TEColumnParallelGroupedLinear,
     TEColumnParallelLinear,
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
     TELinear,
+    TERowParallelGroupedLinear,
     TERowParallelLinear,
 )
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
+from megatron.core.models.hybrid.hybrid_layer_specs import (
+    hybrid_stack_spec as _te_hybrid_stack_spec,
+)
+from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet
 from megatron.core.tensor_parallel.layers import (
@@ -44,7 +51,7 @@ from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe import moe_utils
-from megatron.core.transformer.moe.experts import SequentialMLP
+from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
@@ -65,57 +72,40 @@ from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
 from ..traced_hp import TracedHp
 
-SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
+# Megatron-LM instantiates Nemotron-H et al. as HybridModel; the deprecated MambaModel subclass
+# shares its forward, so DMRegistry resolves those instances to this registration as well.
+SUPPORTED_MODELS = {
+    GPTModel: "megatron.core.models.gpt.GPTModel",
+    HybridModel: "megatron.core.models.hybrid.HybridModel",
+}
 
 try:
     import mamba_ssm  # noqa: F401
-    from megatron.core.models.mamba import MambaModel
-    from megatron.core.models.mamba.mamba_layer_specs import (
-        mamba_stack_spec as _te_mamba_stack_spec,
-    )
     from megatron.core.ssm.mamba_layer import MambaLayer
     from megatron.core.ssm.mamba_mixer import ExtendedRMSNorm, MambaMixer
-
-    SUPPORTED_MODELS[MambaModel] = "megatron.core.models.mamba.MambaModel"
 
     HAS_MAMBA = True
 except ImportError:
     HAS_MAMBA = False
 
-# Newer Megatron-LM instantiates Nemotron-H et al. as plain HybridModel (MambaModel split
-# out as a subclass). Register HybridModel so the dynamic-space converter sees them.
-# DMRegistry._get_registered_nn_class filters by `nn_cls.forward is nn_cls_.forward` and
-# returns the first match in insertion order: MambaModel is registered first, so
-# MambaModel instances dispatch to MambaModel whether or not MambaModel overrides forward.
-try:
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
-
-    SUPPORTED_MODELS[HybridModel] = "megatron.core.models.hybrid.HybridModel"
-
-    HAS_HYBRID = True
-except ImportError:
-    HAS_HYBRID = False
-
 # Attention module types that _DynamicTransformerLayer converts.
 _ATTENTION_TYPES: tuple[type, ...] = (SelfAttention, MLASelfAttention, GatedDeltaNet)
 
-__all__ = ["get_te_mamba_stack_spec"]
+__all__ = ["get_te_hybrid_stack_spec"]
 
 
-def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
-    """Return the TE Mamba stack spec."""
-    assert HAS_MAMBA
+def get_te_hybrid_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
+    """Return the TE Hybrid stack spec."""
     if moe_grouped_gemm:
-        return _te_mamba_stack_spec
+        return _te_hybrid_stack_spec
 
-    # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
+    # The upstream TE hybrid stack spec hardcodes TEGroupedMLP for MoE.
     # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
-    te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
-    # num_experts needs to be non-zero
-    te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
+    te_hybrid_stack_spec = copy.deepcopy(_te_hybrid_stack_spec)
+    te_hybrid_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
         use_te=True, num_experts=8, moe_grouped_gemm=False
     )
-    return te_mamba_stack_spec
+    return te_hybrid_stack_spec
 
 
 # Local Parallel Linear DynamicModules ##########################################################################
@@ -741,11 +731,140 @@ class _DynamicSequentialMLP(DynamicModule):
         for expert in self.local_experts:
             DMRegistry.convert(expert, hidden_size=hidden_size, hp_name="moe_ffn_hidden_size")
 
+    def modify(self, ffn_hidden_size_divisor: int = 1, **kwargs) -> None:
+        """Modify each expert's moe_ffn_hidden_size hparam choices based on search space config."""
+        for expert in self.local_experts:
+            expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a standard SequentialMLP."""
         for expert in self.local_experts:
             expert.export()
         self.local_experts.export()
+        return super().export()
+
+
+@DMRegistry.register(
+    {
+        TEColumnParallelGroupedLinear: (
+            "megatron.core.extensions.transformer_engine.TEColumnParallelGroupedLinear"
+        ),
+        TERowParallelGroupedLinear: (
+            "megatron.core.extensions.transformer_engine.TERowParallelGroupedLinear"
+        ),
+    }
+)
+class _DynamicTEGroupedLinear(DynamicModule):
+    """A TEGroupedLinear (column/row parallel) with dynamic hyperparams for grouped-GEMM MoE.
+
+    TEGroupedMLP fuses all local experts into two grouped linears, each storing the per-expert
+    weights as separate ``weight0..weight{num_gemms-1}`` params (shape ``[out, in]``, optional
+    ``bias{i}``). ``moe_ffn_hidden_size`` / ``hidden_size`` slice each expert weight by
+    ``output_size`` (rows) / ``input_size`` (cols) like a normal linear; ``num_local_experts``
+    reorders/drops experts by remapping position ``j`` to the ``j``-th most important expert and
+    exposing ``num_gemms = num_local_experts.active`` so TE only reads the kept experts.
+    """
+
+    def _setup(self, *, input_size: TracedHp, output_size: TracedHp, num_local_experts: TracedHp):
+        assert not self.single_grouped_weight, (
+            "moe_single_grouped_weight=True is not supported for grouped-GEMM pruning yet."
+        )
+        # input_size/output_size/num_local_experts are all shared with the sibling grouped linear
+        # (and num_local_experts additionally with the router) via _DynamicTEGroupedMLP.
+        self._register_hparam("input_size", input_size)
+        self._register_hparam("output_size", output_size)
+        self._register_hparam("num_local_experts", num_local_experts)
+
+        self._register_dynamic_attribute("num_gemms", lambda mod, val: num_local_experts.active)
+        self._register_dynamic_attribute("in_features", lambda mod, val: input_size.active)
+        self._register_dynamic_attribute("out_features", lambda mod, val: output_size.active)
+        for j in range(self.num_gemms):
+            self._register_dynamic_attribute(f"weight{j}", partial(self._get_expert_param, pos=j))
+            if self.use_bias:
+                self._register_dynamic_attribute(f"bias{j}", partial(self._get_expert_param, pos=j))
+
+    @staticmethod
+    def _get_expert_param(mod: "_DynamicTEGroupedLinear", val: torch.Tensor, *, pos: int):
+        """Dynamic getter for weight{pos}/bias{pos}: map position -> ranked expert, then slice."""
+        hp = mod.get_hparam("num_local_experts")
+        max_experts = hp.max
+        assert isinstance(max_experts, int)
+        order = hp._slice_order.tolist() if hp._slice_order is not None else range(max_experts)
+        e = order[pos]
+        is_weight = val.dim() == 2
+        raw = mod._parameters[f"{'weight' if is_weight else 'bias'}{e}"]
+        slices = [mod.get_hparam("output_size").active_slice]
+        if is_weight:
+            slices.append(mod.get_hparam("input_size").active_slice)
+        return get_sliced_tensor_by_slices(raw, slices)
+
+    def export(self) -> torch.nn.Module:
+        """Export to a standard TEGroupedLinear with the kept experts sliced + reordered in place."""
+        # Read all sliced/reordered params (via the dynamic getters) before mutating any, then drop
+        # the per-expert weight/bias attrs so the base export only folds num_gemms/in/out_features.
+        active = self.get_hparam("num_local_experts").active
+        assert isinstance(active, int)
+        weights = [getattr(self, f"weight{j}").detach().clone() for j in range(active)]
+        biases = [
+            getattr(self, f"bias{j}").detach().clone() for j in range(active) if self.use_bias
+        ]
+        for name in [n for n in list(self._parameters) if n.startswith(("weight", "bias"))]:
+            delattr(self, name)
+
+        super().export()  # num_gemms -> active, in/out_features -> sliced sizes, class un-patched
+
+        for j, weight in enumerate(weights):
+            self.register_parameter(f"weight{j}", torch.nn.Parameter(weight))
+        for j, bias in enumerate(biases):
+            self.register_parameter(f"bias{j}", torch.nn.Parameter(bias))
+        return self
+
+
+@DMRegistry.register({TEGroupedMLP: "megatron.core.transformer.moe.experts.TEGroupedMLP"})
+class _DynamicTEGroupedMLP(DynamicModule):
+    """A TEGroupedMLP (grouped-GEMM MoE experts) with dynamic hyperparams.
+
+    Mirrors ``_DynamicSequentialMLP`` but the experts are two fused ``TEGroupedLinear`` layers rather
+    than an ``nn.ModuleList`` of per-expert MLPs. Since Minitron prunes homogeneously, all experts
+    share a single ``moe_ffn_hidden_size`` hparam (unlike the SequentialMLP path which registers one per expert).
+    """
+
+    def _setup(self, *, hidden_size: TracedHp):
+        """Setup the TEGroupedMLP dynamic module with global hidden_size hparam."""
+        num_local_experts = TracedHp(list(range(1, self.num_local_experts + 1)))
+        self._register_hparam("num_local_experts", num_local_experts)
+
+        moe_ffn_hidden_size = TracedHp(list(range(1, self.config.moe_ffn_hidden_size + 1)))
+        self._register_hparam("moe_ffn_hidden_size", moe_ffn_hidden_size)
+
+        linear_fc1_output_size = (
+            build_concat_hp([moe_ffn_hidden_size] * 2)
+            if self.config.gated_linear_unit
+            else moe_ffn_hidden_size
+        )
+        DMRegistry.convert(  # _DynamicTEGroupedLinear
+            self.linear_fc1,
+            input_size=hidden_size,
+            output_size=linear_fc1_output_size,
+            num_local_experts=num_local_experts,
+        )
+        DMRegistry.convert(  # _DynamicTEGroupedLinear
+            self.linear_fc2,
+            input_size=moe_ffn_hidden_size,
+            output_size=hidden_size,
+            num_local_experts=num_local_experts,
+        )
+
+    def modify(self, ffn_hidden_size_divisor: int = 1, **kwargs) -> None:
+        """Modify the shared moe_ffn_hidden_size hparam choices based on search space config."""
+        hp = self.get_hparam("moe_ffn_hidden_size")
+        choices = {int(make_divisible(c, ffn_hidden_size_divisor)) for c in hp.choices}  # type: ignore[arg-type]
+        hp.choices = list(set(hp.choices) & choices | {hp.original})
+
+    def export(self) -> torch.nn.Module:
+        """Export the dynamic module to a standard TEGroupedMLP."""
+        self.linear_fc1.export()
+        self.linear_fc2.export()
         return super().export()
 
 
@@ -819,8 +938,7 @@ class _DynamicMoELayer(DynamicModule):
         expert_hp.choices = list(set(expert_hp.choices) & choices | {expert_hp.original})
 
         # Modify expert FFN hparam choices
-        for expert in self.experts.local_experts:
-            expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+        self.experts.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
         if self.use_shared_expert:
             self.shared_experts.modify(ffn_hidden_size_divisor)
 
@@ -1055,8 +1173,10 @@ class _MambaContextParallelProxy:
             return mixer.d_inner
         if name in ("nheads_local_tp", "nheads_local_tpcp"):
             return mixer.nheads
-        if name == "conv1d_cp1":
-            return mixer.conv1d
+        if name == "conv1d_weight_cp1":
+            return mixer.conv1d_weight
+        if name == "conv1d_bias_cp1":
+            return mixer.conv1d_bias
         if name == "dt_bias_cp1":
             return mixer.dt_bias
         if name == "A_log_cp1":
@@ -1122,11 +1242,12 @@ class _DynamicMambaMixer(DynamicModule):
         DMRegistry.convert(self.in_proj, input_size=hidden_size, output_size=in_proj_output_size)
 
         conv_dim = build_concat_hp([d_inner, bc])  # z, B, C
-        DMRegistry.convert(self.conv1d)
-        self.conv1d.in_channels = conv_dim
-        self.conv1d.out_channels = conv_dim
-        ks = self.conv1d.get_hparam("kernel_size")
-        ks.choices = [ks.original]
+
+        def _slice_conv(mod, val, _hp=conv_dim):
+            return get_sliced_tensor_by_slices(val, [_hp.active_slice])
+
+        self._register_dynamic_attribute("conv1d_weight", _slice_conv)  # [conv_dim, 1, d_conv]
+        self._register_dynamic_attribute("conv1d_bias", _slice_conv)  # [conv_dim]
 
         if self.rmsnorm:
             DMRegistry.convert(self.norm)
@@ -1151,7 +1272,6 @@ class _DynamicMambaMixer(DynamicModule):
         """Export the dynamic module to a torch.nn.Module."""
         self.in_proj.export()
         self.out_proj.export()
-        self.conv1d.export()
         if self.rmsnorm:
             self.norm.export()
         return super().export()
@@ -1200,10 +1320,10 @@ if HAS_MAMBA:
     )
 
 
-# GPTModel / MambaModel DynamicModule ##############################################################
+# GPTModel / HybridModel DynamicModule ##############################################################
 @DMRegistry.register(SUPPORTED_MODELS)
 class _DynamicMCoreLanguageModel(DynamicModule):
-    """A GPTModel / MambaModel with dynamic hyperparams."""
+    """A GPTModel / HybridModel with dynamic hyperparams."""
 
     def _setup(self):
         assert self.config.tensor_model_parallel_size == 1, "Only TP=1 is supported."
@@ -1232,7 +1352,7 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             DMRegistry.convert(self.decoder.layers[i], hidden_size=hidden_size)
 
         if is_pipeline_last_stage():
-            # NOTE: GPTModel has final_layernorm, MambaModel has final_norm
+            # NOTE: GPTModel has final_layernorm, HybridModel has final_norm
             DMRegistry.convert(
                 getattr(
                     self.decoder,

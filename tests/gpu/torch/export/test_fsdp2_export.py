@@ -19,10 +19,15 @@ import pytest
 import torch
 from _test_utils.torch.export.utils import SmallQKVModel, ToyModel
 from _test_utils.torch.misc import minimum_sm
+from _test_utils.torch.quantization.tied_modules import (
+    make_tied_linear_pair,
+    wrap_in_parent_with_tied_keys,
+)
 from torch.distributed._composable.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
+from modelopt.torch.export.model_utils import TiedWeightMap
 from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     requantize_resmooth_fused_llm_layers,
@@ -202,6 +207,38 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         model.unshard()
 
         _compare_parameters_and_buffers(model, non_fsdp_model)
+
+
+def _tied_map_survives_fsdp2_test(rank, size):
+    """TiedWeightMap (from HF's name-based all_tied_weights_keys) survives fully_shard.
+
+    ``fully_shard`` splits the shared ``nn.Parameter`` into distinct per-module shards, but the HF
+    map is a plain name dict on the model, unaffected by sharding, so TiedWeightMap still resolves
+    the tie both before and after -- no pre-shard capture needed.
+    """
+    with patch_fsdp_mp_dtypes():
+        enc, dec = make_tied_linear_pair(in_features=32, out_features=32)
+        model = wrap_in_parent_with_tied_keys(enc, dec, decoder_canonical=True).to("cuda")
+
+        # Pre-shard: the HF map resolves the tie.
+        assert TiedWeightMap(model).alias_to_canonical == {"encoder.weight": "decoder.weight"}
+
+        fully_shard(model.encoder)
+        fully_shard(model.decoder)
+        fully_shard(model)
+        torch.distributed.barrier()
+
+        # Post-shard: the HF name-based map is untouched -> TiedWeightMap still resolves the tie.
+        tied_map = TiedWeightMap(model)
+        assert tied_map.alias_to_canonical == {"encoder.weight": "decoder.weight"}
+        assert tied_map.group_key("encoder.weight") == "decoder.weight"
+        assert tied_map.group_key("decoder.weight") == "decoder.weight"
+
+
+def test_fsdp2_tied_map_survives_shard(dist_workers):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs to shard a tied weight into distinct params")
+    dist_workers.run(_tied_map_survives_fsdp2_test)
 
 
 @minimum_sm(90)

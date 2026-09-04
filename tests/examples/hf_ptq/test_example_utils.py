@@ -49,6 +49,95 @@ def _write_safetensors(path, tensors):
     save_file(tensors, str(path), metadata={"format": "pt"})
 
 
+def test_copy_custom_model_files_preserves_non_weight_sidecars(tmp_path):
+    source_dir = tmp_path / "source"
+    export_dir = tmp_path / "export"
+    source_dir.mkdir()
+    export_dir.mkdir()
+
+    source_files = {
+        "super_v3_reasoning_parser.py": "class Parser: pass\n",
+        "modeling_custom.py": "class Model: pass\n",
+        "README.md": "# Source model\n",
+        "LICENSE": "license text\n",
+        "chat_template.jinja": "{{ messages }}\n",
+        "tokenizer_config.json": '{"chat_template": "source"}\n',
+        "generation_config.json": '{"source": "generation"}\n',
+        "config.json": '{"source": "config"}\n',
+        "hf_quant_config.json": '{"source": "quant"}\n',
+        "quant_config.json": '{"source": "stale quant"}\n',
+        "quantize_config.json": '{"source": "stale quant"}\n',
+        "recipe.yaml": "quantize: {}\n",
+        "model.safetensors.index.json": '{"weight_map": {}}\n',
+        "model-00001-of-00001.safetensors": "source weights\n",
+        "model.gguf": "source weights\n",
+    }
+    for file_name, contents in source_files.items():
+        (source_dir / file_name).write_text(contents)
+
+    (export_dir / "config.json").write_text('{"export": "config"}\n')
+    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
+    (export_dir / "hf_quant_config.json").write_text('{"export": "quant"}\n')
+    (export_dir / "chat_template.jinja").write_text("{{ exported_messages }}\n")
+    (export_dir / "tokenizer_config.json").write_text('{"chat_template": "export"}\n')
+
+    example_utils.copy_custom_model_files(str(source_dir), str(export_dir), trust_remote_code=False)
+
+    for file_name in [
+        "super_v3_reasoning_parser.py",
+        "modeling_custom.py",
+        "README.md",
+        "LICENSE",
+        "chat_template.jinja",
+        "generation_config.json",
+    ]:
+        assert (export_dir / file_name).read_text() == source_files[file_name]
+
+    assert (export_dir / "config.json").read_text() == '{"export": "config"}\n'
+    assert (export_dir / "hf_quant_config.json").read_text() == '{"export": "quant"}\n'
+    assert (export_dir / "tokenizer_config.json").read_text() == '{"chat_template": "export"}\n'
+    assert not (export_dir / "quant_config.json").exists()
+    assert not (export_dir / "quantize_config.json").exists()
+    assert not (export_dir / "recipe.yaml").exists()
+    assert not (export_dir / "model.safetensors.index.json").exists()
+    assert not (export_dir / "model-00001-of-00001.safetensors").exists()
+    assert not (export_dir / "model.gguf").exists()
+
+    (export_dir / "generation_config.json").write_text('{"export": "generation"}\n')
+    example_utils.copy_custom_model_files(
+        str(source_dir),
+        str(export_dir),
+        exclude_files={"generation_config.json"},
+    )
+    assert (export_dir / "generation_config.json").read_text() == '{"export": "generation"}\n'
+
+
+def test_resolve_model_path_snapshot_download_stays_allowlisted(monkeypatch, tmp_path):
+    snapshot_dir = tmp_path / "snapshot"
+
+    def fake_snapshot_download(**kwargs):
+        assert kwargs == {
+            "repo_id": "org/model",
+            "allow_patterns": example_utils._HF_SIDECAR_DOWNLOAD_ALLOW_PATTERNS,
+        }
+        return str(snapshot_dir)
+
+    def fake_from_pretrained(*args, **kwargs):
+        assert (args, kwargs) == (("org/model",), {"trust_remote_code": False})
+        return SimpleNamespace(_name_or_path="org/model")
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig,
+        "from_pretrained",
+        fake_from_pretrained,
+    )
+    monkeypatch.setattr(example_utils, "snapshot_download", fake_snapshot_download)
+
+    assert example_utils._resolve_model_path("org/model", trust_remote_code=False) == str(
+        snapshot_dir
+    )
+
+
 def test_load_mtp_weights_inlined_orphaned(tmp_path):
     # GLM-5.1: HF builds only num_hidden decoders → MTP keys orphaned.
     main_keys = ["model.embed_tokens.weight", "model.layers.0.x.weight"]
@@ -316,3 +405,289 @@ def test_get_model_uses_expected_dtype_kwarg(
     else:
         assert "trust_remote_code" not in calls["from_config"]
     assert calls["from_pretrained"]["trust_remote_code"] is True
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architecture", "device_count", "expected_device_map"),
+    [
+        # DiffusionGemma ties encoder/decoder weights; "auto" can split a tied pair
+        # across GPUs, so multi-GPU loads must fall back to "sequential".
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        # Detection must also work off ``architectures`` alone, without ``model_type``.
+        (None, "DiffusionGemmaForConditionalGeneration", 2, "sequential"),
+        # Single GPU cannot split a tied pair, so it keeps the unrestricted "auto" map.
+        ("diffusion_gemma", "DiffusionGemmaForConditionalGeneration", 1, "auto"),
+        # "gemma" is a substring of "diffusiongemma"; other Gemmas must not match.
+        ("gemma3", "Gemma3ForCausalLM", 2, "auto"),
+    ],
+)
+def test_get_model_device_map_for_diffusion_gemma(
+    monkeypatch, model_type, architecture, device_count, expected_device_map
+):
+    calls = {}
+    hf_config = SimpleNamespace(
+        architectures=[architecture],
+        dtype=torch.float16,
+        model_type=model_type,
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            calls["eval"] = True
+
+        def parameters(self):
+            return iter(())
+
+    class FakeArchitecture:
+        @staticmethod
+        def _from_config(config, **kwargs):
+            return FakeModel()
+
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            calls["from_pretrained"] = kwargs
+            return FakeModel()
+
+    monkeypatch.setattr(
+        example_utils.AutoConfig, "from_pretrained", lambda *args, **kwargs: hf_config
+    )
+    # Set rather than delete: ``transformers`` lazy-imports, so a deleted real class
+    # (e.g. Gemma3ForCausalLM) reappears on the next ``hasattr`` and the real one loads.
+    # raising=False: DiffusionGemma may not exist in the installed transformers.
+    monkeypatch.setattr(example_utils.transformers, architecture, FakeArchitecture, raising=False)
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: device_count)
+
+    example_utils.get_model("checkpoint", device="cuda", trust_remote_code=True)
+
+    assert calls["from_pretrained"]["device_map"] == expected_device_map
+    # Sequential caps per-GPU memory; "auto" must stay unrestricted.
+    if expected_device_map == "sequential":
+        assert calls["from_pretrained"]["max_memory"] == {0: 1024 * 0.8}
+    else:
+        assert "max_memory" not in calls["from_pretrained"]
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (SimpleNamespace(model_type="diffusion_gemma", architectures=None), True),
+        (SimpleNamespace(model_type=None, architectures=["DiffusionGemmaForCausalLM"]), True),
+        (SimpleNamespace(model_type="gemma3", architectures=["Gemma3ForCausalLM"]), False),
+        # Multi-modal wrappers keep the family name on the nested ``text_config``.
+        (
+            SimpleNamespace(
+                model_type="multimodal",
+                architectures=["SomeWrapperForConditionalGeneration"],
+                text_config=SimpleNamespace(model_type="diffusion_gemma"),
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model_type="multimodal",
+                text_config=SimpleNamespace(architectures=["DiffusionGemmaForCausalLM"]),
+            ),
+            True,
+        ),
+        # A non-DiffusionGemma nested config must not match.
+        (
+            SimpleNamespace(
+                model_type="multimodal", text_config=SimpleNamespace(model_type="gemma3")
+            ),
+            False,
+        ),
+        # Stub configs may omit either attribute entirely.
+        (SimpleNamespace(), False),
+    ],
+)
+def test_is_diffusion_gemma(hf_config, expected):
+    assert example_utils.is_diffusion_gemma(hf_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("trust_remote_code", "expect_bundled_code"),
+    [(True, True), (False, False)],
+)
+def test_get_model_deepseek_honors_trust_remote_code(
+    monkeypatch, trust_remote_code, expect_bundled_code
+):
+    """DeepSeek ships bundled modeling code; --trust_remote_code selects it, else built-in."""
+    used = {}
+    hf_config = SimpleNamespace(
+        architectures=["DeepseekV3ForCausalLM"],
+        dtype=torch.bfloat16,
+        model_type="deepseek_v3",
+        torch_dtype=torch.bfloat16,
+    )
+
+    class FakeModel:
+        def eval(self):
+            return None
+
+    def _record(tag):
+        class Fake:
+            @staticmethod
+            def from_config(config, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+            _from_config = from_config
+
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                used["path"] = tag
+                return FakeModel()
+
+        return Fake
+
+    monkeypatch.setattr(example_utils.AutoConfig, "from_pretrained", lambda *a, **k: hf_config)
+    monkeypatch.setattr(example_utils, "AutoModelForCausalLM", _record("bundled"))
+    monkeypatch.setattr(
+        example_utils.transformers, "DeepseekV3ForCausalLM", _record("builtin"), raising=False
+    )
+    monkeypatch.setattr(example_utils, "is_nemotron_vl", lambda config: False)
+    monkeypatch.setattr(example_utils, "is_speculative", lambda config: False)
+    monkeypatch.setattr(example_utils, "init_empty_weights", lambda include_buffers: nullcontext())
+    monkeypatch.setattr(example_utils, "get_max_memory", lambda: {0: 1024})
+    monkeypatch.setattr(example_utils, "infer_auto_device_map", lambda model, max_memory: {"": 0})
+
+    example_utils.get_model("checkpoint", device="cpu", trust_remote_code=trust_remote_code)
+
+    assert used["path"] == ("bundled" if expect_bundled_code else "builtin")
+
+
+def _layerwise(**kwargs):
+    return {"enable": True, **kwargs}
+
+
+def _blocks(quant_cfg):
+    algorithm = quant_cfg["algorithm"]
+    entries = algorithm if isinstance(algorithm, list) else [algorithm]
+    return [e["layerwise"] for e in entries if "layerwise" in e]
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "expected"),
+    [
+        pytest.param(
+            {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ["/out.layerwise_resume"],
+            id="single-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise()},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            [None, "/out.layerwise_resume"],
+            id="only-the-exporting-entry",
+        ),
+        pytest.param(
+            [
+                {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+                {"method": "max", "layerwise": _layerwise(export_dir="/placeholder")},
+            ],
+            ["/theirs", "/out.layerwise_resume"],
+            id="another-entrys-explicit-path-is-not-this-ones",
+        ),
+    ],
+)
+def test_default_layerwise_resume_dir_targets_the_exporting_entry(algorithm, expected):
+    """Only the pass that exports gets a derived resume dir, and only if it lacks one."""
+    updated, changed = example_utils.default_layerwise_resume_dir({"algorithm": algorithm}, "/out")
+
+    assert [b.get("checkpoint_dir") for b in _blocks(updated)] == expected
+    assert changed is True
+
+
+def test_resolve_checkpoint_dir_keeps_each_entrys_base():
+    """Two layerwise passes must not resolve onto one manifest."""
+    algorithm = [
+        {"method": "awq", "layerwise": _layerwise(checkpoint_dir="/theirs")},
+        {"method": "max", "layerwise": _layerwise(checkpoint_dir="/ours", export_dir="/ph")},
+    ]
+
+    updated, resolved = example_utils.resolve_checkpoint_dir({"algorithm": algorithm}, "/m/Model")
+
+    theirs, ours = (b["checkpoint_dir"] for b in _blocks(updated))
+    assert theirs.startswith("/theirs/") and ours.startswith("/ours/")
+    assert theirs != ours
+    # The exporting pass owns the path the caller reports.
+    assert resolved == ours
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "match"),
+    [
+        pytest.param(
+            [
+                {"layerwise": _layerwise(export_dir="/a")},
+                {"layerwise": _layerwise(export_dir="/b")},
+            ],
+            "only one calibration pass",
+            id="two-exporting-entries",
+        ),
+        pytest.param(
+            [{"layerwise": _layerwise(export_dir="/a")}, {"method": "max"}],
+            "must be the last",
+            id="a-later-pass-would-change-the-model",
+        ),
+    ],
+)
+def test_set_layerwise_export_dir_refuses_ambiguous_ownership(algorithm, match):
+    with pytest.raises(ValueError, match=match):
+        example_utils.set_layerwise_export_dir({"algorithm": algorithm}, "/out")
+
+
+class _Block:
+    """A config object, as the deprecated ``--auto_quantize_*`` path builds."""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def model_dump(self):
+        return dict(self._fields)
+
+
+class _Recipe:
+    def __init__(self, algorithm):
+        self.quantize = SimpleNamespace(algorithm=algorithm)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "expected"),
+    [
+        pytest.param(None, [], id="no-recipe"),
+        pytest.param(_Recipe(None), [], id="no-algorithm"),
+        pytest.param(_Recipe({"method": "max"}), [], id="algorithm-without-layerwise"),
+        pytest.param(
+            _Recipe({"method": "max", "layerwise": {"enable": True}}),
+            [{"enable": True}],
+            id="dict-entry",
+        ),
+        pytest.param(
+            _Recipe(
+                [
+                    {"method": "awq", "layerwise": {"enable": True}},
+                    {"method": "max", "layerwise": {"enable": True, "export_dir": "/x"}},
+                ]
+            ),
+            [{"enable": True}, {"enable": True, "export_dir": "/x"}],
+            id="list-keeps-algorithm-order",
+        ),
+        pytest.param(
+            _Recipe(SimpleNamespace(layerwise=_Block(enable=True, export_dir="/x"))),
+            [{"enable": True, "export_dir": "/x"}],
+            id="config-object-entry",
+        ),
+    ],
+)
+def test_recipe_layerwise_blocks(recipe, expected):
+    """Both recipe shapes normalize to dicts, so callers need no shape-aware access."""
+    assert example_utils.recipe_layerwise_blocks(recipe) == expected
