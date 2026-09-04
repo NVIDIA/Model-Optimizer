@@ -57,19 +57,18 @@ The output is a full Diffusers pipeline overlay with a widened transformer. Poin
 
 ```bash
 pip install -r examples/diffusers/fastgen/pdd/requirements.txt
-export MODELOPT_FASTGEN_DATASET_CACHE_DIR=/absolute/path/to/qwen_image_cache
 
 torchrun --standalone --nproc-per-node=8 \
   examples/diffusers/fastgen/pdd/finetune.py \
   --config examples/diffusers/fastgen/pdd/configs/qwen_image.yaml \
+  --data.dataloader.cache_dir=/absolute/path/to/qwen_image_cache \
   --fsdp.dp_size=8
 ```
 
 The cache must contain `metadata.json`, its declared prompt-embedding shards, and
-`negative_prompt_embedding.pt`. `MODELOPT_FASTGEN_DATASET_CACHE_DIR` lets a cluster launcher
-redirect an unchanged recipe to its mounted cache; it overrides the configured cache root and
-moves sample payloads and the negative embedding together. Paths declared by the dataset remain
-confined to that root.
+`negative_prompt_embedding.pt`. Override `data.dataloader.cache_dir` on the command line when the
+runtime cache location differs from the YAML. Sample payloads and the negative embedding resolve
+from that root, and paths declared by the dataset remain confined to it.
 
 The checked-in recipe targets 3,000 optimizer steps with global batch size 2,048, local batch size
 4, and constant learning rate `1e-5`. Use a new, empty checkpoint directory for the first job.

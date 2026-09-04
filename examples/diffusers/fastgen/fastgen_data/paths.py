@@ -17,12 +17,9 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 __all__ = ["resolve_cache_root", "resolve_under_root"]
-
-_CACHE_ROOT_ENV = "MODELOPT_FASTGEN_DATASET_CACHE_DIR"
 
 
 def _existing_directory(path: str | Path, label: str) -> Path:
@@ -33,18 +30,7 @@ def _existing_directory(path: str | Path, label: str) -> Path:
 
 
 def resolve_cache_root(configured_root: str | Path) -> Path:
-    """Return the effective cache root selected by config and environment.
-
-    An unset or exactly empty ``MODELOPT_FASTGEN_DATASET_CACHE_DIR`` falls back to
-    ``configured_root``. A nonempty override must already be an absolute path to an existing
-    directory.
-    """
-    override = os.environ.get(_CACHE_ROOT_ENV)
-    if override:
-        override_path = Path(override)
-        if not override_path.is_absolute():
-            raise ValueError(f"{_CACHE_ROOT_ENV} must be an absolute path; got {override!r}")
-        return _existing_directory(override_path, _CACHE_ROOT_ENV)
+    """Resolve the configured cache root to an existing directory."""
     return _existing_directory(configured_root, "configured cache root")
 
 

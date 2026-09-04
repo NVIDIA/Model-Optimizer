@@ -39,39 +39,20 @@ from fastgen_data.paths import resolve_cache_root, resolve_under_root
 from fastgen_data.text_to_image_dataset import TextToImageDataset
 
 
-def test_cache_root_uses_unset_or_empty_fallback(make_fastgen_cache, monkeypatch, tmp_path):
+def test_cache_root_resolves_configured_directory(make_fastgen_cache, tmp_path):
     cache = make_fastgen_cache(tmp_path / "cache")
 
-    monkeypatch.delenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", raising=False)
-    assert resolve_cache_root(cache) == cache.resolve()
-
-    monkeypatch.setenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", "")
     assert resolve_cache_root(cache) == cache.resolve()
 
 
-@pytest.mark.parametrize("override", ["relative/cache", "~/cache", " "])
-def test_cache_root_rejects_nonempty_relative_override(monkeypatch, override, tmp_path):
-    fallback = tmp_path / "fallback"
-    fallback.mkdir()
-    monkeypatch.setenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", override)
-
-    with pytest.raises(ValueError, match="absolute"):
-        resolve_cache_root(fallback)
-
-
-def test_cache_root_rejects_missing_or_non_directory_override(monkeypatch, tmp_path):
-    fallback = tmp_path / "fallback"
-    fallback.mkdir()
-
-    monkeypatch.setenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", str(tmp_path / "missing"))
+def test_cache_root_rejects_missing_or_non_directory(tmp_path):
     with pytest.raises(FileNotFoundError):
-        resolve_cache_root(fallback)
+        resolve_cache_root(tmp_path / "missing")
 
     regular_file = tmp_path / "file"
     regular_file.write_text("not a directory")
-    monkeypatch.setenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", str(regular_file))
     with pytest.raises(NotADirectoryError):
-        resolve_cache_root(fallback)
+        resolve_cache_root(regular_file)
 
 
 def test_resolve_under_root_rejects_traversal_absolute_and_symlink_escape(tmp_path):
@@ -139,27 +120,6 @@ def test_prompt_only_dataset_and_loader_do_not_emit_image_latents(make_fastgen_c
     assert "image_latents" not in batch
     assert {"text_embeddings", "text_embeddings_mask"}.issubset(batch)
     assert "negative_text_embeddings" in batch
-
-
-def test_environment_redirects_samples_and_relative_negative_embedding(
-    make_fastgen_cache, monkeypatch, tmp_path
-):
-    fallback = make_fastgen_cache(tmp_path / "fallback", marker=1.0)
-    override = make_fastgen_cache(tmp_path / "override", marker=9.0)
-    monkeypatch.setenv("MODELOPT_FASTGEN_DATASET_CACHE_DIR", str(override.resolve()))
-
-    loader, _ = build_text_to_image_multiresolution_dataloader(
-        cache_dir=str(fallback),
-        batch_size=1,
-        num_workers=0,
-        shuffle=False,
-        negative_prompt_embedding_path="negative_prompt_embedding.pt",
-    )
-    batch = next(iter(loader))
-
-    assert loader.dataset.cache_root == override.resolve()
-    assert batch["metadata"]["prompts"][0].startswith("prompt-9.0-")
-    assert torch.equal(batch["negative_text_embeddings"], torch.full((1, 2, 3), 9.0))
 
 
 def test_builder_rejects_negative_embedding_escape(make_fastgen_cache, tmp_path):

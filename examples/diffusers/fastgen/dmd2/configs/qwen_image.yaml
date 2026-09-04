@@ -149,8 +149,7 @@ data:
   dataloader:
     _target_: fastgen_data.build_text_to_image_multiresolution_dataloader
     cache_dir: /path/to/preprocessed/qwen_image_1024p
-    # The environment override changes the effective root; referenced files must stay beneath it.
-    # MODELOPT_FASTGEN_DATASET_CACHE_DIR overrides cache_dir when set to a non-empty value.
+    # Referenced files must stay beneath this root.
     base_resolution: [1024, 1024]
     batch_size: 1
     drop_last: false
