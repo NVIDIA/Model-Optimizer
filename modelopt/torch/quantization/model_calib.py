@@ -53,6 +53,7 @@ from .nn import (
 )
 from .utils import (
     SHARED_PATTERNS,
+    ModuleNames,
     SharedWeightGlobalAmaxState,
     disable_calib,
     enable_fake_quant,
@@ -61,6 +62,7 @@ from .utils import (
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_row_parallel_linear,
+    module_name_maps,
     persistent_materialization,
     promote_static_block_weight_quantizers,
 )
@@ -186,14 +188,14 @@ def _uses_modelopt_fp8_weight_scales(weight_quantizer: TensorQuantizer) -> bool:
 
 def weight_only_quantize(model: nn.Module):
     """Just quantize the weights of the model."""
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     seen_modules = set()
-    for module in name_to_module.values():
+    for module in names.name_to_module.values():
         if module in seen_modules:
             continue
 
         if isinstance(module, QuantModule):
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 for weight, weight_quantizer in module.iter_weights_for_calibration():
                     weight_quantizer(weight)
         seen_modules.add(module)
@@ -765,10 +767,10 @@ def mse_calibrate(
     """
     # max_calibrate initializes activations and weights; MSE only refines weights below.
     max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     _mse_calibrate_weights(
         model,
-        name_to_module,
+        names,
         step_size=step_size,
         start_multiplier=start_multiplier,
         stop_multiplier=stop_multiplier,
@@ -779,7 +781,7 @@ def mse_calibrate(
 @torch.no_grad()
 def _mse_calibrate_weights(
     model: nn.Module,
-    name_to_module: dict[str, nn.Module],
+    names: ModuleNames,
     step_size: float,
     start_multiplier: float,
     stop_multiplier: float,
@@ -796,11 +798,11 @@ def _mse_calibrate_weights(
     """
     seen_modules: set[int] = set()
     pbar = tqdm(desc="MSE weight calibration")
-    for parent_module in name_to_module.values():
+    for parent_module in names.name_to_module.values():
         if id(parent_module) in seen_modules or not isinstance(parent_module, QuantModule):
             continue
         seen_modules.add(id(parent_module))
-        with enable_weight_access_and_writeback(parent_module, model, name_to_module):
+        with enable_weight_access_and_writeback(parent_module, model, names):
             for weight, weight_quantizer in parent_module.iter_weights_for_calibration():
                 error_func = error_func_for(weight_quantizer) if error_func_for else None
                 hessian = hessian_for(weight_quantizer) if hessian_for else None
@@ -933,7 +935,7 @@ def _is_quant_fused_experts(module: nn.Module) -> bool:
     )
 
 
-def _register_local_hessian_input_hooks(model, name_to_module, capture, block_size, warned):
+def _register_local_hessian_input_hooks(model, names, capture, block_size, warned):
     """Register forward hooks feeding each weight's input activations to ``capture``.
 
     Local-Hessian-specific (kept here rather than as a general ``QuantModule`` API): dense
@@ -954,9 +956,9 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
 
         return _expert_hook
 
-    for name, module in name_to_module.items():
+    for name, module in names.name_to_module.items():
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, TensorQuantizer):
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 # ``weight`` may be absent (e.g. TE GroupedLinear exposes weight0..N, not weight);
                 # such modules have no single 2-D weight to pair and fall back to plain MSE.
                 weight = getattr(module, "weight", None)
@@ -972,7 +974,7 @@ def _register_local_hessian_input_hooks(model, name_to_module, capture, block_si
 
             handles.append(module.register_forward_pre_hook(_dense_hook))
         elif _is_quant_fused_experts(module):
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 first_proj_attr = getattr(module, "_first_proj_attr", "gate_up_proj")
                 for weight_name, quantizers_name, input_q_name in (
                     (
@@ -1050,7 +1052,7 @@ def local_hessian_calibrate(
     print_rank_0("local_hessian: Running max calibration for all quantizers...")
     max_calibrate(model, forward_loop, distributed_sync, shared_states=shared_states)
 
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
 
     # Hessians keyed by id(weight_quantizer); modules pair weights<->activations via the hook.
     accumulators: dict[int, _LocalHessianAccumulator] = {}
@@ -1066,9 +1068,7 @@ def local_hessian_calibrate(
     # Phase 2: capture each weight's input activations during a forward with weight fake-quant
     # disabled (so H = ΣXᵀX reflects full-precision weights); input quantizers are left as-is.
     warned: set = set()
-    handles = _register_local_hessian_input_hooks(
-        model, name_to_module, capture, block_size, warned
-    )
+    handles = _register_local_hessian_input_hooks(model, names, capture, block_size, warned)
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
     try:
         with set_quantizer_by_cfg_context(
@@ -1097,7 +1097,7 @@ def local_hessian_calibrate(
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     _mse_calibrate_weights(
         model,
-        name_to_module,
+        names,
         step_size=step_size,
         start_multiplier=start_multiplier,
         stop_multiplier=stop_multiplier,
@@ -1110,7 +1110,7 @@ def local_hessian_calibrate(
     # accumulators' cache) before empty_cache so export starts defragmented; keep only for debug.
     error_funcs.clear()
     hessians.clear()
-    for module in name_to_module.values():
+    for module in names.name_to_module.values():
         if isinstance(module, TensorQuantizer) and isinstance(module._calibrator, MseCalibrator):
             module._calibrator._error_func = None
             if isinstance(module._calibrator, NVFP4MSECalibrator):
@@ -1334,9 +1334,9 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
         scale_a = scale_a.clamp(min=1e-4, max=1e4)
         apply_pre_quant_scale_and_smooth(module, scale_a)
 
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     smoothed_modules = 0
-    for name, module in name_to_module.items():
+    for name, module in names.name_to_module.items():
         if is_quantized_linear(module):
             if not hasattr(module.input_quantizer, "_amax"):
                 warnings.warn(f"{name} is not calibrated, skip smoothing")
@@ -1352,7 +1352,7 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
                 f"Error: {name} has only one channel to smooth"
             )
 
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 postprocess(module)
 
             smoothed_modules += 1
@@ -1383,11 +1383,11 @@ def awq(
             awq_clip(model, forward_loop, **kwargs)
 
     # Special handling for SequentialQuantizer
-    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
-    name_to_module = dict(model.named_modules())
+    # Pre-compute the name maps to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    names = module_name_maps(model)
     for name, module in model.named_modules():
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
 
 
@@ -1559,11 +1559,11 @@ def awq_lite(
         # Now forward the actual output without any quantization
         return out_actual
 
-    # Pre-compute name_to_module dict ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
-    name_to_module = dict(model.named_modules())
-    for name, module in name_to_module.items():
+    # Pre-compute the name maps ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    names = module_name_maps(model)
+    for name, module in names.name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 module.awq_lite = AWQLiteHelper(module, name)
             module.awq_lite.setup()
 
@@ -1684,7 +1684,7 @@ def awq_lite(
                     "was not properly exercised during calibration. This may degrade accuracy; "
                     "consider increasing calibration size or using a more diverse dataset."
                 )
-                with enable_weight_access_and_writeback(module, model, name_to_module):
+                with enable_weight_access_and_writeback(module, model, names):
                     max_calibrate(module, lambda module: module.weight_quantizer(module.weight))
                     w_shape, w_dtype, w_device = (
                         module.weight.shape[1],
@@ -1713,7 +1713,7 @@ def awq_lite(
                         module.input_quantizer.amax = act_amax.amax()
                     module.input_quantizer.enable()
             else:
-                with enable_weight_access_and_writeback(module, model, name_to_module):
+                with enable_weight_access_and_writeback(module, model, names):
                     postprocess(module, name)
 
             module.awq_lite.cleanup()
@@ -1893,8 +1893,8 @@ def awq_clip(
         self.weight_quantizer.disable()
         return self._forward_no_awq(input, *args, **kwargs)
 
-    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
-    name_to_module = dict(model.named_modules())
+    # Pre-compute the name maps to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    names = module_name_maps(model)
     for name, module in model.named_modules():
         if (
             is_quantized_linear(module)
@@ -1902,7 +1902,7 @@ def awq_clip(
             and module.weight_quantizer.block_sizes is not None
         ):
             bind_forward_method(module, partial(forward, name), "_forward_no_awq")
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 module.awq_clip = AWQClipHelper(module)
 
     print_rank_0("awq_clip: Estimating parameters...")
@@ -1931,7 +1931,7 @@ def awq_clip(
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
             if module.awq_clip.num_tokens > 0:
-                with enable_weight_access_and_writeback(module, model, name_to_module):
+                with enable_weight_access_and_writeback(module, model, names):
                     postprocess(module)
 
             if not debug:
@@ -2035,14 +2035,14 @@ def svdquant(
     for quantizer in skipped_quantizers:
         quantizer.enable()
 
-    name_to_module = dict(model.named_modules())
-    for name, module in name_to_module.items():
+    names = module_name_maps(model)
+    for name, module in names.name_to_module.items():
         if (
             is_quantized_linear(module)
             and module.weight_quantizer.is_enabled
             and not is_skipped(name)
         ):
-            with enable_weight_access_and_writeback(module, model, name_to_module):
+            with enable_weight_access_and_writeback(module, model, names):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
 
@@ -2259,9 +2259,9 @@ def gptq(
         handle.cleanup()
 
     print_rank_0("Updating weights using GPTQ algorithm...")
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     for handle in gptq_handles.values():
-        with enable_weight_access_and_writeback(handle.module, model, name_to_module):
+        with enable_weight_access_and_writeback(handle.module, model, names):
             handle.update_weights(block_size, perc_damp)
         handle.free()
     del gptq_handles
@@ -2320,14 +2320,14 @@ def lsq(
     """
     _run_weight_scale_calibration(model, forward_loop, scale_algorithm)
 
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     seen_modules: set[int] = set()
     seen_quantizers: set[int] = set()
-    for module in name_to_module.values():
+    for module in names.name_to_module.values():
         if id(module) in seen_modules or not isinstance(module, QuantModule):
             continue
         seen_modules.add(id(module))
-        with enable_weight_access_and_writeback(module, model, name_to_module):
+        with enable_weight_access_and_writeback(module, model, names):
             for weight, quantizer in module.iter_weights_for_calibration():
                 if id(quantizer) in seen_quantizers:
                     continue

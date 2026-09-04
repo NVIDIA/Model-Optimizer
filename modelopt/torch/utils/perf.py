@@ -29,6 +29,7 @@ __all__ = [
     "clear_cuda_cache",
     "get_cuda_memory_stats",
     "get_used_gpu_mem_fraction",
+    "maybe_clear_cuda_cache",
     "report_memory",
 ]
 
@@ -36,6 +37,30 @@ __all__ = [
 def clear_cuda_cache():
     """Clear the CUDA cache."""
     if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+_EMPTY_CACHE_CHECK_EVERY = 64
+_empty_cache_calls = 0
+
+
+def maybe_clear_cuda_cache(slack_bytes: int = 4 * 1024**3) -> None:
+    """Clear the CUDA cache only when the allocator is actually holding unused memory.
+
+    For callers that run this once per tensor -- tens of thousands of times on a large MoE export.
+    ``empty_cache()`` syncs the device and returns every cached block to the driver, so the next
+    allocation goes back through ``cudaMalloc``. It relieves memory pressure between operations,
+    which only helps when there is reclaimable slack; with no slack it frees nothing and only costs.
+    The allocator-stats query is cheap but not free, so only sample every Nth call -- slack cannot
+    appear between two adjacent calls.
+    """
+    global _empty_cache_calls
+    _empty_cache_calls += 1
+    if _empty_cache_calls % _EMPTY_CACHE_CHECK_EVERY:
+        return
+    if not torch.cuda.is_available():
+        return
+    if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
         torch.cuda.empty_cache()
 
 

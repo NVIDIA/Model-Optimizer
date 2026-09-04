@@ -37,7 +37,11 @@ from modelopt.torch.quantization.nn import (
     TensorQuantizer,
 )
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
-from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+from modelopt.torch.quantization.utils.core_utils import (
+    ModuleNames,
+    enable_weight_access_and_writeback,
+    module_name_maps,
+)
 from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 from modelopt.torch.utils import get_unwrapped_name, safe_save
 
@@ -365,7 +369,7 @@ def merge_amax_tensors_for_group(tensors: list[torch.Tensor]) -> torch.Tensor:
 def _enable_writeback_for_group(
     group: list[nn.Module],
     root_model: nn.Module,
-    name_to_module: dict[str, nn.Module],
+    names: ModuleNames | None,
 ):
     """Nest ``enable_weight_access_and_writeback`` for every module in ``group`` (one ``with``).
 
@@ -374,7 +378,7 @@ def _enable_writeback_for_group(
     """
     with ExitStack() as stack:
         for m in group:
-            stack.enter_context(enable_weight_access_and_writeback(m, root_model, name_to_module))
+            stack.enter_context(enable_weight_access_and_writeback(m, root_model, names))
         yield
 
 
@@ -410,7 +414,7 @@ def _resmooth_experts_for_export(
     if qfmt is None or "awq" not in qfmt.lower():
         return {}, set()
 
-    name_to_module = dict(model.named_modules()) if inplace else None
+    names = module_name_maps(model) if inplace else None
 
     model_type = type(model).__name__.lower()
     id_to_name: dict[int, str] = {id(m): n for n, m in model.named_modules()}
@@ -480,11 +484,11 @@ def _resmooth_experts_for_export(
             if not experts:
                 continue
             if inplace:
-                if name_to_module is None:
+                if names is None:
                     raise RuntimeError(
-                        "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                        "names is required when inplace=True in _resmooth_experts_for_export"
                     )
-                with _enable_writeback_for_group(experts, model, name_to_module):
+                with _enable_writeback_for_group(experts, model, names):
                     _process_group(experts)
             else:
                 _process_group(experts)
@@ -509,11 +513,11 @@ def _resmooth_experts_for_export(
         if len(modules) <= 1:
             continue
         if inplace:
-            if name_to_module is None:
+            if names is None:
                 raise RuntimeError(
-                    "name_to_module is required when inplace=True in _resmooth_experts_for_export"
+                    "names is required when inplace=True in _resmooth_experts_for_export"
                 )
-            with _enable_writeback_for_group(modules, model, name_to_module):
+            with _enable_writeback_for_group(modules, model, names):
                 _process_group(modules)
         else:
             _process_group(modules)

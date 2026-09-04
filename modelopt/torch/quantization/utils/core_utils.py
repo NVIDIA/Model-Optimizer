@@ -19,7 +19,7 @@ import copy
 import itertools
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -442,101 +442,46 @@ def _get_fsdp2_mesh(module: nn.Module):
     return mesh_info.mesh if mesh_info is not None else None
 
 
-class _NameIndex:
-    """Refreshable ``name <-> module`` maps for one root model.
+class ModuleNames(NamedTuple):
+    """A model's ``name -> module`` and ``id(module) -> name`` maps, built together."""
 
-    A lookup miss means the module tree changed since the last build (export handlers add per-expert
-    submodules mid-pack), so rebuild once and retry. Rebuilds happen per structural change, not per
-    module, so lookups stay amortized O(1).
+    name_to_module: dict
+    module_to_name: dict
+
+
+def module_name_maps(root_model: nn.Module) -> ModuleNames:
+    """Build both name maps for a model, so lookups are O(1) in either direction.
+
+    Callers that resolve names for many modules should build this once and pass it down; resolving
+    a module's name without it costs a ``named_modules()`` walk plus a linear scan every time.
     """
-
-    def __init__(self, root_model: nn.Module):
-        self.root_model = root_model
-        self.refresh()
-
-    def refresh(self):
-        self.name_to_module = dict(self.root_model.named_modules())
-        self.module_to_name = {id(m): n for n, m in self.name_to_module.items()}
-
-    def name_of(self, module: nn.Module) -> str | None:
-        name = self.module_to_name.get(id(module))
-        if name is None:
-            self.refresh()
-            name = self.module_to_name.get(id(module))
-        return name
+    name_to_module = dict(root_model.named_modules())
+    return ModuleNames(name_to_module, {id(m): n for n, m in name_to_module.items()})
 
 
-# id(root_model) -> _NameIndex, populated by ``fsdp2_name_index``.
-_NAME_INDEX: dict[int, _NameIndex] = {}
-
-
-@contextmanager
-def fsdp2_name_index(root_model: nn.Module):
-    """Cache the model's name<->module maps for the block so name lookups are O(1).
-
-    The export path resolves a module's dotted name once per quantized module; rebuilding
-    ``named_modules()`` each time is O(N^2). Scoped to the block, so nothing outside it can see a
-    stale index. Re-entrant.
-    """
-    key = id(root_model)
-    outer = _NAME_INDEX.get(key)
-    _NAME_INDEX[key] = _NameIndex(root_model)
-    try:
-        yield
-    finally:
-        if outer is None:
-            _NAME_INDEX.pop(key, None)
-        else:
-            _NAME_INDEX[key] = outer
-
-
-def _cached_name_maps(root_model: nn.Module) -> tuple[dict | None, dict | None]:
-    """Return the active ``fsdp2_name_index`` maps for this model, else ``(None, None)``."""
-    index = _NAME_INDEX.get(id(root_model))
-    return (index.name_to_module, index.module_to_name) if index else (None, None)
-
-
-def _get_module_name(
-    module: nn.Module,
-    root_model: nn.Module,
-    name_to_module: dict | None = None,
-    module_to_name: dict | None = None,
-):
-    # Prefer an id->name reverse map (O(1)); the name->module scan below is O(N), which becomes
-    # O(N^2) when this is called per module in a loop (e.g. large-MoE export packing).
-    if module_to_name is None and name_to_module is None:
-        index = _NAME_INDEX.get(id(root_model))
-        if index is not None:
-            return index.name_of(module)
-    if module_to_name is not None:
-        return module_to_name.get(id(module))
-    if name_to_module is None:
-        name_to_module = dict(root_model.named_modules())
-    target_module_name = next((name for name, m in name_to_module.items() if m is module), None)
-    return target_module_name
+def _get_module_name(module: nn.Module, root_model: nn.Module, names: ModuleNames | None = None):
+    if names is None:
+        names = module_name_maps(root_model)
+    return names.module_to_name.get(id(module))
 
 
 def _get_enclosing_fsdp_module(
-    module: nn.Module,
-    root_model: nn.Module,
-    name_to_module: dict | None = None,
-    module_to_name: dict | None = None,
+    module: nn.Module, root_model: nn.Module, names: ModuleNames | None = None
 ):
     """Get the enclosing FSDP module for a given module.
 
     Args:
         module: The module to find the enclosing FSDP for.
         root_model: The root model containing the module.
-        name_to_module: Optional pre-computed dict mapping names to modules (for performance).
-        module_to_name: Optional pre-computed ``id(module) -> name`` reverse map (O(1) lookup).
+        names: Optional pre-built name maps (see :func:`module_name_maps`) to avoid rebuilding them.
     """
     if isinstance(module, FSDPModule):
         return module
 
-    target_module_name = _get_module_name(module, root_model, name_to_module, module_to_name)
-    if name_to_module is None:
-        # Read the index only after the lookup above, which may have refreshed it.
-        name_to_module = _cached_name_maps(root_model)[0] or dict(root_model.named_modules())
+    if names is None:
+        names = module_name_maps(root_model)
+    target_module_name = _get_module_name(module, root_model, names)
+    name_to_module = names.name_to_module
 
     if target_module_name is None:
         raise ValueError(f"Module {module} not found in the root model {root_model}.")
@@ -582,7 +527,10 @@ def _fsdp2_unshard_context(fsdp_module: FSDPModule):
 
 @contextmanager
 def fsdp2_weight_access_and_writeback_context(
-    module: nn.Module, root_model: nn.Module, writeback: bool = True
+    module: nn.Module,
+    root_model: nn.Module,
+    writeback: bool = True,
+    names: "ModuleNames | None" = None,
 ):
     """Context manager for FSDP2 weight access and writeback.
 
@@ -594,7 +542,7 @@ def fsdp2_weight_access_and_writeback_context(
     TP DTensor under this context.
     """
     assert not hasattr(module, "_hf_hook"), "We dont support FSDP2 with HF accelerate hooks"
-    fsdp_module = _get_enclosing_fsdp_module(module, root_model)
+    fsdp_module = _get_enclosing_fsdp_module(module, root_model, names)
     assert fsdp_module is not None, "Module is not wrapped by FSDP"
     if not writeback:
         with _fsdp2_unshard_context(fsdp_module):
@@ -661,7 +609,7 @@ def fsdp2_weight_access_and_writeback_context(
 
 @contextmanager
 def enable_weight_access_and_writeback(
-    module, root_model, name_to_module: dict | None = None, writeback: bool = True
+    module, root_model, names: "ModuleNames | None" = None, writeback: bool = True
 ):
     """Enable weight access and writeback for a module.
 
@@ -671,16 +619,15 @@ def enable_weight_access_and_writeback(
     Args:
         module: The module to access weights for.
         root_model: The root model containing the module.
-        name_to_module: Pre-computed ``dict(root_model.named_modules())``. Without this,
-            every call iterates ``root_model.named_modules()`` internally, leading to O(N^2)
-            total cost when called in a loop. This causes significant CPU overhead on large
-            models, particularly Sparse MoE architectures where each expert is typically
-            implemented as its own module.
+        names: Pre-built name maps from :func:`module_name_maps`. Without this, every call
+            rebuilds them, which is O(N^2) in total when called in a loop -- significant CPU
+            overhead on large models, particularly Sparse MoE architectures where each expert
+            is its own module.
         writeback: Whether modified weights must be written back to the owning sharded/offload
             representation when exiting the context.
     """
-    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
-        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback)
+    if _get_enclosing_fsdp_module(module, root_model, names) is not None:
+        context = fsdp2_weight_access_and_writeback_context(module, root_model, writeback, names)
     elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
@@ -695,7 +642,7 @@ def enable_weight_access_and_writeback(
         yield
 
 
-def requires_weight_materialization(module, root_model, name_to_module: dict | None = None) -> bool:
+def requires_weight_materialization(module, root_model, names: "ModuleNames | None" = None) -> bool:
     """Whether ``module``'s own weights are currently unreadable and need a window.
 
     Mirrors the dispatch in :func:`enable_weight_access_and_writeback`, so callers
@@ -710,7 +657,7 @@ def requires_weight_materialization(module, root_model, name_to_module: dict | N
         for t in itertools.chain(module._parameters.values(), module._buffers.values())
     ):
         return False
-    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
+    if _get_enclosing_fsdp_module(module, root_model, names) is not None:
         return True
     if is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         return True
@@ -1006,7 +953,9 @@ def disable_calib(quantizer):
 
 
 @contextmanager
-def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
+def fsdp2_aware_weight_update(
+    root_model, modules_to_update, reshard=True, names: "ModuleNames | None" = None
+):
     """Context manager to update the FSDPParam list if an update is made to a submodule of an FSDPModule.
 
     This context manager is to be used when updating a weight of a sharded module to ensure the changes are properly
@@ -1032,7 +981,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
             root_modules = set()
             for module in modules_to_update:
-                root_module = _get_enclosing_fsdp_module(module, root_model)
+                root_module = _get_enclosing_fsdp_module(module, root_model, names)
                 root_modules.add(root_module)
 
             # Ensure all modules in root_modules are the same
@@ -1051,7 +1000,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
                 for module in modules_to_update:
-                    module_name = _get_module_name(module, root_model)
+                    module_name = _get_module_name(module, root_model, names)
                     # Check if any parameter from this module is in the mapping
                     module_params_in_mapping = any(
                         f"{module_name}.{n}" in fsdp_param_mapping
@@ -1070,7 +1019,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
             # Update FSDPParam list
             for module in modules_to_update:
                 for param_name, param in module.named_parameters():
-                    name = _get_module_name(module, root_model)
+                    name = _get_module_name(module, root_model, names)
                     name = f"{name}.{param_name}"
                     if name not in fsdp_param_mapping:
                         continue

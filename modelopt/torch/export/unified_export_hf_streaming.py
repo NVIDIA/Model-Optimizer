@@ -208,9 +208,11 @@ def _assert_no_split_rules(model: nn.Module) -> None:
         return  # build_reverse_name_mapper reports the failure with a warning
     if split_rules:
         raise NotImplementedError(
-            "Disk/CPU-offloaded export cannot reverse tensor-level split rules in this "
-            "model's transformers conversion mapping: the streaming path reverses names "
-            "per tensor, while splits need the full state dict. Export without offloading."
+            "Streaming export cannot reverse tensor-level split rules in this model's "
+            "transformers conversion mapping: it reverses names one tensor at a time, while a "
+            "split rule regroups tensors across the whole state dict. Export the model resident "
+            "instead -- without disk/CPU offload and without FSDP2 -- so the full state dict is "
+            "built in memory."
         )
 
 
@@ -317,14 +319,15 @@ def _export_transformers_checkpoint_streaming(
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
     from modelopt.torch.quantization.utils.core_utils import (
         enable_weight_access_and_writeback,
+        module_name_maps,
         requires_weight_materialization,
     )
     from modelopt.torch.quantization.utils.layerwise_calib import LayerActivationCollector
 
     export_dir = Path(export_dir)
-    # Materialization dispatch walks the module tree from the root; without this cache each
-    # call re-derives it, which is O(N^2) over a MoE model's expert modules.
-    name_to_module = dict(model.named_modules())
+    # Materialization dispatch walks the module tree from the root; without these maps each
+    # call re-derives them, which is O(N^2) over a MoE model's expert modules.
+    names = module_name_maps(model)
 
     # --- Same model-level setup as _export_transformers_checkpoint ---
     dtype = _resolve_export_dtype(model, dtype)
@@ -409,9 +412,7 @@ def _export_transformers_checkpoint_streaming(
     for layer_name, layer_module in model.named_modules():
         if id(layer_module) not in decoder_layer_ids:
             continue
-        with enable_weight_access_and_writeback(
-            layer_module, model, name_to_module, writeback=False
-        ):
+        with enable_weight_access_and_writeback(layer_module, model, names, writeback=False):
             for sub_name, sub_mod in layer_module.named_modules():
                 full_name = f"{layer_name}.{sub_name}" if sub_name else layer_name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -458,9 +459,9 @@ def _export_transformers_checkpoint_streaming(
     for name, module in model.named_modules():
         if id(module) in decoder_owned_ids:
             continue
-        if not requires_weight_materialization(module, model, name_to_module):
+        if not requires_weight_materialization(module, model, names):
             continue
-        with enable_weight_access_and_writeback(module, model, name_to_module, writeback=False):
+        with enable_weight_access_and_writeback(module, model, names, writeback=False):
             for sub_name, sub_mod in module.named_modules():
                 full_name = f"{name}.{sub_name}" if sub_name else name
                 _dispatch_export_handler(full_name, sub_mod, ctx)
@@ -539,11 +540,9 @@ def _export_fsdp2_checkpoint_streaming(
     export_dir = Path(export_dir)
     my_rank, world = _dist.rank(), _dist.size()
 
-    # pack_weights=False: each layer is packed below, after it has been gathered, so the packer
-    # always sees a whole weight exactly as a single-process export would.
-    dtype, tied_map, quant_config = _prepare_model_for_export(
-        model, dtype, is_modelopt_qlora, pack_weights=False
-    )
+    # Setup only -- no global packing pass. Each layer is packed below once it has been gathered,
+    # so the packer always sees a whole weight exactly as a single-process export would.
+    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
 
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
@@ -573,10 +572,12 @@ def _export_fsdp2_checkpoint_streaming(
     )
 
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
-    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+    from modelopt.torch.quantization.utils.core_utils import (
+        enable_weight_access_and_writeback,
+        module_name_maps,
+    )
 
-    id_to_name = {id(m): n for n, m in model.named_modules()}
-    name_to_module = dict(model.named_modules())
+    names = module_name_maps(model)
     ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
     # This rank's packed tensors, held until every gather is done. Bounded to its own share of the
     # model (~model_size / world), not the whole checkpoint.
@@ -584,11 +585,11 @@ def _export_fsdp2_checkpoint_streaming(
     for index, unit in enumerate(get_export_units(model)):
         is_owner = index % world == my_rank
         for module in unit:
-            base = id_to_name.get(id(module), "")
+            base = names.module_to_name.get(id(module), "")
             # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
             # it exactly as a single-process export does. Every rank must enter -- the gather is a
             # collective, and gating around it instead of inside it would hang the owner.
-            with enable_weight_access_and_writeback(module, model, name_to_module, writeback=True):
+            with enable_weight_access_and_writeback(module, model, names, writeback=True):
                 if not is_owner:
                     continue
                 for sub_name, sub_module in module.named_modules():

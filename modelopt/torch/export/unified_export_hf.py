@@ -56,6 +56,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
+from modelopt.torch.opt.plugins.huggingface import _MODELOPT_STATE_SAVE_NAME
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
@@ -63,12 +64,13 @@ from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
 from modelopt.torch.quantization.utils import (
     fsdp2_aware_weight_update,
-    fsdp2_name_index,
+    module_name_maps,
     quantizer_attr_names,
 )
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
 from modelopt.torch.utils.distributed import is_fsdp2_model
+from modelopt.torch.utils.perf import maybe_clear_cuda_cache
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -361,6 +363,7 @@ def _fuse_shared_input_modules(
     qkv_only: bool = False,
     fuse_layernorms: bool = False,
     quantization_format: str | None = None,
+    names=None,
 ) -> dict[str, list[str]]:
     """Fuse modules that share the same input.
 
@@ -377,6 +380,8 @@ def _fuse_shared_input_modules(
     Returns:
         Dict mapping first module name to list of all fused module names.
     """
+    if names is None:
+        names = module_name_maps(model)
     fused_linears = {}
     fused_count = 0
 
@@ -410,7 +415,7 @@ def _fuse_shared_input_modules(
                             print(f"  Fused QKV group: {module_names}")
             else:
                 # Fuse all modules that have the same input (LLM models)
-                with _fusion_update_context(model, modules):
+                with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules)
                 fused_linears[modules[0].name] = [module.name for module in modules]
                 fused_count += 1
@@ -424,7 +429,7 @@ def _fuse_shared_input_modules(
                 and "awq" in group_quant_format
                 and tensor in output_to_layernorm
             ):
-                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):
+                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor], names=names):
                     fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
 
     if qkv_only:
@@ -436,23 +441,17 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
-def _fusion_writes_weights(modules: list[nn.Module]) -> bool:
-    """True if :func:`preprocess_linear_fusion` will write a weight, not just amax buffers.
+def _fusion_update_context(model: nn.Module, modules: list[nn.Module], names=None, **kwargs):
+    """Gather the modules only when the fusion will actually write a weight.
 
-    It only touches weights via the ``pre_quant_scale`` resmooth branch; otherwise it unifies amax /
-    global_amax, which are quantizer buffers and so are never FSDP-sharded. Under FSDP2 that makes
-    the surrounding ``fsdp2_aware_weight_update`` (a full-unit all-gather + FSDPParam rebuild +
-    reshard) pure overhead.
+    ``preprocess_linear_fusion`` writes weights only in its ``pre_quant_scale`` resmooth branch;
+    otherwise it unifies amax / global_amax, which are buffers and so are never FSDP-sharded.
+    Gathering for those costs a full-unit all-gather + FSDPParam rebuild + reshard for nothing.
     """
     input_quantizer = getattr(modules[0], "input_quantizer", None)
-    return input_quantizer is not None and input_quantizer.pre_quant_scale is not None
-
-
-def _fusion_update_context(model: nn.Module, modules: list[nn.Module], **kwargs):
-    """``fsdp2_aware_weight_update`` for weight-writing fusions, else a no-op context."""
-    if not _fusion_writes_weights(modules):
+    if input_quantizer is None or input_quantizer.pre_quant_scale is None:
         return nullcontext()
-    return fsdp2_aware_weight_update(model, modules, **kwargs)
+    return fsdp2_aware_weight_update(model, modules, names=names, **kwargs)
 
 
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
@@ -461,6 +460,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     quantization_format = get_quantization_format(model)
     model_type = type(model).__name__.lower()
     module_names = set()
+    # Built once: every fusion below resolves module names through it.
+    names = module_name_maps(model)
 
     # NVFP4 SVDQuant does not need pre-quant scale fusion (either into previous linear or layernorm) because
     # 1) its kernel handles pre-quant scale.
@@ -482,7 +483,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
             # update_experts_avg_prequant_scale(module)
             grouped_experts = get_experts_list(module, model_type)
             for modules in grouped_experts:
-                with _fusion_update_context(model, modules):
+                with _fusion_update_context(model, modules, names):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
     # Define the dummy forward function for LLM
@@ -540,6 +541,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         qkv_only=False,
         fuse_layernorms=True,
         quantization_format=quantization_format,
+        names=names,
     )
 
     # The dummy forward may not be able to activate all the experts.
@@ -561,7 +563,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                     assert new_expert_name in module_names
                     new_expert_modules.append(model.get_submodule(new_expert_name))
 
-                with _fusion_update_context(model, new_expert_modules):
+                with _fusion_update_context(model, new_expert_modules, names):
                     preprocess_linear_fusion(new_expert_modules)
 
                 expert_id += 1
@@ -589,30 +591,6 @@ def _compressed_per_block_scale(
             "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
         ) from e
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
-
-
-_EMPTY_CACHE_CHECK_EVERY = 64
-_empty_cache_calls = 0
-
-
-def _maybe_empty_cache(slack_bytes: int = 4 * 1024**3) -> None:
-    """Empty the CUDA cache only when the allocator is actually holding unused memory.
-
-    This runs once per exported weight -- tens of thousands of times on a large MoE -- and
-    ``empty_cache()`` syncs the device and returns every cached block to the driver, so the next
-    allocation has to go back through ``cudaMalloc``. It is here to relieve memory pressure between
-    packs, which only helps when there is reclaimable slack; with no slack it frees nothing and only
-    costs. The allocator-stats query is cheap but not free, so only sample every Nth call -- slack
-    cannot appear between two adjacent packs.
-    """
-    global _empty_cache_calls
-    _empty_cache_calls += 1
-    if _empty_cache_calls % _EMPTY_CACHE_CHECK_EVERY:
-        return
-    if not torch.cuda.is_available():
-        return
-    if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
-        torch.cuda.empty_cache()
 
 
 def _export_quantized_weight(
@@ -856,7 +834,7 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
-    _maybe_empty_cache()
+    maybe_clear_cuda_cache()
 
 
 def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContext) -> None:
@@ -974,21 +952,11 @@ def _process_quantized_modules(
         _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _prepare_model_for_export(model, dtype, is_modelopt_qlora, pack_weights=True):
-    """Run the shared export setup, optionally quantizing every module's weight in place.
+def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
+    """Run the shared export setup. Packing the weights is a separate step.
 
-    The body runs under ``fsdp2_name_index`` so the per-module name lookups in the FSDP2 helpers
-    are O(1) instead of a ``named_modules()`` scan each, which is O(N^2) overall.
-    """
-    with fsdp2_name_index(model):
-        return _prepare_model_for_export_impl(model, dtype, is_modelopt_qlora, pack_weights)
-
-
-def _prepare_model_for_export_impl(model, dtype, is_modelopt_qlora, pack_weights=True):
-    """Run the shared export setup and quantize every module's weights in place.
-
-    Both export paths call this so they cannot drift. Under FSDP2 each rank quantizes its own slice.
-    Returns the dtype, the tied-weight map and the quant config.
+    Both export paths call this so they cannot drift. Returns the dtype, the tied-weight map and
+    the quant config.
     """
     dtype = _resolve_export_dtype(model, dtype)
     # One tied-weight map for the whole export (amax sync + final dedup in postprocess_state_dict).
@@ -1031,15 +999,30 @@ def _prepare_model_for_export_impl(model, dtype, is_modelopt_qlora, pack_weights
             f"{synced_input} tied module group(s)"
         )
 
-    # Process all quantized modules and export weights
+    return dtype, tied_map, quant_config
+
+
+def pack_quantized_weights(model, dtype, is_modelopt_qlora: bool = False) -> None:
+    """Quantize every module's weight in place, then rebuild the fused MoE linears."""
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    # The FSDP2 streaming path packs per layer inside its own loop, once each layer has been
-    # gathered, so it skips the global pass here.
-    if pack_weights:
-        _process_quantized_modules(model, dtype, is_modelopt_qlora)
-        _reconstruct_fused_moe_linear(model)
-    return dtype, tied_map, quant_config
+    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    _reconstruct_fused_moe_linear(model)
+
+
+def _collect_full_state_dict(model: nn.Module) -> dict[str, Any]:
+    """Return the model's complete state dict, whatever it is sharded across.
+
+    Under FSDP2 the shards are gathered to CPU on rank 0, so every rank must call this -- the
+    gather is a collective, and other ranks come back with an empty dict. Otherwise the model is
+    replicated and its own state dict is already complete.
+    """
+    if is_fsdp2_model(model):
+        return get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
+    return model.state_dict()
 
 
 def _export_transformers_checkpoint(
@@ -1069,17 +1052,9 @@ def _export_transformers_checkpoint(
         NotImplementedError: if the model has accelerate offload hooks.
     """
     dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    pack_quantized_weights(model, dtype, is_modelopt_qlora)
 
-    if is_fsdp2_model(model):
-        # Gather the whole model to CPU on rank 0, as this function's contract says. Only direct
-        # callers reach here -- export_hf_checkpoint streams FSDP2 exports instead.
-        quantized_state_dict = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
-    else:
-        # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
-        quantized_state_dict = model.state_dict()
+    quantized_state_dict = _collect_full_state_dict(model)
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
@@ -1681,7 +1656,7 @@ def export_hf_checkpoint(
                 model.hf_quantizer = None
             if rank == 0:
                 if save_modelopt_state and ModeloptStateManager.is_converted(model):
-                    torch.save(modelopt_state(model), export_dir / "modelopt_state.pth")
+                    torch.save(modelopt_state(model), export_dir / _MODELOPT_STATE_SAVE_NAME)
                 _revert_quant_config_names_best_effort(model, hf_quant_config)
         else:
             post_state_dict, hf_quant_config = _export_transformers_checkpoint(
