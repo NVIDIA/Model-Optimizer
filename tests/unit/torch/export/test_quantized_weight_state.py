@@ -20,10 +20,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-import modelopt.torch.export.quant_utils as quant_utils
+import modelopt.torch.export.quantized_weight_export as weight_export
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.quant_utils import (
+from modelopt.torch.export.quantized_weight_export import (
     build_hf_quantization_config,
     capture_quantized_weight_export_state,
     export_quantized_weight_tensors,
@@ -110,6 +110,23 @@ class _GroupedWeights(nn.Module):
         yield self.weight1, self.quantizers[1]
 
 
+def _blockwise_export_state(width: int, *, transposed: bool = False):
+    return weight_export._QuantizedWeightExportState(
+        quantization_format="fp8_pb_wo",
+        block_size=128,
+        weight_shape=(width, 128) if transposed else (128, width),
+        tensors=(
+            weight_export._ExportStateTensor(
+                "weight_scale",
+                torch.ones(1, (width + 127) // 128),
+                axes=(0, 1),
+                block_sizes=(128, 128),
+            ),
+        ),
+        packing_permutation=(1, 0) if transposed else (0, 1),
+    )
+
+
 def test_capture_does_not_modify_zero_amax():
     module = _fp8_linear()
     module.weight_quantizer._amax.zero_()
@@ -176,6 +193,33 @@ def test_export_spec_rejects_unsupported_format():
         get_quantized_weight_export_spec(module)
 
 
+def test_export_spec_rejects_weight_only_mxfp4():
+    module = nn.Linear(32, 32, bias=False)
+    module.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(
+            num_bits=(2, 1),
+            block_sizes={-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+        )
+    )
+    module.input_quantizer = TensorQuantizer()
+    module.input_quantizer.disable()
+
+    with pytest.raises(NotImplementedError, match="weight-only MXFP4"):
+        get_quantized_weight_export_spec(module)
+
+
+def test_export_spec_rejects_unsupported_fp8_2d_block_shape():
+    module = nn.Linear(128, 128, bias=False)
+    module.weight_quantizer = TensorQuantizer(
+        QuantizerAttributeConfig(num_bits=(4, 3), block_sizes={-2: 64, -1: 128})
+    )
+    module.input_quantizer = TensorQuantizer()
+    module.input_quantizer.disable()
+
+    with pytest.raises(NotImplementedError, match="only with 128x128 blocks"):
+        get_quantized_weight_export_spec(module)
+
+
 def test_export_state_split_restore_preserves_output():
     module = _fp8_linear()
     state = capture_quantized_weight_export_state(module)
@@ -200,11 +244,58 @@ def test_export_spec_builds_config_without_tensor_state():
     assert config["quant_algo"] == "FP8"
 
 
+_FUNCTIONAL_FORMAT_CASES = (
+    ("fp8", "FP8", 0, 8, True),
+    ("fp8_pc_pt", "FP8_PER_CHANNEL_PER_TOKEN", 0, 8, True),
+    ("fp8_pb_wo", "FP8_PB_WO", 128, 8, False),
+    ("mxfp8", "MXFP8", 32, 8, True),
+    ("mxfp4", "MXFP4", 32, 4, True),
+    ("nvfp4", "NVFP4", 16, 4, True),
+    ("w4a16_nvfp4", "W4A16_NVFP4", 16, 4, False),
+    ("w4a8_nvfp4_fp8", "W4A8_NVFP4_FP8", 16, 4, True),
+    ("w4a8_mxfp4_fp8", "W4A8_MXFP4_FP8", 32, 4, True),
+)
+
+
+@pytest.mark.parametrize(
+    ("quantization_format", "quant_algo", "block_size", "weight_bits", "has_input"),
+    _FUNCTIONAL_FORMAT_CASES,
+)
+def test_functional_format_builds_canonical_hf_config(
+    quantization_format, quant_algo, block_size, weight_bits, has_input
+):
+    spec = weight_export._QuantizedWeightExportSpec(quantization_format, block_size)
+
+    config = build_hf_quantization_config({"model.layers.0.proj.weight": spec})
+
+    group = config["config_groups"]["group_0"]
+    assert config["quant_algo"] == quant_algo
+    assert group["weights"]["num_bits"] == weight_bits
+    assert ("input_activations" in group) is has_input
+    if quant_algo == "FP8_PB_WO":
+        assert group["weights"]["strategy"] == "block"
+        assert group["weights"]["block_structure"] == [128, 128]
+    elif block_size:
+        assert group["weights"]["group_size"] == block_size
+    if quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
+        assert group["input_activations"]["dynamic"] is True
+        assert group["input_activations"]["strategy"] == "token"
+    elif quant_algo in {"MXFP4", "MXFP8"}:
+        assert group["input_activations"]["dynamic"] is True
+        assert group["input_activations"]["strategy"] == "group"
+
+
+def test_all_functional_formats_have_canonical_hf_config_coverage():
+    assert {case[0] for case in _FUNCTIONAL_FORMAT_CASES} == set(
+        weight_export._FUNCTIONAL_WEIGHT_EXPORT_FORMATS
+    )
+
+
 def test_export_spec_does_not_materialize_static_scale_state(monkeypatch):
     weight = torch.arange(32, dtype=torch.float32).reshape(2, 16) / 32
     module = _static_w4a16_linear(weight, weight.abs().amax(dim=1, keepdim=True), torch.tensor(1.0))
     monkeypatch.setattr(
-        quant_utils,
+        weight_export,
         "_state_tensor",
         lambda *args, **kwargs: pytest.fail("export spec materialized tensor state"),
     )
@@ -246,6 +337,23 @@ def test_static_nvfp4_merge_recomputes_scales_from_merged_amax():
     )
     for name in actual:
         torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
+
+
+def test_blockwise_state_merge_rejects_misaligned_shard_boundaries():
+    with pytest.raises(ValueError, match=r"boundary 192.*block sizes.*128"):
+        merge_quantized_weight_export_states(
+            (_blockwise_export_state(192), _blockwise_export_state(192)), 1
+        )
+
+
+def test_blockwise_state_merge_accepts_aligned_cumulative_boundaries_after_permutation():
+    merged = merge_quantized_weight_export_states(
+        tuple(_blockwise_export_state(width, transposed=True) for width in (128, 128, 64)),
+        0,
+    )
+
+    assert merged.weight_shape == (320, 128)
+    assert merged.tensors[0].value.shape == (1, 3)
 
 
 def test_static_nvfp4_noncontiguous_selection_tracks_block_amax():
