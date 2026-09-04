@@ -144,6 +144,71 @@ def postprocess_amax(model: nn.Module, key: str, post_process_fn) -> nn.Module:
     return model
 
 
+def _check_weight_quantization_took_effect(model: nn.Module, config: QuantizeConfig) -> None:
+    """Raise when a config asks for weight quantization but matches no weight quantizer.
+
+    A config whose module patterns do not match the model is not an error to
+    :func:`set_quantizer_by_cfg` — every pattern simply matches nothing — so the run
+    proceeds through calibration and export and produces a checkpoint that is silently
+    unquantized (``"quant_algo": null`` with an empty ``quantized_layers``). That has
+    bitten several MoE architectures whose module naming differs from the wildcards in
+    the general recipes, and it is only noticed when someone reads the exported config.
+
+    Matching goes through :func:`conversion._match_quantizer`, the same matcher
+    :func:`set_quantizer_by_cfg` applied, so the question "did this pattern match
+    anything?" is answered exactly as the code that applied the config would. A local
+    ``fnmatch`` would diverge on the two cases that matcher handles: ``SequentialQuantizer``
+    modules (W4A8-style list-valued ``cfg``) and fused-experts quantizer names
+    (``...gate_up_proj_weight_quantizers.0`` normalizing to ``..._weight_quantizer``).
+
+    Two kinds of config legitimately quantize no weight and must not raise: one that never
+    asks (activation-only or KV-cache-only), and one that asks and then retracts, since
+    entries apply in order and the last one for a pattern wins.
+    """
+    from .conversion import _match_quantizer
+
+    # Later entries override earlier ones, so only each pattern's final state states intent.
+    last_entry_per_pattern = {entry.quantizer_name: entry for entry in config.quant_cfg}
+    weight_patterns = [
+        pattern
+        for pattern, entry in last_entry_per_pattern.items()
+        if entry.enable and "weight_quantizer" in pattern
+    ]
+    if not weight_patterns:
+        return
+
+    quantizers = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer))
+    ]
+    # `parent_class` is deliberately not resolved: a pattern narrowed by it still names real
+    # modules, and treating it as matched keeps this check biased towards false negatives.
+    if any(
+        _match_quantizer(pattern, name, module, None, model)
+        for pattern in weight_patterns
+        for name, module in quantizers
+    ):
+        return
+    # Nothing this config names exists in the model. Any weight quantizer already enabled was
+    # established by an earlier `mtq.quantize` call, which this config refines rather than
+    # replaces, so the model is not left unquantized and this is not the reported failure.
+    if any(module.is_enabled for name, module in quantizers if "weight_quantizer" in name):
+        return
+
+    patterns = "\n  ".join(sorted(weight_patterns))
+    raise RuntimeError(
+        "The quantization config asks for weight quantization but no weight quantizer was "
+        f"enabled, so nothing would be quantized ({len(quantizers)} quantizer(s) inserted). "
+        "These patterns matched no weight quantizer:\n  "
+        f"{patterns}\n"
+        "Either the patterns do not match this architecture's module names (check the "
+        "model-specific recipes under modelopt_recipes/huggingface/<model_type>/), or the "
+        "modules holding the weights were never converted to quantized modules (an "
+        "unsupported custom module, e.g. a trust_remote_code MoE layout)."
+    )
+
+
 def quantize(
     model: nn.Module,
     config: dict[str, Any | QuantizeConfig],
@@ -241,12 +306,14 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
+    quantize_config = QuantizeConfig(**dict(config))
     if not is_quantized(model):
         model = apply_mode(model, mode=[("quantize", dict(config))], registry=QuantizeModeRegistry)
     else:
         # Already quantized, so lets apply the quant_cfg from the config
-        quant_cfg = QuantizeConfig(**dict(config)).quant_cfg
-        set_quantizer_by_cfg(model, quant_cfg)
+        set_quantizer_by_cfg(model, quantize_config.quant_cfg)
+    # Fail before calibration rather than after exporting an unquantized checkpoint.
+    _check_weight_quantization_took_effect(model, quantize_config)
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 

@@ -261,7 +261,9 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
         # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
-        mtq.NVFP4_MLP_ONLY_CFG,
+        # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
+        # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
+        # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
@@ -281,7 +283,9 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         # mtq.W4A8_AWQ_BETA_CFG, #TODO: Fix unit test for this case
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
-        mtq.NVFP4_MLP_ONLY_CFG,
+        # NVFP4_MLP_ONLY_CFG is omitted: SmallQKVModel has no MLP, so that config matched
+        # nothing and the parametrization exercised an unquantized model. NVFP4_OMLP_ONLY_CFG
+        # covers the same scoped-recipe shape here because it also selects `o_proj`.
         mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
