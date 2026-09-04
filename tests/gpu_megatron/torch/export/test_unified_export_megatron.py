@@ -665,6 +665,7 @@ def _make_exporter_for_grouped_mlp() -> GPTModelExporter:
     exporter._get_quantized_state = lambda *a, **k: ({}, None, 0)
     exporter._get_weight_scales = lambda *a, **k: (None, None)
     exporter._record_layer_quant_config = lambda *a, **k: None
+    exporter.exclude_modules = []
     return exporter
 
 
@@ -767,6 +768,25 @@ def test_grouped_mlp_slicing_scalar_scale_is_shared_by_both_shards():
 
     for proj in ("gate_proj", "up_proj"):
         torch.testing.assert_close(exporter._state_dict[f"experts.0.{proj}.weight_scale"], scale)
+
+
+def test_grouped_mlp_slicing_records_unquantized_experts_as_excluded():
+    """exclude_modules is an explicit list: unquantized experts must be named in it, or a
+    mixed-precision checkpoint leaves the runtime no signal for them.
+    """
+    exporter = _make_exporter_for_grouped_mlp()  # stub yields qformat None
+    module = _FakeTEGroupedMLP(num_gemms=2, local_expert_indices=[0, 1])
+
+    exporter._grouped_mlp_slicing(
+        module, "experts.{}", gate_proj_name="gate_proj", up_proj_name="up_proj"
+    )
+
+    assert set(exporter.exclude_modules) == {
+        "experts.0.gate_proj",
+        "experts.0.up_proj",
+        "experts.1.gate_proj",
+        "experts.1.up_proj",
+    }
 
 
 def test_grouped_mlp_slicing_collects_all_missing_expert_weights():

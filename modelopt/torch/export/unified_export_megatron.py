@@ -1418,6 +1418,10 @@ class GPTModelExporter:
                     if weight_scale_cpu is None or weight_scale_cpu.dim() == 0:
                         scales = (weight_scale_cpu, weight_scale_cpu)
                     else:
+                        assert weight_scale_cpu.shape[0] == weight.shape[0], (
+                            f"cannot split a {tuple(weight_scale_cpu.shape)} weight_scale along "
+                            f"the output dim of a {tuple(weight.shape)} gated expert weight"
+                        )
                         scales = (weight_scale_cpu[:half], weight_scale_cpu[half:])
                     shards = [
                         (expert_prefix + _gated_subnames[0] + ".", weight[:half], scales[0]),
@@ -1453,17 +1457,19 @@ class GPTModelExporter:
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
         # a TEGroupedLinear layer share qformat/block_size, so local values apply globally.
-        if seen_qformat is not None:
-            assert seen_block_size is not None
-            num_total_experts = num_experts * ep_size
-            for global_id in range(num_total_experts):
-                for sub in _gated_subnames or (None,):
-                    expert_prefix = prefix.format(global_id) + "."
-                    self._record_layer_quant_config(
-                        expert_prefix if sub is None else expert_prefix + sub + ".",
-                        seen_qformat,
-                        seen_block_size,
-                    )
+        num_total_experts = num_experts * ep_size
+        for global_id in range(num_total_experts):
+            for sub in _gated_subnames or (None,):
+                expert_prefix = prefix.format(global_id) + "."
+                if sub is not None:
+                    expert_prefix += sub + "."
+                # exclude_modules is an explicit list, so unquantized experts must be named there
+                # or a mixed-precision checkpoint gives the runtime no signal for them.
+                if seen_qformat in (None, QUANTIZATION_NONE):
+                    self._record_excluded_module(expert_prefix)
+                else:
+                    assert seen_block_size is not None
+                    self._record_layer_quant_config(expert_prefix, seen_qformat, seen_block_size)
 
         if ep_size > 1:
             # all_gather_object pickles trip on quantized uint8 tensors whose

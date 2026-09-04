@@ -46,6 +46,7 @@ from modelopt.torch.utils import print_rank_0, warn_rank_0
 __all__ = [
     "get_language_model",
     "is_vlm_config",
+    "keep_gpt_output_layer_extra_state",
     "load_mbridge_model_from_hf",
     "load_modelopt_megatron_checkpoint",
     "set_moe_expert_layout",
