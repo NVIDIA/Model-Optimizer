@@ -83,6 +83,11 @@ class AlgoCapabilities:
     # unsmoothed weight; running it twice folds twice while keeping only the last
     # activation-side scale (see ``apply_pre_quant_scale_and_smooth``).
     requires_absent: frozenset[str] = frozenset()
+    # Whether the underlying calibration function honours the `should_process` write-mask.
+    # An algorithm that does not must never be given a narrower scope than the whole model:
+    # it would either raise (no such parameter) or silently write outside its scope
+    # (parameter swallowed by `**kwargs`), clobbering other stages.
+    supports_scoping: bool = True
 
     @property
     def shareable_forward(self) -> bool:
@@ -114,12 +119,14 @@ ALGO_CAPABILITIES: dict[str, AlgoCapabilities] = {
         role="input",
         requires=frozenset({"acts"}),
         produces=frozenset({_I_AMAX}),
+        supports_scoping=False,
     ),
     "local_hessian": AlgoCapabilities(
         granularity="module",
         role="weight",
         requires=frozenset({_W, _W_AMAX, "acts"}),
         produces=frozenset({_W_AMAX}),
+        supports_scoping=False,
     ),
     "smoothquant": AlgoCapabilities(
         granularity="module",
@@ -169,12 +176,14 @@ ALGO_CAPABILITIES: dict[str, AlgoCapabilities] = {
         produces=frozenset({_PQS, _W, _W_AMAX, _I_AMAX}),
         self_forwards=True,
         requires_absent=frozenset({_PQS}),
+        supports_scoping=False,
     ),
     "lsq": AlgoCapabilities(
         granularity="tensor",
         role="weight",
         requires=frozenset({_W, _W_AMAX}),
         produces=frozenset({_W_AMAX}),
+        supports_scoping=False,
     ),
 }
 
@@ -268,10 +277,17 @@ def _index_model(model: nn.Module) -> _ModelIndex:
         elif isinstance(module, (TensorQuantizer, SequentialQuantizer)):
             index.quantizers.append(name)
     for q in index.quantizers:
-        parent = q.rsplit(".", 1)[0] if "." in q else ""
-        if parent in index.quantizers_of:
-            index.quantizers_of[parent].append(q)
-            index.parent_of[q] = parent
+        # Walk up to the nearest enclosing quantized linear rather than assuming the
+        # quantizer is its direct child: a SequentialQuantizer (W4A8, INT4-AWQ) nests its
+        # levels as `<linear>.weight_quantizer.0`, which is a *grandchild*. Attaching only
+        # direct children silently drops every sub-quantizer from module-scoped stages.
+        parts = q.split(".")
+        for depth in range(len(parts) - 1, 0, -1):
+            ancestor = ".".join(parts[:depth])
+            if ancestor in index.quantizers_of:
+                index.quantizers_of[ancestor].append(q)
+                index.parent_of[q] = ancestor
+                break
     return index
 
 
@@ -303,12 +319,23 @@ TOKEN_ROLE: dict[str, str] = {
 
 
 def stage_targets(model: nn.Module, stage: AlgoStage) -> tuple[set[str], set[str]]:
-    """``(modules, quantizers)`` a stage may write, after subtracting its exclusions."""
+    """``(modules, quantizers)`` a stage may write, after subtracting its exclusions.
+
+    Exclusions are subtracted at the granularity the excluding entry actually claimed. A
+    ``quantizer_name`` entry claims *quantizers*, not the linears that own them, so removing
+    its parent modules as well would strip the fallback stage of every module -- and with it
+    the weight calibration that only runs per module (`weight_only_quantize`). A module drops
+    out only when nothing it owns is left in scope.
+    """
     modules, quantizers = resolve_targets(model, stage.scope, stage.selector)
     for selector, glob in stage.exclude:
         ex_modules, ex_quantizers = resolve_targets(model, glob, selector)
-        modules -= ex_modules
         quantizers -= ex_quantizers
+        if selector == "module_name":
+            modules -= ex_modules
+    if stage.exclude:
+        owned = _index_model(model).quantizers_of
+        modules = {m for m in modules if quantizers.intersection(owned.get(m, ()))}
     return modules, quantizers
 
 
@@ -477,6 +504,20 @@ def _validate_scopes(model: nn.Module, plan: CalibrationPlan, sink: list[str]) -
         caps = stage.capabilities
         if caps is None:
             continue
+
+        if not caps.supports_scoping:
+            everything = set(_index_model(model).quantizers)
+            _, in_scope = stage_targets(model, stage)
+            if in_scope != everything:
+                _report(
+                    f"{stage.algo!r} does not honour the scoping write-mask, so it cannot be "
+                    f"restricted to {stage.selector}={stage.scope!r} ({len(in_scope)} of "
+                    f"{len(everything)} quantizers) -- it would write outside its scope and "
+                    "clobber other stages. Use it at whole-model scope, or add "
+                    "`should_process` support to its calibration function first.",
+                    sink=sink,
+                )
+                continue
         # Role check: a weight-only algorithm pointed at input quantizers writes nothing.
         if stage.selector == "quantizer_name":
             roles = {"weight" if "weight_quantizer" in q else "input" for q in quantizers}

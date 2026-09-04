@@ -15,6 +15,7 @@
 
 """This module contains the mode descriptor for the quantization mode."""
 
+import inspect
 from abc import abstractmethod
 from collections.abc import Callable
 
@@ -243,9 +244,15 @@ def wrapped_calib_func(
         kwargs["algorithm"] = method
 
     # The scoping write-mask (see `algo_cfg.stage_predicate`). `None` means "whole model",
-    # which is exactly today's behaviour, so it is not forwarded in that case.
-    if should_process is not None:
-        kwargs["should_process"] = should_process
+    # which is exactly today's behaviour, so it is not forwarded in that case. Only algorithms
+    # that declare the parameter get it: passing it to one that would swallow it via `**kwargs`
+    # buys nothing and hides the fact that the mask is not honoured, and passing it to one that
+    # declares neither raises. `algo_cfg` refuses to *scope* such algorithms
+    # (`AlgoCapabilities.supports_scoping`), so reaching here means whole-model scope.
+    if should_process is not None and func is not None:
+        params = inspect.signature(func).parameters
+        if "should_process" in params:
+            kwargs["should_process"] = should_process
 
     moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
     if moe_calib_experts_ratio is not None:

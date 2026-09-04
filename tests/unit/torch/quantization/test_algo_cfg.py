@@ -32,6 +32,24 @@ from modelopt.torch.quantization.algo_cfg import (
 )
 from modelopt.torch.quantization.config import AlgoCfgEntry
 
+# Two-level weight quantizer (the W4A8 / INT4-AWQ shape): each weight quantizer becomes a
+# SequentialQuantizer whose levels are *grandchildren* of the linear.
+SEQUENTIAL_QUANT_CFG = [
+    {"quantizer_name": "*", "enable": False},
+    {
+        "quantizer_name": "*weight_quantizer",
+        "cfg": [{"num_bits": 4, "block_sizes": {-1: 32}}, {"num_bits": (4, 3), "axis": None}],
+    },
+    {"quantizer_name": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+]
+
+# Weight-only: nothing needs a forward, so `weight_only_quantize` inside `max_calibrate` is the
+# only thing that writes weight amax. Scoping bugs that a forward pass would paper over show up.
+WEIGHT_ONLY_QUANT_CFG = [
+    {"quantizer_name": "*", "enable": False},
+    {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 32}}},
+]
+
 QUANT_CFG = [
     {"quantizer_name": "*", "enable": False},
     {"quantizer_name": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 32}}},
@@ -106,6 +124,19 @@ def _weight_amax(model):
         for name, module in model.named_modules()
         if name.endswith("weight_quantizer") and getattr(module, "_amax", None) is not None
     }
+
+
+def _uncalibrated_weight_quantizers(model):
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
+    return [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, TensorQuantizer)
+        and "weight_quantizer" in name
+        and not module._disabled
+        and getattr(module, "_amax", None) is None
+    ]
 
 
 def _run_chain(cfg, quant_cfg=None):
@@ -415,6 +446,75 @@ def test_scoped_stage_writes_only_its_targets():
     calibrated = _weight_amax(model)
     assert calibrated
     assert all("mlp" in name for name in calibrated)
+
+
+def test_module_scope_reaches_sequential_quantizer_levels():
+    """A SequentialQuantizer nests its levels below the linear, not directly under it."""
+    model = mtq.quantize(_model(), {"quant_cfg": SEQUENTIAL_QUANT_CFG, "algorithm": None}, None)
+    _, quantizers = resolve_targets(model, "*", "module_name")
+    levels = [
+        name
+        for name, _ in model.named_modules()
+        if name.split(".")[-1].isdigit() and "quantizer" in name
+    ]
+    assert levels, "fixture should produce sequential sub-quantizers"
+    assert all(level in quantizers for level in levels)
+
+
+def test_sequential_quantizers_are_calibrated_under_a_module_scope():
+    scoped = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": SEQUENTIAL_QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*", "cfg": ["max"]}],
+        },
+        _forward_loop,
+    )
+    legacy = mtq.quantize(
+        _model(), {"quant_cfg": SEQUENTIAL_QUANT_CFG, "algorithm": "max"}, _forward_loop
+    )
+    assert _uncalibrated_weight_quantizers(scoped) == []
+    assert _uncalibrated_weight_quantizers(legacy) == []
+
+
+def test_quantizer_scoped_entry_leaves_the_fallback_able_to_calibrate_weights():
+    """A `quantizer_name` entry claims quantizers, not the linears that own them.
+
+    Subtracting the parent modules too would strip the fallback stage of every module, and
+    with it `weight_only_quantize` -- invisible whenever a forward pass would have set the
+    weight amax anyway, which is why this uses a weight-only config with no forward loop.
+    """
+    scoped = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": WEIGHT_ONLY_QUANT_CFG,
+            "algorithm": "max",
+            "algo_cfg": [{"quantizer_name": "*input_quantizer", "cfg": ["max"]}],
+        },
+        None,
+    )
+    assert _uncalibrated_weight_quantizers(scoped) == []
+
+
+def test_algorithms_that_ignore_the_write_mask_cannot_be_scoped(quantized):
+    """`local_hessian` takes no `should_process`; scoping it would write outside its scope."""
+    with pytest.raises(AlgoCfgValidationError, match="does not honour the scoping write-mask"):
+        compile_algo_cfg(
+            {
+                "algo_cfg": [{"module_name": "*mlp*", "cfg": ["local_hessian"]}],
+                "algorithm": None,
+            },
+            quantized,
+        )
+
+
+def test_algorithms_that_ignore_the_write_mask_are_still_usable_whole_model(quantized):
+    plan = compile_algo_cfg(
+        {"algo_cfg": [{"quantizer_name": "*", "cfg": ["local_hessian"]}], "algorithm": None},
+        quantized,
+    )
+    assert [stage.algo for stage in plan] == ["local_hessian"]
 
 
 def test_scoping_never_toggles_enable_state():
