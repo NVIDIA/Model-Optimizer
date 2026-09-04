@@ -69,7 +69,7 @@ def _export_fp8_model(source_dtype, weights_dtype, conv=False):
     model = model.eval().to(source_dtype)
     if conv:
         with torch.no_grad():
-            model[0].weight.fill_(1e-38)
+            model[0].weight.fill_(1e-38 if source_dtype == torch.bfloat16 else 1.0)
     model = mtq.quantize(
         model,
         mtq.FP8_DEFAULT_CFG,
@@ -191,6 +191,7 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
         (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16, False),
         (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16, True),
         (torch.float32, "fp16", onnx.TensorProto.FLOAT16, False),
+        (torch.float32, "fp16", onnx.TensorProto.FLOAT16, True),
     ],
 )
 def test_fp8_export_with_supported_weights_dtype(
@@ -227,12 +228,24 @@ def test_fp8_export_with_supported_weights_dtype(
     assert all(value.type.tensor_type.elem_type == expected_onnx_dtype for value in graph_io)
 
 
-def test_fp8_export_rejects_bf16_conversion_from_fp32():
-    with pytest.raises(
-        AssertionError,
-        match="Converting a quantized ONNX graph to BF16 is not supported",
-    ):
-        _export_fp8_model(torch.float32, "bf16")
+@pytest.mark.parametrize(
+    ("source_dtype", "weights_dtype", "error"),
+    [
+        (
+            torch.float32,
+            "bf16",
+            r"Converting a quantized ONNX graph to BF16.*source floating dtypes: torch.float32",
+        ),
+        (
+            torch.bfloat16,
+            "fp16",
+            r"Converting a BF16 FP8 ONNX graph to FP16.*source floating dtypes: torch.bfloat16",
+        ),
+    ],
+)
+def test_fp8_export_rejects_unsupported_dtype_conversion(source_dtype, weights_dtype, error):
+    with pytest.raises(AssertionError, match=error):
+        _export_fp8_model(source_dtype, weights_dtype)
 
 
 def test_fp8_bf16_noop_rejects_incompatible_mixed_format():
@@ -299,7 +312,8 @@ def test_fp8_bf16_noop_rejects_mixed_buffer_dtype():
         forward_loop=lambda quantized_model: quantized_model(sample_input),
     )
     with pytest.raises(
-        AssertionError, match="Converting a quantized ONNX graph to BF16 is not supported"
+        AssertionError,
+        match=r"source floating dtypes: torch.bfloat16, torch.float32",
     ):
         get_onnx_bytes_and_metadata(model, (sample_input,), weights_dtype="bf16", onnx_opset=23)
 
