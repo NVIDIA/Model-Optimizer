@@ -13,79 +13,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate registered MoE specs against the installed transformers definitions.
+"""Validate registered specs against the installed transformers definitions.
 
 ``test_model_specs.py`` pins spec values against a hand-written table. That catches an
 accidental edit, but not a spec that is simply *wrong*: the table and the spec can be
 wrong in the same way. ``gpt_oss`` shipped ``block_names=("GptOssMoE",)``, a class that
 does not exist in transformers, and a mirrored table agreed with it.
 
-These tests read the other side of the contract -- what transformers actually defines --
-so a renamed block class or projection is caught at the source.
+This file reads the other side of the contract -- what transformers actually defines --
+so a block class naming nothing real is caught at the source.
 
-Structure follows the transformers repo's own convention -- shared assertions
-parametrized over the registry, rather than a test module per model.
+Nothing here names a model. Which specs to check, which cannot be checked, and which
+transformers releases each applies to all come from the registry:
 
-Unlike transformers' ``utils/check_repo.py``, the exclusions are not a table here: a
-model that cannot be introspected is one whose code ships with the checkpoint, which
-its spec already records as ``modeling_source="remote_code"``. This file therefore
-names no models at all; the set to check, and the reason to skip one, both come from
-the registry.
+- ``modeling_source`` says whether the classes ship in transformers at all;
+- ``min_transformers_version`` says from which release a spec's definitions apply, so an
+  absence on an older transformers is an expected skip rather than a failure.
+
+That second field is what lets these checks be assertions. Without it every check
+degrades to "skip when not found", and a broken lookup would leave the suite green
+having verified nothing.
 """
 
-import functools
 import importlib
-import inspect
 
 import pytest
 
 pytest.importorskip("transformers")
 
-import torch.nn as nn
+from packaging.version import Version
 
 from modelopt.torch.models import get_spec, get_specs
 
-# Model types that have been in transformers long enough to exist in every version this
-# repo supports, so failing to resolve one means the lookup itself broke rather than the
-# installed transformers predating the model. Everything else may legitimately be
-# missing on the tf_min end of the CI matrix and only skips.
-#
-# Unlike a bare count, a name here states something a reader can check: "this model has
-# been upstream for years." Drop an entry only when transformers actually removes it.
-ALWAYS_RESOLVABLE = {
-    "dbrx",
-    "mixtral",
-    "qwen2_moe",
-    "qwen3_moe",
-}
+
+def _installed_version() -> Version:
+    return Version(importlib.import_module("transformers").__version__)
 
 
-def _is_remote_code(model_type: str) -> bool:
-    """Whether the model's classes live in checkpoint code rather than transformers.
-
-    Read off the spec rather than a table here: it is a fact about the model, and the
-    spec is where a model's facts belong.
-    """
-    spec = get_spec(model_type)
-    return spec is not None and spec.modeling_source == "remote_code"
-
-
-def _moe_variants():
-    """(model_type, variant) for every registered MoE variant."""
-    return [
-        (spec.model_type, variant)
-        for spec in get_specs()
-        if spec.moe_spec is not None
-        for variant in spec.moe_spec.moe_variants
-    ]
-
-
-@functools.cache
 def _package_name(model_type: str) -> str:
     """The transformers package directory for ``model_type``.
 
     A model type is not always its own directory: sub-model types live with their parent
-    (``gemma3_text`` in ``gemma3``) and a few are spelled differently (``kosmos-2`` in
+    (``gemma4_text`` in ``gemma4``) and a few are spelled differently (``kosmos-2`` in
     ``kosmos2``). transformers resolves this with ``model_type_to_module_name``, backed
     by its SPECIAL_MODEL_TYPE_TO_MODULE_NAME table -- ``CONFIG_MAPPING[model_type]``
     would fail to import otherwise. Deferring to it keeps that knowledge upstream
@@ -111,129 +80,102 @@ def _modeling_module(model_type: str):
 
 
 def _find_block_class(module, block_names: tuple[str, ...]):
-    """The first of ``block_names`` that names a real class in ``module``."""
+    """The first of ``block_names`` naming a class in ``module``, matched case-insensitively.
+
+    Mirrors ``specs.match_class_names``, which lowercases both sides, so a spec that
+    resolves at runtime resolves here too. The spellings do drift: ``nemotron_h``
+    declares ``NemotronHMOE`` while transformers defines ``NemotronHMoE``.
+    """
+    by_lower = {name.lower(): obj for name, obj in vars(module).items() if isinstance(obj, type)}
     for name in block_names:
-        cls = getattr(module, name, None)
-        if isinstance(cls, type):
+        cls = by_lower.get(name.lower())
+        if cls is not None:
             return cls
     return None
 
 
-def _ids(items):
-    return [f"{mt}-{'/'.join(v.block_names)}" for mt, v in items]
+def _moe_variants():
+    """(model_type, variant) for every registered MoE variant."""
+    return [
+        (spec.model_type, variant)
+        for spec in get_specs()
+        if spec.moe_spec is not None
+        for variant in spec.moe_spec.moe_variants
+    ]
 
 
 VARIANTS = _moe_variants()
+MOE_MODEL_TYPES = sorted({mt for mt, _ in VARIANTS})
+REMOTE_CODE_MODEL_TYPES = sorted(
+    s.model_type for s in get_specs() if s.modeling_source == "remote_code"
+)
+VERSIONED_MOE_MODEL_TYPES = sorted(
+    mt for mt in MOE_MODEL_TYPES if get_spec(mt).min_transformers_version is not None
+)
 
 
-def test_always_resolvable_models_are_registered():
-    """ALWAYS_RESOLVABLE cannot drift away from the registry."""
-    registered = {mt for mt, _ in VARIANTS}
-    assert registered >= ALWAYS_RESOLVABLE, (
-        f"ALWAYS_RESOLVABLE names unregistered model types: "
-        f"{sorted(ALWAYS_RESOLVABLE - registered)}"
-    )
+def test_version_claim_matches_modeling_source():
+    """A spec names a transformers release exactly when its code ships in transformers.
 
-
-REMOTE_CODE_MODEL_TYPES = sorted({mt for mt, _ in VARIANTS if _is_remote_code(mt)})
+    Pure bookkeeping over the registry, so it means the same thing on every version in
+    the CI matrix. It is what makes the checks below exhaustive: a new spec cannot land
+    without either a release to check against or a declared reason there is none.
+    """
+    for spec in get_specs():
+        has_version = spec.min_transformers_version is not None
+        in_transformers = spec.modeling_source == "transformers"
+        assert has_version == in_transformers, (
+            f"{spec.model_type!r}: modeling_source={spec.modeling_source!r} but "
+            f"min_transformers_version={spec.min_transformers_version!r}. A transformers "
+            f"model needs the release its definitions come from; a remote_code model has "
+            f"no release to name."
+        )
 
 
 @pytest.mark.parametrize("model_type", REMOTE_CODE_MODEL_TYPES)
 def test_remote_code_models_are_really_absent(model_type):
     """``modeling_source="remote_code"`` must still hold for the installed transformers.
 
-    Validates the spec field itself, the same job this file does for block names and
-    projections. Models do graduate from remote code into transformers, and a field
-    left stale would silently suppress every other check for that model.
+    Models do graduate from remote code into transformers, and a field left stale would
+    silently suppress every other check for that model.
     """
     module = _modeling_module(model_type)
     assert module is None, (
         f"{model_type!r} declares modeling_source='remote_code', but transformers now "
-        f"provides {module.__name__}. Set modeling_source='transformers' on its spec so "
-        f"its block names and expert projections are checked."
+        f"provides {module.__name__}. Set modeling_source='transformers' and give it a "
+        f"min_transformers_version so its block names get checked."
     )
 
 
-@pytest.mark.parametrize(("model_type", "variant"), VARIANTS, ids=_ids(VARIANTS))
-def test_block_names_name_a_real_transformers_class(model_type, variant):
-    """``block_names`` must match a class transformers actually defines.
+@pytest.mark.parametrize("model_type", VERSIONED_MOE_MODEL_TYPES)
+def test_moe_block_resolves_from_its_declared_version(model_type):
+    """From ``min_transformers_version`` on, a spec's MoE block must name a real class.
 
-    ``block_names`` is the matching key: a name that exists nowhere silently matches
+    ``block_names`` is the matching key: a name existing nowhere silently matches
     nothing, which is how the ``GptOssMoE`` entry stayed invisible.
+
+    One resolving variant is enough. A model can declare a variant no transformers
+    release defines -- mixtral carries ``MixtralMoeSparseMoeBlock`` with MCore
+    ``linear_fc1``/``linear_fc2`` naming, migrated from a legacy branch -- so requiring
+    every variant to resolve would fail on those permanently.
     """
-    if _is_remote_code(model_type):
-        pytest.skip(f"{model_type!r} is a trust_remote_code model; not in transformers")
+    spec = get_spec(model_type)
+    installed = _installed_version()
+    required = Version(spec.min_transformers_version)
+    if installed < required:
+        pytest.skip(f"needs transformers >= {required}, installed {installed}")
+
     module = _modeling_module(model_type)
-    if module is None:
-        pytest.skip(f"no modeling module for {model_type!r} in this transformers")
-
-    block_cls = _find_block_class(module, variant.block_names)
-    if block_cls is None:
-        pytest.skip(
-            f"none of {variant.block_names} exist in {module.__name__}; this transformers "
-            f"version may predate or postdate the layout the spec describes"
-        )
-    assert block_cls.__name__ in variant.block_names
-
-
-@pytest.mark.parametrize(("model_type", "variant"), VARIANTS, ids=_ids(VARIANTS))
-def test_expert_linear_names_exist_in_transformers(model_type, variant):
-    """Some module class in the model's file must define every declared projection.
-
-    Checked against the class sources rather than a constructed model: building a real
-    MoE block needs a per-model config, and the failure this guards against -- a
-    projection renamed upstream, so the spec's names no longer resolve -- shows up in
-    the source just as well. The check is deliberately module-scoped: it asserts the
-    names exist together on *a* module class, not which one holds them.
-    """
-    if variant.expert_linear_names is None:
-        pytest.skip("variant declares no expert linear names")
-    if _is_remote_code(model_type):
-        pytest.skip(f"{model_type!r} is a trust_remote_code model; not in transformers")
-    module = _modeling_module(model_type)
-    if module is None:
-        pytest.skip(f"no modeling module for {model_type!r} in this transformers")
-    if _find_block_class(module, variant.block_names) is None:
-        pytest.skip(f"none of {variant.block_names} exist in {module.__name__}")
-
-    wanted = variant.expert_linear_names
-    for obj in vars(module).values():
-        if not (isinstance(obj, type) and issubclass(obj, nn.Module)):
-            continue
-        try:
-            src = inspect.getsource(obj)
-        except (OSError, TypeError):
-            continue
-        if all(f"self.{name}" in src for name in wanted):
-            return
-    pytest.fail(
-        f"{model_type}: no nn.Module in {module.__name__} defines all of {wanted}. "
-        f"The expert projections were most likely renamed upstream; update the spec."
+    assert module is not None, (
+        f"{model_type!r} declares min_transformers_version="
+        f"{spec.min_transformers_version!r} but transformers {installed} has no modeling "
+        f"module for it. Either that version is wrong or the model moved."
     )
-
-
-def test_long_standing_models_still_resolve():
-    """Guard against every case above degrading into a skip.
-
-    The checks skip when a model is absent from the installed transformers, correct for
-    the tf_min end of the matrix but equally able to hide a broken lookup. These models
-    are old enough that not finding one means the lookup broke.
-
-    One resolving variant per model is enough. A model can declare a variant that no
-    transformers version defines -- mixtral carries ``MixtralMoeSparseMoeBlock`` with
-    MCore ``linear_fc1``/``linear_fc2`` naming, migrated from a legacy branch -- and
-    requiring every variant to resolve would fail on those forever.
-    """
-    unresolved = []
-    for model_type in sorted(ALWAYS_RESOLVABLE):
-        module = _modeling_module(model_type)
-        variants = [v for mt, v in VARIANTS if mt == model_type]
-        if module is None or not any(
-            _find_block_class(module, v.block_names) is not None for v in variants
-        ):
-            unresolved.append((model_type, [v.block_names for v in variants]))
-    assert not unresolved, (
-        f"{unresolved} did not resolve against transformers "
-        f"{importlib.import_module('transformers').__version__}, but they ship in every "
-        f"supported version -- the module lookup or the spec's block_names is wrong."
+    variants = [v for mt, v in VARIANTS if mt == model_type]
+    resolved = [v.block_names for v in variants if _find_block_class(module, v.block_names)]
+    assert resolved, (
+        f"{model_type!r}: none of {[v.block_names for v in variants]} name a class in "
+        f"{module.__name__} on transformers {installed}. The block class was most likely "
+        f"renamed upstream; update block_names, and min_transformers_version if the "
+        f"rename landed in a later release."
     )

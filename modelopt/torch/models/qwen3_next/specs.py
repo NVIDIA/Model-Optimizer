@@ -21,6 +21,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="qwen3_next",
+        min_transformers_version="4.57",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(

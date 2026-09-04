@@ -34,4 +34,10 @@ GEMMA4_MOE_VARIANTS = (
     ),
 )
 
-register(ModelSpec(model_type="gemma4", moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS)))
+register(
+    ModelSpec(
+        model_type="gemma4",
+        min_transformers_version="5.5",
+        moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS),
+    )
+)

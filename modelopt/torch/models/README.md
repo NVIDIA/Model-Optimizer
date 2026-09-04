@@ -54,13 +54,23 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 | `moe_spec` (`MoESpec`) | MoE architecture facts — block classes, expert projection naming | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data of the unified HF export path | export needs nothing model-specific |
 
-`model_type` is required. `modeling_source` says whether the classes this spec names
-ship inside `transformers` (the default) or come from the checkpoint under
-`trust_remote_code=True` — set it to `"remote_code"` for the latter, which is what tells
-the test suite those classes cannot be imported and checked.
-
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.
+
+Alongside the required `model_type`, two fields say where the classes this spec names
+come from, and they must agree:
+
+| Field | Meaning |
+|---|---|
+| `modeling_source` | `"transformers"` (default), or `"remote_code"` when the code ships with the checkpoint and needs `trust_remote_code=True` |
+| `min_transformers_version` | Earliest `transformers` release whose definitions match this spec; `None` for a `remote_code` model |
+
+Clamp `min_transformers_version` at the repo's minimum supported transformers (`tf_min`
+in `noxfile.py`, currently `4.57`) — a model older than the floor records the floor,
+since nothing older is installed or tested. A model added later records its own release.
+The pair is what lets `test_specs_vs_transformers.py` assert rather than skip: it can
+tell a model that is legitimately absent on an older transformers from a spec that no
+longer matches reality.
 
 ## Fields
 

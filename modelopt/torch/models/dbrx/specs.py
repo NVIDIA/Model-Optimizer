@@ -24,6 +24,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="dbrx",
+        min_transformers_version="4.57",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(

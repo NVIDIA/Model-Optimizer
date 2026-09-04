@@ -169,6 +169,16 @@ class ModelSpec:
     """The HF model type this spec describes (``config.model_type``, e.g.
     ``"qwen3_moe"``). Unique across the registry."""
 
+    min_transformers_version: str | None = None
+    """Earliest ``transformers`` release whose definitions match this spec, or ``None``
+    when the question does not apply (``modeling_source="remote_code"``).
+
+    Clamped below at the repo's minimum supported transformers (``tf_min`` in
+    ``noxfile.py``): a model that predates the floor records the floor, since nothing
+    older is ever installed or tested. A model added after the floor records its own
+    release, which is what lets the test suite tell an expected absence on an older
+    transformers apart from a spec that no longer matches reality."""
+
     modeling_source: Literal["transformers", "remote_code"] = "transformers"
     """Where the model's modeling code lives: shipped inside ``transformers``, or
     carried by the checkpoint and loaded with ``trust_remote_code=True``.

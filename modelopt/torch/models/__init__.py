@@ -17,7 +17,8 @@
 
 Directory names are the HF ``config.model_type`` they describe; a model whose code
 ships with the checkpoint uses its remote-code ``model_type`` and records that as
-``ModelSpec.modeling_source``. Each package's
+``ModelSpec.modeling_source``, while a model defined in transformers records the release
+its definitions come from as ``ModelSpec.min_transformers_version``. Each package's
 ``specs.py`` registers one global ``ModelSpec`` (built from the section classes in this
 package's own ``specs.py``) at import time. Importing this package registers them all.
 Consumers resolve a spec via the registry lookups (``get_spec`` / ``match_moe_block``)

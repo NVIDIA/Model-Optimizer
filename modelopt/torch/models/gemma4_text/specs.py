@@ -25,4 +25,10 @@ from ..gemma4.specs import GEMMA4_MOE_VARIANTS
 from ..registry import register
 from ..specs import ModelSpec, MoESpec
 
-register(ModelSpec(model_type="gemma4_text", moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS)))
+register(
+    ModelSpec(
+        model_type="gemma4_text",
+        min_transformers_version="5.5",
+        moe_spec=MoESpec(moe_variants=GEMMA4_MOE_VARIANTS),
+    )
+)

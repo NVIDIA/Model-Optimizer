@@ -21,6 +21,7 @@ from ..specs import ExportSpec, ModelSpec
 register(
     ModelSpec(
         model_type="qwen3",
+        min_transformers_version="4.57",
         export_spec=ExportSpec(
             # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
             pqs_fuse_rules=(

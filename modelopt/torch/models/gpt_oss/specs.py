@@ -21,6 +21,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="gpt_oss",
+        min_transformers_version="4.57",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(

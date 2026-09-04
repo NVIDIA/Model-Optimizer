@@ -21,6 +21,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="nemotron_h",
+        min_transformers_version="5.3",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(

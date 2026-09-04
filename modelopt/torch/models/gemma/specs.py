@@ -23,6 +23,7 @@ from ..specs import ExportSpec, ModelSpec
 register(
     ModelSpec(
         model_type="gemma",
+        min_transformers_version="4.57",
         export_spec=ExportSpec(weight_plus_one_norm_names=("GemmaRMSNorm",)),
     )
 )
