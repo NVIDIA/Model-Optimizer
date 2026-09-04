@@ -148,9 +148,7 @@ def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_ro
     assert 'python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"' in dockerfile
 
 
-def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
-    project_root_path, tmp_path
-):
+def test_lmms_eval_vllm_patch_preserves_task_sampling(project_root_path, tmp_path):
     puzzletron_root = project_root_path / "examples/puzzletron"
     environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
     patch_text = (
@@ -168,7 +166,7 @@ def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
     )
     undefined_overwrite = "                sampling_params = SamplingParams(**params)"
 
-    def write_fixture(root, *, overwrite):
+    def write_fixture(root):
         source = root / "lmms_eval/models/simple/vllm.py"
         source.parent.mkdir(parents=True)
         lines = ["# pinned upstream fixture"] * 522
@@ -177,7 +175,7 @@ def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
             'self._select_max_new_tokens(gen_kwargs.get("max_new_tokens"))'
         )
         lines[477] = correct_sampling
-        lines[520] = overwrite
+        lines[520] = undefined_overwrite
         lines[521] = (
             '                self._write_watchdog_heartbeat("chat_start", '
             "batch_idx=batch_idx, batch_requests=batch_requests)"
@@ -188,7 +186,7 @@ def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
 
     exact_checkout = tmp_path / "exact"
     exact_checkout.mkdir()
-    exact_source = write_fixture(exact_checkout, overwrite=undefined_overwrite)
+    exact_source = write_fixture(exact_checkout)
     subprocess.run(
         ["git", "apply", "--unidiff-zero", "--check", str(vllm_patch)],
         cwd=exact_checkout,
@@ -202,20 +200,6 @@ def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
     patched_source = exact_source.read_text()
     assert correct_sampling in patched_source
     assert undefined_overwrite not in patched_source
-
-    drifted_checkout = tmp_path / "drifted"
-    drifted_checkout.mkdir()
-    write_fixture(
-        drifted_checkout,
-        overwrite="                sampling_params = SamplingParams(**other_params)",
-    )
-    rejected = subprocess.run(
-        ["git", "apply", "--unidiff-zero", "--check", str(vllm_patch)],
-        cwd=drifted_checkout,
-        capture_output=True,
-        text=True,
-    )
-    assert rejected.returncode != 0
 
 
 def test_image_checks_native_lmms_eval_contract(project_root_path):

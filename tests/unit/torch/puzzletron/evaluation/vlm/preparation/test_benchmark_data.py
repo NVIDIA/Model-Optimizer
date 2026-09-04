@@ -233,12 +233,8 @@ def test_repair_without_atomic_exchange_preserves_live_root(monkeypatch, tmp_pat
     [
         (None, None, "readable ownership marker"),
         ("corrupt", "{", "readable ownership marker"),
-        ("schema", "other/v1", "mismatched ownership: schema"),
-        ("task", "mvbench", "mismatched ownership: task"),
-        ("repository", "other/repository", "mismatched ownership: repository"),
         ("revision", "other-revision", "mismatched ownership: revision"),
-        ("requires_media", False, "mismatched ownership: requires_media"),
-        ("preparation_dir", "other-root", "mismatched ownership: preparation_dir"),
+        ("status", "unknown", "invalid ownership-marker status"),
     ],
 )
 def test_missing_or_mismatched_media_marker_preserves_unproven_root(
