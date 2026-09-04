@@ -128,6 +128,18 @@ class GroupedMLPSlicing(CustomModuleMapping):
         )
 
 
+class GroupedGatedMLPSlicing(CustomModuleMapping):
+    """A custom module mapping that slices grouped MLP weights per expert and splits gate/up."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that slices grouped gated MLP weights for export."""
+        super().__init__(
+            func_name="grouped_mlp_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs={"gate_proj_name": "gate_proj", "up_proj_name": "up_proj", **func_kwargs},
+        )
+
+
 class GroupedMLPPacking(CustomModuleMapping):
     """A custom module mapping that packs grouped MoE experts into one stacked tensor."""
 

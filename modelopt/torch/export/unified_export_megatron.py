@@ -498,7 +498,16 @@ class GPTModelExporter:
         # carries extras with no export counterpart, and only inside decoder layers, whose naming
         # is stable. A dropped decoder module is the case that loads fine and produces garbage.
         num_layers = self.model.config.num_layers
-        exported_modules = {key.rsplit(".", 1)[0] for key in exported}
+        # Ancestors too: an export may expand one source module into several (Qwen3.5 packs
+        # routed experts; the quantized export writes them per expert). Expansion is not a drop.
+        exported_modules = set()
+        for key in exported:
+            parts = key.rsplit(".", 1)[0].split(".")
+            for i in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:i])
+                if prefix in exported_modules:
+                    break
+                exported_modules.add(prefix)
         missing = set()
         for key in source - exported:
             layer = re.search(r"\.layers\.(\d+)\.", key)
@@ -1347,8 +1356,12 @@ class GPTModelExporter:
         is_mtp=False,
         quantize=True,
         record_quant_config=True,
+        gate_proj_name=None,
+        up_proj_name=None,
     ):
         """Export TEGroupedLinear weight0..weight{N-1} as one HF-style entry per expert.
+
+        ``gate_proj_name`` / ``up_proj_name`` also split each expert's fused gate+up ``linear_fc1``.
 
         ``quantize=False`` emits unquantized weights alongside the scales, which
         ``_grouped_mlp_packing`` needs so it can quantize once over the stacked tensor.
@@ -1425,6 +1438,10 @@ class GPTModelExporter:
         elif local_missing:
             raise ValueError(f"TEGroupedLinear missing expert weights: {local_missing}")
 
+        if (gate_proj_name is None) != (up_proj_name is None):
+            raise ValueError("gate_proj_name and up_proj_name must be set together")
+        _gated_subnames = None if gate_proj_name is None else (gate_proj_name, up_proj_name)
+
         # Per expert, temporarily assign weight = weight{i} and, for the per-expert
         # quantizer layout (GroupedQuantizer), swap in that expert's own TensorQuantizer,
         # so _get_quantized_state extracts each expert's own qformat/scales instead of
@@ -1467,31 +1484,46 @@ class GPTModelExporter:
                     weight_scale_2.detach().cpu().clone() if weight_scale_2 is not None else None
                 )
 
-                if weight_scale_cpu is None:
-                    local_expert_state[expert_prefix + "weight"] = weight
+                # Gated: split gate+up rows, each taking its slice of a per-block weight_scale.
+                if _gated_subnames is None:
+                    shards = [(expert_prefix, weight, weight_scale_cpu)]
                 else:
-                    local_expert_state[expert_prefix + "weight"] = (
-                        weight
-                        if not quantize
-                        else to_quantized_weight(
-                            weight,
-                            weight_scale_cpu,
-                            qformat,
-                            weight_scale_2_cpu,
-                            block_size,
+                    half = weight.shape[0] // 2
+                    if weight_scale_cpu is None or weight_scale_cpu.dim() == 0:
+                        scales = (weight_scale_cpu, weight_scale_cpu)
+                    else:
+                        scales = (weight_scale_cpu[:half], weight_scale_cpu[half:])
+                    shards = [
+                        (expert_prefix + _gated_subnames[0] + ".", weight[:half], scales[0]),
+                        (expert_prefix + _gated_subnames[1] + ".", weight[half:], scales[1]),
+                    ]
+
+                for shard_prefix, shard_weight, shard_scale in shards:
+                    if shard_scale is None:
+                        local_expert_state[shard_prefix + "weight"] = shard_weight
+                    else:
+                        local_expert_state[shard_prefix + "weight"] = (
+                            shard_weight
+                            if not quantize
+                            else to_quantized_weight(
+                                shard_weight,
+                                shard_scale,
+                                qformat,
+                                weight_scale_2_cpu,
+                                block_size,
+                            )
                         )
-                    )
-                    local_expert_state[expert_prefix + "weight_scale"] = weight_scale_cpu.clone()
+                        local_expert_state[shard_prefix + "weight_scale"] = shard_scale.clone()
 
-                if weight_scale_2_cpu is not None:
-                    local_expert_state[expert_prefix + "weight_scale_2"] = (
-                        weight_scale_2_cpu.clone()
-                    )
+                    if weight_scale_2_cpu is not None:
+                        local_expert_state[shard_prefix + "weight_scale_2"] = (
+                            weight_scale_2_cpu.clone()
+                        )
 
-                for key, val in name_to_value.items():
-                    if key == "output_scale":
-                        continue
-                    local_expert_state[expert_prefix + key] = val.detach().cpu().clone()
+                    for key, val in name_to_value.items():
+                        if key == "output_scale":
+                            continue
+                        local_expert_state[shard_prefix + key] = val.detach().cpu().clone()
         finally:
             for _wq in temp_amax_wqs:
                 _wq.reset_amax()
@@ -1507,9 +1539,13 @@ class GPTModelExporter:
             assert seen_block_size is not None
             num_total_experts = num_experts * ep_size
             for global_id in range(num_total_experts):
-                self._record_layer_quant_config(
-                    prefix.format(global_id) + ".", seen_qformat, seen_block_size
-                )
+                for sub in _gated_subnames or (None,):
+                    expert_prefix = prefix.format(global_id) + "."
+                    self._record_layer_quant_config(
+                        expert_prefix if sub is None else expert_prefix + sub + ".",
+                        seen_qformat,
+                        seen_block_size,
+                    )
 
         if ep_size > 1:
             # all_gather_object pickles trip on quantized uint8 tensors whose
