@@ -1,7 +1,7 @@
 {
-  "extends": "short-native-v2",
-  "schema": "modelopt.vlm-evaluation-profile/v1",
-  "name": "smoke-native-v1",
+  "extends": "core-3_344-examples_r1",
+  "schema": "modelopt.vlm-sample-set/v1",
+  "name": "core-3_24-examples_r1",
   "tasks": {
     "realworldqa": {
       "selection": {

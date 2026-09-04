@@ -1,0 +1,5 @@
+{
+  "schema": "modelopt.vlm-evaluator-profile/v1",
+  "name": "lmms-eval-qwen-3.5-native_r1",
+  "lmms_eval_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56"
+}

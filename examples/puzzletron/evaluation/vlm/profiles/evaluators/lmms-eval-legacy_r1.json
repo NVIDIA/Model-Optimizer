@@ -1,0 +1,5 @@
+{
+  "schema": "modelopt.vlm-evaluator-profile/v1",
+  "name": "lmms-eval-legacy_r1",
+  "lmms_eval_revision": "15c32bfec165df13c269ddd3cda03b2ed9137825"
+}

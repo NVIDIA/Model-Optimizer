@@ -176,10 +176,10 @@ def _resolve_task_selection(
             raise ValueError("--profile-task requires a versioned evaluation profile")
         if profile_contract.name not in {
             "full-v1",
-            "core3-full-native-v1",
-            "core3-full-vllm-v1",
+            "core-3_full_r1-native",
+            "core-3_full_r1-vllm",
             "short-all-native-v1",
-            "short-all-native-v2",
+            "judge-free-8_690-examples_r1-native",
         }:
             raise ValueError(
                 "--profile-task is supported only for full-data and short-all-native profiles"
@@ -423,6 +423,13 @@ def _report(
         ),
         "profile_fingerprint": (
             profile_contract.fingerprint if profile_contract is not None else None
+        ),
+        "sample_set": profile_contract.sample_set if profile_contract is not None else None,
+        "backend_profile": (
+            profile_contract.backend_profile if profile_contract is not None else None
+        ),
+        "evaluator_profile": (
+            profile_contract.evaluator_profile if profile_contract is not None else None
         ),
         "model_pin": (
             profile_contract.manifest.get("model") if profile_contract is not None else None

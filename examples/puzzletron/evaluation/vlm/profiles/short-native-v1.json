@@ -1,11 +1,7 @@
 {
-  "extends": "short-v1",
-  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "schema": "modelopt.vlm-evaluation-profile/v2",
   "name": "short-native-v1",
-  "lmms_eval_revision": "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56",
-  "backend": {
-    "attention_implementation": "sdpa",
-    "enable_thinking": false,
-    "name": "qwen3_5"
-  }
+  "sample_set": "core-3_344-examples_legacy-r1",
+  "backend_profile": "qwen-3.5-native_r1",
+  "evaluator_profile": "lmms-eval-qwen-3.5-native_r1"
 }

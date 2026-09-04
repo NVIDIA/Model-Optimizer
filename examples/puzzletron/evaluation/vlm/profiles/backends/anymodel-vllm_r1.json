@@ -1,8 +1,7 @@
 {
-  "extends": "short-native-v2",
-  "schema": "modelopt.vlm-evaluation-profile/v1",
-  "name": "short-vllm-v2",
-  "backend": {
+  "schema": "modelopt.vlm-backend-profile/v1",
+  "name": "anymodel-vllm_r1",
+  "settings": {
     "attention_config": {
       "flash_attn_version": 2
     },

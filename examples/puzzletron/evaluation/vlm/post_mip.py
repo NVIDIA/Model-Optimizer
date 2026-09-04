@@ -240,7 +240,7 @@ def evaluate_frozen_campaign_v2_checkpoint(
         output_root=output_root,
         settings=settings,
         suite="short",
-        evaluation_profile="short-native-v2",
+        evaluation_profile="core-3_344-examples_r1-native",
         require_manifest=True,
     )
     runs = result["runs"]
@@ -266,7 +266,7 @@ def evaluate_frozen_campaign_v3_checkpoint(
         output_root=output_root,
         settings=settings,
         suite="short",
-        evaluation_profile="short-vllm-v2",
+        evaluation_profile="core-3_344-examples_r1-vllm",
         require_manifest=True,
     )
     runs = result["runs"]
@@ -292,7 +292,7 @@ def evaluate_reproducibility_smoke_checkpoint(
         output_root=output_root,
         settings=settings,
         suite="short",
-        evaluation_profile="smoke-native-v1",
+        evaluation_profile="core-3_24-examples_r1-native",
         require_manifest=True,
     )
     runs = result["runs"]
@@ -318,7 +318,7 @@ def evaluate_reproducibility_smoke_v2_checkpoint(
         output_root=output_root,
         settings=settings,
         suite="short",
-        evaluation_profile="smoke-vllm-v1",
+        evaluation_profile="core-3_24-examples_r1-vllm",
         require_manifest=True,
     )
     runs = result["runs"]

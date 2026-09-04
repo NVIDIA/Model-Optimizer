@@ -1,8 +1,7 @@
 {
-  "extends": "smoke-native-v1",
-  "schema": "modelopt.vlm-evaluation-profile/v1",
-  "name": "smoke-vllm-v1",
-  "backend": {
+  "schema": "modelopt.vlm-backend-profile/v1",
+  "name": "anymodel-vllm-eager_r1",
+  "settings": {
     "attention_config": {
       "flash_attn_version": 2
     },

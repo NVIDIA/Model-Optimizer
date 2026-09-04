@@ -1,8 +1,7 @@
 {
-  "extends": "short-native-v1",
-  "schema": "modelopt.vlm-evaluation-profile/v1",
-  "name": "short-native-v2",
-  "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+  "extends": "core-3_344-examples_legacy-r1",
+  "schema": "modelopt.vlm-sample-set/v1",
+  "name": "core-3_344-examples_r1",
   "sampling": {
     "schema": "modelopt.vlm-sampling-audit/v1",
     "claim_scope": "deterministic-screening-only",

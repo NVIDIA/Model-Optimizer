@@ -1,15 +1,23 @@
 # VLM checkpoint evaluation
 
 Use this evaluator to test a local Qwen 3.5 checkpoint on image and video
-benchmarks. A profile chooses the benchmarks, examples, model-loading path,
-and evaluation settings. Use the same profile for every model being compared.
+benchmarks. A runnable profile composes three independently named contracts:
+
+- a sample set, which fixes the benchmark scope and selected examples;
+- a backend profile, which fixes model loading and prompt construction; and
+- an evaluator profile, which pins the `lmms-eval` revision.
+
+Callers still select one profile. Keeping the components separate makes it
+clear that native and vLLM runs can use identical examples while changing only
+the backend. Use the same runnable profile for every model being compared.
 
 The common choices are:
 
-- `short-native-v2` for the maintained three-benchmark campaign screen;
-- `short-vllm-v2` and `smoke-vllm-v1` for materialized heterogeneous campaign checkpoints;
-- `short-all-native-v2` for a broader eight-benchmark regression screen;
-- `core3-full-native-v1` and `core3-full-vllm-v1` for paired full-dataset
+- `core-3_344-examples_r1-native` for the maintained three-benchmark campaign screen;
+- `core-3_344-examples_r1-vllm` for materialized heterogeneous campaign checkpoints;
+- `core-3_24-examples_r1-native` and `core-3_24-examples_r1-vllm` for lifecycle smoke checks;
+- `judge-free-8_690-examples_r1-native` for a broader eight-benchmark regression screen;
+- `core-3_full_r1-native` and `core-3_full_r1-vllm` for paired full-dataset
   teacher references on RealWorldQA, MMMU validation, and MVBench;
 - `short-v1`, `short-native-v1`, `short-all-native-v1`, and `full-v1` with an
   environment that matches each profile's pinned evaluator revision.
@@ -32,12 +40,12 @@ that do not match the selected profile.
 
 | Path | Profiles | What it does |
 | --- | --- | --- |
-| Qwen-specific Transformers | `short-native-v1`, `short-native-v2`, `short-all-native-v1`, `short-all-native-v2`, `core3-full-native-v1` | Loads the checkpoint directly with the Qwen 3.5 model loader. Video prompts include timestamps for sampled frames. |
-| General vLLM | `short-v1`, `short-vllm-v2`, `smoke-vllm-v1`, `full-v1`, `core3-full-vllm-v1` | Runs the checkpoint through vLLM and converts inputs to general image and video messages. Video prompts do not include frame timestamps. Materialized heterogeneous checkpoints require this path. |
+| Qwen-specific Transformers | `short-native-v1`, `core-3_24-examples_r1-native`, `core-3_344-examples_r1-native`, `short-all-native-v1`, `judge-free-8_690-examples_r1-native`, `core-3_full_r1-native` | Loads the checkpoint directly with the Qwen 3.5 model loader. Video prompts include timestamps for sampled frames. |
+| General vLLM | `short-v1`, `core-3_344-examples_r1-vllm`, `core-3_24-examples_r1-vllm`, `full-v1`, `core-3_full_r1-vllm` | Runs the checkpoint through vLLM and converts inputs to general image and video messages. Video prompts do not include frame timestamps. Materialized heterogeneous checkpoints require this path. |
 
 The native and vLLM paths produce different prompts, so their scores represent
 the complete paths and do not isolate the inference engine.
-The heterogeneous-checkpoint `short-vllm-v2` and `smoke-vllm-v1` profiles pin
+The heterogeneous-checkpoint `core-3_344-examples_r1-vllm` and `core-3_24-examples_r1-vllm` profiles pin
 FlashAttention 2 because the runtime's FlashAttention 3 scheduler does
 not support their per-layer attention geometry.
 
@@ -45,24 +53,39 @@ not support their per-layer attention geometry.
 
 Use a versioned profile when scores will be compared across checkpoints:
 
-| Profile | Coverage | Examples evaluated |
-| --- | --- | --- |
-| `short-v1` | RealWorldQA, MMMU, and MVBench | 344 predefined examples; MMMU uses four per subject and MVBench uses eight per category |
-| `short-native-v1` | Same examples as `short-v1`, using the Qwen-specific Transformers adapter | The same 344 predefined examples with timestamps added to video prompts |
-| `short-native-v2` | Fixed coverage of RealWorldQA, MMMU, and MVBench | 64 RealWorldQA rows, four rows from each of 30 MMMU subjects, and eight rows from each of 20 MVBench tasks |
-| `short-all-native-v1` | All eight judge-free benchmarks, using the Qwen-specific Transformers adapter | 690 predefined examples: the same 344 plus 346 from five additional benchmarks |
-| `short-all-native-v2` | Fixed coverage of all eight judge-free benchmarks | 690 predefined examples distributed across the recorded source strata |
-| `core3-full-native-v1` | Native backend on RealWorldQA, MMMU validation, and MVBench | All 765, 900, and 4,000 rows respectively |
-| `core3-full-vllm-v1` | vLLM backend on the same three datasets | All 765, 900, and 4,000 rows respectively |
-| `full-v1` | Eight judge-free image and video benchmarks | Every available example in each pinned dataset version |
+The sample-set portion of a current profile name describes the data:
 
-Use `short-native-v2` for campaign comparisons. Use
-`short-all-native-v2` when broader image and video regression coverage is more
+| Sample set | Benchmarks | Selected examples | Pinned population |
+| --- | --- | ---: | ---: |
+| `core-3_24-examples_r1` | RealWorldQA, MMMU validation, one MVBench task | 24 | 1,865 |
+| `core-3_344-examples_r1` | RealWorldQA, MMMU validation, MVBench | 344 | 5,665 |
+| `judge-free-8_690-examples_r1` | All eight judge-free benchmarks | 690 | 31,916 |
+| `core-3_full_r1` | RealWorldQA, MMMU validation, MVBench | all | 5,665 |
+
+Here, `core-3` means the three campaign benchmarks and `judge-free-8` means
+the current eight-benchmark set that needs no external judge. The number before
+`examples` is the number actually evaluated, not the full dataset population.
+`r1` versions the sample-set definition. It does not version the backend or
+evaluator.
+
+Append `-native` or `-vllm` to select a composed runnable profile. For example,
+`core-3_344-examples_r1-native` and `core-3_344-examples_r1-vllm` share the
+same 344 examples and evaluator, while their backend profiles differ. The 344
+examples are 64 of 765 RealWorldQA examples, 120 of 900 MMMU examples, and 160
+of 4,000 MVBench examples. The 690-example set contains those 344 plus 346
+examples selected from VideoMMMU, Video-MME, LongVideoBench, MLVU, and
+PerceptionTest.
+
+The historical `short-v1`, `short-native-v1`, `short-all-native-v1`, and
+`full-v1` names remain available because they pin older evaluator contracts.
+
+Use `core-3_344-examples_r1-native` for campaign comparisons. Use
+`judge-free-8_690-examples_r1-native` when broader image and video regression coverage is more
 important than matching the campaign screen. The v1 profiles require their
 pinned evaluator revisions. No short profile replaces a full-data profile for
 complete benchmark reporting.
 
-The paired `core3-full-*` profiles provide teacher references. They pin the
+The paired `core-3_full_r1-*` profiles provide teacher references. They pin the
 Qwen 3.5 0.8B Hub snapshot and
 reject other checkpoints or runtime-setting overrides. Keep the two backend
 results separate: their prompt construction and MVBench frame annotations
@@ -83,7 +106,7 @@ treats its model-level `max_new_tokens` value as a lower bound, so the report
 also records that limitation; backend score differences therefore include
 generation-policy and prompt-path differences, not just engine behavior.
 
-`short-native-v2` selects
+`core-3_344-examples_r1-native` selects
 64 positions across all 765 RealWorldQA test rows, four positions within each
 30-row MMMU subject, and eight positions within each 200-row MVBench task. Its
 profile records the generator version, population and stratum counts, selected
@@ -92,7 +115,7 @@ These fixed rows provide a regression screen, not a representative
 full-benchmark estimate. Compare a teacher and every candidate with the same
 profile.
 
-`short-all-native-v2` adds midpoint samples from
+`judge-free-8_690-examples_r1-native` adds fixed, evenly spaced samples from
 five video benchmarks: 24 rows from each of three VideoMMMU tasks, four rows
 from each of 18 Video-MME duration-and-domain strata, 68 rows across the
 LongVideoBench validation split, and 10 rows from each of seven MLVU task
@@ -130,8 +153,7 @@ frames.
 ## Cache benchmark data
 
 Evaluation reads every selected dataset revision from an explicit Hugging Face
-cache root. The campaign `prepare_dataset` stage fills and validates this cache
-from the configured evaluation tasks. The repository stores only profile
+cache root. The repository stores only profile
 metadata and exact-row selectors; it does not store benchmark records or media.
 To prepare the common image and video cache independently, run:
 
@@ -144,15 +166,16 @@ python -m examples.puzzletron.evaluation.vlm.preparation.benchmark_data \
 ```
 
 The command downloads each listed exact pinned snapshot and safely extracts
-media only for tasks that declare a preparation directory. For `short-native-v2`,
+media only for tasks that declare a preparation directory. For `core-3_344-examples_r1-native`,
 prepare `realworldqa`, `mmmu_val`, and `mvbench`. Use `--download-only` and
 `--extract-only` to split transfer and extraction across jobs, or
 `--range-resume` for a resumable single-writer download. Run the command with
 `--help` to list all supported dataset task names. Preparation records exact
-snapshot and media inventories. Ordinary resume uses file metadata as a fast
-path and checks recorded hashes after metadata changes; incomplete owned media
-is rebuilt from the pinned snapshot only when the host supports atomic directory
-exchange. Otherwise the existing root is preserved and preparation fails.
+snapshot and media inventories. Preparation verifies the recorded snapshot and
+media hashes on reuse, which can read the complete cached content. Incomplete
+owned media is rebuilt from the pinned snapshot only when the host supports
+atomic directory exchange. Otherwise the existing root is preserved and
+preparation fails.
 
 Video suites also require an installed `decord`-compatible reader. The
 Puzzletron requirements select the supported reader for the current platform
@@ -173,20 +196,20 @@ same command with a teacher or any materialized Qwen 3.5 student checkpoint:
 ```bash
 python -m examples.puzzletron.evaluation.vlm.run \
   --checkpoint /path/to/checkpoint \
-  --output-dir /path/to/results/short-all-native-v2 \
+  --output-dir /path/to/results/judge-free-8_690-examples_r1-native \
   --hf-home "$HF_HOME" \
-  --profile short-all-native-v2
+  --profile judge-free-8_690-examples_r1-native
 ```
 
-The `core3-full-*` profiles instead require the exact pinned local Qwen 3.5
+The `core-3_full_r1-*` profiles instead require the exact pinned local Qwen 3.5
 0.8B Hub snapshot. For example:
 
 ```bash
 python -m examples.puzzletron.evaluation.vlm.run \
   --checkpoint "$HF_HOME/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17" \
-  --output-dir /path/to/results/core3-full-native-v1/realworldqa \
+  --output-dir /path/to/results/core-3_full_r1-native/realworldqa \
   --hf-home "$HF_HOME" \
-  --profile core3-full-native-v1 \
+  --profile core-3_full_r1-native \
   --profile-task realworldqa \
   --preflight-only
 ```
@@ -196,7 +219,7 @@ Use `full-v1` only with its pinned evaluator revision. Always run
 
 To run tasks in parallel, run one profile task per job with
 `--profile PROFILE --profile-task TASK`. This works for `full-v1`, the paired
-`core3-full-*` profiles, and `short-all-native-v2`. A complete result needs one
+`core-3_full_r1-*` profiles, and `judge-free-8_690-examples_r1-native`. A complete result needs one
 successful job for every task in the selected profile.
 
 Grouped tasks can use multiple batch-1 workers without changing inference

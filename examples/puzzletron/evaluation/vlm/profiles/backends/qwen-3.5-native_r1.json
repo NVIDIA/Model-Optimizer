@@ -1,0 +1,9 @@
+{
+  "schema": "modelopt.vlm-backend-profile/v1",
+  "name": "qwen-3.5-native_r1",
+  "settings": {
+    "attention_implementation": "sdpa",
+    "enable_thinking": false,
+    "name": "qwen3_5"
+  }
+}

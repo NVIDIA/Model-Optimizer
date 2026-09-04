@@ -33,151 +33,154 @@ __all__ = [
     "load_profile",
 ]
 
-_PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v1"
+_PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v2"
+_SAMPLE_SET_SCHEMA = "modelopt.vlm-sample-set/v1"
+_BACKEND_PROFILE_SCHEMA = "modelopt.vlm-backend-profile/v1"
+_EVALUATOR_PROFILE_SCHEMA = "modelopt.vlm-evaluator-profile/v1"
 _PROFILE_ROOT = Path(__file__).with_name("profiles")
 PROFILE_NAMES = (
     "short-v1",
     "short-native-v1",
-    "short-native-v2",
-    "short-vllm-v2",
-    "smoke-native-v1",
-    "smoke-vllm-v1",
+    "core-3_344-examples_r1-native",
+    "core-3_344-examples_r1-vllm",
+    "core-3_24-examples_r1-native",
+    "core-3_24-examples_r1-vllm",
     "short-all-native-v1",
-    "short-all-native-v2",
+    "judge-free-8_690-examples_r1-native",
     "full-v1",
-    "core3-full-native-v1",
-    "core3-full-vllm-v1",
+    "core-3_full_r1-native",
+    "core-3_full_r1-vllm",
 )
-_PROFILE_TASKS = {
-    "short-v1": ("realworldqa", "mmmu_val", "mvbench"),
-    "short-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
-    "short-native-v2": ("realworldqa", "mmmu_val", "mvbench"),
-    "short-vllm-v2": ("realworldqa", "mmmu_val", "mvbench"),
-    "smoke-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
-    "smoke-vllm-v1": ("realworldqa", "mmmu_val", "mvbench"),
+_PROFILE_COMPONENTS = {
+    "short-v1": (
+        "core-3_344-examples_legacy-r1",
+        "qwen-3.5-vllm_r1",
+        "lmms-eval-legacy_r1",
+    ),
+    "short-native-v1": (
+        "core-3_344-examples_legacy-r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-qwen-3.5-native_r1",
+    ),
+    "core-3_344-examples_r1-native": (
+        "core-3_344-examples_r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
+    ),
+    "core-3_344-examples_r1-vllm": (
+        "core-3_344-examples_r1",
+        "anymodel-vllm_r1",
+        "lmms-eval-modelopt_r1",
+    ),
+    "core-3_24-examples_r1-native": (
+        "core-3_24-examples_r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
+    ),
+    "core-3_24-examples_r1-vllm": (
+        "core-3_24-examples_r1",
+        "anymodel-vllm-eager_r1",
+        "lmms-eval-modelopt_r1",
+    ),
     "short-all-native-v1": (
-        "realworldqa",
-        "mmmu_val",
-        "mvbench",
-        "video_mmmu",
-        "videomme",
-        "longvideobench_val_v",
-        "mlvu_dev",
-        "perceptiontest_val_mc",
+        "judge-free-8_690-examples_legacy-r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-qwen-3.5-native_r1",
     ),
-    "short-all-native-v2": (
-        "realworldqa",
-        "mmmu_val",
-        "mvbench",
-        "video_mmmu",
-        "videomme",
-        "longvideobench_val_v",
-        "mlvu_dev",
-        "perceptiontest_val_mc",
+    "judge-free-8_690-examples_r1-native": (
+        "judge-free-8_690-examples_r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
     ),
-    "full-v1": tuple(task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"),
-    "core3-full-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
-    "core3-full-vllm-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "full-v1": (
+        "judge-free-8_full_legacy-r1",
+        "qwen-3.5-vllm_r1",
+        "lmms-eval-legacy_r1",
+    ),
+    "core-3_full_r1-native": (
+        "core-3_full_r1",
+        "qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
+    ),
+    "core-3_full_r1-vllm": (
+        "core-3_full_r1",
+        "qwen-3.5-vllm_r1",
+        "lmms-eval-modelopt_r1",
+    ),
 }
-_PROFILE_SELECTIONS = {
-    "short-v1": "exact-rows",
-    "short-native-v1": "exact-rows",
-    "short-native-v2": "exact-rows",
-    "short-vllm-v2": "exact-rows",
-    "smoke-native-v1": "exact-rows",
-    "smoke-vllm-v1": "exact-rows",
-    "short-all-native-v1": "exact-rows",
-    "short-all-native-v2": "exact-rows",
-    "full-v1": "all",
-    "core3-full-native-v1": "all",
-    "core3-full-vllm-v1": "all",
+_CORE_3_TASKS = ("realworldqa", "mmmu_val", "mvbench")
+_JUDGE_FREE_8_TASKS = (
+    "realworldqa",
+    "mmmu_val",
+    "mvbench",
+    "video_mmmu",
+    "videomme",
+    "longvideobench_val_v",
+    "mlvu_dev",
+    "perceptiontest_val_mc",
+)
+_SAMPLE_SET_TASKS = {
+    "core-3_344-examples_legacy-r1": _CORE_3_TASKS,
+    "core-3_344-examples_r1": _CORE_3_TASKS,
+    "core-3_24-examples_r1": _CORE_3_TASKS,
+    "judge-free-8_690-examples_legacy-r1": _JUDGE_FREE_8_TASKS,
+    "judge-free-8_690-examples_r1": _JUDGE_FREE_8_TASKS,
+    "judge-free-8_full_legacy-r1": tuple(
+        task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"
+    ),
+    "core-3_full_r1": _CORE_3_TASKS,
+}
+_SAMPLE_SET_SELECTIONS = {
+    "core-3_344-examples_legacy-r1": "exact-rows",
+    "core-3_344-examples_r1": "exact-rows",
+    "core-3_24-examples_r1": "exact-rows",
+    "judge-free-8_690-examples_legacy-r1": "exact-rows",
+    "judge-free-8_690-examples_r1": "exact-rows",
+    "judge-free-8_full_legacy-r1": "all",
+    "core-3_full_r1": "all",
 }
 SHORT_PROFILE_NAMES = tuple(
-    name for name in PROFILE_NAMES if _PROFILE_SELECTIONS[name] == "exact-rows"
+    name
+    for name in PROFILE_NAMES
+    if _SAMPLE_SET_SELECTIONS[_PROFILE_COMPONENTS[name][0]] == "exact-rows"
 )
-_PROFILE_BACKENDS = {
-    "short-v1": {
+_BACKEND_SETTINGS = {
+    "qwen-3.5-vllm_r1": {
         "enable_thinking": False,
         "name": "vllm",
         "reasoning_parser": "qwen3",
     },
-    "short-native-v1": {
+    "qwen-3.5-native_r1": {
         "attention_implementation": "sdpa",
         "enable_thinking": False,
         "name": "qwen3_5",
     },
-    "short-native-v2": {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    },
-    "short-vllm-v2": {
+    "anymodel-vllm_r1": {
         "attention_config": {"flash_attn_version": 2},
         "enable_thinking": False,
         "name": "vllm",
         "reasoning_parser": "qwen3",
     },
-    "smoke-native-v1": {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    },
-    "smoke-vllm-v1": {
+    "anymodel-vllm-eager_r1": {
         "attention_config": {"flash_attn_version": 2},
         "enable_thinking": False,
         "enforce_eager": True,
         "name": "vllm",
         "reasoning_parser": "qwen3",
     },
-    "short-all-native-v1": {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    },
-    "short-all-native-v2": {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    },
-    "full-v1": {
-        "enable_thinking": False,
-        "name": "vllm",
-        "reasoning_parser": "qwen3",
-    },
-    "core3-full-native-v1": {
-        "attention_implementation": "sdpa",
-        "enable_thinking": False,
-        "name": "qwen3_5",
-    },
-    "core3-full-vllm-v1": {
-        "enable_thinking": False,
-        "name": "vllm",
-        "reasoning_parser": "qwen3",
-    },
 }
-_PROFILE_REVISIONS = {
-    "short-v1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
-    "short-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
-    "short-native-v2": checkpoint.LMMS_EVAL_REVISION,
-    "short-vllm-v2": checkpoint.LMMS_EVAL_REVISION,
-    "smoke-native-v1": checkpoint.LMMS_EVAL_REVISION,
-    "smoke-vllm-v1": checkpoint.LMMS_EVAL_REVISION,
-    "short-all-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
-    "short-all-native-v2": checkpoint.LMMS_EVAL_REVISION,
-    "full-v1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
-    "core3-full-native-v1": checkpoint.LMMS_EVAL_REVISION,
-    "core3-full-vllm-v1": checkpoint.LMMS_EVAL_REVISION,
+_EVALUATOR_REVISIONS = {
+    "lmms-eval-legacy_r1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
+    "lmms-eval-qwen-3.5-native_r1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "lmms-eval-modelopt_r1": checkpoint.LMMS_EVAL_REVISION,
 }
-_PROFILE_MODELS = {
-    name: {
+_SAMPLE_SET_MODELS = {
+    "core-3_full_r1": {
         "repository": "Qwen/Qwen3.5-0.8B",
         "revision": "2fc06364715b967f1860aea9cf38778875588b17",
     }
-    for name in ("core3-full-native-v1", "core3-full-vllm-v1")
 }
-_PROFILE_POPULATIONS = {
-    name: {"realworldqa": 765, "mmmu_val": 900, "mvbench": 4000} for name in _PROFILE_MODELS
-}
+_SAMPLE_SET_POPULATIONS = {"core-3_full_r1": {"realworldqa": 765, "mmmu_val": 900, "mvbench": 4000}}
 _MVBENCH_LEAF_POPULATIONS = {
     "action_sequence": 200,
     "moving_count": 200,
@@ -200,13 +203,11 @@ _MVBENCH_LEAF_POPULATIONS = {
     "moving_attribute": 200,
     "egocentric_navigation": 200,
 }
-_AUDITED_SAMPLING_PROFILES = frozenset(
+_AUDITED_SAMPLE_SETS = frozenset(
     {
-        "smoke-native-v1",
-        "smoke-vllm-v1",
-        "short-native-v2",
-        "short-vllm-v2",
-        "short-all-native-v2",
+        "core-3_24-examples_r1",
+        "core-3_344-examples_r1",
+        "judge-free-8_690-examples_r1",
     }
 )
 _SAMPLING_AUDIT_SCHEMA = "modelopt.vlm-sampling-audit/v1"
@@ -230,6 +231,21 @@ class ProfileContract:
     name: str
     manifest: dict[str, object]
     fingerprint: str
+
+    @property
+    def sample_set(self) -> str:
+        """Return the selected example-set contract name."""
+        return cast("str", self.manifest["sample_set"])
+
+    @property
+    def backend_profile(self) -> str:
+        """Return the selected model-backend contract name."""
+        return cast("str", self.manifest["backend_profile"])
+
+    @property
+    def evaluator_profile(self) -> str:
+        """Return the selected evaluator contract name."""
+        return cast("str", self.manifest["evaluator_profile"])
 
     @property
     def source_tasks(self) -> tuple[str, ...]:
@@ -264,13 +280,49 @@ def load_profile(name: str) -> ProfileContract:
     """Load a named profile after validating every executable pin."""
     if name not in PROFILE_NAMES:
         raise ValueError(f"unsupported VLM evaluation profile: {name}")
-    path = _PROFILE_ROOT / f"{name}.json"
-    try:
-        manifest = _resolve_manifest(name, json.loads(path.read_text()))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"VLM evaluation profile is unreadable: {path}") from error
-    if not isinstance(manifest, dict):
-        raise RuntimeError(f"VLM evaluation profile must contain an object: {path}")
+    composition = _load_component(_PROFILE_ROOT, name, _PROFILE_SCHEMA, "profile")
+    expected_components = _PROFILE_COMPONENTS[name]
+    observed_components = tuple(
+        composition.get(key) for key in ("sample_set", "backend_profile", "evaluator_profile")
+    )
+    if observed_components != expected_components:
+        raise RuntimeError(f"{name} profile composition differs from the runtime policy")
+
+    sample_set_name, backend_name, evaluator_name = expected_components
+    sample_set = _resolve_sample_set(sample_set_name)
+    backend = _load_component(
+        _PROFILE_ROOT / "backends", backend_name, _BACKEND_PROFILE_SCHEMA, "backend profile"
+    )
+    evaluator = _load_component(
+        _PROFILE_ROOT / "evaluators",
+        evaluator_name,
+        _EVALUATOR_PROFILE_SCHEMA,
+        "evaluator profile",
+    )
+    if backend.get("settings") != _BACKEND_SETTINGS[backend_name]:
+        raise RuntimeError(f"{backend_name} backend profile differs from the runtime policy")
+    if evaluator.get("lmms_eval_revision") != _EVALUATOR_REVISIONS[evaluator_name]:
+        raise RuntimeError(f"{evaluator_name} evaluator profile differs from the runtime pin")
+
+    manifest = {
+        **composition,
+        "lmms_eval_revision": evaluator["lmms_eval_revision"],
+        "model_family": {
+            "architecture": "Qwen3_5ForConditionalGeneration",
+            "model_type": "qwen3_5",
+        },
+        "backend": backend["settings"],
+        "preprocessing": {"fps": 2, "max_frames": 32, "video_reader": "decord"},
+        "generation": {"do_sample": False, "temperature": 0},
+        "seed": 42,
+        "repetitions": 1,
+        "batch_size": 1,
+        **{
+            key: value
+            for key, value in sample_set.items()
+            if key not in {"schema", "name", "extends"}
+        },
+    }
     _validate_manifest(name, manifest)
     canonical = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
     return ProfileContract(
@@ -280,30 +332,45 @@ def load_profile(name: str) -> ProfileContract:
     )
 
 
-def _resolve_manifest(name: str, manifest: object, *, ancestors: tuple[str, ...] = ()) -> object:
-    """Resolve profile inheritance while rejecting cycles."""
-    if not isinstance(manifest, dict) or "extends" not in manifest:
-        return manifest
-    base_name = manifest.get("extends")
+def _load_component(root: Path, name: str, schema: str, label: str) -> dict[str, object]:
+    """Load one named component and validate its identity envelope."""
+    path = root / f"{name}.json"
+    try:
+        component = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"VLM evaluation {label} is unreadable: {path}") from error
+    if not isinstance(component, dict):
+        raise RuntimeError(f"VLM evaluation {label} must contain an object: {path}")
+    if component.get("schema") != schema:
+        raise RuntimeError(f"{name} {label} schema must be {schema}")
+    if component.get("name") != name:
+        raise RuntimeError(f"{name} {label} name does not match its filename")
+    return component
+
+
+def _resolve_sample_set(name: str, *, ancestors: tuple[str, ...] = ()) -> dict[str, object]:
+    """Resolve sample-set inheritance while rejecting cycles."""
+    if name not in _SAMPLE_SET_TASKS:
+        raise RuntimeError(f"unsupported VLM evaluation sample set: {name}")
+    sample_set = _load_component(
+        _PROFILE_ROOT / "sample_sets", name, _SAMPLE_SET_SCHEMA, "sample set"
+    )
+    if "extends" not in sample_set:
+        return sample_set
+    base_name = sample_set.get("extends")
     if (
         not isinstance(base_name, str)
-        or base_name not in PROFILE_NAMES
+        or base_name not in _SAMPLE_SET_TASKS
         or base_name == name
         or base_name in ancestors
     ):
-        raise RuntimeError(f"{name} profile extends an unsupported base profile")
-    base_path = _PROFILE_ROOT / f"{base_name}.json"
-    try:
-        base = json.loads(base_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"VLM evaluation base profile is unreadable: {base_path}") from error
-    base = _resolve_manifest(base_name, base, ancestors=(*ancestors, name))
-    if not isinstance(base, dict):
-        raise RuntimeError(f"{name} profile base must contain an object")
-    overrides = {key: value for key, value in manifest.items() if key != "extends"}
+        raise RuntimeError(f"{name} sample set extends an unsupported base sample set")
+    base = _resolve_sample_set(base_name, ancestors=(*ancestors, name))
+    overrides = {key: value for key, value in sample_set.items() if key != "extends"}
     if isinstance(base.get("tasks"), dict) and isinstance(overrides.get("tasks"), dict):
-        tasks = dict(base["tasks"])
-        for task, entry in overrides["tasks"].items():
+        tasks = dict(cast("dict[str, object]", base["tasks"]))
+        override_tasks = cast("dict[str, object]", overrides["tasks"])
+        for task, entry in override_tasks.items():
             base_entry = tasks.get(task)
             tasks[task] = (
                 {**base_entry, **entry}
@@ -319,17 +386,24 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
         raise RuntimeError(f"{name} profile schema must be {_PROFILE_SCHEMA}")
     if manifest.get("name") != name:
         raise RuntimeError(f"{name} profile name does not match its filename")
-    if manifest.get("lmms_eval_revision") != _PROFILE_REVISIONS[name]:
-        raise RuntimeError(f"{name} profile lmms_eval_revision differs from the runtime pin")
+    sample_set_name, backend_name, evaluator_name = _PROFILE_COMPONENTS[name]
+    if manifest.get("sample_set") != sample_set_name:
+        raise RuntimeError(f"{name} profile sample set differs from its composition")
+    if manifest.get("backend_profile") != backend_name:
+        raise RuntimeError(f"{name} profile backend differs from its composition")
+    if manifest.get("evaluator_profile") != evaluator_name:
+        raise RuntimeError(f"{name} profile evaluator differs from its composition")
+    if manifest.get("lmms_eval_revision") != _EVALUATOR_REVISIONS[evaluator_name]:
+        raise RuntimeError(f"{name} profile lmms_eval_revision differs from the evaluator pin")
     if manifest.get("model_family") != {
         "architecture": "Qwen3_5ForConditionalGeneration",
         "model_type": "qwen3_5",
     }:
         raise RuntimeError(f"{name} profile model family is unsupported")
-    expected_model = _PROFILE_MODELS.get(name)
+    expected_model = _SAMPLE_SET_MODELS.get(sample_set_name)
     if expected_model is not None and manifest.get("model") != expected_model:
         raise RuntimeError(f"{name} profile model pin differs from the runtime policy")
-    if manifest.get("backend") != _PROFILE_BACKENDS[name]:
+    if manifest.get("backend") != _BACKEND_SETTINGS[backend_name]:
         raise RuntimeError(f"{name} profile backend differs from the runtime policy")
     if manifest.get("preprocessing") != {
         "fps": 2,
@@ -346,16 +420,16 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
     ):
         raise RuntimeError(f"{name} profile execution identity differs from the runtime policy")
     selection = manifest.get("selection")
-    if selection != _PROFILE_SELECTIONS[name]:
+    if selection != _SAMPLE_SET_SELECTIONS[sample_set_name]:
         raise RuntimeError(f"{name} profile selection differs from its versioned policy")
     tasks = manifest.get("tasks")
     if not isinstance(tasks, dict) or not tasks:
         raise RuntimeError(f"{name} profile tasks must contain an object")
-    if tuple(tasks) != _PROFILE_TASKS[name]:
+    if tuple(tasks) != _SAMPLE_SET_TASKS[sample_set_name]:
         raise RuntimeError(f"{name} profile tasks differ from its versioned policy")
     for task, entry in tasks.items():
-        _validate_task(name, task, entry, selection=cast("str", selection))
-    _validate_sampling(name, manifest, tasks)
+        _validate_task(sample_set_name, task, entry, selection=cast("str", selection))
+    _validate_sampling(sample_set_name, manifest, tasks)
 
 
 def _validate_task(name: str, task: object, entry: object, *, selection: str) -> None:
@@ -373,7 +447,7 @@ def _validate_task(name: str, task: object, entry: object, *, selection: str) ->
     observed = {key: entry.get(key) for key in expected}
     if observed != expected:
         raise RuntimeError(f"{name} profile task pins differ from the runtime catalog: {task}")
-    expected_population = _PROFILE_POPULATIONS.get(name, {}).get(task)
+    expected_population = _SAMPLE_SET_POPULATIONS.get(name, {}).get(task)
     if expected_population is not None and entry.get("population_rows") != expected_population:
         raise RuntimeError(
             f"{name} profile task population differs from its versioned policy: {task}"
@@ -396,7 +470,7 @@ def _validate_sampling(
     tasks: dict[str, object],
 ) -> None:
     sampling = manifest.get("sampling")
-    if name in _AUDITED_SAMPLING_PROFILES and not isinstance(sampling, dict):
+    if name in _AUDITED_SAMPLE_SETS and not isinstance(sampling, dict):
         raise RuntimeError(f"{name} profile must contain a sampling audit")
     if sampling is None:
         return

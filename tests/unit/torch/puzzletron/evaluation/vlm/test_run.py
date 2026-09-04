@@ -20,6 +20,7 @@ import importlib.util
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 from hashlib import sha256
@@ -704,33 +705,49 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
 
 def test_versioned_profile_contracts_pin_backends_and_fingerprints():
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
+    for name in profiles:
+        composition = json.loads((contracts._PROFILE_ROOT / f"{name}.json").read_text())
+        assert set(composition) == {
+            "schema",
+            "name",
+            "sample_set",
+            "backend_profile",
+            "evaluator_profile",
+        }
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {
-        "short-v1": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
-        "short-native-v1": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
-        "short-native-v2": "d89134cdf4dfaaafe86b2fe9512bb183fa6528953fb5909e865bb961e95d4ee7",
-        "short-vllm-v2": "fc8a0a874fa2220610c50c33ee07fee4ce9e28c4032c0becdbc0059e1e1a58e8",
-        "smoke-native-v1": "734aea43cefa14776e016693a6c5ad2e32efed33fada2b3cdb856ce0cafa3271",
-        "smoke-vllm-v1": "abc0c2de8576717b50695e4f91ac239459a0f2789f45e01cddbe6d4976ead0e7",
-        "short-all-native-v1": "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68",
-        "short-all-native-v2": "5db871b4cdd2f713161237f762619172ec7459318f1017de359faf96ff42fd36",
-        "full-v1": "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a",
-        "core3-full-native-v1": (
-            "82b053bcf74d7cfe5eab2bbbb94083b79c4ac16c0fff6f5a824a5d8b1079e06c"
-        ),
-        "core3-full-vllm-v1": ("6423b6fea1d988a4f9c79572bf17e47ad1d851760a90ee775033deeb68b700ec"),
+        "short-v1": "8286a094c3cfb5c2608a6e1469d6525bb1c4be11a7ab8789ed97dd249d7bea71",
+        "short-native-v1": "b15054c251af54a5298233b1c01a3babf76c4281d055469fd26b76129c34f258",
+        "core-3_344-examples_r1-native": "2017656d093de7d95d25c7e34241b1d708150157f0c4e6a0bf6bd48649c2191a",
+        "core-3_344-examples_r1-vllm": "859908fdb32b6bcaddb5400cd4430f4c9026264db38c7a8b56a98f42109c1f78",
+        "core-3_24-examples_r1-native": "0e51e27d57e27f0c5e4943d077308766387fa739b2d1c413b7b951327358cefc",
+        "core-3_24-examples_r1-vllm": "9c68168f05003e695258dc119351610b4e98bafb3e4f3e773c4e64ce5d17835a",
+        "short-all-native-v1": "9d7334371316a2a7774ee7e520ce0fc57e3c42ecfd7749ccd217e02ab59b6ee3",
+        "judge-free-8_690-examples_r1-native": "78457702288ba2d9d7b903366f7030302936377690b0ec37a0704e3eda8fd851",
+        "full-v1": "680483a7e2eceeab82a5e0b2767cc751f1951f58ffedc0aa190481d6ec978307",
+        "core-3_full_r1-native": "976efbd056fecb686e64b912ed50251b1c16e5efe1d3ae3d179f208cc587c0a7",
+        "core-3_full_r1-vllm": "40fd44fbb4812bd927d3f82e33d6eddec5b4641736c65c48250b8ea77acaec81",
     }
 
-    current_short = profiles["short-native-v2"]
-    smoke = profiles["smoke-native-v1"]
-    materialized_short = profiles["short-vllm-v2"]
-    materialized_smoke = profiles["smoke-vllm-v1"]
+    current_short = profiles["core-3_344-examples_r1-native"]
+    smoke = profiles["core-3_24-examples_r1-native"]
+    materialized_short = profiles["core-3_344-examples_r1-vllm"]
+    materialized_smoke = profiles["core-3_24-examples_r1-vllm"]
     assert current_short.manifest["lmms_eval_revision"] == checkpoint.LMMS_EVAL_REVISION
     assert current_short.manifest["backend"]["name"] == "qwen3_5"
     assert materialized_short.manifest["backend"]["name"] == "vllm"
+    assert materialized_short.sample_set == current_short.sample_set
+    assert materialized_short.backend_profile != current_short.backend_profile
+    assert materialized_short.evaluator_profile == current_short.evaluator_profile
     assert materialized_short.exact_rows == current_short.exact_rows
     assert materialized_smoke.manifest["backend"]["name"] == "vllm"
     assert materialized_smoke.manifest["backend"]["enforce_eager"] is True
     assert materialized_smoke.exact_rows == smoke.exact_rows
+    assert suites.manifest_selected_rows(current_short.exact_rows) == 344
+    assert suites.manifest_selected_rows(smoke.exact_rows) == 24
+    assert (
+        suites.manifest_selected_rows(profiles["judge-free-8_690-examples_r1-native"].exact_rows)
+        == 690
+    )
     assert profiles["full-v1"].exact_rows is None
 
 
@@ -738,7 +755,7 @@ def test_versioned_profile_contracts_pin_backends_and_fingerprints():
     ("name", "backend"),
     [
         (
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             {
                 "attention_implementation": "sdpa",
                 "enable_thinking": False,
@@ -746,7 +763,7 @@ def test_versioned_profile_contracts_pin_backends_and_fingerprints():
             },
         ),
         (
-            "core3-full-vllm-v1",
+            "core-3_full_r1-vllm",
             {"enable_thinking": False, "name": "vllm", "reasoning_parser": "qwen3"},
         ),
     ],
@@ -784,30 +801,33 @@ def test_core3_full_teacher_profiles_pin_paired_population_and_runtime(name, bac
     ("name", "field", "value", "message"),
     [
         (
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             "backend",
             {"enable_thinking": False, "name": "vllm", "reasoning_parser": "qwen3"},
-            "backend differs",
+            "backend profile differs",
         ),
         (
-            "core3-full-vllm-v1",
+            "core-3_full_r1-vllm",
             "model",
             {"repository": "Qwen/Qwen3.5-0.8B", "revision": "different"},
             "model pin differs",
         ),
-        ("core3-full-native-v1", "population", 764, "population differs"),
+        ("core-3_full_r1-native", "population", 764, "population differs"),
     ],
 )
 def test_core3_full_teacher_profiles_reject_contract_overrides(
     monkeypatch, tmp_path, name, field, value, message
 ):
-    for profile_name in ("core3-full-native-v1", "core3-full-vllm-v1"):
-        source = contracts._PROFILE_ROOT / f"{profile_name}.json"
-        (tmp_path / source.name).write_text(source.read_text())
-    manifest_path = tmp_path / f"{name}.json"
+    shutil.copytree(contracts._PROFILE_ROOT, tmp_path, dirs_exist_ok=True)
+    if field == "backend":
+        manifest_path = tmp_path / "backends" / "qwen-3.5-native_r1.json"
+    else:
+        manifest_path = tmp_path / "sample_sets" / "core-3_full_r1.json"
     manifest = json.loads(manifest_path.read_text())
     if field == "population":
         manifest["tasks"]["realworldqa"]["population_rows"] = value
+    elif field == "backend":
+        manifest["settings"] = value
     else:
         manifest[field] = value
     manifest_path.write_text(json.dumps(manifest))
@@ -818,21 +838,19 @@ def test_core3_full_teacher_profiles_reject_contract_overrides(
 
 
 def test_audited_profile_rejects_rows_that_drift_from_systematic_selection(monkeypatch, tmp_path):
-    for name in ("short-v1", "short-native-v1", "short-native-v2"):
-        source = contracts._PROFILE_ROOT / f"{name}.json"
-        (tmp_path / source.name).write_text(source.read_text())
-    manifest_path = tmp_path / "short-native-v2.json"
+    shutil.copytree(contracts._PROFILE_ROOT, tmp_path, dirs_exist_ok=True)
+    manifest_path = tmp_path / "sample_sets" / "core-3_344-examples_r1.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["tasks"]["realworldqa"]["rows"][0]["source_row_index"] = 6
     manifest_path.write_text(json.dumps(manifest))
     monkeypatch.setattr(contracts, "_PROFILE_ROOT", tmp_path)
 
     with pytest.raises(RuntimeError, match="rows differ from its sampling audit"):
-        contracts.load_profile("short-native-v2")
+        contracts.load_profile("core-3_344-examples_r1-native")
 
 
 def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
-    contract = contracts.load_profile("short-all-native-v2")
+    contract = contracts.load_profile("judge-free-8_690-examples_r1-native")
     exact_rows = contract.exact_rows
     assert exact_rows is not None
     validated = suites.validate_exact_rows_manifest(
@@ -993,6 +1011,9 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     contract = contracts.load_profile(name)
     assert prepared.report["profile_name"] == name
     assert prepared.report["profile_fingerprint"] == contract.fingerprint
+    assert prepared.report["sample_set"] == contract.sample_set
+    assert prepared.report["backend_profile"] == contract.backend_profile
+    assert prepared.report["evaluator_profile"] == contract.evaluator_profile
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
     assert prepared.report["quick_selected_rows"] == 344
     assert prepared.report["quick_row_identities"] == suites.manifest_row_identities(
@@ -1013,7 +1034,7 @@ def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "short-all-native-v2",
+            "judge-free-8_690-examples_r1-native",
             "--hf-home",
             str(hf_home),
         ]
@@ -1045,7 +1066,7 @@ def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     ("profile_name", "expected_eager"),
-    [("smoke-vllm-v1", True), ("short-vllm-v2", None)],
+    [("core-3_24-examples_r1-vllm", True), ("core-3_344-examples_r1-vllm", None)],
 )
 def test_vllm_profile_forwards_runtime_settings(
     monkeypatch, tmp_path, profile_name, expected_eager
@@ -1086,7 +1107,7 @@ def test_vllm_profile_forwards_runtime_settings(
     assert 'attention_config={"flash_attn_version":2}' in model_args
 
 
-@pytest.mark.parametrize("name", ["core3-full-native-v1", "core3-full-vllm-v1"])
+@pytest.mark.parametrize("name", ["core-3_full_r1-native", "core-3_full_r1-vllm"])
 def test_core3_full_teacher_profiles_preserve_backend_prompt_policy(monkeypatch, tmp_path, name):
     model, hf_home = _write_core3_teacher_snapshot(tmp_path)
     lmms_root = _write_lmms_tasks(tmp_path, ("mmmu_val",))
@@ -1122,7 +1143,7 @@ def test_core3_full_teacher_profiles_preserve_backend_prompt_policy(monkeypatch,
     }
     assert prepared.report["profile_population_rows"] == {"mmmu_val": 900}
     assert prepared.report["output_budget_contract"]["mmmu_val"]["effective_max_new_tokens"] == 128
-    if name == "core3-full-native-v1":
+    if name == "core-3_full_r1-native":
         assert settings["model"] == "qwen3_5"
         assert prepared.report["backend_limitations"] == []
     else:
@@ -1158,7 +1179,7 @@ def test_core3_full_teacher_profile_population_expectations_follow_group_shard(
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             "--profile-task",
             "mvbench",
             "--profile-task-shard",
@@ -1190,7 +1211,7 @@ def test_core3_full_teacher_profile_accepts_snapshot_symlink(monkeypatch, tmp_pa
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             "--profile-task",
             "realworldqa",
             "--hf-home",
@@ -1222,7 +1243,7 @@ def test_core3_full_teacher_profile_rejects_unpinned_checkpoint(monkeypatch, tmp
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             "--profile-task",
             "realworldqa",
             "--hf-home",
@@ -1245,7 +1266,7 @@ def test_core3_full_teacher_profile_rejects_settings_override(monkeypatch, tmp_p
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "core3-full-native-v1",
+            "core-3_full_r1-native",
             "--profile-task",
             "realworldqa",
             "--hf-home",
@@ -1370,7 +1391,7 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "short-all-native-v2",
+            "judge-free-8_690-examples_r1-native",
             "--profile-task",
             "mvbench",
             "--profile-task-shard",
@@ -1423,7 +1444,7 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
     )
     assert (
         prepared.report["profile_fingerprint"]
-        == contracts.load_profile("short-all-native-v2").fingerprint
+        == contracts.load_profile("judge-free-8_690-examples_r1-native").fingerprint
     )
     tasks_root, _ = tasks.prepare(
         tmp_path / "results",
@@ -1446,7 +1467,7 @@ def test_smoke_profile_generates_only_manifest_backed_mvbench_leaves(monkeypatch
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "smoke-native-v1",
+            "core-3_24-examples_r1-native",
             "--hf-home",
             str(hf_home),
         ]
