@@ -533,6 +533,7 @@ def get_onnx_bytes_and_metadata(
         for tensor in chain(model.parameters(), model.buffers())
         if tensor.is_floating_point()
     }
+    source_floating_dtype_names = ", ".join(sorted(map(str, source_floating_dtypes))) or "none"
 
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
     # Floats/ints are tensorized when they are provided, but not tensorized when they are not
@@ -645,6 +646,12 @@ def get_onnx_bytes_and_metadata(
     uses_other_unsupported_quantizer = (
         is_int4_quantized(model) or is_mxfp8_quantized(model) or is_int8_quantized(model)
     )
+    if weights_dtype == "fp16" and uses_fp8 and torch.bfloat16 in source_floating_dtypes:
+        raise AssertionError(
+            "Converting a BF16 FP8 ONNX graph to FP16 is not supported yet "
+            f"(source floating dtypes: {source_floating_dtype_names})"
+        )
+
     is_bf16_fp8_noop = (
         weights_dtype == "bf16"
         and source_floating_dtypes == {torch.bfloat16}
@@ -654,7 +661,8 @@ def get_onnx_bytes_and_metadata(
     if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
         if uses_other_unsupported_quantizer or uses_fp8:
             assert weights_dtype == "fp16", (
-                "Converting a quantized ONNX graph to BF16 is not supported yet"
+                "Converting a quantized ONNX graph to BF16 is not supported yet "
+                f"(source floating dtypes: {source_floating_dtype_names})"
             )
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
