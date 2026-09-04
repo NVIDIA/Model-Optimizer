@@ -85,12 +85,6 @@ _CONTROLLED_MODEL_KWARGS = {
 _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE = "_modelopt_qwen_image_pdd_execution"
 
 
-def _require_binary_mask(mask: torch.Tensor, *, name: str) -> None:
-    mask_int = mask.to(torch.int64)
-    if not bool(torch.all((mask_int == 0) | (mask_int == 1)).item()):
-        raise ValueError(f"{name} mask must contain only zero and one values.")
-
-
 def _config_guidance_embeds(transformer: nn.Module) -> bool:
     config = getattr(transformer, "config", None)
     if isinstance(config, Mapping):
@@ -266,6 +260,37 @@ def _validate_qwen_pdd_config(config: PDDConfig) -> None:
         raise TypeError(f"config must be PDDConfig, got {type(config).__name__}.")
 
 
+def _output_projection(transformer: nn.Module) -> nn.Linear:
+    projection = getattr(transformer, "proj_out", None)
+    if not isinstance(projection, nn.Linear):
+        raise TypeError(
+            "Qwen-Image transformer must register an nn.Linear at 'proj_out', got "
+            f"{type(projection).__name__}."
+        )
+    return projection
+
+
+def _require_pdd_projection(
+    model: nn.Module,
+    grid_size: int,
+    base_out_features: int,
+    *,
+    fused: bool = False,
+) -> nn.Linear:
+    projection = _output_projection(model)
+    if projection.out_features != grid_size * base_out_features:
+        raise ValueError(
+            f"Qwen PDD proj_out has {projection.out_features} outputs; expected "
+            f"{grid_size * base_out_features} ({grid_size} heads x {base_out_features})."
+        )
+    if isinstance(projection, PDDOutputProjection):
+        if projection.grid_size != grid_size or projection.layer_spec != QWEN_IMAGE_PDD_LAYER_SPEC:
+            raise ValueError("Qwen PDD projection metadata does not match its configuration.")
+    elif fused:
+        raise TypeError("Qwen fused PDD inference requires a PDDOutputProjection.")
+    return projection
+
+
 def convert_qwen_image_to_pdd(
     transformer: nn.Module,
     config: PDDConfig,
@@ -281,14 +306,7 @@ def convert_qwen_image_to_pdd(
         raise TypeError(f"transformer must be nn.Module, got {type(transformer).__name__}.")
     if _config_guidance_embeds(transformer):
         raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
-    try:
-        current = transformer.get_submodule("proj_out")
-    except AttributeError as error:
-        raise ValueError(
-            "Qwen-Image transformer must register an nn.Linear at 'proj_out'."
-        ) from error
-    if not isinstance(current, nn.Linear):
-        raise TypeError(f"Qwen-Image proj_out must be nn.Linear, got {type(current).__name__}.")
+    current = _output_projection(transformer)
 
     projection = PDDOutputProjection.from_linear(
         current,
@@ -297,8 +315,6 @@ def convert_qwen_image_to_pdd(
     )
     if projection is not current:
         transformer.proj_out = projection
-        if transformer.get_submodule("proj_out") is not projection:
-            raise RuntimeError("Qwen-Image proj_out replacement did not remain registered.")
     return projection
 
 
@@ -312,14 +328,7 @@ def restore_qwen_image_pdd_projection(
         raise TypeError(f"transformer must be nn.Module, got {type(transformer).__name__}.")
     if _config_guidance_embeds(transformer):
         raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
-    try:
-        current = transformer.get_submodule("proj_out")
-    except AttributeError as error:
-        raise ValueError(
-            "Qwen-Image transformer must register an nn.Linear at 'proj_out'."
-        ) from error
-    if not isinstance(current, nn.Linear):
-        raise TypeError(f"Qwen-Image proj_out must be nn.Linear, got {type(current).__name__}.")
+    current = _output_projection(transformer)
     if isinstance(current, PDDOutputProjection):
         return PDDOutputProjection.from_linear(
             current,
@@ -350,8 +359,6 @@ def restore_qwen_image_pdd_projection(
     projection.bias = current.bias
     projection.train(current.training)
     transformer.proj_out = projection
-    if transformer.get_submodule("proj_out") is not projection:
-        raise RuntimeError("Qwen-Image proj_out replacement did not remain registered.")
     return projection
 
 
@@ -380,23 +387,6 @@ class QwenImagePDDAdapter:
         self.compute_dtype = compute_dtype
 
     @staticmethod
-    def _validate_state_and_time(state: torch.Tensor, time: torch.Tensor) -> None:
-        if state.ndim != 4:
-            raise ValueError(
-                f"Qwen-Image PDD state must have shape [B, C, H, W], got {tuple(state.shape)}."
-            )
-        if state.shape[2] % 2 or state.shape[3] % 2:
-            raise ValueError("Qwen-Image PDD requires even latent height and width.")
-        if time.shape != (state.shape[0],):
-            raise ValueError(
-                f"Qwen-Image PDD time must have shape ({state.shape[0]},), got {tuple(time.shape)}."
-            )
-        if time.device != state.device:
-            raise ValueError(f"time must be on {state.device}, got {time.device}.")
-        if not time.dtype.is_floating_point:
-            raise TypeError(f"time must use a real floating-point dtype, got {time.dtype}.")
-
-    @staticmethod
     def _parse_condition(
         condition: Any,
         *,
@@ -417,21 +407,14 @@ class QwenImagePDDAdapter:
             )
         if not encoder_hidden_states.dtype.is_floating_point:
             raise TypeError(f"{name} embeddings must use a real floating-point dtype.")
-        if (
-            attention_mask.dtype.is_floating_point
-            or attention_mask.dtype.is_complex
-            or attention_mask.shape[1] != encoder_hidden_states.shape[1]
-        ):
-            raise ValueError(
-                f"{name} mask must be an integer/bool tensor matching the embedding "
-                "sequence length."
-            )
-        batch_size = state.shape[0]
-        if encoder_hidden_states.shape[0] != batch_size or attention_mask.shape[0] != batch_size:
-            raise ValueError(f"{name} batch size must match state batch size {batch_size}.")
+        if attention_mask.dtype.is_floating_point or attention_mask.dtype.is_complex:
+            raise TypeError(f"{name} mask must use an integer or bool dtype.")
+        if attention_mask.shape != encoder_hidden_states.shape[:2]:
+            raise ValueError(f"{name} mask shape must match the embedding batch and sequence axes.")
+        if encoder_hidden_states.shape[0] != state.shape[0]:
+            raise ValueError(f"{name} batch size must match state batch size {state.shape[0]}.")
         if encoder_hidden_states.device != state.device or attention_mask.device != state.device:
             raise ValueError(f"{name} tensors must be on {state.device}.")
-        _require_binary_mask(attention_mask, name=name)
         return encoder_hidden_states, attention_mask
 
     def _model_dtype(self, model: nn.Module, fallback: torch.dtype) -> torch.dtype:
@@ -444,82 +427,60 @@ class QwenImagePDDAdapter:
 
     @staticmethod
     def _extract_packed_output(output: Any) -> torch.Tensor:
-        if isinstance(output, tuple):
-            if not output:
-                raise TypeError("Qwen-Image model returned an empty tuple.")
-            packed = output[0]
-        elif isinstance(output, torch.Tensor):
-            packed = output
-        elif hasattr(output, "sample"):
-            packed = output.sample
-        else:
-            raise TypeError(
-                "Qwen-Image PDD could not extract a tensor from model output of type "
-                f"{type(output).__name__}."
-            )
-        if not isinstance(packed, torch.Tensor):
-            raise TypeError("Qwen-Image model output payload must be a tensor.")
+        if (
+            not isinstance(output, tuple)
+            or len(output) != 1
+            or not isinstance(output[0], torch.Tensor)
+        ):
+            raise TypeError("Qwen-Image PDD requires a one-tensor tuple from return_dict=False.")
+        packed = output[0]
         if packed.ndim != 3:
             raise ValueError(
                 f"Qwen-Image model output must be packed [B, P, F], got {tuple(packed.shape)}."
             )
         return packed
 
-    def _prepare_call(
+    def _prepare_model_call(
         self,
         model: nn.Module,
         state: torch.Tensor,
         time: torch.Tensor,
-        condition: Any,
         model_kwargs: Mapping[str, Any],
-        *,
-        condition_name: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        self._validate_state_and_time(state, time)
+    ) -> tuple[torch.Tensor, torch.dtype, list[list[tuple[int, int, int]]]]:
         require_qwen_image_pdd_forward(model)
         if _config_guidance_embeds(model):
             raise ValueError("Qwen-Image PDD does not support transformer guidance embeddings.")
-        encoder_hidden_states, attention_mask = self._parse_condition(
-            condition,
-            state=state,
-            name=condition_name,
-        )
         conflicts = sorted(_CONTROLLED_MODEL_KWARGS.intersection(model_kwargs))
         if conflicts:
             raise ValueError(f"Qwen-Image PDD model_kwargs contains controlled keys: {conflicts}.")
-        return encoder_hidden_states, attention_mask
-
-    def _call_packed(
-        self,
-        model: nn.Module,
-        state: torch.Tensor,
-        time: torch.Tensor,
-        condition: Any,
-        model_kwargs: Mapping[str, Any],
-        *,
-        condition_name: str,
-        prepared_condition: tuple[torch.Tensor, torch.Tensor] | None = None,
-        fusion: tuple[int, int, torch.Tensor] | None = None,
-    ) -> torch.Tensor:
-        if prepared_condition is None:
-            encoder_hidden_states, attention_mask = self._prepare_call(
-                model,
-                state,
-                time,
-                condition,
-                model_kwargs,
-                condition_name=condition_name,
-            )
-        else:
-            encoder_hidden_states, attention_mask = prepared_condition
-
-        batch_size, _, height, width = state.shape
         model_dtype = self._model_dtype(model, state.dtype)
         if model_dtype != torch.bfloat16:
             raise TypeError("Qwen PDD execution requires BF16 compute.")
         if time.dtype != torch.float32:
             raise TypeError("Qwen PDD execution requires FP32 time.")
         packed_state = pack_latents(state).to(model_dtype)
+        if time.shape != (packed_state.shape[0],) or time.device != packed_state.device:
+            raise ValueError("Qwen PDD time must have shape [batch] on the state device.")
+        return (
+            packed_state,
+            model_dtype,
+            build_img_shapes(state.shape[0], state.shape[2], state.shape[3]),
+        )
+
+    def _call_packed(
+        self,
+        model: nn.Module,
+        packed_state: torch.Tensor,
+        time: torch.Tensor,
+        model_kwargs: Mapping[str, Any],
+        *,
+        prepared_condition: tuple[torch.Tensor, torch.Tensor],
+        model_dtype: torch.dtype,
+        img_shapes: list[list[tuple[int, int, int]]],
+        fusion: tuple[int, int, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        encoder_hidden_states, attention_mask = prepared_condition
+
         encoder_hidden_states = encoder_hidden_states.to(model_dtype)
         call_kwargs = dict(model_kwargs)
         if fusion is not None:
@@ -529,42 +490,11 @@ class QwenImagePDDAdapter:
             timestep=time,
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_mask=attention_mask,
-            img_shapes=build_img_shapes(batch_size, height, width),
+            img_shapes=img_shapes,
             return_dict=False,
             **call_kwargs,
         )
         return self._extract_packed_output(output)
-
-    def _prepare_teacher_cfg_calls(
-        self,
-        model: nn.Module,
-        state: torch.Tensor,
-        time: torch.Tensor,
-        condition: Any,
-        negative_condition: Any,
-        model_kwargs: Mapping[str, Any],
-    ) -> tuple[
-        tuple[torch.Tensor, torch.Tensor],
-        tuple[torch.Tensor, torch.Tensor],
-    ]:
-        """Validate both local CFG calls before either model execution begins."""
-        prepared_condition = self._prepare_call(
-            model,
-            state,
-            time,
-            condition,
-            model_kwargs,
-            condition_name="condition",
-        )
-        prepared_negative_condition = self._prepare_call(
-            model,
-            state,
-            time,
-            negative_condition,
-            model_kwargs,
-            condition_name="negative_condition",
-        )
-        return prepared_condition, prepared_negative_condition
 
     @staticmethod
     def _expected_packed_shape(state: torch.Tensor, *, output_features: int) -> torch.Size:
@@ -611,55 +541,6 @@ class QwenImagePDDAdapter:
             )
         return unpack_latents(packed, state.shape[2], state.shape[3])
 
-    @staticmethod
-    def _all_heads_projection(
-        model: nn.Module,
-        grid_size: int,
-        base_out_features: int,
-    ) -> nn.Linear:
-        try:
-            projection = model.get_submodule("proj_out")
-        except AttributeError as error:
-            raise ValueError(
-                "Qwen student must register an output projection at 'proj_out'."
-            ) from error
-        if not isinstance(projection, nn.Linear):
-            raise TypeError("Qwen student proj_out must be a widened nn.Linear for PDD training.")
-        expected_out_features = grid_size * base_out_features
-        if projection.out_features != expected_out_features:
-            raise ValueError(
-                f"Qwen PDD proj_out has {projection.out_features} outputs; expected "
-                f"{expected_out_features} ({grid_size} heads x {base_out_features})."
-            )
-        if isinstance(projection, PDDOutputProjection):
-            if projection.grid_size != grid_size:
-                raise ValueError(
-                    f"Qwen PDD projection grid_size={projection.grid_size} does not match "
-                    f"config grid_size={grid_size}."
-                )
-            if projection.layer_spec != QWEN_IMAGE_PDD_LAYER_SPEC:
-                raise ValueError("Qwen PDD projection carries an incompatible layer specification.")
-        return projection
-
-    @classmethod
-    def _fused_projection(cls, model: nn.Module, grid_size: int) -> PDDOutputProjection:
-        try:
-            projection = model.get_submodule("proj_out")
-        except AttributeError as error:
-            raise ValueError(
-                "Qwen student must register an output projection at 'proj_out'."
-            ) from error
-        if not isinstance(projection, PDDOutputProjection):
-            raise TypeError(
-                "Qwen fused PDD inference requires proj_out to be a PDDOutputProjection."
-            )
-        cls._all_heads_projection(
-            model,
-            grid_size,
-            base_out_features=projection.base_out_features,
-        )
-        return projection
-
     def student_all_heads(
         self,
         model: nn.Module,
@@ -670,18 +551,23 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Return unpacked PDD interval velocities from one Qwen call."""
-        self._all_heads_projection(
+        _require_pdd_projection(
             model,
             self.config.grid_size,
             base_out_features=state.shape[1] * 4,
         )
+        packed_state, model_dtype, img_shapes = self._prepare_model_call(
+            model, state, time, model_kwargs
+        )
+        prepared_condition = self._parse_condition(condition, state=state, name="condition")
         packed = self._call_packed(
             model,
-            state,
+            packed_state,
             time,
-            condition,
             model_kwargs,
-            condition_name="condition",
+            prepared_condition=prepared_condition,
+            model_dtype=model_dtype,
+            img_shapes=img_shapes,
         )
         return self._unpack_all_heads(packed, state)
 
@@ -698,14 +584,30 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Run one conditional Qwen call with its final projection fused for a block."""
-        self._fused_projection(model, self.config.grid_size)
+        projection = _output_projection(model)
+        base_out_features = (
+            projection.base_out_features
+            if isinstance(projection, PDDOutputProjection)
+            else state.shape[1] * 4
+        )
+        _require_pdd_projection(
+            model,
+            self.config.grid_size,
+            base_out_features,
+            fused=True,
+        )
+        packed_state, model_dtype, img_shapes = self._prepare_model_call(
+            model, state, time, model_kwargs
+        )
+        prepared_condition = self._parse_condition(condition, state=state, name="condition")
         packed = self._call_packed(
             model,
-            state,
+            packed_state,
             time,
-            condition,
             model_kwargs,
-            condition_name="condition",
+            prepared_condition=prepared_condition,
+            model_dtype=model_dtype,
+            img_shapes=img_shapes,
             fusion=(start, end, grid),
         )
         return self._unpack_single(packed, state)
@@ -722,40 +624,39 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Return conditional or fixed two-pass packed-CFG Qwen teacher velocity."""
+        packed_state, model_dtype, img_shapes = self._prepare_model_call(
+            model, state, time, model_kwargs
+        )
+        prepared_condition = self._parse_condition(condition, state=state, name="condition")
         guidance_scale = self.guidance_scale
+        prepared_negative_condition = prepared_condition
         if guidance_scale is not None:
-            prepared_condition, prepared_negative_condition = self._prepare_teacher_cfg_calls(
-                model,
-                state,
-                time,
-                condition,
+            prepared_negative_condition = self._parse_condition(
                 negative_condition,
-                model_kwargs,
+                state=state,
+                name="negative_condition",
             )
-        else:
-            prepared_condition = None
-            prepared_negative_condition = None
 
         conditional = self._call_packed(
             model,
-            state,
+            packed_state,
             time,
-            condition,
             model_kwargs,
-            condition_name="condition",
             prepared_condition=prepared_condition,
+            model_dtype=model_dtype,
+            img_shapes=img_shapes,
         )
         if guidance_scale is None:
             return self._unpack_single(conditional, state)
 
         unconditional = self._call_packed(
             model,
-            state,
+            packed_state,
             time,
-            negative_condition,
             model_kwargs,
-            condition_name="negative_condition",
             prepared_condition=prepared_negative_condition,
+            model_dtype=model_dtype,
+            img_shapes=img_shapes,
         )
         expected = self._expected_packed_shape(state, output_features=state.shape[1] * 4)
         if conditional.shape != expected or unconditional.shape != expected:

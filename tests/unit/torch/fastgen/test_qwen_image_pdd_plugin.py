@@ -247,7 +247,7 @@ def test_teacher_cfg_zero_guided_norm_uses_qwen_clamp() -> None:
         def forward(self, *, hidden_states, **_kwargs):
             self.calls += 1
             value = 3.0 if self.calls == 1 else 4.0
-            return torch.full_like(hidden_states, value, dtype=torch.bfloat16)
+            return (torch.full_like(hidden_states, value, dtype=torch.bfloat16),)
 
     teacher = ZeroGuidedTeacher()
     state, time, condition, negative_condition = _inputs(batch_size=1)
