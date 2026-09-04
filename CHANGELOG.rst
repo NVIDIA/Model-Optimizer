@@ -54,6 +54,7 @@ Changelog
 
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
+- Fix FP8 ONNX export of BF16 models during real-weight compression.
 - Fix Megatron-Bridge Quantization Aware Distillation of a vision-language model silently discarding the ModelOpt state, so the distilled checkpoint restored no quantizers and exported as an unquantized model. Re-run QAD to regenerate any affected checkpoint.
 - Fix Megatron-Core HuggingFace export silently omitting fused (grouped GEMM) MoE experts for architectures without an ``experts.linear_fc1`` rule (e.g. ``Qwen3MoeForCausalLM``), which produced a valid-looking checkpoint containing no expert weights. The exporter now raises instead of writing that checkpoint; the scripts also avoid the situation by selecting ``SequentialMLP`` for those architectures.
 - Fix GatedDeltaNet (Qwen3.5) quantizer exclusions on Megatron-Core: the recipe patterns name the HuggingFace ``linear_attn`` module, so the ``conv1d`` was calibrated and the alpha / beta gate projections were exported in FP8. ``conv1d`` now has a ``self_attention`` alias in the default disabled-quantizer units, and the alpha / beta projections are exported in BF16 (they share Megatron's fused ``in_proj`` quantizer and cannot be disabled by name).
@@ -131,7 +132,6 @@ Changelog
 
 **Bug Fixes**
 
-- Fix FP8 ONNX export of BF16 models during real-weight compression.
 - Fix NemotronH dense MLP quantization with the ``nvfp4_mlp_only`` and ``nvfp4_omlp_only`` recipe families. NemotronH registers these projections as ``mixer.up_proj`` / ``mixer.down_proj``, which the previous ``*mlp*`` selector missed, producing checkpoints with a null ``quant_algo``.
 - Fix ``ShapeInferenceError`` during ONNX INT8 + FP16 quantization (``--high_precision_dtype fp16``) of weakly-typed models (e.g. TensorFlow exports) that carry stale rank-0 ``graph.output`` shapes or ops such as ``TopK`` that ONNX's static shape inference cannot resolve. Stale output shapes are now reconciled via symbolic shape inference, and AutoCast falls back to schema-based type inference so unresolved ops no longer leave tensors untyped.
 - Fix fused MoE expert auto-detection (``register_fused_experts_on_the_fly``) skipping modules without an ``act_fn`` attribute. Modules applying a custom gated activation between the two ``F.linear`` calls (e.g. ``MiniMaxM3VLExperts``) were silently skipped, leaving routed experts unquantized and failing HF export. Enables NVFP4/FP8 quantization and export for MiniMax-M2 / MiniMax-M3.
