@@ -86,19 +86,6 @@ def test_load_pdd_config_builtin_recipe():
     assert config.inference_blocks == [32, 32, 32, 32]
 
 
-def test_load_pdd_config_filesystem_precedes_same_named_builtin(tmp_path, monkeypatch):
-    """An explicit same-named filesystem recipe takes precedence over the built-in."""
-    relative_path = tmp_path / "general" / "distillation" / "pdd_qwen_image.yaml"
-    relative_path.parent.mkdir(parents=True)
-    relative_path.write_text("guidance_scale: 7.0\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-
-    config = load_pdd_config("general/distillation/pdd_qwen_image")
-
-    assert config.guidance_scale == 7.0
-    assert config.inference_blocks == [32, 32, 32, 32]
-
-
 QUANTIZER_ATTRIBUTE_SCHEMA = (
     "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
 )

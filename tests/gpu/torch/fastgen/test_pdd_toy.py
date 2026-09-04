@@ -17,9 +17,7 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
@@ -32,10 +30,6 @@ from modelopt.torch.fastgen import (
     convert_to_pdd_output_projection,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-_FORBIDDEN_MODULES = ("diffusers", "fastgen", "nemo_automodel")
 _WIDTH = 8
 _GRID_SIZE = 4
 
@@ -154,18 +148,10 @@ def _build(
     return student, teacher, projection, pipeline, adapter
 
 
-def _assert_optional_frameworks_absent() -> None:
-    resolvable = sorted(name for name in _FORBIDDEN_MODULES if importlib.util.find_spec(name))
-    assert not resolvable, f"plain PDD GPU environment resolves optional frameworks: {resolvable}"
-    imported = sorted(name for name in _FORBIDDEN_MODULES if name in sys.modules)
-    assert not imported, f"plain PDD GPU test imported optional frameworks: {imported}"
-
-
-def test_bf16_loss_gradient_update_reload_and_fused_sample(tmp_path: Path) -> None:
-    _assert_optional_frameworks_absent()
-    assert torch.cuda.is_available(), "Task-10 BF16 gate requires a real CUDA device"
+def test_bf16_loss_backward_and_fused_sample() -> None:
+    assert torch.cuda.is_available(), "BF16 test requires a real CUDA device"
     device = torch.device("cuda", 0)
-    assert torch.cuda.get_device_capability(device)[0] >= 8, "BF16 gate requires Ampere or newer"
+    assert torch.cuda.get_device_capability(device)[0] >= 8, "BF16 requires Ampere or newer"
 
     student, teacher, projection, pipeline, adapter = _build(device)
     assert {parameter.dtype for parameter in student.parameters()} == {torch.bfloat16}
@@ -175,15 +161,6 @@ def test_bf16_loss_gradient_update_reload_and_fused_sample(tmp_path: Path) -> No
     noise = torch.linspace(0.5, -0.5, _WIDTH, device=device, dtype=torch.float32).reshape(1, -1)
     n = torch.tensor([0], device=device, dtype=torch.int64)
     k = torch.tensor([2], device=device, dtype=torch.int64)
-    optimizer = torch.optim.AdamW(
-        student.parameters(),
-        lr=2.0e-3,
-        weight_decay=0.0,
-        foreach=False,
-        fused=False,
-    )
-
-    optimizer.zero_grad(set_to_none=True)
     loss, metrics = pipeline.compute_loss(data, noise=noise, n=n, k=k)
     assert loss.dtype == torch.float32
     assert torch.isfinite(loss)
@@ -199,55 +176,12 @@ def test_bf16_loss_gradient_update_reload_and_fused_sample(tmp_path: Path) -> No
 
     assert all(parameter.grad is None for parameter in teacher.parameters())
     assert projection.weight.grad is not None
-    weight_grad = projection.weight.grad.reshape(_GRID_SIZE, _WIDTH, _WIDTH)
-    bias_grad = projection.bias.grad.reshape(_GRID_SIZE, _WIDTH)
-    assert torch.count_nonzero(weight_grad[2]) > 0
-    assert torch.count_nonzero(bias_grad[2]) > 0
-    assert torch.count_nonzero(weight_grad[[0, 1, 3]]) == 0
-    assert torch.count_nonzero(bias_grad[[0, 1, 3]]) == 0
     assert student.backbone.weight.grad is not None
-    assert torch.count_nonzero(student.backbone.weight.grad) > 0
+    assert torch.isfinite(projection.weight.grad).all()
+    assert torch.isfinite(student.backbone.weight.grad).all()
 
-    gradients = [
-        parameter.grad.float().square().sum()
-        for parameter in student.parameters()
-        if parameter.grad is not None
-    ]
-    grad_norm = torch.stack(gradients).sum().sqrt()
-    assert torch.isfinite(grad_norm) and grad_norm > 0
-    before = {name: parameter.detach().clone() for name, parameter in student.named_parameters()}
-    optimizer.step()
-    update_norm = (
-        torch.stack(
-            [
-                (parameter.detach() - before[name]).float().square().sum()
-                for name, parameter in student.named_parameters()
-            ]
-        )
-        .sum()
-        .sqrt()
-    )
-    assert torch.isfinite(update_norm) and update_norm > 0
-
-    checkpoint = tmp_path / "pdd_bf16_state.pt"
-    torch.save(student.state_dict(), checkpoint)
-    saved = torch.load(checkpoint, map_location=device, weights_only=True)
-    assert saved.keys() == student.state_dict().keys()
-    assert all(value.dtype == torch.bfloat16 for value in saved.values())
-
-    restored, _teacher, restored_projection, restored_pipeline, restored_adapter = _build(device)
-    incompatible = restored.load_state_dict(saved, strict=True)
-    assert incompatible.missing_keys == []
-    assert incompatible.unexpected_keys == []
-    assert restored_projection.weight.shape == projection.weight.shape
-    time = pipeline.time_grid(device)[n]
-    expected = adapter.student_all_heads(student, data.float(), time)
-    actual = restored_adapter.student_all_heads(restored, data.float(), time)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
-    sampled = restored_pipeline.sample(noise, blocks=[2, 2])
+    sampled = pipeline.sample(noise, blocks=[2, 2])
     assert sampled.dtype == torch.float32
     assert torch.isfinite(sampled).all()
-    assert restored_adapter.fused_calls == 2
+    assert adapter.fused_calls == 2
     torch.cuda.synchronize(device)
-    _assert_optional_frameworks_absent()

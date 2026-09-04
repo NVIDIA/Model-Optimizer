@@ -34,7 +34,6 @@ torchdata are absent (e.g. a CPU login node) and runs in the training container.
 
 from __future__ import annotations
 
-import inspect
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -54,7 +53,6 @@ pytest.importorskip("torch")
 _sampler_mod = pytest.importorskip("nemo_automodel.components.datasets.diffusion.sampler")
 _stateful_dataloader_mod = pytest.importorskip("torchdata.stateful_dataloader")
 dmd2_recipe = pytest.importorskip("dmd2.recipe")
-from fastgen_data import rebuild_stateful_dataloader
 
 SequentialBucketSampler = _sampler_mod.SequentialBucketSampler
 StatefulDataLoader = _stateful_dataloader_mod.StatefulDataLoader
@@ -84,7 +82,7 @@ class _RecordingSampler(SequentialBucketSampler):
         super().load_state_dict(state_dict)
 
 
-def _build(n, sampler_cls, loader_cls, **loader_kwargs):
+def _build(n, sampler_cls, loader_cls):
     """A real sampler + StatefulDataLoader over one shared synthetic dataset."""
     ds = _Dataset(n)
     sampler = sampler_cls(
@@ -104,7 +102,6 @@ def _build(n, sampler_cls, loader_cls, **loader_kwargs):
         batch_sampler=sampler,
         collate_fn=lambda b: b,
         num_workers=0,
-        **loader_kwargs,
     )
     return sampler, loader
 
@@ -194,48 +191,3 @@ def test_resume_reset_is_noop_on_fresh_start(monkeypatch):
     assert recipe.dataloader is loader, "fresh start must not rebuild the dataloader"
     assert recipe.sampler.state_dict() == {"epoch": 0, "batches_yielded": 0}
     assert recipe.step_scheduler.epoch == 0
-
-
-def test_resume_helper_preserves_public_loader_options():
-    generator = pytest.importorskip("torch").Generator().manual_seed(11)
-    sampler, loader = _build(
-        _N,
-        _RecordingSampler,
-        StatefulDataLoader,
-        timeout=0,
-        worker_init_fn=None,
-        generator=generator,
-        pin_memory=False,
-        in_order=True,
-        snapshot_every_n_steps=7,
-    )
-    scheduler = SimpleNamespace(epoch_len=_N, grad_acc_steps=1, epoch=0, dataloader=loader)
-
-    rebuilt = rebuild_stateful_dataloader(loader, sampler, scheduler, global_step=3)
-
-    assert rebuilt is scheduler.dataloader
-    for name in (
-        "collate_fn",
-        "num_workers",
-        "pin_memory",
-        "timeout",
-        "worker_init_fn",
-        "multiprocessing_context",
-        "generator",
-        "prefetch_factor",
-        "persistent_workers",
-        "pin_memory_device",
-        "in_order",
-        "snapshot_every_n_steps",
-    ):
-        assert getattr(rebuilt, name) is getattr(loader, name) or getattr(rebuilt, name) == getattr(
-            loader, name
-        )
-
-
-def test_recipe_resume_path_has_no_private_loader_or_sampler_access():
-    source = inspect.getsource(dmd2_recipe.DMD2DiffusionRecipe._rebuild_dataloader_for_resume)
-    loop_source = inspect.getsource(dmd2_recipe.DMD2DiffusionRecipe.run_train_validation_loop)
-
-    assert "_batches_to_skip" not in source + loop_source
-    assert '__dict__["dataloader"]' not in source

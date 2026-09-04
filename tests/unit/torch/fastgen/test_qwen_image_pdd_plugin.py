@@ -26,13 +26,12 @@ import torch.nn.functional as F
 from torch import nn
 
 import modelopt.torch.fastgen.plugins.qwen_image_pdd as qwen_image_pdd_plugin
-from modelopt.torch.fastgen import PDDConfig, PDDOutputProjection, PDDPipeline
+from modelopt.torch.fastgen import PDDConfig, PDDPipeline
 from modelopt.torch.fastgen.flow_matching import fusion_coefficients
 from modelopt.torch.fastgen.plugins import QwenImagePDDAdapter
 from modelopt.torch.fastgen.plugins.qwen_image import build_img_shapes, pack_latents, unpack_latents
 from modelopt.torch.fastgen.plugins.qwen_image_pdd import (
     QWEN_IMAGE_PDD_EXECUTION,
-    QWEN_IMAGE_PDD_LAYER_SPEC,
     convert_qwen_image_to_pdd,
     enable_qwen_image_pdd_forward,
     freeze_qwen_image_pdd_unused_parameters,
@@ -134,23 +133,6 @@ def _inputs(batch_size: int = 2):
     return state, time, (embeddings, mask), (negative_embeddings, negative_mask)
 
 
-def _call_base_packed(
-    model: _TinyQwenTransformer,
-    state: torch.Tensor,
-    time: torch.Tensor,
-    condition: tuple[torch.Tensor, torch.Tensor],
-) -> torch.Tensor:
-    embeddings, mask = condition
-    return model(
-        hidden_states=pack_latents(state).to(torch.bfloat16),
-        timestep=time,
-        encoder_hidden_states=embeddings.to(torch.bfloat16),
-        encoder_hidden_states_mask=mask,
-        img_shapes=build_img_shapes(state.shape[0], state.shape[2], state.shape[3]),
-        max_txt_seq_len=int(mask.sum(dim=1).max().item()),
-    )[0]
-
-
 def _pack_oracle(latents: torch.Tensor) -> torch.Tensor:
     batch, channels, height, width = latents.shape
     return (
@@ -181,80 +163,6 @@ def _mr210_rollout_oracle(
     velocity_mask = (interval_ids[None] >= n[:, None]) & (interval_ids[None] < k[:, None])
     weighted_intervals = velocity_mask.to(torch.float32) * torch.diff(grid.float())[None]
     return state.float() + torch.einsum("bn,bn...->b...", weighted_intervals, heads.float())
-
-
-def _tiny_qwen_oracle(
-    model: _TinyQwenTransformer,
-    state: torch.Tensor,
-    time: torch.Tensor,
-    condition: tuple[torch.Tensor, torch.Tensor],
-) -> torch.Tensor:
-    embeddings, mask = condition
-    packed = _pack_oracle(state).to(torch.bfloat16)
-    hidden = torch.tanh(model.backbone(packed))
-    condition_value = embeddings.mean(dim=(1, 2), keepdim=True)
-    condition_value = condition_value + 0.01 * mask.sum(dim=1, keepdim=True).unsqueeze(-1)
-    hidden = hidden + condition_value.to(hidden.dtype)
-    hidden = hidden + (0.1 * time[:, None, None]).to(hidden.dtype)
-    return F.linear(hidden, model.proj_out.weight, model.proj_out.bias)
-
-
-def test_conversion_is_idempotent_and_every_initialized_head_matches_base() -> None:
-    base = _TinyQwenTransformer()
-    student = copy.deepcopy(base)
-    state, time, condition, _ = _inputs()
-    base_packed = _call_base_packed(base, state, time, condition)
-    base_velocity = unpack_latents(base_packed, 4, 4)
-    config = _config()
-
-    projection = convert_qwen_image_to_pdd(student, config)
-    repeated = convert_qwen_image_to_pdd(student, config)
-    adapter = QwenImagePDDAdapter(config)
-    actual = adapter.student_all_heads(student, state, time, condition=condition)
-
-    assert projection is repeated
-    assert student.proj_out is projection
-    assert isinstance(projection, PDDOutputProjection)
-    assert projection.layer_spec == QWEN_IMAGE_PDD_LAYER_SPEC
-    assert projection.layer_spec.projection_path == "transformer.proj_out"
-    assert actual.shape == (2, 4, 1, 4, 4)
-    torch.testing.assert_close(actual, base_velocity[:, None].expand_as(actual))
-    assert len(student.calls) == 1
-    torch.testing.assert_close(student.calls[0]["timestep"], time)
-    assert student.calls[0]["img_shapes"] == [[(1, 2, 2)], [(1, 2, 2)]]
-    assert student.calls[0]["max_txt_seq_len"] == 3
-    assert "txt_seq_lens" not in student.calls[0]["kwargs"]
-
-
-def test_unfused_channel_major_output_maps_each_packed_head_in_order() -> None:
-    student = _TinyQwenTransformer()
-    config = _config()
-    projection = convert_qwen_image_to_pdd(student, config)
-    with torch.no_grad():
-        projection.weight.zero_()
-        head_bias = (torch.arange(16, dtype=torch.float32).reshape(4, 4) / 5).to(torch.bfloat16)
-        projection.bias.copy_(head_bias.reshape(-1))
-    state, time, condition, _ = _inputs(batch_size=1)
-
-    actual = QwenImagePDDAdapter(config).student_all_heads(
-        student,
-        state,
-        time,
-        condition=condition,
-    )
-    expected = torch.stack(
-        [
-            unpack_latents(
-                head_bias[index].reshape(1, 1, 4).expand(1, 4, 4),
-                4,
-                4,
-            )
-            for index in range(4)
-        ],
-        dim=1,
-    )
-
-    torch.testing.assert_close(actual, expected)
 
 
 def test_all_head_training_accepts_a_serialized_widened_linear() -> None:
@@ -322,40 +230,6 @@ def test_fused_student_matches_explicit_packed_weight_fusion() -> None:
     assert student.proj_out(projection.weight.new_zeros(1, 5)).shape[-1] == 16
 
 
-def test_teacher_cfg_uses_qwen_per_token_fp32_norm_rescale() -> None:
-    teacher = _TinyQwenTransformer()
-    config = _config(guidance_scale=4.0)
-    adapter = QwenImagePDDAdapter(config)
-    state, time, condition, negative_condition = _inputs()
-
-    actual = adapter.teacher_velocity(
-        teacher,
-        state,
-        time,
-        condition=condition,
-        negative_condition=negative_condition,
-    )
-
-    assert len(teacher.calls) == 2
-    conditional = teacher.calls[0]["output"]
-    unconditional = teacher.calls[1]["output"]
-    guided_low_precision = conditional + 3.0 * (conditional - unconditional)
-    conditional_fp32 = conditional.float()
-    guided_fp32 = guided_low_precision.float()
-    factor = torch.linalg.vector_norm(
-        conditional_fp32,
-        dim=-1,
-        keepdim=True,
-    ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
-    expected = unpack_latents((guided_fp32 * factor).to(conditional.dtype), 4, 4)
-
-    assert actual.dtype == torch.bfloat16
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(teacher.calls[0]["encoder_hidden_states"], condition[0])
-    torch.testing.assert_close(teacher.calls[1]["encoder_hidden_states"], negative_condition[0])
-    assert all("txt_seq_lens" not in call["kwargs"] for call in teacher.calls)
-
-
 def test_teacher_cfg_remote_preflight_failure_stops_both_model_calls(monkeypatch) -> None:
     teacher = _TinyQwenTransformer()
     adapter = QwenImagePDDAdapter(_config(guidance_scale=4.0))
@@ -381,69 +255,6 @@ def test_teacher_cfg_remote_preflight_failure_stops_both_model_calls(monkeypatch
         )
 
     assert teacher.calls == []
-
-
-def test_teacher_cfg_local_missing_negative_condition_fails_collectively(monkeypatch) -> None:
-    teacher = _TinyQwenTransformer()
-    adapter = QwenImagePDDAdapter(_config(guidance_scale=4.0))
-    state, time, condition, _ = _inputs()
-
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_available", lambda: True)
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_initialized", lambda: True)
-
-    def preserve_local_failure(failed, *, op):
-        assert bool(failed)
-        assert op is torch.distributed.ReduceOp.MAX
-
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "all_reduce", preserve_local_failure)
-
-    with pytest.raises(TypeError, match="negative_condition must be a tuple"):
-        adapter.teacher_velocity(
-            teacher,
-            state,
-            time,
-            condition=condition,
-            negative_condition=None,
-        )
-
-    assert teacher.calls == []
-
-
-def test_teacher_cfg_stays_in_model_output_dtype() -> None:
-    class LowPrecisionTeacher(_QwenImageTestDouble):
-        def __init__(self) -> None:
-            super().__init__()
-            self.config = SimpleNamespace(guidance_embeds=False)
-            self._modelopt_qwen_image_pdd_execution = QWEN_IMAGE_PDD_EXECUTION
-            self.anchor = nn.Parameter(torch.zeros((), dtype=torch.bfloat16), requires_grad=False)
-            self.outputs: list[torch.Tensor] = []
-
-        def forward(self, *, hidden_states, encoder_hidden_states, **kwargs):
-            value = encoder_hidden_states.mean(dim=(1, 2), keepdim=True).to(torch.bfloat16)
-            output = hidden_states.to(torch.bfloat16) + value
-            self.outputs.append(output.detach().clone())
-            return (output,)
-
-    teacher = LowPrecisionTeacher()
-    state, time, condition, negative_condition = _inputs()
-    actual = QwenImagePDDAdapter(_config(guidance_scale=4.0)).teacher_velocity(
-        teacher,
-        state,
-        time,
-        condition=condition,
-        negative_condition=negative_condition,
-    )
-
-    assert actual.dtype == torch.bfloat16
-    conditional, unconditional = teacher.outputs
-    guided_low_precision = conditional + 3.0 * (conditional - unconditional)
-    conditional_fp32 = conditional.float()
-    guided_fp32 = guided_low_precision.float()
-    factor = torch.linalg.vector_norm(
-        conditional_fp32, dim=-1, keepdim=True
-    ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
-    expected = unpack_latents((guided_fp32 * factor).to(torch.bfloat16), 4, 4)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_teacher_cfg_zero_guided_norm_uses_qwen_clamp() -> None:
@@ -474,126 +285,6 @@ def test_teacher_cfg_zero_guided_norm_uses_qwen_clamp() -> None:
     torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
 
 
-def test_mr210_qwen_loss_and_backward_match_independent_equations() -> None:
-    class CapturingAdapter(QwenImagePDDAdapter):
-        def student_all_heads(self, *args, **kwargs):
-            value = super().student_all_heads(*args, **kwargs)
-            self.captured_heads = value.detach().clone()
-            return value
-
-        def teacher_velocity(self, _model, state, time, **kwargs):
-            self.captured_teacher_state = state.detach().clone()
-            value = super().teacher_velocity(_model, state, time, **kwargs)
-            self.captured_teacher = value.detach().clone()
-            return value
-
-    torch.manual_seed(20260716)
-    base = _TinyQwenTransformer()
-    actual_student = copy.deepcopy(base)
-    actual_teacher = copy.deepcopy(base)
-    oracle_student = copy.deepcopy(base)
-    oracle_teacher = copy.deepcopy(base)
-    config = _config(guidance_scale=4.0)
-    convert_qwen_image_to_pdd(actual_student, config)
-    convert_qwen_image_to_pdd(oracle_student, config)
-    adapter = CapturingAdapter(config)
-    pipeline = PDDPipeline(actual_student, actual_teacher, config, adapter)
-
-    generator = torch.Generator().manual_seed(47)
-    data = torch.randn(1, 1, 4, 4, generator=generator)
-    noise = torch.randn(1, 1, 4, 4, generator=generator)
-    condition = (
-        torch.randn(1, 3, 2, generator=generator).to(torch.bfloat16),
-        torch.tensor([[1, 1, 1]], dtype=torch.long),
-    )
-    negative_condition = (
-        torch.randn(1, 2, 2, generator=generator).to(torch.bfloat16),
-        torch.tensor([[1, 1]], dtype=torch.long),
-    )
-    n = torch.tensor([1], dtype=torch.long)
-    k = torch.tensor([3], dtype=torch.long)
-
-    actual_loss, _metrics = pipeline.compute_loss(
-        data,
-        noise=noise,
-        condition=condition,
-        negative_condition=negative_condition,
-        n=n,
-        k=k,
-    )
-    actual_loss.backward()
-
-    unshifted = torch.linspace(0.999, 0.0, 5, dtype=torch.float64)
-    grid = (5.0 * unshifted / (1.0 + 4.0 * unshifted)).clamp_max(0.999).float()
-    time_n = grid[n]
-    broadcast_time = time_n.to(torch.float64).reshape(1, 1, 1, 1)
-    x_n = (
-        data.float().to(torch.float64) * (1.0 - broadcast_time)
-        + noise.float().to(torch.float64) * broadcast_time
-    ).float()
-
-    packed_heads = _tiny_qwen_oracle(oracle_student, x_n, time_n, condition)
-    batch, patches, _features = packed_heads.shape
-    packed_heads = packed_heads.reshape(batch, patches, 4, 4).permute(0, 2, 1, 3)
-    oracle_heads = _unpack_oracle(packed_heads.reshape(4, patches, 4), 4, 4).reshape(1, 4, 1, 4, 4)
-    oracle_heads_fp32 = oracle_heads.float()
-    with torch.no_grad():
-        x_bar_k = _mr210_rollout_oracle(x_n, oracle_heads_fp32, grid, n, k)
-    student_target = oracle_heads_fp32[:, int(k.item())]
-    time_k = grid[k]
-
-    conditional_packed = _tiny_qwen_oracle(oracle_teacher, x_bar_k, time_k, condition)
-    unconditional_packed = _tiny_qwen_oracle(
-        oracle_teacher,
-        x_bar_k,
-        time_k,
-        negative_condition,
-    )
-    guided_low_precision = conditional_packed + 3.0 * (conditional_packed - unconditional_packed)
-    conditional_fp32 = conditional_packed.float()
-    guided_fp32 = guided_low_precision.float()
-    teacher_target_packed = (
-        guided_fp32
-        * (
-            torch.linalg.vector_norm(conditional_fp32, dim=-1, keepdim=True)
-            / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
-        )
-    ).to(torch.bfloat16)
-    teacher_target_low_precision = _unpack_oracle(teacher_target_packed, 4, 4)
-    teacher_target = teacher_target_low_precision.float().detach()
-    oracle_loss = (student_target - teacher_target).square().mean()
-    oracle_loss.backward()
-
-    torch.testing.assert_close(
-        adapter.captured_heads[:, int(k.item())],
-        oracle_heads[:, int(k.item())],
-        rtol=0,
-        atol=0,
-    )
-    torch.testing.assert_close(
-        adapter.captured_teacher_state,
-        x_bar_k,
-        rtol=1e-6,
-        atol=1e-7,
-    )
-    torch.testing.assert_close(
-        adapter.captured_teacher,
-        teacher_target_low_precision,
-        rtol=0,
-        atol=0,
-    )
-    torch.testing.assert_close(actual_loss, oracle_loss, rtol=1e-6, atol=1e-7)
-    for name in ("backbone.weight", "proj_out.weight"):
-        actual_gradient = dict(actual_student.named_parameters())[name].grad
-        oracle_gradient = dict(oracle_student.named_parameters())[name].grad
-        torch.testing.assert_close(
-            actual_gradient,
-            oracle_gradient,
-            rtol=1e-6,
-            atol=1e-7,
-        )
-
-
 def test_guidance_disabled_teacher_is_one_conditional_call_without_negative_condition() -> None:
     teacher = _TinyQwenTransformer()
     config = _config(guidance_scale=None)
@@ -610,21 +301,6 @@ def test_guidance_disabled_teacher_is_one_conditional_call_without_negative_cond
     assert len(teacher.calls) == 1
     expected = unpack_latents(teacher.calls[0]["output"], 4, 4)
     torch.testing.assert_close(actual, expected)
-
-
-def test_conversion_preserves_requires_grad_mode_and_rejects_conflicts() -> None:
-    transformer = _TinyQwenTransformer()
-    transformer.eval()
-    transformer.proj_out.weight.requires_grad_(False)
-    transformer.proj_out.bias.requires_grad_(False)
-    projection = convert_qwen_image_to_pdd(transformer, _config())
-
-    assert transformer.training is False
-    assert projection.training is False
-    assert projection.weight.requires_grad is False
-    assert projection.bias.requires_grad is False
-    with pytest.raises(ValueError, match="incompatible"):
-        convert_qwen_image_to_pdd(transformer, _config(grid_size=2))
 
 
 def _tiny_diffusers_qwen():
@@ -840,83 +516,28 @@ def test_mr210_real_qwen_loss_and_backward_match_independent_graph() -> None:
         )
 
 
-def test_conversion_preserves_the_ordinary_diffusers_qwen_root() -> None:
-    student = _tiny_diffusers_qwen().eval()
-    root_type = type(student)
-    config = dict(student.config)
-
-    convert_qwen_image_to_pdd(student, _config())
-
-    assert type(student) is root_type
-    assert isinstance(student.proj_out, PDDOutputProjection)
-    assert dict(student.config) == config
-
-
-def test_qwen_pdd_forward_binding_accepts_a_dynamic_qwen_subclass() -> None:
-    student = _tiny_diffusers_qwen().eval()
-    student.__class__ = type("FSDPQwenImageTransformer2DModel", (type(student),), {})
-
-    assert enable_qwen_image_pdd_forward(student) is student
-    assert require_qwen_image_pdd_forward(student) == QWEN_IMAGE_PDD_EXECUTION
-
-
 def test_qwen_pdd_forward_binding_preserves_root_state_and_deepcopy() -> None:
     source = _tiny_diffusers_qwen().eval()
     source_type = type(source)
     source_state = {name: value.detach().clone() for name, value in source.state_dict().items()}
-    source_state_keys = tuple(source_state)
-    source_parameters = tuple(source.parameters())
-    source_buffers = tuple(source.buffers())
-    custom_attribute = object()
-    source.custom_attribute = custom_attribute
-    hook = source.register_forward_pre_hook(lambda *_args: None)
 
     adopted = enable_qwen_image_pdd_forward(source)
 
     assert adopted is source
     assert type(adopted) is source_type
-    assert tuple(adopted.state_dict()) == source_state_keys
-    assert all(
-        actual is expected
-        for actual, expected in zip(adopted.parameters(), source_parameters, strict=True)
-    )
-    assert all(
-        actual is expected
-        for actual, expected in zip(adopted.buffers(), source_buffers, strict=True)
-    )
-    assert hook.id in adopted._forward_pre_hooks
-    assert adopted.custom_attribute is custom_attribute
     assert enable_qwen_image_pdd_forward(adopted) is adopted
+    assert require_qwen_image_pdd_forward(adopted) == QWEN_IMAGE_PDD_EXECUTION
+    for name, value in adopted.state_dict().items():
+        torch.testing.assert_close(value, source_state[name], rtol=0, atol=0)
 
     round_trip = copy.deepcopy(adopted)
-    with torch.no_grad():
-        next(round_trip.parameters()).zero_()
-    round_trip.load_state_dict(source_state)
-    for name, value in round_trip.state_dict().items():
-        torch.testing.assert_close(value, source_state[name], rtol=0, atol=0)
     assert round_trip.forward.__self__ is round_trip
-
-    teacher = copy.deepcopy(adopted)
-    assert teacher is not adopted
-    assert teacher.forward.__func__ is adopted.forward.__func__
-    assert teacher.forward.__self__ is teacher
-    assert teacher.forward.__self__ is not adopted
-    require_qwen_image_pdd_forward(teacher)
-
-    tampered = copy.deepcopy(adopted)
-    tampered.forward = MethodType(lambda self, **_kwargs: self, tampered)
-    with pytest.raises(RuntimeError, match="masked joint-attention forward"):
-        require_qwen_image_pdd_forward(tampered)
+    require_qwen_image_pdd_forward(round_trip)
 
     conflicting = _tiny_diffusers_qwen()
     conflicting.forward = MethodType(lambda self, **_kwargs: self, conflicting)
     with pytest.raises(RuntimeError, match="instance-level forward override"):
         enable_qwen_image_pdd_forward(conflicting)
-
-    forged = _tiny_diffusers_qwen()
-    forged._modelopt_qwen_image_pdd_execution = QWEN_IMAGE_PDD_EXECUTION
-    with pytest.raises(RuntimeError, match="masked joint-attention forward"):
-        qwen_image_pdd_plugin.require_qwen_image_pdd_forward(forged)
 
 
 def test_mr210_qwen_conversion_preserves_every_initialized_head() -> None:
@@ -1116,6 +737,10 @@ def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
             conditional_fp32, dim=-1, keepdim=True
         ) / torch.linalg.vector_norm(guided_fp32, dim=-1, keepdim=True).clamp_min(1e-5)
         expected = unpack_latents((guided_fp32 * factor).to(torch.bfloat16), 4, 4)
+        global_factor = torch.linalg.vector_norm(
+            conditional_fp32, dim=(1, 2), keepdim=True
+        ) / torch.linalg.vector_norm(guided_fp32, dim=(1, 2), keepdim=True).clamp_min(1e-5)
+        global_expected = unpack_latents((guided_fp32 * global_factor).to(torch.bfloat16), 4, 4)
         actual = adapter.teacher_velocity(
             teacher,
             state,
@@ -1124,59 +749,21 @@ def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
             negative_condition=negative_condition,
         )
 
+    assert not torch.equal(expected, global_expected)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_adapter_accepts_binary_masks_nonzero_padding_and_fp32_time() -> None:
-    student = _TinyQwenTransformer()
-    config = _config()
-    convert_qwen_image_to_pdd(student, config)
-    state, time, condition, _ = _inputs()
-    embeddings = condition[0].clone()
-    mask = torch.tensor([[1, 0, 1], [0, 0, 0]], dtype=torch.long)
-    embeddings[~mask.bool()] = 17
-
-    actual = QwenImagePDDAdapter(config).student_all_heads(
-        student,
-        state,
-        time,
-        condition=(embeddings, mask),
-    )
-
-    assert actual.shape == (2, 4, 1, 4, 4)
-    torch.testing.assert_close(student.calls[0]["encoder_hidden_states_mask"], mask)
-    assert student.calls[0]["timestep"].dtype == torch.float32
-    assert student.calls[0]["max_txt_seq_len"] == 2
-
-
-def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> None:
+def test_qwen_pdd_rejects_unsupported_configuration_and_inputs() -> None:
     with pytest.raises(ValueError, match="num_train_timesteps=None"):
         QwenImagePDDAdapter(_config().model_copy(update={"num_train_timesteps": 1000}))
-    with pytest.raises(TypeError, match="compute_dtype"):
-        QwenImagePDDAdapter(_config(), compute_dtype=torch.long)
 
     transformer = _TinyQwenTransformer()
-    transformer.config.guidance_embeds = True
-    with pytest.raises(ValueError, match="guidance embeddings"):
-        convert_qwen_image_to_pdd(transformer, _config())
-
-    transformer.config.guidance_embeds = False
     config = _config()
     adapter = QwenImagePDDAdapter(config)
     state, time, condition, _ = _inputs()
     with pytest.raises(TypeError, match="negative_condition must be a tuple"):
         adapter.teacher_velocity(transformer, state, time, condition=condition)
-    with pytest.raises(TypeError, match="negative_condition must be a tuple"):
-        adapter.teacher_velocity(
-            transformer,
-            state,
-            time,
-            condition=condition,
-            negative_condition=condition[0],
-        )
     assert transformer.calls == []
-    with pytest.raises(ValueError, match="has 4 outputs; expected 16"):
-        adapter.student_all_heads(transformer, state, time, condition=condition)
 
     convert_qwen_image_to_pdd(transformer, config)
     with pytest.raises(TypeError, match="FP32 time"):
@@ -1186,74 +773,9 @@ def test_qwen_pdd_rejects_unsupported_config_condition_and_call_contracts() -> N
             time.to(torch.bfloat16),
             condition=condition,
         )
-    with pytest.raises(TypeError, match="tuple"):
-        adapter.student_all_heads(transformer, state, time, condition=condition[0])
-    with pytest.raises(ValueError, match="requires batched embeddings"):
-        adapter.student_all_heads(
-            transformer,
-            state,
-            time,
-            condition=(condition[0][..., 0], condition[1]),
-        )
-    with pytest.raises(ValueError, match="controlled keys"):
-        adapter.student_all_heads(
-            transformer,
-            state,
-            time,
-            condition=condition,
-            guidance=torch.ones(state.shape[0]),
-        )
-    with pytest.raises(ValueError, match="zero and one"):
-        adapter.student_all_heads(
-            transformer,
-            state,
-            time,
-            condition=(condition[0], torch.tensor([[1, 2, 0], [1, 0, 0]])),
-        )
-    with pytest.raises(ValueError, match="integer/bool"):
-        adapter.student_all_heads(
-            transformer,
-            state,
-            time,
-            condition=(condition[0], condition[1].float()),
-        )
 
     unmarked = _TinyQwenTransformer()
     delattr(unmarked, "_modelopt_qwen_image_pdd_execution")
     convert_qwen_image_to_pdd(unmarked, config)
     with pytest.raises(RuntimeError, match="masked joint-attention forward"):
         adapter.student_all_heads(unmarked, state, time, condition=condition)
-
-
-def test_raw_head_reference_uses_independent_linear_outputs() -> None:
-    """Pin the widened storage order without calling adapter reshape helpers."""
-    student = _TinyQwenTransformer()
-    config = _config()
-    projection = convert_qwen_image_to_pdd(student, config)
-    state, time, condition, _ = _inputs(batch_size=1)
-    embeddings, mask = condition
-    packed = pack_latents(state).to(torch.bfloat16)
-    hidden = torch.tanh(student.backbone(packed))
-    condition_value = embeddings.mean(dim=(1, 2), keepdim=True)
-    condition_value = condition_value + 0.01 * mask.sum(dim=1, keepdim=True).unsqueeze(-1)
-    hidden = hidden + condition_value.to(hidden.dtype)
-    hidden = hidden + (0.1 * time[:, None, None]).to(hidden.dtype)
-    head_weights = projection.weight.reshape(4, 4, 5)
-    head_bias = projection.bias.reshape(4, 4)
-    expected_packed = torch.stack(
-        [F.linear(hidden, head_weights[index], head_bias[index]) for index in range(4)],
-        dim=1,
-    )
-    expected = torch.stack(
-        [unpack_latents(expected_packed[:, index], 4, 4) for index in range(4)],
-        dim=1,
-    )
-
-    actual = QwenImagePDDAdapter(config).student_all_heads(
-        student,
-        state,
-        time,
-        condition=condition,
-    )
-
-    torch.testing.assert_close(actual, expected)

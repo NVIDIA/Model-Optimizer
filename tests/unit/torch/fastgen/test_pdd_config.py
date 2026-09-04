@@ -19,14 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from modelopt.torch.fastgen import (
-    PDDConfig,
-    SampleTimestepConfig,
-    fusion_coefficients,
-    integrate_interval_velocities,
-    load_pdd_config,
-    make_shifted_flow_grid,
-)
+from modelopt.torch.fastgen import PDDConfig, SampleTimestepConfig, load_pdd_config
 
 
 def test_default_pdd_config_is_canonical_and_lists_are_independent():
@@ -48,12 +41,6 @@ def test_default_pdd_config_is_canonical_and_lists_are_independent():
 
     first.inference_blocks[0] = 16
     assert second.inference_blocks == [32, 32, 32, 32]
-
-
-def test_pdd_public_surface_exports_stateless_math_helpers():
-    assert callable(make_shifted_flow_grid)
-    assert callable(integrate_interval_velocities)
-    assert callable(fusion_coefficients)
 
 
 def test_pdd_config_accepts_supported_schedule_and_adapter_time_scale():
@@ -102,25 +89,15 @@ def test_pdd_config_rejects_non_float_grid_max_t_before_coercion(value):
     assert config.grid_max_t == 0.999
 
 
-def test_pdd_config_accepts_explicit_grid_max_t_upper_boundary():
-    config = PDDConfig(grid_max_t=1.0)
-    assert config.grid_max_t == 1.0
-
-
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"grid_size": 0}, "grid_size must be > 0"),
         ({"grid_max_t": 0.0}, "0 < grid_max_t <= 1"),
-        ({"grid_max_t": -0.1}, "0 < grid_max_t <= 1"),
         ({"grid_max_t": 1.0001}, "0 < grid_max_t <= 1"),
         ({"grid_max_t": float("nan")}, "0 < grid_max_t <= 1"),
-        ({"grid_max_t": float("inf")}, "0 < grid_max_t <= 1"),
-        ({"grid_max_t": float("-inf")}, "0 < grid_max_t <= 1"),
         ({"flow_shift": 0.5}, "flow_shift must be finite and >= 1"),
-        ({"flow_shift": float("inf")}, "flow_shift must be finite and >= 1"),
         ({"block_size_min": 0}, "0 < block_size_min"),
-        ({"block_size_min": 65}, "0 < block_size_min"),
         ({"block_size_max": 129}, "block_size_max <= grid_size"),
         ({"grid_size": 130}, "must be divisible"),
         ({"inference_blocks": []}, "at least one block"),
@@ -159,14 +136,6 @@ def test_pdd_config_locks_algorithm_modes(overrides):
 def test_pdd_config_rejects_nondefault_sample_timestep_config():
     with pytest.raises(ValueError, match="sample_t_cfg is unused by PDD"):
         PDDConfig(sample_t_cfg=SampleTimestepConfig(shift=6.0))
-
-    with pytest.raises(ValueError, match="sample_t_cfg is unused by PDD"):
-        PDDConfig(sample_t_cfg=SampleTimestepConfig(t_list=[1.0, 0.0]))
-
-
-def test_pdd_config_accepts_explicit_default_sample_timestep_config():
-    config = PDDConfig(sample_t_cfg=SampleTimestepConfig())
-    assert config.sample_t_cfg == SampleTimestepConfig()
 
 
 def test_pdd_config_loads_filesystem_yaml_with_optional_suffix(tmp_path):

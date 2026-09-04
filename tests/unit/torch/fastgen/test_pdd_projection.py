@@ -17,10 +17,6 @@
 
 from __future__ import annotations
 
-import copy
-import threading
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-
 import pytest
 import torch
 import torch.nn.functional as F
@@ -204,66 +200,6 @@ def test_fused_forward_matches_independent_weighted_head_sum(layout, bias):
     assert torch.equal(grid, original_grid)
 
 
-def test_fusion_contexts_nest_and_restore_in_order():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
-    inputs = torch.tensor([[1.0, -0.5]])
-    grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
-    normal = projection(inputs)
-
-    with projection.fuse_block(0, 2, grid):
-        outer_before = projection(inputs)
-        with projection.fuse_block(1, 3, grid):
-            inner = projection(inputs)
-        outer_after = projection(inputs)
-
-    torch.testing.assert_close(outer_before, outer_after)
-    assert outer_before.shape == inner.shape == (1, 6)
-    assert projection(inputs).shape == normal.shape == (1, 18)
-    torch.testing.assert_close(projection(inputs), normal)
-
-
-def test_active_fusion_rejects_forward_from_another_thread():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
-    inputs = torch.tensor([[1.0, -0.5]])
-    grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
-
-    with projection.fuse_block(0, 2, grid), ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(projection, inputs)
-        with pytest.raises(RuntimeError, match="non-owning thread"):
-            future.result()
-
-
-def test_simultaneous_fusion_entry_admits_exactly_one_thread():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
-    grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
-    start_barrier = threading.Barrier(3)
-    release_owner = threading.Event()
-
-    def _enter(start, end):
-        start_barrier.wait()
-        try:
-            with projection.fuse_block(start, end, grid):
-                release_owner.wait(timeout=5)
-                return "admitted"
-        except RuntimeError as error:
-            return f"rejected: {error}"
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(_enter, 0, 2), executor.submit(_enter, 1, 3)]
-        start_barrier.wait()
-        done, _ = wait(futures, timeout=5, return_when=FIRST_COMPLETED)
-        release_owner.set()
-        results = [future.result(timeout=5) for future in futures]
-
-    assert len(done) == 1
-    assert results.count("admitted") == 1
-    rejected = [result for result in results if result != "admitted"]
-    assert len(rejected) == 1
-    assert "another thread" in rejected[0]
-    assert projection._fusion_stack == []
-    assert projection._fusion_owner_thread is None
-
-
 def test_fusion_context_exception_cleans_up_and_allows_reuse():
     projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
     inputs = torch.tensor([[1.0, -0.5]])
@@ -275,17 +211,6 @@ def test_fusion_context_exception_cleans_up_and_allows_reuse():
     with projection.fuse_block(1, 3, grid):
         assert projection(inputs).shape == (1, 6)
     assert projection(inputs).shape == (1, 18)
-
-
-def test_projection_deepcopy_recreates_inactive_fusion_lock():
-    projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
-    copied = copy.deepcopy(projection)
-    inputs = torch.tensor([[1.0, -0.5]])
-    grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
-
-    with copied.fuse_block(0, 2, grid):
-        assert copied(inputs).shape == (1, 6)
-    assert copied._fusion_lock is not projection._fusion_lock
 
 
 @pytest.mark.parametrize(

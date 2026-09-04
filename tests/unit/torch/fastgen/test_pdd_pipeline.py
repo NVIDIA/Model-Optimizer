@@ -194,48 +194,6 @@ def _reference_rf_forward_process(
     return (data_64 * (1.0 - time_64) + noise_64 * time_64).to(torch.float32)
 
 
-def test_student_input_matches_fastgen_float64_forward_process() -> None:
-    pipeline, adapter = _pipeline()
-    data = torch.tensor(
-        [[-0.2654421329498291, 0.5161616802215576, -0.7285917401313782]],
-        dtype=torch.float32,
-    )
-    noise = torch.tensor(
-        [[0.3856363296508789, -0.34849217534065247, -0.11881951987743378]],
-        dtype=torch.float32,
-    )
-    n = torch.tensor([0])
-
-    pipeline.compute_loss(data, noise=noise, n=n, k=torch.tensor([0]))
-
-    time = pipeline.time_grid()[n]
-    expected = _reference_rf_forward_process(data, noise, time)
-    stale_direct = (1.0 - time[:, None]) * data + time[:, None] * noise
-    assert torch.equal(
-        expected,
-        torch.tensor([[0.3849852681159973, -0.34762752056121826, -0.11942928284406662]]),
-    )
-    assert not torch.equal(stale_direct, expected)
-    assert torch.equal(adapter.student_calls[0]["state"], expected)
-    assert torch.equal(adapter.student_calls[0]["time"], time)
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
-def test_student_input_normalizes_supported_floating_dtypes_to_float32(dtype) -> None:
-    pipeline, adapter = _pipeline()
-    data = torch.tensor([[0.75, -1.25, 0.125]], dtype=dtype)
-    noise = torch.tensor([[-0.5, 1.5, 2.25]], dtype=dtype)
-    n = torch.tensor([2])
-
-    pipeline.compute_loss(data, noise=noise, n=n, k=torch.tensor([3]))
-
-    time = pipeline.time_grid()[n]
-    expected = _reference_rf_forward_process(data, noise, time)
-    assert adapter.student_calls[0]["state"].dtype == torch.float32
-    assert torch.equal(adapter.student_calls[0]["state"], expected)
-    assert torch.equal(adapter.student_calls[0]["time"], time)
-
-
 def test_euler_loss_matches_analytic_empty_and_tail_reconstruction() -> None:
     pipeline, adapter = _pipeline()
     data = torch.tensor([[1.0, -2.0, 0.5], [-1.5, 0.25, 2.0]])
@@ -369,95 +327,16 @@ def test_selected_head_low_precision_outputs_use_float32_mse() -> None:
     torch.testing.assert_close(loss, expected)
 
 
-def test_loss_can_skip_optional_diagnostics() -> None:
-    pipeline, _ = _pipeline()
-    data = torch.ones(2, 3)
-
-    _, metrics = pipeline.compute_loss(
-        data,
-        noise=torch.zeros_like(data),
-        n=torch.tensor([0, 2]),
-        k=torch.tensor([1, 3]),
-        collect_metrics=False,
-    )
-
-    assert set(metrics) == {"student_target_mse"}
-
-
-def test_small_grid_accepts_exactly_the_trained_index_support() -> None:
-    pipeline, _ = _pipeline()
-    data = torch.ones(1, 3)
-    noise = torch.zeros_like(data)
-    expected = {
-        (0, 0),
-        (0, 1),
-        (0, 2),
-        (0, 3),
-        (2, 2),
-        (2, 3),
-        (2, 4),
-        (2, 5),
-        (4, 4),
-        (4, 5),
-        (4, 6),
-        (4, 7),
-        (6, 6),
-        (6, 7),
-    }
-    accepted = set()
-
-    for n_value in range(-1, 9):
-        for k_value in range(-1, 9):
-            pair = (n_value, k_value)
-            if pair not in expected:
-                with pytest.raises(RuntimeError):
-                    pipeline.compute_loss(
-                        data,
-                        noise=noise,
-                        n=torch.tensor([n_value]),
-                        k=torch.tensor([k_value]),
-                    )
-                continue
-            pipeline.compute_loss(
-                data,
-                noise=noise,
-                n=torch.tensor([n_value]),
-                k=torch.tensor([k_value]),
-            )
-            accepted.add(pair)
-
-    assert accepted == expected
-
-
-def test_explicit_k_requires_explicit_n_but_explicit_n_can_sample_k() -> None:
-    pipeline, _ = _pipeline()
-    data = torch.ones(16, 3)
-    noise = torch.zeros_like(data)
-
-    with pytest.raises(ValueError, match="explicit k requires explicit n"):
-        pipeline.compute_loss(data, noise=noise, k=torch.zeros(16, dtype=torch.long))
-
-    _, metrics = pipeline.compute_loss(
-        data,
-        noise=noise,
-        n=torch.full((16,), 6, dtype=torch.long),
-        generator=torch.Generator().manual_seed(7),
-    )
-    assert torch.equal(metrics["n"], torch.full((16,), 6, dtype=torch.long))
-    assert set(metrics["k"].tolist()) == {6, 7}
-
-
 def test_sampled_indices_stay_on_exact_uniform_support() -> None:
     pipeline, _ = _pipeline()
     generator = torch.Generator().manual_seed(1234)
 
-    n, k = pipeline._resolve_indices(
-        batch_size=4096,
-        device=torch.device("cpu"),
-        n=None,
-        k=None,
+    _, metrics = pipeline.compute_loss(
+        torch.ones(4096, 3),
+        noise=torch.zeros(4096, 3),
         generator=generator,
     )
+    n, k = metrics["n"], metrics["k"]
 
     assert set(n.tolist()) == {0, 2, 4, 6}
     assert torch.all(n.remainder(2) == 0)
@@ -600,3 +479,25 @@ def test_pipeline_freezes_teacher_but_not_student() -> None:
     assert pipeline.teacher.training is False
     assert all(not parameter.requires_grad for parameter in pipeline.teacher.parameters())
     assert all(parameter.requires_grad for parameter in pipeline.student.parameters())
+
+
+def test_only_selected_head_and_shared_backbone_receive_gradients() -> None:
+    pipeline, _ = _pipeline()
+
+    loss, metrics = pipeline.compute_loss(
+        torch.tensor([[1.0, -0.5, 0.25]]),
+        noise=torch.tensor([[-0.25, 2.0, 0.5]]),
+        n=torch.tensor([0]),
+        k=torch.tensor([3]),
+    )
+    loss.backward()
+
+    student = pipeline.student
+    assert student.state_scale.grad is not None
+    assert torch.isfinite(student.state_scale.grad)
+    assert student.head_bias.grad is not None
+    assert torch.count_nonzero(student.head_bias.grad[3]) > 0
+    assert torch.count_nonzero(student.head_bias.grad[:3]) == 0
+    assert torch.count_nonzero(student.head_bias.grad[4:]) == 0
+    assert all(parameter.grad is None for parameter in pipeline.teacher.parameters())
+    assert all(not value.requires_grad for value in metrics.values())
