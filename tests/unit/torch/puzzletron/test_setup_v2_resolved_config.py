@@ -91,6 +91,8 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "infrastructure.runner.slurm.account": "account",
         "infrastructure.runner.slurm.partition": "cluster-default",
         "infrastructure.runner.slurm.partition_cpu": "cpu-default",
+        "infrastructure.runner.slurm.cpu_cpus_per_task": 4,
+        "infrastructure.runner.slurm.cpu_memory_mb": 32768,
         "infrastructure.gpus_per_node": 8,
         "output.result_root": "/results",
     }
@@ -169,7 +171,14 @@ def _campaign_state(tmp_path: Path) -> WizardState:
         "pruning": pruning,
         "serving_workloads": workloads,
         "vllm_measurements": measurements,
-        "mip_config": {"runs": {}, "marker": "named"},
+        "mip_config": {
+            "runs": {
+                "params-90": {
+                    "search_space": {"embedding": [1024, 768], "depth": [0]},
+                }
+            },
+            "marker": "named",
+        },
         "post_mip_flows": {},
         "parallel_profiles": profiles,
         "stage_resources": {
@@ -374,6 +383,8 @@ def test_runner_compatibility_override_is_applied_to_resolved_runner(tmp_path: P
 
     assert runner["runner"]["slurm"]["partition"] == ["late-a", "late-b"]
     assert runner["runner"]["slurm"]["partition_cpu"] == "cpu-default"
+    assert runner["runner"]["slurm"]["cpu_cpus_per_task"] == 4
+    assert runner["runner"]["slurm"]["cpu_memory_mb"] == 32768
     assert runner["runner"]["slurm"]["account"] == "account"
 
 
@@ -447,6 +458,11 @@ def test_generated_readme_separates_plan_inspection_from_launch(tmp_path: Path) 
         command[1] == f"{repository}/examples/puzzletron/orchestrate.py"
         for command in orchestrator_commands
     )
+    assert all(command[command.index("--stage") + 1] == "full" for command in orchestrator_commands)
+    assert {
+        tuple(argument for argument in inspection if argument != "--dry-run")
+        for inspection in inspection_commands
+    } == {tuple(command) for command in launch_commands}
     resume_command = next(command for command in commands if "--resume" in command)
     assert resume_command == [
         "python",

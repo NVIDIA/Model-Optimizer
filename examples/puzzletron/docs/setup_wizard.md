@@ -54,8 +54,11 @@ data, scheduler, and container settings before selecting it. The defaults file
 is loaded only when passed explicitly and takes precedence over the selected
 profile. If the primary Slurm partition requires GPUs, set
 `infrastructure.runner.slurm.partition_cpu` to an eligible CPU partition; the
-generated execution routes conversion, tokenization, MIP, materialization, and
-other zero-GPU stages there.
+generated execution routes conversion, tokenization, solve-only MIP,
+materialization, and other zero-GPU stages there. Setup-generated named MIP is
+always solve-only and runs on CPU; any checkpoint materialization or validation
+runs as an explicit later stage. Inspect the generated dry-run for the
+authoritative resource and launcher choice.
 
 Use the full flow to expose every section and nested setting:
 
@@ -98,6 +101,21 @@ these as **Validate setup** and **Run campaign**. Each bundle contains
 experiment, runner, and execution YAML plus a `dry-run-plan.txt`; users do not
 need to construct a smoke configuration themselves. The wizard does not submit
 either bundle, and the campaign is not automatically gated on validation.
+
+For named width/depth MIP, setup reads the teacher hidden size and layer count
+from the inspected model configuration. It always retains the teacher hidden
+size as the full-width scenario, even when the selected search only changes
+FFN dimensions. Missing or contradictory teacher geometry stops setup with the
+model field that must be fixed. Do not add these values by hand to generated
+YAML.
+
+`dry-run-plan.txt` is a snapshot from the checkout that generated the bundle.
+After updating ModelOpt, rerun the generated README's `--dry-run` command before
+launching. Incompatible execution schemas and named-MIP bundles fail before
+submission and report the setting to change or the setup-resume command that
+regenerates both bundles. Named-MIP checks cover the teacher-width scenario,
+depth domain, and realized-model validation. Bundles that omit an explicit
+resource use the registered CPU-stage defaults.
 
 The generated configuration can include reusable execution profiles, multiple
 deployment measurements, independent optimization goals, and editable

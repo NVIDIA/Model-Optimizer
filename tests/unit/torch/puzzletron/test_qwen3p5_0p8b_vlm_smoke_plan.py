@@ -37,7 +37,6 @@ EXECUTION_PATH = (
 
 def _compile_plan(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "results"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
     return compile_campaign_plan(
         experiment_config_path=RUN_PATH,
@@ -56,6 +55,7 @@ def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_ffn_only_route(
     stage_ids = tuple(stage.stage_id for stage in plan.stages)
 
     assert stage_ids == (
+        "prepare_dataset",
         "convert",
         "width_importance",
         "sort",
@@ -66,13 +66,26 @@ def test_qwen3p5_0p8b_vlm_smoke_compiles_the_bounded_ffn_only_route(
         "replacement_scoring",
         "mip",
     )
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
+    assert tuple(stage.total_gpus for stage in plan.stages) == (
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1,
+        0,
+    )
     assert config["model"]["source"] == "Qwen/Qwen3.5-0.8B"
     assert config["model"]["revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
     assert config["model"]["descriptor_override"] == "qwen3_5"
     assert config["model"]["force_hf"] is False
     assert config["model"]["trust_remote_code"] is False
-    assert config["data"]["path"] == str(tmp_path / "dataset")
+    prepared_dataset = tmp_path / "results/datasets/nemotron_vlm_v2"
+    assert config["prepare_dataset"]["output"] == str(prepared_dataset)
+    assert config["data"]["path"] == str(prepared_dataset)
     assert config["data"]["revision"] == "fixture-revision"
     assert config["data"]["processor_identity"] == (
         "Qwen/Qwen3.5-0.8B@2fc06364715b967f1860aea9cf38778875588b17"

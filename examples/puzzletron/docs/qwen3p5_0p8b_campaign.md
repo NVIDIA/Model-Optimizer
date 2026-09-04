@@ -35,13 +35,35 @@ Inspect every requested stage, node count, walltime, and worker path before
 removing `--dry-run`. Relaunch the same command to resume compatible work;
 completed stages are not submitted again.
 
+For the maintained smoke example, set `EXPERIMENT` to
+`examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_smoke.yaml`
+and `EXECUTION` to
+`examples/puzzletron/configs/orchestration/execution.single_gpu.yaml` in the
+same command. For a setup-generated campaign, first use the three files under
+`<campaign>/smoke/`, then the three files under `<campaign>/production/`.
+
+For a full campaign, `orchestrate.py --stage full` is the sole public entry
+point for dry-run, launch, and resume. Its worker command intentionally enters `main.py`, which
+dispatches named MIP work to the width/depth solver. Do not replace that worker
+command with a direct solver invocation. A setup-generated text bundle obtains
+the teacher width and depth from the inspected checkpoint configuration and
+retains the teacher-width scenario even though this default campaign only
+searches FFN sizes.
+
+The default text evaluation route needs the pinned evaluator in the worker
+environment described in [environment setup](environment_setup.md) and access
+to its task data or a populated cache. It has no
+separate evaluation-preparation command. If you opt into the NeMo evaluator,
+run the preparation command documented in
+[text checkpoint evaluation](checkpoint_evaluation.md) before launching the
+same campaign command.
+
 ## Change the search dimensions
 
 The default campaign changes only `ffn.intermediate_size`. The opt-in
-`campaign_extended.yaml` variant additionally enables hidden width,
-grouped-attention KV and query heads, GDN key groups, GDN value-head dimension,
-embedding width, and depth. Each enabled axis requires compatible measurement
-and checkpoint-slicing support.
+`campaign_extended.yaml` variant additionally enables hidden width and depth.
+Grouped-attention and GDN axes remain exclusive to the all-axis VLM campaign.
+Each enabled axis requires compatible measurement and checkpoint-slicing support.
 
 Run the extended variant with the same two-GPU KD execution profile:
 

@@ -121,7 +121,7 @@ def test_qwen3p5_0p8b_full_smoke_declares_its_hydra_inheritance(
     }
 
 
-def test_qwen3p5_0p8b_full_smoke_compiles_the_complete_one_gpu_route(
+def test_qwen3p5_0p8b_full_smoke_compiles_the_single_gpu_or_cpu_route(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -146,7 +146,20 @@ def test_qwen3p5_0p8b_full_smoke_compiles_the_complete_one_gpu_route(
     for parent, node in pairwise(post_nodes):
         assert node.parents == (parent.stage_id,)
     assert stage_ids[-1] == "post.params-90.best"
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
+    cpu_stage_ids = {
+        "tokenize_data",
+        "convert",
+        "build_library",
+        "mip",
+        "post.params-90.best_lm",
+        "post.params-90.fastest",
+        "post.params-90.best",
+    }
+    assert {stage.stage_id for stage in plan.stages if stage.resource == "cpu"} == cpu_stage_ids
+    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in cpu_stage_ids)
+    assert all(
+        stage.total_gpus == 1 for stage in plan.stages if stage.stage_id not in cpu_stage_ids
+    )
 
 
 def test_qwen3p5_0p8b_full_smoke_keeps_runtime_budgets_bounded(
@@ -236,7 +249,7 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
         "ffn_intermediate": {
             "enabled": True,
             "teacher_value": 3584,
-            "values": [3328, 3072, 2816, 2432, 2048, 1664, 1408],
+            "values": [3328, 3072],
         },
         "gdn_key_groups": {"enabled": False, "teacher_value": 16, "values": []},
         "gdn_value_heads_per_group": {
@@ -249,7 +262,11 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
             "teacher_value": 128,
             "values": [],
         },
-        "gdn_value_head_dim": {"enabled": False, "teacher_value": 128, "values": []},
+        "gdn_value_head_dim": {
+            "enabled": False,
+            "teacher_value": 128,
+            "values": [],
+        },
     }
     expected_mip_grid = {
         "depth": [0, 1, 2],
@@ -263,8 +280,9 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
     assert campaign["search_space"]["axes"] == expected_axes
     assert smoke["embedding_pruning"]["widths"] == [1024, 960, 896]
     assert smoke["vllm_stats"]["model_hidden_sizes"] == [1024, 960, 896]
-    assert smoke["pruning"]["attention_scored_axes"] == []
-    assert smoke["pruning"]["gdn_scored_axes"] == []
+    for config in (smoke, regression, campaign):
+        assert config["pruning"]["attention_scored_axes"] == []
+        assert config["pruning"]["gdn_scored_axes"] == []
     assert smoke["sort"]["deferred_axes"] == []
     assert smoke["width_sanity"]["hidden_width_diagnostic"] is True
     assert smoke["width_sanity"]["axes"] == [
@@ -272,6 +290,7 @@ def test_qwen3p5_0p8b_extended_grid_is_shared_by_smoke_and_regression(
         "ffn_intermediate",
     ]
     assert smoke["depth_importance"]["enabled"] is True
+    assert smoke["depth_importance"]["max_removals"] == 2
     assert smoke["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid
     assert regression["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid
     assert campaign["mip"]["runs"]["params-90"]["search_space"] == expected_mip_grid

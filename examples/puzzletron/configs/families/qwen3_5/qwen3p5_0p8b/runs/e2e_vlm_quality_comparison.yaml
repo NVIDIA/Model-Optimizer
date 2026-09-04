@@ -2,20 +2,28 @@
 
 defaults:
   - full_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Opt-in deterministic quality comparison for the final distilled candidate.
-# It evaluates the student and pinned teacher with identical RealWorldQA and
-# MMMU settings, records metric deltas, and defines no acceptance threshold.
+# Opt-in deterministic quality comparison for two distilled finalists.
+# It evaluates every student and the pinned teacher with identical RealWorldQA,
+# MMMU, and MVBench settings, records metric deltas, and defines no acceptance
+# threshold.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_e2e_vlm_quality_comparison}
 display_name: Qwen3p5 0.8B end-to-end VLM quality comparison
+
+prepare_dataset:
+  num_samples: 16
+  evaluation_tasks: [realworldqa, mmmu_val, mvbench]
+  evaluation_hf_home: ${oc.env:HF_HOME}
 
 pruning:
   eval_samples: 8
 
 sort_sanity:
   eval_samples: 2
+  max_abs_reverse_lm_loss_delta: 0.005
 
 width_sanity:
   target_count_per_axis: 1
@@ -29,11 +37,11 @@ mip:
   runs:
     params-90:
       solver:
-        num_solutions: 1
+        num_solutions: 8
         min_hamming_distance: 2
-        max_seconds_per_solution: 30
+        max_seconds_per_solution: 300
       homogeneous:
-        keep: 5
+        enabled: false
 
 post_mip:
   flows:
@@ -41,9 +49,11 @@ post_mip:
       nodes:
         image_eval:
           config:
-            eval_samples: 2
+            eval_samples: 16
             block_size: 512
         best_vlm_loss:
+          top_k: 2
+        fastest_vlm:
           top_k: 2
         vlm_serving:
           config:
@@ -53,10 +63,10 @@ post_mip:
             benchmark_timeout: 300
         short_vlm_kd:
           config:
-            max_steps: 2
-            global_batch_size: 1
+            max_steps: 64
+            global_batch_size: 4
             local_batch_size: 1
-            checkpoint_every_steps: 2
+            checkpoint_every_steps: 64
 
         quality_benchmarks:
           type: downstream_evaluation

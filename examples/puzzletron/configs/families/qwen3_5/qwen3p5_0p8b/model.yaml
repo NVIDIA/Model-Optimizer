@@ -23,6 +23,9 @@ model_info:
   layer_counts:
     linear_attention: 18
     full_attention: 6
+  # Exact hybrid layout at the pinned revision. Campaign validation uses this to
+  # prevent an attention sentinel from being assigned to a GDN block.
+  full_attention_layer_indices: [3, 7, 11, 15, 19, 23]
   mamba:
     linear_key_head_dim: 128
     linear_num_key_heads: 16

@@ -2,15 +2,22 @@
 
 # Bounded VLM student-versus-teacher evaluation shared by the campaign and the
 # opt-in comparison.
+prepare_dataset:
+  evaluation_tasks: [realworldqa, mmmu_val, mvbench]
+
 vlm_quality_evaluation:
-  profile: qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2
+  profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
+  evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+  row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
   reference_checkpoint: ${teacher_dir}
+  reference_once: true
+  reference_cache_id: qwen35-0p8b-short-v2-teacher
   batch_size: 1
   timeout_seconds: 14400
   dtype: bfloat16
   gpu_memory_utilization: 0.5
-  max_model_len: 16384
-  limit_mm_per_prompt: {image: 12}
+  max_model_len: 32768
+  limit_mm_per_prompt: {image: 32}
   topology:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1

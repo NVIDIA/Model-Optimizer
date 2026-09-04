@@ -7,20 +7,26 @@ defaults:
 # Opt-in search overlay for the additional Qwen 3.5 0.8B architecture axes.
 # Run the extended smoke and verify measurement and checkpoint slicing for the
 # target checkpoint before allocating full campaign budgets.
+model:
+  # Native compact grouped attention is qualified only for the single-device
+  # SDPA implementation. Transformer Engine captures teacher head geometry.
+  automodel_backend: {attn: sdpa}
+
 embedding_pruning:
   widths: [1024, 960, 896]
   alignment: 64
 
 pruning:
-  intermediate_size_list: [3328, 3072, 2816, 2432, 2048, 1664, 1408]
-  # Native AutoModel Qwen3NextAttention does not yet support compact reduced
-  # grouped-attention scoring. Keep only the teacher geometry until that
-  # runtime path has physical-versus-dynamic equivalence coverage.
-  attn_heads_list: [[8, 2]]
-  attention_scored_axes: []
-  # The native CP-aware Qwen GDN wrapper likewise has no compact scoring
-  # equivalence path yet. Keep every GDN dimension at teacher geometry.
-  gdn_scored_axes: []
+  # The 0.8B search deliberately stays near the teacher. More aggressive
+  # historical bins remain valid diagnostics, but are not campaign defaults.
+  intermediate_size_list: [3328, 3072]
+  # [query heads, KV groups]: teacher, query-head-only, KV-group-only. KV
+  # groups have no mild nonteacher value because the teacher has only two.
+  attn_heads_list: [[8, 2], [6, 2], [4, 1], [3, 1]]
+  attention_scored_axes: [kv_groups, q_heads_per_group]
+  # Value heads/group is already one and therefore irreducible. The other GDN
+  # axes use their smallest practical aligned decrements.
+  gdn_scored_axes: [gdn_key_groups, gdn_key_head_dim, gdn_value_head_dim]
 
 sort:
   deferred_axes: []
@@ -48,33 +54,33 @@ search_space:
       teacher_value: 1024
       values: [960, 896]
     kv_groups:
-      enabled: false
+      enabled: true
       teacher_value: 2
-      values: []
+      values: [1]
     q_heads_per_group:
-      enabled: false
+      enabled: true
       teacher_value: 4
-      values: []
+      values: [3]
     ffn_intermediate:
       enabled: true
       teacher_value: 3584
-      values: [3328, 3072, 2816, 2432, 2048, 1664, 1408]
+      values: [3328, 3072]
     gdn_key_groups:
-      enabled: false
+      enabled: true
       teacher_value: 16
-      values: []
+      values: [14]
     gdn_value_heads_per_group:
       enabled: false
       teacher_value: 1
       values: []
     gdn_key_head_dim:
-      enabled: false
+      enabled: true
       teacher_value: 128
-      values: []
+      values: [112]
     gdn_value_head_dim:
-      enabled: false
+      enabled: true
       teacher_value: 128
-      values: []
+      values: [112]
 
 mip:
   depth_scenario_count: 3

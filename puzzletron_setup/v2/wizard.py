@@ -717,6 +717,8 @@ def infrastructure_section(
         ("infrastructure.runner.slurm.job_name_prefix", "pt"),
         ("infrastructure.runner.slurm.partition", None),
         ("infrastructure.runner.slurm.partition_cpu", None),
+        ("infrastructure.runner.slurm.cpu_cpus_per_task", None),
+        ("infrastructure.runner.slurm.cpu_memory_mb", None),
         ("infrastructure.runner.slurm.time_limit", "4:00:00"),
         ("infrastructure.runner.slurm.qos", None),
         ("infrastructure.runner.slurm.max_nodes", 64),
@@ -846,6 +848,28 @@ def infrastructure_section(
             return False
         if value == "":
             session.state.set_field(path, None, source="user")
+    for path, label, fallback in (
+        (
+            "infrastructure.runner.slurm.cpu_cpus_per_task",
+            "CPUs per task for CPU-only stages:",
+            4,
+        ),
+        (
+            "infrastructure.runner.slurm.cpu_memory_mb",
+            "Memory in MiB for CPU-only stages:",
+            32768,
+        ),
+    ):
+        resolved = resolver.resolve(path, fallback)
+        value = session.integer(
+            path,
+            label,
+            default=fallback if resolved.value is None else int(resolved.value),
+            minimum=1,
+        )
+        if value is BACK:
+            return False
+        session.state.set_field(path, value, source="user")
     gpus = _integer_field(
         session,
         resolver,

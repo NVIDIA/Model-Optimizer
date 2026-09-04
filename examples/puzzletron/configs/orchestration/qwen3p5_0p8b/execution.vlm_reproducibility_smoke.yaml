@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Shared one-GPU execution profile for bounded Puzzletron examples. Most stages
-# already default to one instance with the strategy implied by their stage or
-# post-MIP node type. These two stages otherwise use a persistent worker pool.
+# One-GPU execution profile for the Qwen 3.5 0.8B reproducibility smoke.
+# Pure orchestration and result-assembly stages run on CPU.
 execution:
   defaults:
     failure_policy: strict
@@ -14,3 +13,5 @@ execution:
     mip: {strategy: single, resource: cpu}
     depth_importance: {strategy: single}
     replacement_scoring: {strategy: single}
+    post.reproducibility-smoke.retain_variants: {strategy: single, resource: cpu}
+    post.reproducibility-smoke.result: {strategy: single, resource: cpu}

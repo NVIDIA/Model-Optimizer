@@ -5,13 +5,25 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
   - _self_
 
-# Campaign using the additional axes from the shared Qwen 3.5 0.8B search
-# overlay after their smoke, measurement, and checkpoint-slicing checks pass.
+# Campaign using hidden width, FFN width, and depth from the shared Qwen 3.5
+# 0.8B search overlay. Grouped-attention and GDN candidates remain exclusive
+# to the all-axis VLM campaign.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_extended}
 display_name: Qwen3p5 0.8B extended pruning campaign
 
 pruning:
   experiment_id: qwen35_0p8b_extended_2048
+  attention_scored_axes: []
+  gdn_scored_axes: []
+
+search_space:
+  axes:
+    kv_groups: {enabled: false, values: []}
+    q_heads_per_group: {enabled: false, values: []}
+    gdn_key_groups: {enabled: false, values: []}
+    gdn_value_heads_per_group: {enabled: false, values: []}
+    gdn_key_head_dim: {enabled: false, values: []}
+    gdn_value_head_dim: {enabled: false, values: []}
 
 depth_importance:
   expected_initial_sublayers: 48

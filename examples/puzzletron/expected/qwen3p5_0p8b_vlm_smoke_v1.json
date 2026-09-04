@@ -1,0 +1,609 @@
+{
+  "schema": "modelopt.puzzletron-expected-results/v1",
+  "id": "qwen3p5-0p8b-vlm-smoke-v1",
+  "observation": "qwen3p5_0p8b_vlm_smoke_observation_v1.json",
+  "artifacts": {
+    "report": "artifacts/campaign_report/report_manifest.json",
+    "result": "artifacts/post_mip/nodes/result/summary.json",
+    "serving": "artifacts/post_mip/nodes/serving_mechanics/summary.json",
+    "curve_0": {
+      "path": "artifacts/post_mip/nodes/result/summary.json",
+      "follow": [
+        "/observations_path",
+        "/0/artifacts/result_manifest_path"
+      ]
+    },
+    "curve_1": {
+      "path": "artifacts/post_mip/nodes/result/summary.json",
+      "follow": [
+        "/observations_path",
+        "/1/artifacts/result_manifest_path"
+      ]
+    },
+    "curve_2": {
+      "path": "artifacts/post_mip/nodes/result/summary.json",
+      "follow": [
+        "/observations_path",
+        "/2/artifacts/result_manifest_path"
+      ]
+    }
+  },
+  "fields": [
+    {
+      "name": "report_schema_version",
+      "artifact": "report",
+      "pointer": "/schema_version",
+      "classification": "exact"
+    },
+    {
+      "name": "report_verification",
+      "artifact": "report",
+      "pointer": "/verification",
+      "classification": "exact"
+    },
+    {
+      "name": "model_name",
+      "artifact": "report",
+      "pointer": "/model_name",
+      "classification": "exact"
+    },
+    {
+      "name": "result_status",
+      "artifact": "result",
+      "pointer": "/status",
+      "classification": "exact"
+    },
+    {
+      "name": "result_count",
+      "artifact": "result",
+      "pointer": "/output_count",
+      "classification": "exact"
+    },
+    {
+      "name": "serving_status",
+      "artifact": "serving",
+      "pointer": "/status",
+      "classification": "exact"
+    },
+    {
+      "name": "serving_count",
+      "artifact": "serving",
+      "pointer": "/output_count",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_schema",
+      "artifact": "curve_0",
+      "pointer": "/schema",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_profile",
+      "artifact": "curve_0",
+      "pointer": "/evaluation_identity/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_manifest",
+      "artifact": "curve_0",
+      "pointer": "/evaluation_identity/row_manifest_sha256",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_steps",
+      "artifact": "curve_0",
+      "pointer": "/milestones/0/steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_exact_result",
+      "artifact": "curve_0",
+      "pointer": "/exact_result",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_profile",
+      "artifact": "curve_1",
+      "pointer": "/evaluation_identity/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_manifest",
+      "artifact": "curve_1",
+      "pointer": "/evaluation_identity/row_manifest_sha256",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_steps",
+      "artifact": "curve_1",
+      "pointer": "/milestones/0/steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_exact_result",
+      "artifact": "curve_1",
+      "pointer": "/exact_result",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_profile",
+      "artifact": "curve_2",
+      "pointer": "/evaluation_identity/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_manifest",
+      "artifact": "curve_2",
+      "pointer": "/evaluation_identity/row_manifest_sha256",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_steps",
+      "artifact": "curve_2",
+      "pointer": "/milestones/0/steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_exact_result",
+      "artifact": "curve_2",
+      "pointer": "/exact_result",
+      "classification": "informational"
+    },
+    {
+      "name": "report_generation_seconds",
+      "artifact": "report",
+      "pointer": "/generation_seconds",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_axis_inventory",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/axis_inventory",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_evaluator_contract",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_evaluator_profile",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_evaluator_lmms_eval_revision",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_evaluator_generation_policy",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract/generation_policy",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_evaluator_output_budget_contract",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_evaluator_backend_limitations",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluator_contract/backend_limitations",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_denominators",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/denominators",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_parameter_counts",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/parameter_counts",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_hidden_size",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/hidden_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_num_hidden_layers",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/num_hidden_layers",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_tensor_count",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_count",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_tensor_shapes",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_selected_sample_ids",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/selected_sample_ids",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_row_outcomes",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/row_outcomes",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_stage_completion",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/stage_completion",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_architecture_id",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_pre_kd_checkpoint_fingerprint",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/pre_kd_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_reference_checkpoint_fingerprint",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/reference_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_cumulative_steps",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_global_batch_size",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/global_batch_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_cumulative_examples",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_examples",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_effective_tokens",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/effective_tokens",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_max_sample_length",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/max_sample_length",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_0_kd_token_upper_bound",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/kd_exposure/0/token_upper_bound",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_axis_inventory",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/axis_inventory",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_evaluator_contract",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_evaluator_profile",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_evaluator_lmms_eval_revision",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_evaluator_generation_policy",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract/generation_policy",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_evaluator_output_budget_contract",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_evaluator_backend_limitations",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluator_contract/backend_limitations",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_denominators",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/denominators",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_parameter_counts",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/parameter_counts",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_hidden_size",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/hidden_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_num_hidden_layers",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/num_hidden_layers",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_tensor_count",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_count",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_tensor_shapes",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_selected_sample_ids",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/selected_sample_ids",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_row_outcomes",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/row_outcomes",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_stage_completion",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/stage_completion",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_architecture_id",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_pre_kd_checkpoint_fingerprint",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/pre_kd_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_reference_checkpoint_fingerprint",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/reference_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_cumulative_steps",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_global_batch_size",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/global_batch_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_cumulative_examples",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_examples",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_effective_tokens",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/effective_tokens",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_max_sample_length",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/max_sample_length",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_1_kd_token_upper_bound",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/kd_exposure/0/token_upper_bound",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_axis_inventory",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/axis_inventory",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_contract",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_evaluator_profile",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract/profile",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_lmms_eval_revision",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_generation_policy",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract/generation_policy",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_output_budget_contract",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_backend_limitations",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluator_contract/backend_limitations",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_denominators",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/denominators",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_parameter_counts",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/parameter_counts",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_hidden_size",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/hidden_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_num_hidden_layers",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/geometry/num_hidden_layers",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_tensor_count",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_count",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_tensor_shapes",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_selected_sample_ids",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/selected_sample_ids",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_row_outcomes",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/row_outcomes",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_stage_completion",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/stage_completion",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_architecture_id",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_pre_kd_checkpoint_fingerprint",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/pre_kd_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_reference_checkpoint_fingerprint",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/checkpoint_and_lineage_identities/reference_checkpoint_fingerprint",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_cumulative_steps",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_steps",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_global_batch_size",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/global_batch_size",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_cumulative_examples",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/cumulative_examples",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_effective_tokens",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/effective_tokens",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_max_sample_length",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/max_sample_length",
+      "classification": "exact"
+    },
+    {
+      "name": "curve_2_kd_token_upper_bound",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/kd_exposure/0/token_upper_bound",
+      "classification": "exact"
+    }
+  ]
+}

@@ -1,0 +1,2265 @@
+{
+  "schema": "modelopt.puzzletron-reference-observation/v1",
+  "contract_id": "qwen3p5-0p8b-vlm-smoke-v1",
+  "values": {
+    "report_schema_version": 1,
+    "report_verification": "passed",
+    "model_name": "Qwen3p5 0.8B reproducibility smoke",
+    "result_status": "success",
+    "result_count": 3,
+    "serving_status": "success",
+    "serving_count": 3,
+    "curve_0_schema": "modelopt.puzzletron.kd-learning-curve/v1",
+    "curve_0_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_0_manifest": "08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde",
+    "curve_0_steps": 2,
+    "curve_0_exact_result": null,
+    "curve_1_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_1_manifest": "08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde",
+    "curve_1_steps": 2,
+    "curve_1_exact_result": null,
+    "curve_2_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_2_manifest": "08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde",
+    "curve_2_steps": 2,
+    "curve_2_exact_result": null,
+    "curve_0_axis_inventory": [
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          },
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 6,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      }
+    ],
+    "curve_0_evaluator_contract": {
+      "backend_limitations": [
+        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+        "pinned generic vLLM max_new_tokens is a model-level lower bound"
+      ],
+      "evaluator_revision": "8514598fb9a93d1b6622f0e0f8fd2985a7f7b2cc",
+      "generation_policy": {
+        "do_sample": false,
+        "enable_thinking": false,
+        "temperature": 0
+      },
+      "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+      "output_budget_contract": {
+        "mmmu_val": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 128,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 128,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "mvbench": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "realworldqa": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        }
+      },
+      "profile": "qwen35_vlm_core3_24row_smoke_v2"
+    },
+    "curve_0_evaluator_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_0_evaluator_lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "curve_0_evaluator_generation_policy": {
+      "do_sample": false,
+      "enable_thinking": false,
+      "temperature": 0
+    },
+    "curve_0_evaluator_output_budget_contract": {
+      "mmmu_val": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 128,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 128,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "mvbench": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "realworldqa": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      }
+    },
+    "curve_0_evaluator_backend_limitations": [
+      "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+      "pinned generic vLLM max_new_tokens is a model-level lower bound"
+    ],
+    "curve_0_denominators": {
+      "mmmu_val": {
+        "population_rows": 900,
+        "selected_rows": 8
+      },
+      "mvbench": {
+        "population_rows": 200,
+        "selected_rows": 8
+      },
+      "realworldqa": {
+        "population_rows": 765,
+        "selected_rows": 8
+      }
+    },
+    "curve_0_parameter_counts": {
+      "materialized_checkpoint": 1126145600,
+      "mip_estimates": {
+        "active_params": 496539456.0,
+        "num_params": 1126145600.0,
+        "stats.active_params": 496539456.0,
+        "stats.num_params": 1126145600.0
+      }
+    },
+    "curve_0_hidden_size": 1024,
+    "curve_0_num_hidden_layers": 24,
+    "curve_0_tensor_count": 489,
+    "curve_0_selected_sample_ids": {
+      "mmmu_val": [
+        {
+          "source_row_index": 45,
+          "source_sample_id": "validation_Agriculture_16"
+        },
+        {
+          "source_row_index": 165,
+          "source_sample_id": "validation_Basic_Medical_Science_16"
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "validation_Computer_Science_16"
+        },
+        {
+          "source_row_index": 405,
+          "source_sample_id": "validation_Electronics_16"
+        },
+        {
+          "source_row_index": 495,
+          "source_sample_id": "validation_Geography_16"
+        },
+        {
+          "source_row_index": 615,
+          "source_sample_id": "validation_Marketing_16"
+        },
+        {
+          "source_row_index": 735,
+          "source_sample_id": "validation_Music_16"
+        },
+        {
+          "source_row_index": 855,
+          "source_sample_id": "validation_Public_Health_16"
+        }
+      ],
+      "mvbench": [
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 12,
+          "source_sample_id": "action_sequence:12"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 37,
+          "source_sample_id": "action_sequence:37"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 62,
+          "source_sample_id": "action_sequence:62"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 87,
+          "source_sample_id": "action_sequence:87"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 112,
+          "source_sample_id": "action_sequence:112"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 137,
+          "source_sample_id": "action_sequence:137"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 162,
+          "source_sample_id": "action_sequence:162"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 187,
+          "source_sample_id": "action_sequence:187"
+        }
+      ],
+      "realworldqa": [
+        {
+          "source_row_index": 47,
+          "source_sample_id": "test:47"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "test:143"
+        },
+        {
+          "source_row_index": 239,
+          "source_sample_id": "test:239"
+        },
+        {
+          "source_row_index": 334,
+          "source_sample_id": "test:334"
+        },
+        {
+          "source_row_index": 430,
+          "source_sample_id": "test:430"
+        },
+        {
+          "source_row_index": 525,
+          "source_sample_id": "test:525"
+        },
+        {
+          "source_row_index": 621,
+          "source_sample_id": "test:621"
+        },
+        {
+          "source_row_index": 717,
+          "source_sample_id": "test:717"
+        }
+      ]
+    },
+    "curve_0_row_outcomes": {
+      "expected": 24,
+      "failed": 0,
+      "milestone_sample_counts": [
+        {
+          "modelopt_vlm_benchmark_mmmu_val": 8,
+          "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+          "modelopt_vlm_benchmark_realworldqa": 8
+        }
+      ],
+      "missing": 0,
+      "pre_kd_sample_counts": {
+        "modelopt_vlm_benchmark_mmmu_val": 8,
+        "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+        "modelopt_vlm_benchmark_realworldqa": 8
+      }
+    },
+    "curve_0_stage_completion": {
+      "milestones": [
+        {
+          "evaluation": "success",
+          "kd": "success",
+          "steps": 2
+        }
+      ],
+      "pre_kd": "success"
+    },
+    "curve_0_architecture_id": "architecture_4d2b5d04e1ec371b",
+    "curve_0_pre_kd_checkpoint_fingerprint": "c47bfeef892c7cc7ac5aa26178ec9f819d2a33662603969807f47e8d18656dd3",
+    "curve_0_reference_checkpoint_fingerprint": "7bb7780f1aca3ad6a3acb3b280588bd138902bcdb2a542dc36ed876fbc6bffc2",
+    "curve_0_kd_cumulative_steps": 2,
+    "curve_0_kd_global_batch_size": 1,
+    "curve_0_kd_cumulative_examples": 2,
+    "curve_0_kd_effective_tokens": 1063,
+    "curve_0_kd_max_sample_length": 512,
+    "curve_0_kd_token_upper_bound": 1024,
+    "curve_1_axis_inventory": [
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          },
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 1,
+            "num_query_heads": 4,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      }
+    ],
+    "curve_1_evaluator_contract": {
+      "backend_limitations": [
+        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+        "pinned generic vLLM max_new_tokens is a model-level lower bound"
+      ],
+      "evaluator_revision": "8514598fb9a93d1b6622f0e0f8fd2985a7f7b2cc",
+      "generation_policy": {
+        "do_sample": false,
+        "enable_thinking": false,
+        "temperature": 0
+      },
+      "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+      "output_budget_contract": {
+        "mmmu_val": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 128,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 128,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "mvbench": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "realworldqa": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        }
+      },
+      "profile": "qwen35_vlm_core3_24row_smoke_v2"
+    },
+    "curve_1_evaluator_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_1_evaluator_lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "curve_1_evaluator_generation_policy": {
+      "do_sample": false,
+      "enable_thinking": false,
+      "temperature": 0
+    },
+    "curve_1_evaluator_output_budget_contract": {
+      "mmmu_val": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 128,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 128,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "mvbench": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "realworldqa": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      }
+    },
+    "curve_1_evaluator_backend_limitations": [
+      "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+      "pinned generic vLLM max_new_tokens is a model-level lower bound"
+    ],
+    "curve_1_denominators": {
+      "mmmu_val": {
+        "population_rows": 900,
+        "selected_rows": 8
+      },
+      "mvbench": {
+        "population_rows": 200,
+        "selected_rows": 8
+      },
+      "realworldqa": {
+        "population_rows": 765,
+        "selected_rows": 8
+      }
+    },
+    "curve_1_parameter_counts": {
+      "materialized_checkpoint": 1124048448,
+      "mip_estimates": {
+        "active_params": 494442304.0,
+        "num_params": 1124048448.0,
+        "stats.active_params": 494442304.0,
+        "stats.num_params": 1124048448.0
+      }
+    },
+    "curve_1_hidden_size": 1024,
+    "curve_1_num_hidden_layers": 24,
+    "curve_1_tensor_count": 489,
+    "curve_1_selected_sample_ids": {
+      "mmmu_val": [
+        {
+          "source_row_index": 45,
+          "source_sample_id": "validation_Agriculture_16"
+        },
+        {
+          "source_row_index": 165,
+          "source_sample_id": "validation_Basic_Medical_Science_16"
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "validation_Computer_Science_16"
+        },
+        {
+          "source_row_index": 405,
+          "source_sample_id": "validation_Electronics_16"
+        },
+        {
+          "source_row_index": 495,
+          "source_sample_id": "validation_Geography_16"
+        },
+        {
+          "source_row_index": 615,
+          "source_sample_id": "validation_Marketing_16"
+        },
+        {
+          "source_row_index": 735,
+          "source_sample_id": "validation_Music_16"
+        },
+        {
+          "source_row_index": 855,
+          "source_sample_id": "validation_Public_Health_16"
+        }
+      ],
+      "mvbench": [
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 12,
+          "source_sample_id": "action_sequence:12"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 37,
+          "source_sample_id": "action_sequence:37"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 62,
+          "source_sample_id": "action_sequence:62"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 87,
+          "source_sample_id": "action_sequence:87"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 112,
+          "source_sample_id": "action_sequence:112"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 137,
+          "source_sample_id": "action_sequence:137"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 162,
+          "source_sample_id": "action_sequence:162"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 187,
+          "source_sample_id": "action_sequence:187"
+        }
+      ],
+      "realworldqa": [
+        {
+          "source_row_index": 47,
+          "source_sample_id": "test:47"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "test:143"
+        },
+        {
+          "source_row_index": 239,
+          "source_sample_id": "test:239"
+        },
+        {
+          "source_row_index": 334,
+          "source_sample_id": "test:334"
+        },
+        {
+          "source_row_index": 430,
+          "source_sample_id": "test:430"
+        },
+        {
+          "source_row_index": 525,
+          "source_sample_id": "test:525"
+        },
+        {
+          "source_row_index": 621,
+          "source_sample_id": "test:621"
+        },
+        {
+          "source_row_index": 717,
+          "source_sample_id": "test:717"
+        }
+      ]
+    },
+    "curve_1_row_outcomes": {
+      "expected": 24,
+      "failed": 0,
+      "milestone_sample_counts": [
+        {
+          "modelopt_vlm_benchmark_mmmu_val": 8,
+          "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+          "modelopt_vlm_benchmark_realworldqa": 8
+        }
+      ],
+      "missing": 0,
+      "pre_kd_sample_counts": {
+        "modelopt_vlm_benchmark_mmmu_val": 8,
+        "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+        "modelopt_vlm_benchmark_realworldqa": 8
+      }
+    },
+    "curve_1_stage_completion": {
+      "milestones": [
+        {
+          "evaluation": "success",
+          "kd": "success",
+          "steps": 2
+        }
+      ],
+      "pre_kd": "success"
+    },
+    "curve_1_architecture_id": "architecture_b56a00a0aa291d09",
+    "curve_1_pre_kd_checkpoint_fingerprint": "1d8075c24fe6fdaf6432b134c97be85a961d4dfeec9c443bed59d3cd09d46492",
+    "curve_1_reference_checkpoint_fingerprint": "7bb7780f1aca3ad6a3acb3b280588bd138902bcdb2a542dc36ed876fbc6bffc2",
+    "curve_1_kd_cumulative_steps": 2,
+    "curve_1_kd_global_batch_size": 1,
+    "curve_1_kd_cumulative_examples": 2,
+    "curve_1_kd_effective_tokens": 1063,
+    "curve_1_kd_max_sample_length": 512,
+    "curve_1_kd_token_upper_bound": 1024,
+    "curve_2_axis_inventory": [
+      {
+        "subblock_configs": [
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          },
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 112,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 14,
+            "num_heads": 14,
+            "state_dim": 112
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "intermediate_size": 3328,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          },
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": null,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": true
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          },
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 1,
+            "num_query_heads": 3,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "conv_kernel_size": 4,
+            "head_dim": 128,
+            "kind": "mamba",
+            "name": "gdn",
+            "no_op": false,
+            "num_groups": 16,
+            "num_heads": 16,
+            "state_dim": 128
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      },
+      {
+        "subblock_configs": [
+          {
+            "k_eq_v": null,
+            "kind": "attention",
+            "kv_source_layer": null,
+            "llama4": null,
+            "name": "attention",
+            "no_op": false,
+            "num_kv_heads": 2,
+            "num_query_heads": 8,
+            "qk_head_dim": null,
+            "sliding_window_size": null,
+            "v_head_dim": null
+          },
+          {
+            "intermediate_size": 3584,
+            "kind": "ffn",
+            "name": "ffn",
+            "no_op": false
+          }
+        ]
+      }
+    ],
+    "curve_2_evaluator_contract": {
+      "backend_limitations": [
+        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+        "pinned generic vLLM max_new_tokens is a model-level lower bound"
+      ],
+      "evaluator_revision": "8514598fb9a93d1b6622f0e0f8fd2985a7f7b2cc",
+      "generation_policy": {
+        "do_sample": false,
+        "enable_thinking": false,
+        "temperature": 0
+      },
+      "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+      "output_budget_contract": {
+        "mmmu_val": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 128,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 128,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "mvbench": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        },
+        "realworldqa": {
+          "adapter": "vllm",
+          "effective_max_new_tokens": 16,
+          "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+          "requested_max_new_tokens": 16,
+          "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+        }
+      },
+      "profile": "qwen35_vlm_core3_24row_smoke_v2"
+    },
+    "curve_2_evaluator_profile": "qwen35_vlm_core3_24row_smoke_v2",
+    "curve_2_evaluator_lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+    "curve_2_evaluator_generation_policy": {
+      "do_sample": false,
+      "enable_thinking": false,
+      "temperature": 0
+    },
+    "curve_2_evaluator_output_budget_contract": {
+      "mmmu_val": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 128,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 128,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "mvbench": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      },
+      "realworldqa": {
+        "adapter": "vllm",
+        "effective_max_new_tokens": 16,
+        "limitation": "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor",
+        "requested_max_new_tokens": 16,
+        "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
+      }
+    },
+    "curve_2_evaluator_backend_limitations": [
+      "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+      "pinned generic vLLM max_new_tokens is a model-level lower bound"
+    ],
+    "curve_2_denominators": {
+      "mmmu_val": {
+        "population_rows": 900,
+        "selected_rows": 8
+      },
+      "mvbench": {
+        "population_rows": 200,
+        "selected_rows": 8
+      },
+      "realworldqa": {
+        "population_rows": 765,
+        "selected_rows": 8
+      }
+    },
+    "curve_2_parameter_counts": {
+      "materialized_checkpoint": 1045679916,
+      "mip_estimates": {
+        "active_params": 449456620.0,
+        "num_params": 1045679916.0,
+        "stats.active_params": 449456620.0,
+        "stats.num_params": 1045679916.0
+      }
+    },
+    "curve_2_hidden_size": 960,
+    "curve_2_num_hidden_layers": 24,
+    "curve_2_tensor_count": 485,
+    "curve_2_selected_sample_ids": {
+      "mmmu_val": [
+        {
+          "source_row_index": 45,
+          "source_sample_id": "validation_Agriculture_16"
+        },
+        {
+          "source_row_index": 165,
+          "source_sample_id": "validation_Basic_Medical_Science_16"
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "validation_Computer_Science_16"
+        },
+        {
+          "source_row_index": 405,
+          "source_sample_id": "validation_Electronics_16"
+        },
+        {
+          "source_row_index": 495,
+          "source_sample_id": "validation_Geography_16"
+        },
+        {
+          "source_row_index": 615,
+          "source_sample_id": "validation_Marketing_16"
+        },
+        {
+          "source_row_index": 735,
+          "source_sample_id": "validation_Music_16"
+        },
+        {
+          "source_row_index": 855,
+          "source_sample_id": "validation_Public_Health_16"
+        }
+      ],
+      "mvbench": [
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 12,
+          "source_sample_id": "action_sequence:12"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 37,
+          "source_sample_id": "action_sequence:37"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 62,
+          "source_sample_id": "action_sequence:62"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 87,
+          "source_sample_id": "action_sequence:87"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 112,
+          "source_sample_id": "action_sequence:112"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 137,
+          "source_sample_id": "action_sequence:137"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 162,
+          "source_sample_id": "action_sequence:162"
+        },
+        {
+          "leaf_task": "mvbench_action_sequence",
+          "source_row_index": 187,
+          "source_sample_id": "action_sequence:187"
+        }
+      ],
+      "realworldqa": [
+        {
+          "source_row_index": 47,
+          "source_sample_id": "test:47"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "test:143"
+        },
+        {
+          "source_row_index": 239,
+          "source_sample_id": "test:239"
+        },
+        {
+          "source_row_index": 334,
+          "source_sample_id": "test:334"
+        },
+        {
+          "source_row_index": 430,
+          "source_sample_id": "test:430"
+        },
+        {
+          "source_row_index": 525,
+          "source_sample_id": "test:525"
+        },
+        {
+          "source_row_index": 621,
+          "source_sample_id": "test:621"
+        },
+        {
+          "source_row_index": 717,
+          "source_sample_id": "test:717"
+        }
+      ]
+    },
+    "curve_2_row_outcomes": {
+      "expected": 24,
+      "failed": 0,
+      "milestone_sample_counts": [
+        {
+          "modelopt_vlm_benchmark_mmmu_val": 8,
+          "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+          "modelopt_vlm_benchmark_realworldqa": 8
+        }
+      ],
+      "missing": 0,
+      "pre_kd_sample_counts": {
+        "modelopt_vlm_benchmark_mmmu_val": 8,
+        "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+        "modelopt_vlm_benchmark_realworldqa": 8
+      }
+    },
+    "curve_2_stage_completion": {
+      "milestones": [
+        {
+          "evaluation": "success",
+          "kd": "success",
+          "steps": 2
+        }
+      ],
+      "pre_kd": "success"
+    },
+    "curve_2_architecture_id": "architecture_234bdf0add9eff4e",
+    "curve_2_pre_kd_checkpoint_fingerprint": "64298b0d6cf1e2053e27676d0ee5c8c15bf77a0717ff5b0935b1370489ebd3ea",
+    "curve_2_reference_checkpoint_fingerprint": "7bb7780f1aca3ad6a3acb3b280588bd138902bcdb2a542dc36ed876fbc6bffc2",
+    "curve_2_kd_cumulative_steps": 2,
+    "curve_2_kd_global_batch_size": 1,
+    "curve_2_kd_cumulative_examples": 2,
+    "curve_2_kd_effective_tokens": 1063,
+    "curve_2_kd_max_sample_length": 512,
+    "curve_2_kd_token_upper_bound": 1024
+  },
+  "qualification": {
+    "status": "qualified-stable-runtime-values",
+    "note": "Qualified from two independent exact-source smoke roots. Root-local checkpoint metadata, nondeterministic short-KD weights, and tiny-sample evaluation outcomes remain informational."
+  }
+}

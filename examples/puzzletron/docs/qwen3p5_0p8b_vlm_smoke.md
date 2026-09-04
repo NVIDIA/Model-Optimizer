@@ -1,35 +1,20 @@
 # Qwen 3.5 0.8B VLM pruning smoke
 
-Use this guide to run the Qwen 3.5 0.8B vision-language pruning example on one
-GPU. The example uses eight image-conversation samples and keeps
-the work small enough to check the complete workflow:
+This guide provides two supported end-to-end checks for Qwen 3.5 0.8B:
 
-1. Search two FFN intermediate sizes, `3072` and `2048`.
-2. Save the two candidates with the lowest image-text loss.
-3. Reload each saved checkpoint and evaluate two RealWorldQA samples.
-4. Measure both checkpoints with 1-, 6-, and 12-image AIPerf requests.
-5. Distill the faster candidate for two steps, then reload and evaluate the
-   resulting checkpoint.
+- The [all-axis reproducibility smoke](#run-the-reproducibility-smoke) prepares
+  pinned data, exercises every reducible axis, materializes and reloads three
+  students, runs two KD steps plus teacher/pre-KD/post-KD evaluation and a small
+  serving cell, verifies stable result fields, and resumes with the same command.
+- The [quick quality comparison](#run-a-quick-quality-comparison) prepares
+  its pinned data, screens the all-axis search globally, materializes two
+  finalists, gives both the same 64-step KD exposure, and evaluates and serves
+  both before final selection.
 
-The example configuration pins the model, dataset, evaluation task, and small
-work limits. This smoke test checks that pruning, evaluation, serving,
-distillation, and resume all work. Its scores and throughput are not model
-quality or performance results.
-
-## Generate a complete bundle with the setup wizard
-
-For a new run, start with the [setup wizard](setup_wizard.md), select Qwen 3.5
-0.8B, and choose a multimodal dataset. The generated smoke and campaign bundles
-cover conversion, multimodal pruning and search, MIP selection,
-materialization, image-aware serving, VLM distillation, final selection, and a
-pinned student-versus-teacher RealWorldQA/MMMU comparison. Inspect the generated
-`dry-run-plan.txt` and materialize the site-specific runner settings before
-launching.
-
-The model-specific defaults are separate from the wizard implementation. The
-same onboarding path can support the 2B and 4B variants by adding their model
-inventory, pruning domains, resource defaults, and pinned evaluation settings.
-The tracked recipes below remain useful for reproducing the bounded 0.8B run.
+Both routes use deterministic evaluation rows and produce a cumulative report.
+Their small evaluation sets and serving workloads test the pipeline; use larger
+benchmark and serving workloads to measure model quality or throughput.
+`full_vlm_smoke.yaml` provides a portable FFN-only smoke.
 
 ## Before you start
 
@@ -42,54 +27,33 @@ Workers also need access to:
 
 - `Qwen/Qwen3.5-0.8B` at the revision in
   `configs/families/qwen3_5/qwen3p5_0p8b/model.yaml`;
-- the pinned RealWorldQA snapshot described in
-  [cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data);
-- a shared location for the prepared dataset and campaign output.
+- a writable `HF_HOME` for the pinned evaluation snapshots and prepared media;
+- a shared writable location for the campaign output and prepared dataset.
 
-If workers cannot access the network, populate the model and benchmark caches
-before launch and mount them through the runner. Keep the configured model
-identity instead of replacing it with a machine-specific path.
+The `prepare_dataset` stage downloads and validates the evaluation tasks selected
+by the run config in the runner's `HF_HOME`, including required video media.
+Snapshot and media inventories make resume reject partial data. See
+[cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data) for
+standalone preparation and recovery behavior. If workers cannot access the
+network, populate those exact caches before launch and mount them through the
+runner. Keep the configured model identity instead of replacing it with a
+machine-specific path.
 
-## Prepare the dataset
+## Prepare the output root
 
-Choose paths visible to every worker. The dataset revision must be an immutable
-Hugging Face commit SHA.
+Choose a path visible to every worker. The run config pins the dataset revision
+to an immutable Hugging Face commit and materializes the dataset below this
+root as the first resumable CPU stage.
 
 ```bash
-export PUZZLETRON_DATASET_PATH=/path/to/qwen3p5-vlm-smoke-data
-export PUZZLETRON_DATASET_REVISION=51f4f4d219315c3283950994d4eb3d7fc30aa87b
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_smoke
+export HF_HOME=/path/visible-at-the-same-location-to-controller-and-workers/hf-home
 ```
 
-Download and normalize eight image-conversation samples. This is the only step
-that needs dataset network access.
-
-```bash
-python examples/puzzletron/materialize_dataset.py nemotron_vlm_v2 \
-  --output "$PUZZLETRON_DATASET_PATH" \
-  --revision "$PUZZLETRON_DATASET_REVISION" \
-  --subsets sparsetables plotqa_cot wiki_en \
-  --num-samples 8 \
-  --max-shards-per-subset 1
-```
-
-Check that the manifest has the expected revision, samples, and local images:
-
-```bash
-python - "$PUZZLETRON_DATASET_PATH" "$PUZZLETRON_DATASET_REVISION" <<'PY'
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-manifest = json.loads((root / "manifest.json").read_text())
-assert manifest["acquisition"]["revision"] == sys.argv[2]
-assert manifest["sample_count"] == 8
-assert manifest["image_count"] >= 8
-assert all((root / image["path"]).is_file() for image in manifest["images"])
-print(f"prepared {manifest['sample_count']} samples with {manifest['image_count']} images")
-PY
-```
+Export `HF_HOME` in the controller shell before invoking the orchestrator;
+Hydra seals that exact worker-visible path into the preparation stage's resume
+identity. A matching acquisition manifest is reused on resume; a mismatched or
+unsealed destination is rejected instead of silently overwritten.
 
 ## Configure the runner
 
@@ -97,8 +61,6 @@ The example provides the experiment and execution settings. Copy the runner
 template into the output directory and replace its site-specific placeholders:
 
 ```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
 RUNNER_TEMPLATE=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml
 RUNNER="$PUZZLETRON_RUN_ROOT/runner.slurm.yaml"
 
@@ -117,168 +79,68 @@ fi
 ```
 
 Set the repository, environment, container, mounts, Slurm account, and
-partition for your site. The model cache, benchmark cache, prepared dataset,
-and output directory must be visible inside the worker environment.
+partition for your site. The model cache, benchmark cache, and output directory
+must be visible inside the worker environment.
 
-## Inspect and run the smoke test
+## Run the reproducibility smoke
 
-Compile the plan without submitting work:
+Use `vlm_reproducibility_smoke.yaml` for the unattended reference smoke. It
+uses an immutable 24-row evaluation profile: eight RealWorldQA rows, eight
+MMMU validation rows, and eight `action_sequence` MVBench rows. The MIP inputs
+include separate query-head and KV-group variants plus one combined sentinel.
+The combined sentinel binds FFN width to layer 1, grouped attention to layer
+19, and GDN geometry to layer 0; other layers keep teacher geometry.
+
+One command prepares or validates the pinned training and evaluation data,
+then runs or resumes materialization, checkpoint reload, teacher/pre-KD
+evaluation, two-step KD, post-KD evaluation, the serving mechanics cell, the
+final report, and the checked expectation contract:
 
 ```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_reproducibility_smoke.yaml
+EXPECT=examples/puzzletron/expected/qwen3p5_0p8b_vlm_smoke_v1.json
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_reproducibility_smoke.yaml
+
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
   --runner "$RUNNER" \
   --execution "$EXECUTION" \
-  --stage full --dry-run
+  --stage full \
+  --expect "$EXPECT"
 ```
 
-Before launch, check that model stages use one GPU and that the plan contains
-these VLM-specific steps:
+Rerun the same command against the same output root to resume. Exit status 0
+means the campaign and expectation comparison passed, 1 means comparable
+results regressed, and 2 means required result fields were missing, incomplete,
+invalid, or nonfinite. The comparison checks architecture, dataset, evaluator,
+geometry, parameter counts, tensor counts, KD exposure, and stage completion.
+It records checkpoint contents, evaluator source revision, scores, and serving
+timing without requiring those values to match exactly.
 
-- image-text evaluation and no text tokenization stage;
-- `checkpoint_eval` before serving;
-- chat serving with 1, 6, and 12 images per request;
-- `post_kd_checkpoint_eval` after VLM distillation;
-- final image-text evaluation and candidate selection.
+## Run a quick quality comparison
 
-Run the same plan without `--dry-run`:
+The `e2e_vlm_quality_comparison.yaml` route is the compact end-to-end test. The
+grid has eight feasible width/depth scenarios; with
+`num_solutions: 8` per scenario it can emit up to 64 solutions. The route scores
+every solution on the same 16 image-text samples, globally retains two, and
+gives both finalists the same 64-step KD exposure with global batch size four.
+It then compares the students with the pinned teacher on deterministic
+RealWorldQA, MMMU, and MVBench rows. Evaluations are resumable and are reused
+only when checkpoint identity and evaluator artifacts still match. Results
+include student and teacher metrics and their deltas. This route does not
+enforce a minimum score.
 
-```bash
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full
-```
-
-To resume after an interruption, rerun this exact command with the same
-environment variables and configuration files. Puzzletron reuses compatible
-completed stages and reruns failed or incomplete work.
-
-## Check the result
-
-Open the campaign report at
-`$PUZZLETRON_RUN_ROOT/artifacts/campaign_report/campaign_report.html`. Confirm
-the following before accepting the smoke test:
-
-- width scoring, image-text evaluation, and VLM distillation processed real
-  image tensors;
-- sorting and physical slicing checks passed;
-- both saved pre-distillation checkpoints completed `checkpoint_eval` on two
-  RealWorldQA samples with finite metrics;
-- AIPerf completed its 1-, 6-, and 12-image requests for both candidates, and
-  `fastest_vlm` selected one candidate from the 12-image throughput result;
-- the selected post-distillation checkpoint completed
-  `post_kd_checkpoint_eval` on two RealWorldQA samples with finite metrics;
-- the two distillation steps produced finite CE and KD metrics;
-- rerunning the launch command submitted no work for already completed stages.
-
-The evaluation summaries contain aggregate metrics. The raw `image_eval` and
-`final_image_eval` records should also report a nonzero vision-forward count
-and image-output checksums:
-
-```bash
-python - "$PUZZLETRON_RUN_ROOT" <<'PY'
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-for node in ("image_eval", "final_image_eval"):
-    records = list(
-        root.glob(
-            f"artifacts/post_mip/nodes/{node}/executions/*/raw/*/solution_0.json"
-        )
-    )
-    assert records, f"missing raw evaluation record for {node}"
-    for path in records:
-        details = json.loads(path.read_text())["observability"]
-        assert details["vision_forward_count"] > 0
-        assert details["vision_output_checksums"]
-PY
-```
-
-The serving step uses one synthetic request for each image count. It checks the
-multimodal API and provides a value for candidate selection, but it is not a
-performance benchmark. Use more requests, realistic concurrency, and your
-deployment image sizes before drawing throughput conclusions.
-
-## Choose a campaign or quality-comparison route
-
-The routes use the pinned Qwen 3.5 0.8B VLM. The legacy
-`full_vlm_smoke.yaml` compatibility route keeps the portable FFN-only lifecycle
-check. `vlm_admitted_axes_lifecycle_smoke.yaml` enables
-hidden width, FFN, and depth diagnostics, then realizes
-one mixed candidate whose exact MIP parameter count must retain 85–95% of the
-teacher. That candidate continues through physical materialization, checkpoint
-reload, image serving, two-step VLM KD, and image-text evaluation.
-The extended grid uses 64-channel hidden-width alignment so its `960` and `896`
-endpoints pass the same physical materialization validator used by the smoke.
-
-The older `qwen35_vlm_realworldqa`, `qwen35_vlm_e2e_full_eval`, and
-`qwen35_vlm_short_v1` profile names remain registered only as deprecated
-compatibility aliases. New recipes use identities that state the task scope and
-row-selection policy.
-
-`vlm_campaign.yaml` is the expanded admitted-axis search: hidden width,
-heterogeneous FFN width, and depth. It reuses the existing `params-90` MIP
-profile and the established image-text LM-loss `top_k: 2` screening step.
-It records serving measurements only for the selected checkpoint after the
-final KD and frozen-row evaluation milestone. The `3328` and `3072` FFN widths
-are separate conservative controls; the deeper `2816`, `2432`, `2048`, `1664`,
-and `1408` values remain search bins rather than justified VLM defaults.
-
-Every LM-loss-retained candidate follows one resumable trajectory from the same
-immutable pre-KD materialized checkpoint. AutoModel optimizer state is
-preserved while the cumulative step limit advances through 64, 128, and 256
-updates. Candidate selection happens only after all three checkpoints have been
-evaluated. The selection is an explicit manual gate so the campaign does not
-encode an additional sampling interpretation.
-
-The `3328` and `3072` controls follow their own otherwise identical 64/128/256
-learning curves. Every milestone uses the same
-`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1` profile, exact-row
-manifest path, and required manifest SHA256. The teacher result is
-computed once under that identity and reused for every control, candidate, and
-milestone. Each KD record includes global batch size, cumulative examples,
-non-padding effective tokens from the training log, a padded-token upper bound,
-estimated cumulative GPU-hours, and measured incremental and cumulative
-GPU-hours. The selected bounded result freezes the pre-KD checkpoint identity,
-all three checkpoint paths, metrics, exposure records, teacher identity, and
-row-manifest digest in an immutable learning-curve manifest.
-
-The 512- and 1024-step extensions are not part of the bounded campaign result.
-They are available only for the selected finalist, each behind a separate
-manual approval gate, and resume the same optimizer trajectory if approved.
-They use the same fixed 344-row selection: 64 RealWorldQA rows, 120 MMMU
-validation rows, and 160 MVBench rows under the semantic contract
-`qwen35-vlm-rwqa64-mmmu120-mvbench160-frozen-v1`. The separate eight-task,
-all-rows `qwen35-vlm-judge-free8-all-rows-v1` scope remains an optional later
-run.
-
-Grouped-attention and GDN reductions are disabled. The native Qwen
-`Qwen3NextAttention` backend rejects compact reduced geometry, and its
-CP-aware GDN wrapper has no compact scoring equivalence path. Keep their teacher
-shapes until those backends have equivalent scoring and materialization support.
-`gdn_value_heads_per_group` is additionally irreducible because its teacher
-value is already one.
-
-The opt-in `e2e_vlm_quality_comparison.yaml` route keeps the lifecycle bounded
-and compares its final student with the pinned teacher on deterministic
-RealWorldQA and MMMU subsets. Repetitions are resumable and are reused only
-when checkpoint identity and evaluator artifacts still match. Results include
-student and teacher metrics and their deltas, but no quality gate.
-
-Use `e2e_vlm_quality_comparison_extended.yaml` for the same bounded comparison
-after the expanded admitted-axis smoke candidate.
+Use `e2e_vlm_quality_comparison_extended.yaml` to run the comparison after the
+extended smoke candidate.
 
 Run the comparison route with a site-specific runner and a distinct output
-root. This route requires the pinned RealWorldQA and MMMU caches and is
-intentionally excluded from default CI:
+root. Its preparation stage fills or validates the pinned RealWorldQA, MMMU,
+and MVBench snapshots in a writable runner `HF_HOME`; offline runners must
+prepopulate that cache. The route requires a GPU and is not part of default CI:
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/execution.single_gpu.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.e2e_vlm_quality_comparison.yaml
 RUNNER=/path/to/site-specific/runner.slurm.yaml
 export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_e2e_vlm_quality_comparison
 
@@ -289,25 +151,27 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Inspect the compiled stage order and one-GPU allocation before launch. Then
-omit `--dry-run` to launch or resume the exact same three-input campaign.
-
-Run the campaign with the same execution profile and a distinct output root:
-
-The campaign gives both materialized candidates the same short KD and quality
-screen, then selects one candidate for the longer KD and final quality
-comparison. AIPerf runs only for that final post-KD checkpoint. Each serving
-cell has three repetitions; every repetition uses 32 warmup requests followed
-by 64 measured requests. The separate MIP runtime estimator remains disabled
-in this campaign.
+Inspect the compiled stage order and one-GPU-per-worker allocation before
+launch. The two finalist workers may run concurrently. Then launch or resume
+the exact same three-input campaign with:
 
 ```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_admitted_axes_campaign.yaml
-RUNNER=/path/to/site-specific/runner.slurm.yaml
-export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
-export PUZZLETRON_VLM_SHORT_V1_MANIFEST=/path/to/frozen-short-v1.json
-export PUZZLETRON_VLM_SHORT_V1_SHA256=<64-lowercase-hex-digest>
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full
+```
+
+## Run the FFN-only smoke
+
+This route searches two FFN sizes, materializes and reloads two candidates,
+selects one using its small serving cell, and runs two KD steps. Use the same
+runner and output-root setup with these files:
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.full_vlm_smoke.yaml
 
 python examples/puzzletron/orchestrate.py \
   --experiment "$EXPERIMENT" \
@@ -316,12 +180,87 @@ python examples/puzzletron/orchestrate.py \
   --stage full --dry-run
 ```
 
-Inspect the compiled stage order, identity inputs, and one-GPU allocation. A
-successful dry run or smoke test is preparation evidence only. Launching this
-real campaign requires separate GPU/scheduler authorization, and the campaign
-is not complete until at least one selected post-KD student has comparable
-64/128/256 scores on the fixed 344-row selection and an immutable
-learning-curve result manifest.
+Inspect the plan, then omit `--dry-run` to launch or resume it. Its synthetic
+serving requests check mechanics only; use a representative workload for
+throughput measurements.
+
+## Understand the broader campaign example
+
+`vlm_campaign.yaml` searches hidden width,
+heterogeneous FFN width, depth, grouped-attention geometry, and GDN key groups
+and head dimensions. It uses the `params-90` MIP profile and an image-text
+LM-loss screen. It requests up to eight
+heterogeneous MIP solutions for each feasible width/depth scenario and retains
+four comparable finalists for matched KD. Candidate generation,
+physical materialization, reload validation, and serving all fail closed when a
+requested geometry is unsupported. The `3328` and `3072` FFN widths are
+separate controls.
+
+Every LM-loss-retained candidate follows one resumable trajectory from the same
+immutable pre-KD materialized checkpoint. AutoModel optimizer state is
+preserved while the cumulative step limit advances through 64, 128, and 256
+updates. Candidate selection happens automatically after all three checkpoints
+have been evaluated, using the configured 256-step RealWorldQA score. The
+placement-bound all-axis sentinel follows an independent trajectory, so it
+cannot be removed by the LM-loss top-k screen.
+
+The `3328` and `3072` controls follow their own otherwise identical 64/128/256
+learning curves. Every milestone uses the same evaluator
+`qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3` profile and its
+fixed rows: 64 RealWorldQA rows, 120 MMMU validation rows, and 160 MVBench rows.
+The teacher result is computed once and reused for every control, candidate,
+and milestone. Each KD record reports batch size, cumulative examples,
+effective tokens, a padded-token upper bound, and GPU time. The learning-curve
+manifest records the pre-KD checkpoint, each KD checkpoint, metrics, training
+exposure, teacher identity, and selected evaluation rows.
+
+The separate `vlm_campaign_extended.yaml` recipe adds 512- and 1024-step
+milestones for the selected finalist. Each milestone requires manual approval
+and resumes the same optimizer trajectory. Use the
+`qwen35-vlm-judge-free8-all-rows-v1` profile separately for an eight-task,
+all-rows evaluation.
+
+Grouped-attention and GDN reductions use a limited native runtime.
+Compact execution supports only unsharded SDPA `Qwen3NextAttention` and the
+single-device, context-parallel-one, non-packed GDN path. Transformer Engine,
+DTensor or tensor-parallel attention, context parallelism greater than one,
+and packed GDN execution fail closed. Validate isolated candidate execution and
+physical materialization before relying on a combined search result.
+`gdn_value_heads_per_group` remains disabled because its teacher value is
+already one.
+
+## Run the all-axis campaign
+
+Dry-run `vlm_campaign.yaml` with the site-specific runner and a distinct output
+root before launch.
+
+The route evaluates four ranked candidates,
+selects one automatically at 256 steps, and runs matched 64/128/256-step
+trajectories for the selected candidate, the placement-bound all-axis sentinel,
+and the two FFN controls. Candidate and sentinel checkpoints each receive a
+three-repetition AIPerf cell; every repetition uses 32 warmup requests followed
+by 64 measured requests. The 512/1024 milestones are available only through the
+separate extended recipe.
+
+```bash
+EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
+EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_admitted_axes_campaign.yaml
+RUNNER=/path/to/site-specific/runner.slurm.yaml
+export PUZZLETRON_RUN_ROOT=/path/to/qwen3p5_0p8b_vlm_campaign
+
+python examples/puzzletron/orchestrate.py \
+  --experiment "$EXPERIMENT" \
+  --runner "$RUNNER" \
+  --execution "$EXECUTION" \
+  --stage full --dry-run
+```
+
+Inspect the compiled stage order, input identities, supported runtime modes, and
+one-GPU-per-worker allocation; up to four candidate workers may run
+concurrently. Then omit `--dry-run`; rerunning that command resumes the
+campaign. Use `vlm_campaign_extended.yaml` when you want the additional
+512/1024 milestones. This campaign does not include an expected-result
+baseline.
 
 ## Evaluate a saved checkpoint separately
 
@@ -358,8 +297,9 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
 can generate the same route with site-specific settings. Hidden width,
 attention, GDN, embedding width, and depth are available through guided
-customization. Attention and GDN reductions are not included in the tracked
-runtime-validated routes. Inspect every customized plan with `--dry-run` before
-launch. See
+customization. Among the tracked routes, attention and GDN reductions are
+enabled only by `vlm_campaign.yaml`; unsupported distributed and packed modes
+fail closed.
+Inspect every customized plan with `--dry-run` before launch. See
 [configuration and overrides](configuration_overrides.md) for persistent and
 temporary changes.

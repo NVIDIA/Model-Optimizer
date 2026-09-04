@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Parallel two-finalist execution profile for the compact VLM comparison.
+execution:
+  defaults:
+    failure_policy: strict
+    halt_policy: drain
+    gpus_per_node: 1
+  stages:
+    prepare_dataset: {strategy: single, resource: cpu}
+    mip: {strategy: single, resource: cpu}
+    depth_importance: {strategy: single}
+    replacement_scoring: {strategy: single}
+    post.params-90.image_eval: &finalists {instances: 2}
+    post.params-90.best_vlm_loss: {strategy: single, resource: cpu}
+    post.params-90.materialized: *finalists
+    post.params-90.checkpoint_eval: *finalists
+    post.params-90.vlm_serving: *finalists
+    post.params-90.fastest_vlm: {strategy: single, resource: cpu}
+    post.params-90.short_vlm_kd: *finalists
+    post.params-90.post_kd_checkpoint_eval: *finalists
+    post.params-90.final_image_eval: *finalists
+    post.params-90.best: {strategy: single, resource: cpu}
+    post.params-90.quality_benchmarks: *finalists

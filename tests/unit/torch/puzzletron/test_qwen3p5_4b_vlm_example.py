@@ -133,7 +133,10 @@ def test_qwen3p5_4b_default_compiles_the_complete_ffn_grid_and_stops_at_mip(
         "replacement_scoring",
         "mip",
     )
-    assert all(stage.total_gpus == 1 for stage in plan.stages)
+    cpu_stages = {"convert", "build_library", "mip"}
+    assert all(stage.resource == "cpu" for stage in plan.stages if stage.stage_id in cpu_stages)
+    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in cpu_stages)
+    assert all(stage.total_gpus == 1 for stage in plan.stages if stage.stage_id not in cpu_stages)
     assert config["model"]["source"] == "Qwen/Qwen3.5-4B"
     assert config["model"]["revision"] == "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
     assert config["data"]["processor_identity"] == (
@@ -265,10 +268,19 @@ def test_qwen3p5_4b_opt_in_lifecycle_materializes_reloads_and_bounds_kd_and_eval
         next(stage for stage in plan.stages if stage.stage_id.endswith("short_vlm_kd")).total_gpus
         == 2
     )
+    cpu_stages = {
+        "convert",
+        "build_library",
+        "mip",
+        "post.params-80.best_vlm_loss",
+        "post.params-80.best",
+    }
+    assert all(stage.resource == "cpu" for stage in plan.stages if stage.stage_id in cpu_stages)
+    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in cpu_stages)
     assert all(
         stage.total_gpus == 1
         for stage in plan.stages
-        if not stage.stage_id.endswith("short_vlm_kd")
+        if stage.stage_id not in cpu_stages and not stage.stage_id.endswith("short_vlm_kd")
     )
 
 

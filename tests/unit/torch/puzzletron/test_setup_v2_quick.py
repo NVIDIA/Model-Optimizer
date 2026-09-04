@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
+import puzzletron_setup.v2.bundle as bundle_module
 import puzzletron_setup.v2.cli as cli_module
 import puzzletron_setup.v2.wizard as wizard_module
 from puzzletron_orchestrator.compiler import (
@@ -29,6 +31,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.controller import dry_run_plan
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
@@ -455,6 +458,35 @@ def test_guided_wizard_runs_real_sections_and_generates_valid_bundles(
     smoke_runner = yaml.safe_load((campaign / "smoke" / "runner.yaml").read_text())
     assert smoke_runner["runner"]["slurm"]["job_name_prefix"] == "acct-puzzletron"
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
+    execution = yaml.safe_load((campaign / "production" / "execution.yaml").read_text())
+    assert execution["execution"]["schema_version"] == 1
+    assert production["model_info"]["hidden_size"] == 1024
+    assert production["model_info"]["num_hidden_layers"] == 24
+    assert production["embedding_pruning"] == {
+        "enabled": True,
+        "widths": [1024],
+        "alignment": 256,
+        "cycle_widths": True,
+    }
+    assert production["depth_importance"]["expected_initial_sublayers"] == 48
+    assert production["depth_importance"]["max_subblocks_to_remove"] == 0
+    mip_run = next(iter(production["mip"]["runs"].values()))
+    assert mip_run["search_space"]["embedding"] == [1024]
+    assert mip_run["search_space"]["depth"] == [0]
+    assert execution["execution"]["stages"]["mip"]["resource"] == "cpu"
+    plan = compile_campaign_plan(
+        experiment_config_path=campaign / "production" / "experiment.yaml",
+        runner=load_runner_config(campaign / "production" / "runner.yaml"),
+        execution=load_execution_config(campaign / "production" / "execution.yaml"),
+        stage_filter="mip",
+    )
+    submission = dry_run_plan(plan)[0]
+    assert submission.launcher == "direct"
+    assert submission.gpus == 0
+    assert any(
+        str(argument).endswith("examples/puzzletron/main.py") for argument in submission.argv
+    )
+    assert submission.argv[submission.argv.index("--worker-stage") + 1] == "mip"
     flow = next(iter(production["post_mip"]["flows"].values()))
     comparison = flow["nodes"]["quality_benchmarks"]
     assert comparison["type"] == "downstream_evaluation"
@@ -545,15 +577,21 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     smoke = yaml.safe_load((campaign / "smoke" / "experiment.yaml").read_text())
     smoke_flow = next(iter(smoke["post_mip"]["flows"].values()))
     smoke_quality = smoke_flow["nodes"]["quality_benchmarks"]["config"]
-    assert smoke_quality["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+    assert smoke_quality["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
     assert smoke_quality["limit"] == 8
+    assert smoke_quality["limit_mm_per_prompt"] == {"image": 32}
+    assert smoke_quality["max_model_len"] == 32768
     assert "recorded_observation" not in smoke_quality
     production = yaml.safe_load((campaign / "production" / "experiment.yaml").read_text())
     flow_id, flow = next(iter(production["post_mip"]["flows"].items()))
     assert flow_id == "params-90"
     nodes = flow["nodes"]
     quality = nodes["quality_benchmarks"]
-    assert quality["config"]["profile"] == "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
+    assert (
+        quality["config"]["profile"] == "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+    )
+    assert quality["config"]["limit_mm_per_prompt"] == {"image": 32}
+    assert quality["config"]["max_model_len"] == 32768
     assert "model" not in quality["config"]
     assert "log_samples" not in quality["config"]
     assert "recorded_observation" not in quality["config"]
@@ -574,6 +612,70 @@ def test_guided_wizard_generates_the_complete_qwen_vlm_flow(tmp_path, monkeypatc
     assert f"post.{flow_id}.vlm_serving" in stage_ids
     assert f"post.{flow_id}.short_kd" in stage_ids
     assert stage_ids[-1] == f"post.{flow_id}.quality_benchmarks"
+    mip = next(stage for stage in plan.stages if stage.stage_id == "mip")
+    assert mip.resource == "cpu"
+    assert mip.total_gpus == 0
+    dry_run = (campaign / "production" / "dry-run-plan.txt").read_text()
+    assert "mip: 1 submission(s), strategy=single, resource=cpu" in dry_run
+    assert '"resource": "cpu"' in dry_run
+    assert "scheduler_script" in dry_run
+    assert str(campaign / "production" / "experiment.yaml") in dry_run
+    assert ".puzzletron-v2-" not in dry_run
+    readme = (campaign / "README.md").read_text()
+    assert "generation-time snapshot" in readme
+    snapshots = {
+        budget: (campaign / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+    wizard_module.build_bundles_v2(campaign, WizardState.resume(campaign))
+    assert snapshots == {
+        budget: (campaign / budget / "dry-run-plan.txt").read_text()
+        for budget in ("smoke", "production")
+    }
+
+    changed_state = WizardState.resume(campaign)
+    changed_state.set_field(
+        "infrastructure.runner.slurm.partition",
+        "replacement-gpu-partition",
+        source="user",
+    )
+    readme_path = campaign / "README.md"
+    readme_path.write_text(f"{readme_path.read_text()}\nrollback sentinel\n")
+
+    def campaign_files():
+        return {
+            path.relative_to(campaign): path.read_bytes()
+            for path in campaign.rglob("*")
+            if path.is_file()
+        }
+
+    published_files = campaign_files()
+    assert b"replacement-gpu-partition" not in published_files[Path("smoke/runner.yaml")]
+
+    render_plan = bundle_module.dry_run_bundle
+
+    def fail_production_plan(bundle):
+        if bundle.parent == campaign and bundle.name == "production":
+            raise RuntimeError("dry-run rendering failed")
+        return render_plan(bundle)
+
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", fail_production_plan)
+    with pytest.raises(RuntimeError, match="dry-run rendering failed"):
+        wizard_module.build_bundles_v2(campaign, changed_state)
+    assert campaign_files() == published_files
+
+    monkeypatch.setattr(bundle_module, "dry_run_bundle", render_plan)
+    replace = bundle_module.os.replace
+
+    def fail_readme_publish(source, target):
+        if target == campaign / "README.md" and source.name == "README.md":
+            raise RuntimeError("README publication failed")
+        return replace(source, target)
+
+    monkeypatch.setattr(bundle_module.os, "replace", fail_readme_publish)
+    with pytest.raises(RuntimeError, match="README publication failed"):
+        wizard_module.build_bundles_v2(campaign, changed_state)
+    assert campaign_files() == published_files
     assert all(stage.total_gpus <= 1 for stage in plan.stages)
 
 
@@ -649,6 +751,8 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
             "acct",
             "pt",
             "4:00:00",
+            "6",
+            "24576",
             "8",
             "",
         ]
@@ -664,6 +768,8 @@ def test_customize_partition_prompt_renders_list_default_as_comma_separated(tmp_
     assert backend.cpu_partition_default == "cpu-a,cpu-b"
     assert state.get_field("infrastructure.runner.slurm.partition") == "gpu-a,gpu-b"
     assert state.get_field("infrastructure.runner.slurm.partition_cpu") == "cpu-a,cpu-b"
+    assert state.get_field("infrastructure.runner.slurm.cpu_cpus_per_task") == 6
+    assert state.get_field("infrastructure.runner.slurm.cpu_memory_mb") == 24576
     assert backend.remaining == 0
 
 

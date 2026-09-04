@@ -8,6 +8,8 @@ runner:
   slurm:
     account: REPLACE_WITH_SLURM_ACCOUNT
     partition: REPLACE_WITH_SLURM_PARTITION
+    cpu_cpus_per_task: 4
+    cpu_memory_mb: 32768
     max_nodes: 1
     time_limit: "4:00:00"
   execution_contract:

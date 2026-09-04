@@ -13,6 +13,10 @@ data:
   # Tested public snapshot; callers may override with another immutable SHA.
   revision: ${oc.env:PUZZLETRON_DATASET_REVISION,51f4f4d219315c3283950994d4eb3d7fc30aa87b}
 
+prepare_dataset:
+  evaluation_tasks: [realworldqa, mmmu_val, mvbench]
+  evaluation_hf_home: ${oc.env:HF_HOME}
+
 # Auto-detection would select the VLM recipe from data.modality. Declare the
 # domain and trainable groups explicitly so the resolved run packet is auditable.
 global_distillation:
@@ -56,22 +60,18 @@ post_mip:
           input: materialized
           failure_policy: strict
           config: &realworldqa_smoke_config
-            profile: qwen35_vlm_realworldqa
+            profile: qwen35_vlm_core3_24row_smoke_v2
+            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
+            row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
+            reference_checkpoint: ${teacher_dir}
+            reference_once: true
+            reference_cache_id: qwen35-0p8b-smoke-v1-teacher
             batch_size: 1
-            timeout_seconds: 600
+            timeout_seconds: 3000
             dtype: bfloat16
             gpu_memory_utilization: 0.5
-            max_model_len: 4096
-            limit_mm_per_prompt: {image: 1}
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
+            max_model_len: 16384
+            limit_mm_per_prompt: {image: 32}
         vlm_serving:
           type: aiperf
           input: checkpoint_eval

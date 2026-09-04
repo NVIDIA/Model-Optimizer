@@ -24,6 +24,7 @@ from puzzletron_orchestrator.compiler import (
     load_execution_config,
     load_runner_config,
 )
+from puzzletron_orchestrator.controller import dry_run_plan
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 RUN_PATH = (
@@ -102,3 +103,23 @@ def test_qwen3p5_0p8b_runner_requires_an_explicit_site_contract() -> None:
     assert runner.contract.container.startswith("REPLACE_WITH_")
     assert runner.contract.container_mounts is not None
     assert runner.contract.container_mounts.startswith("REPLACE_WITH_")
+
+
+def test_manual_smoke_routes_mip_through_one_cpu_task(monkeypatch, tmp_path: Path) -> None:
+    plan = _compile_plan(monkeypatch, tmp_path)
+    node = next(stage for stage in plan.stages if stage.stage_id == "mip")
+    submission = next(item for item in dry_run_plan(plan) if item.stage_id == "mip")
+    script = submission.scheduler_script
+
+    assert node.resource == "cpu"
+    assert node.distributed is False
+    assert submission.resource == "cpu"
+    assert submission.gpus == 0
+    assert submission.task_count == 1
+    assert submission.launcher == "direct"
+    assert "--gpus-per-node" not in submission.argv
+    assert script is not None
+    assert "#SBATCH --gpus" not in script
+    srun = next(line for line in script.splitlines() if line.startswith("srun "))
+    assert "--gpus-per-task" not in srun
+    assert "--launcher direct" in script
