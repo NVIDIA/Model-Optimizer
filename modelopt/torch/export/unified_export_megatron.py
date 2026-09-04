@@ -1489,7 +1489,6 @@ class GPTModelExporter:
             del gathered_bytes
         else:
             self._state_dict.update(local_expert_state)
-        return seen_qformat, seen_block_size
 
     def _qkv_slicing(
         self,

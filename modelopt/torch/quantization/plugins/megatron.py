@@ -333,9 +333,6 @@ def _output_layer_untied(config) -> bool:
 # Statement kinds of the upstream GPTModel.sharded_state_dict body patched below.
 _GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
 
-# The replacement we installed on GPTModel, so a repeat call can recognise its own work.
-_patched_gpt_sharded_state_dict = None
-
 
 def _output_layer_extra_state_has_data(entry: Any) -> bool:
     """True when a sharded state-dict entry carries a payload."""
@@ -350,18 +347,16 @@ def keep_gpt_output_layer_extra_state() -> bool:
     """Keep ``output_layer._extra_state`` so a quantized ``lm_head`` can be checkpointed.
 
     ``GPTModel.sharded_state_dict`` drops that entry and asserts it is empty, so a quantized
-    output_layer otherwise fails to save and loads back unquantized. Cached: warns at most once.
+    output_layer otherwise fails to save and loads back unquantized. ``@cache`` makes this
+    idempotent -- the body runs once per process, so a repeat call cannot double-patch or re-warn.
 
     TODO: remove once megatron-core migrates GPTModel to HybridModel, expected in nemo:26.10.
     """
-    global _patched_gpt_sharded_state_dict
-    if GPTModel.sharded_state_dict is _patched_gpt_sharded_state_dict:
-        return True
     try:
         src = textwrap.dedent(inspect.getsource(GPTModel.sharded_state_dict))
-    except (OSError, TypeError):
-        src = ""  # no source to check against; leave megatron-core alone
-    func = ast.parse(src).body[0] if src else None
+        func = ast.parse(src).body[0]
+    except (OSError, TypeError, SyntaxError, IndexError):
+        func = None  # no usable source to compare against; leave megatron-core alone
     body = func.body if isinstance(func, ast.FunctionDef) else []
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]  # docstring
@@ -384,7 +379,6 @@ def keep_gpt_output_layer_extra_state() -> bool:
             sharded_state_dict.pop(key)  # upstream behaviour for the empty placeholder
         return sharded_state_dict
 
-    _patched_gpt_sharded_state_dict = sharded_state_dict
     GPTModel.sharded_state_dict = sharded_state_dict
     return True
 

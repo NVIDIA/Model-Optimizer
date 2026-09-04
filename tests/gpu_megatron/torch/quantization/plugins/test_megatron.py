@@ -1998,11 +1998,11 @@ class TestKeepGptOutputLayerExtraState:
         )
 
     def test_second_call_is_a_no_op(self):
-        """Self-disabling: re-running never stacks a second patch on top of our own."""
+        """Idempotent: @cache runs the body once, so a repeat call cannot stack a second patch."""
         first = keep_gpt_output_layer_extra_state()
         after_first = GPTModel.sharded_state_dict
-        keep_gpt_output_layer_extra_state.cache_clear()
         assert keep_gpt_output_layer_extra_state() == first
+        assert keep_gpt_output_layer_extra_state.cache_info().hits >= 1
         assert GPTModel.sharded_state_dict is after_first
 
     def test_unrecognised_upstream_is_left_alone(self):
