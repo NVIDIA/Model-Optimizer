@@ -180,9 +180,6 @@ def build_text_to_image_multiresolution_dataloader(
     pin_memory: bool = True,
     prefetch_factor: int = 2,
     negative_prompt_embedding_path: str | None = None,
-    split: str | None = None,
-    validation_count: int | None = None,
-    split_seed: int = 2026,
     sampler_seed: int = 42,
     loader_seed: int | None = None,
 ) -> tuple[StatefulDataLoader, SequentialBucketSampler]:
@@ -205,9 +202,6 @@ def build_text_to_image_multiresolution_dataloader(
         prefetch_factor: Prefetch batches per worker.
         negative_prompt_embedding_path: Optional ``.pt`` with a static negative-prompt
             embedding, bound into the collate and broadcast to every batch.
-        split: Optional deterministic ``"train"`` or ``"validation"`` selection.
-        validation_count: Number of validation samples when ``split`` is set.
-        split_seed: Local seed used to construct deterministic split membership.
         sampler_seed: Seed for the released deterministic bucket sampler.
         loader_seed: Optional dedicated seed for DataLoader worker/base-seed generation.
 
@@ -218,9 +212,6 @@ def build_text_to_image_multiresolution_dataloader(
         cache_dir=cache_dir,
         train_text_encoder=train_text_encoder,
         prompt_only=prompt_only,
-        split=split,
-        validation_count=validation_count,
-        split_seed=split_seed,
     )
     effective_root = dataset.cache_root
 

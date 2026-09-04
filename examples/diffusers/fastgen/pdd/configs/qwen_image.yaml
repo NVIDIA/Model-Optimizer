@@ -17,11 +17,7 @@ model:
   latent_shape: [16, 128, 128]
 
 pdd:
-  pred_type: flow
-  num_train_timesteps:
   guidance_scale: 4.0
-  student_sample_steps: 4
-  student_sample_type: ode
   grid_size: 128
   grid_max_t: 0.999
   flow_shift: 5.0
@@ -86,9 +82,6 @@ data:
     drop_last: true
     shuffle: true
     dynamic_batch_size: false
-    split: train
-    validation_count: 2000
-    split_seed: 2026
     sampler_seed: 42
     loader_seed: 42
     negative_prompt_embedding_path: negative_prompt_embedding.pt

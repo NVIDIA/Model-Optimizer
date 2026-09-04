@@ -87,7 +87,7 @@ def _parse_blocks(value: str) -> list[int]:
 def _load_config(path: Path, blocks: list[int]) -> PDDConfig:
     raw = yaml.safe_load(path.read_text())
     values = dict(raw["pdd"])
-    values.update(inference_blocks=blocks, student_sample_steps=len(blocks))
+    values["inference_blocks"] = blocks
     return PDDConfig.model_validate(values)
 
 

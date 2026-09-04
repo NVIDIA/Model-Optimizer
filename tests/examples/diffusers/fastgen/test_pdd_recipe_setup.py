@@ -128,7 +128,6 @@ def test_prepared_student_width_is_validated_before_training() -> None:
         block_size_min=1,
         block_size_max=8,
         inference_blocks=[4, 4],
-        student_sample_steps=2,
     )
     _validate_prepared_student(_PreparedStudent(out_features=32), config)
 

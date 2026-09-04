@@ -4,13 +4,6 @@
 # model-call defaults only; data roots, training topology, checkpoint paths, and
 # cluster settings belong to the framework example and run manifest.
 
-pred_type: flow
-student_sample_type: ode
-student_sample_steps: 4
-
-# Qwen consumes the normalized continuous time supplied by the PDD grid.
-num_train_timesteps:
-
 # Canonical Qwen teacher guidance. Packed-space norm rescaling remains owned by
 # the Qwen plugin/example rather than the framework-neutral PDD config.
 guidance_scale: 4.0

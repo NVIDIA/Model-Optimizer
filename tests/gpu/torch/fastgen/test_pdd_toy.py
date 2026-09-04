@@ -40,8 +40,13 @@ class _Student(nn.Module):
         self.backbone = nn.Linear(_WIDTH, _WIDTH)
         self.projection = nn.Linear(_WIDTH, _WIDTH)
 
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.projection(torch.tanh(self.backbone(state)))
+    def forward(
+        self,
+        state: torch.Tensor,
+        *,
+        fusion: tuple[int, int, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        return self.projection(torch.tanh(self.backbone(state)), fusion=fusion)
 
 
 class _Teacher(nn.Module):
@@ -90,8 +95,7 @@ class _Adapter:
         projection = model.projection
         assert isinstance(projection, PDDOutputProjection)
         self.fused_calls += 1
-        with projection.fuse_block(start, end, grid):
-            return model(state.to(self._model_dtype(model)))
+        return model(state.to(self._model_dtype(model)), fusion=(start, end, grid))
 
     def teacher_velocity(
         self,
@@ -131,7 +135,6 @@ def _build(
         block_size_min=1,
         block_size_max=_GRID_SIZE,
         inference_blocks=[2, 2],
-        student_sample_steps=2,
         guidance_scale=None,
     )
     student = _Student().to(device=device, dtype=torch.bfloat16)

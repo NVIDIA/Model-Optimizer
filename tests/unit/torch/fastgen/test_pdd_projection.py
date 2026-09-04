@@ -186,8 +186,7 @@ def test_fused_forward_matches_independent_weighted_head_sum(layout, bias):
     coefficients = torch.tensor([0.5 / 0.8, 0.3 / 0.8])
     expected = torch.einsum("n,bno->bo", coefficients, explicit_heads[:, 1:3])
 
-    with projection.fuse_block(1, 3, grid):
-        actual = projection(inputs)
+    actual = projection(inputs, fusion=(1, 3, grid))
 
     torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(
@@ -200,16 +199,12 @@ def test_fused_forward_matches_independent_weighted_head_sum(layout, bias):
     assert torch.equal(grid, original_grid)
 
 
-def test_fusion_context_exception_cleans_up_and_allows_reuse():
+def test_fused_forward_does_not_change_subsequent_projection_calls():
     projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
     inputs = torch.tensor([[1.0, -0.5]])
     grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
 
-    with pytest.raises(RuntimeError, match="body failed"), projection.fuse_block(0, 2, grid):
-        raise RuntimeError("body failed")
-
-    with projection.fuse_block(1, 3, grid):
-        assert projection(inputs).shape == (1, 6)
+    assert projection(inputs, fusion=(1, 3, grid)).shape == (1, 6)
     assert projection(inputs).shape == (1, 18)
 
 
@@ -217,11 +212,11 @@ def test_fusion_context_exception_cleans_up_and_allows_reuse():
     ("start", "end", "message"),
     [(-1, 2, "0 <= start"), (1, 1, "0 <= start"), (1, 4, "0 <= start")],
 )
-def test_fusion_context_rejects_invalid_blocks(start, end, message):
+def test_fused_forward_rejects_invalid_blocks(start, end, message):
     projection = PDDOutputProjection.from_linear(_base_linear(), 3, _spec("channel_major"))
     grid = torch.tensor([1.0, 0.7, 0.2, 0.0])
-    with pytest.raises(ValueError, match=message), projection.fuse_block(start, end, grid):
-        pass
+    with pytest.raises(ValueError, match=message):
+        projection(torch.zeros(1, 2), fusion=(start, end, grid))
 
 
 def _state_clone(state):

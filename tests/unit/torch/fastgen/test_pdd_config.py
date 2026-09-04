@@ -19,74 +19,39 @@ from __future__ import annotations
 
 import pytest
 
-from modelopt.torch.fastgen import PDDConfig, SampleTimestepConfig, load_pdd_config
+from modelopt.torch.fastgen import PDDConfig, load_pdd_config
 
 
-def test_default_pdd_config_is_canonical_and_lists_are_independent():
-    first = PDDConfig()
-    second = PDDConfig()
+def test_default_pdd_config_is_canonical():
+    config = PDDConfig()
 
-    assert first.pred_type == "flow"
-    assert first.student_sample_type == "ode"
-    assert first.student_sample_steps == 4
-    assert first.grid_size == 128
-    assert first.grid_max_t == 0.999
-    assert first.flow_shift == 5.0
-    assert first.block_size_min == 4
-    assert first.block_size_max == 64
-    assert first.teacher_integrator == "euler"
-    assert first.inference_blocks == [32, 32, 32, 32]
-    assert first.data_free is False
-    assert first.inference_blocks is not second.inference_blocks
-
-    first.inference_blocks[0] = 16
-    assert second.inference_blocks == [32, 32, 32, 32]
+    assert config.guidance_scale is None
+    assert config.grid_size == 128
+    assert config.grid_max_t == 0.999
+    assert config.flow_shift == 5.0
+    assert config.block_size_min == 4
+    assert config.block_size_max == 64
+    assert config.teacher_integrator == "euler"
+    assert config.inference_blocks == (32, 32, 32, 32)
+    assert config.data_free is False
 
 
-def test_pdd_config_accepts_supported_schedule_and_adapter_time_scale():
+def test_pdd_config_accepts_supported_schedule():
     config = PDDConfig(
         inference_blocks=[64, 64],
-        student_sample_steps=2,
         teacher_integrator="midpoint",
-        num_train_timesteps=1000,
         data_free=True,
     )
 
-    assert config.inference_blocks == [64, 64]
+    assert config.inference_blocks == (64, 64)
     assert config.teacher_integrator == "midpoint"
-    assert config.num_train_timesteps == 1000
     assert config.data_free is True
-
-
-def test_rejected_attribute_assignment_leaves_pdd_config_unchanged():
-    config = PDDConfig()
-
-    with pytest.raises(ValueError, match="student_sample_steps must equal"):
-        config.student_sample_steps = 3
-
-    assert config.student_sample_steps == 4
-    assert config.inference_blocks == [32, 32, 32, 32]
-
-
-def test_rejected_mapping_assignment_leaves_pdd_config_unchanged():
-    config = PDDConfig()
-
-    with pytest.raises(ValueError, match="student_sample_steps must equal"):
-        config["inference_blocks"] = [64, 64]
-
-    assert config.student_sample_steps == 4
-    assert config.inference_blocks == [32, 32, 32, 32]
 
 
 @pytest.mark.parametrize("value", [True, 1])
 def test_pdd_config_rejects_non_float_grid_max_t_before_coercion(value):
     with pytest.raises(ValueError, match="grid_max_t must be a float"):
         PDDConfig(grid_max_t=value)
-
-    config = PDDConfig()
-    with pytest.raises(ValueError, match="grid_max_t must be a float"):
-        config.grid_max_t = value
-    assert config.grid_max_t == 0.999
 
 
 @pytest.mark.parametrize(
@@ -102,10 +67,6 @@ def test_pdd_config_rejects_non_float_grid_max_t_before_coercion(value):
         ({"grid_size": 130}, "must be divisible"),
         ({"inference_blocks": []}, "at least one block"),
         ({"inference_blocks": [32, 32, 32]}, "must sum to grid_size"),
-        (
-            {"inference_blocks": [64, 64], "student_sample_steps": 4},
-            "student_sample_steps must equal",
-        ),
     ],
 )
 def test_pdd_config_rejects_invalid_grid_and_block_boundaries(overrides, message):
@@ -114,34 +75,37 @@ def test_pdd_config_rejects_invalid_grid_and_block_boundaries(overrides, message
 
 
 def test_pdd_config_accepts_inference_partition_outside_training_block_support():
-    config = PDDConfig(inference_blocks=[1, 127], student_sample_steps=2)
+    config = PDDConfig(inference_blocks=[1, 127])
 
-    assert config.inference_blocks == [1, 127]
+    assert config.inference_blocks == (1, 127)
+
+
+@pytest.mark.parametrize("mapping_assignment", [False, True])
+def test_rejected_assignment_leaves_pdd_config_unchanged(mapping_assignment):
+    config = PDDConfig()
+
+    with pytest.raises(ValueError, match="must sum to grid_size"):
+        if mapping_assignment:
+            config["grid_size"] = 64
+        else:
+            config.grid_size = 64
+
+    assert config.grid_size == 128
+    assert config.inference_blocks == (32, 32, 32, 32)
 
 
 @pytest.mark.parametrize(
-    "overrides",
-    [
-        {"pred_type": "x0"},
-        {"student_sample_type": "sde"},
-        {"teacher_integrator": "heun"},
-        {"teacher_integrator": "rk4"},
-    ],
+    "overrides", [{"teacher_integrator": "heun"}, {"teacher_integrator": "rk4"}]
 )
 def test_pdd_config_locks_algorithm_modes(overrides):
     with pytest.raises(ValueError):
         PDDConfig(**overrides)
 
 
-def test_pdd_config_rejects_nondefault_sample_timestep_config():
-    with pytest.raises(ValueError, match="sample_t_cfg is unused by PDD"):
-        PDDConfig(sample_t_cfg=SampleTimestepConfig(shift=6.0))
-
-
 def test_pdd_config_loads_filesystem_yaml_with_optional_suffix(tmp_path):
     config_path = tmp_path / "pdd.yaml"
     config_path.write_text(
-        "inference_blocks: [64, 64]\nstudent_sample_steps: 2\nteacher_integrator: midpoint\n",
+        "inference_blocks: [64, 64]\nteacher_integrator: midpoint\n",
         encoding="utf-8",
     )
 
@@ -149,5 +113,5 @@ def test_pdd_config_loads_filesystem_yaml_with_optional_suffix(tmp_path):
     from_class = PDDConfig.from_yaml(config_path)
 
     assert loaded == from_class
-    assert loaded.inference_blocks == [64, 64]
+    assert loaded.inference_blocks == (64, 64)
     assert loaded.teacher_integrator == "midpoint"

@@ -15,10 +15,9 @@
 
 """Pydantic configuration classes for the fastgen distillation pipelines.
 
-Configurations are layered so a method-specific config (e.g. :class:`DMDConfig`) inherits
-shared diffusion-distillation hyperparameters from :class:`DistillationConfig`. All classes
-inherit :class:`modelopt.torch.opt.config.ModeloptBaseConfig`, which provides torch-safe
-serialization and dict-like iteration.
+Configurations inherit :class:`modelopt.torch.opt.config.ModeloptBaseConfig`, which provides
+torch-safe serialization and dict-like iteration. DMD builds on shared diffusion-distillation
+settings, while PDD exposes only its fixed-grid method settings.
 
 The default values in :class:`DMDConfig` mirror the FastGen Wan 2.2 5B experiment at
 ``FastGen/fastgen/configs/experiments/WanT2V/config_dmd2_wan22_5b.py``.
@@ -172,8 +171,7 @@ class EMAConfig(ModeloptBaseConfig):
 class DistillationConfig(ModeloptBaseConfig):
     """Shared hyperparameters for diffusion step-distillation methods.
 
-    Concrete methods subclass this config to add method-specific fields
-    (see :class:`DMDConfig`).
+    DMD subclasses this config to add method-specific fields.
     """
 
     pred_type: PredType = ModeloptField(
@@ -220,7 +218,7 @@ class DistillationConfig(ModeloptBaseConfig):
     )
 
 
-class PDDConfig(DistillationConfig):
+class PDDConfig(ModeloptBaseConfig):
     """Hyperparameters for Parallel Decoding Distillation (PDD).
 
     PDD trains one velocity head per interval on a fixed shifted rectified-flow
@@ -228,20 +226,10 @@ class PDDConfig(DistillationConfig):
     not define a second timestep schedule.
     """
 
-    pred_type: Literal["flow"] = ModeloptField(
-        default="flow",
-        title="Network prediction parameterization",
-        description="PDD is defined for rectified-flow velocity prediction.",
-    )
-    student_sample_type: Literal["ode"] = ModeloptField(
-        default="ode",
-        title="Student sampling mode",
-        description="PDD fused inference follows the fixed rectified-flow ODE grid.",
-    )
-    student_sample_steps: int = ModeloptField(
-        default=4,
-        title="Student inference steps",
-        description="Number of contiguous blocks in ``inference_blocks``.",
+    guidance_scale: float | None = ModeloptField(
+        default=None,
+        title="CFG scale",
+        description="Teacher classifier-free guidance scale. If ``None``, CFG is disabled.",
     )
     grid_size: int = ModeloptField(
         default=128,
@@ -273,8 +261,8 @@ class PDDConfig(DistillationConfig):
         title="Teacher target integrator",
         description="Integrator used to estimate the teacher mean velocity for an interval.",
     )
-    inference_blocks: list[int] = Field(
-        default_factory=lambda: [32, 32, 32, 32],
+    inference_blocks: tuple[int, ...] = ModeloptField(
+        default=(32, 32, 32, 32),
         title="Fused inference block schedule",
         description="Contiguous interval counts that partition the complete PDD grid.",
     )
@@ -287,12 +275,7 @@ class PDDConfig(DistillationConfig):
     )
 
     def __setattr__(self, name: str, value: object) -> None:
-        """Validate a complete candidate config before changing an initialized field.
-
-        Pydantic's after-model validators otherwise run after assignment and leave the
-        rejected value stored. PDD has cross-field schedule invariants, so attribute
-        and mutable-mapping updates must be transactional.
-        """
+        """Validate cross-field invariants before changing an initialized field."""
         if name in type(self).model_fields and name in self.__dict__:
             candidate = self.model_dump()
             candidate[name] = value
@@ -336,18 +319,6 @@ class PDDConfig(DistillationConfig):
             raise ValueError(
                 f"inference_blocks must sum to grid_size={self.grid_size}, got "
                 f"{sum(self.inference_blocks)}."
-            )
-        if self.student_sample_steps != len(self.inference_blocks):
-            raise ValueError(
-                "student_sample_steps must equal len(inference_blocks), got "
-                f"{self.student_sample_steps} and {len(self.inference_blocks)}."
-            )
-
-        default_sample_t_cfg = SampleTimestepConfig()
-        if self.sample_t_cfg.model_dump() != default_sample_t_cfg.model_dump():
-            raise ValueError(
-                "sample_t_cfg is unused by PDD and cannot be overridden; PDD samples "
-                "discrete interval indices from its fixed shifted grid."
             )
         return self
 

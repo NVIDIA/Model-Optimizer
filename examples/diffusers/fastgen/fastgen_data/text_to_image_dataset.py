@@ -20,7 +20,6 @@ import torch
 from nemo_automodel.components.datasets.diffusion.base_dataset import BaseMultiresolutionDataset
 
 from .paths import resolve_cache_root, resolve_under_root
-from .splits import make_train_validation_indices
 
 __all__ = ["TextToImageDataset"]
 
@@ -33,29 +32,16 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         cache_dir: str | Path,
         train_text_encoder: bool = False,
         prompt_only: bool = False,
-        split: str | None = None,
-        validation_count: int | None = None,
-        split_seed: int = 2026,
     ):
         """
         Args:
             cache_dir: Directory containing preprocessed cache
             train_text_encoder: If True, returns tokens instead of embeddings
             prompt_only: Omit cached image latents from returned samples.
-            split: Optional deterministic ``"train"`` or ``"validation"`` selection.
-            validation_count: Number of validation samples when ``split`` is set.
-            split_seed: Local seed used to construct deterministic split membership.
         """
-        if split not in (None, "train", "validation"):
-            raise ValueError("split must be null, 'train', or 'validation'")
-        if split is not None and validation_count is None:
-            raise ValueError("validation_count is required when split is set")
         self.train_text_encoder = train_text_encoder
         self.prompt_only = prompt_only
         self.cache_root = resolve_cache_root(cache_dir)
-        self._split = split
-        self._validation_count = validation_count
-        self._split_seed = split_seed
         self._resolved_cache_files: dict[int, Path] = {}
         super().__init__(str(self.cache_root), quantization=64)
 
@@ -95,18 +81,8 @@ class TextToImageDataset(BaseMultiresolutionDataset):
         if not complete_metadata:
             raise ValueError(f"No samples found in {metadata_file}")
         self.total_num_samples = len(complete_metadata)
-        if self._split is None:
-            self.sample_ids = list(range(self.total_num_samples))
-        else:
-            if self._validation_count is None:
-                raise RuntimeError("validation_count was not resolved for the requested split")
-            train, validation = make_train_validation_indices(
-                self.total_num_samples,
-                self._validation_count,
-                self._split_seed,
-            )
-            self.sample_ids = train if self._split == "train" else validation
-        return [complete_metadata[index] for index in self.sample_ids]
+        self.sample_ids = list(range(self.total_num_samples))
+        return complete_metadata
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Load a single sample."""

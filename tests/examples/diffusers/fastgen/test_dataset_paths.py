@@ -34,12 +34,9 @@ _FASTGEN_DIR = _REPO_ROOT / "examples" / "diffusers" / "fastgen"
 if str(_FASTGEN_DIR) not in sys.path:
     sys.path.insert(0, str(_FASTGEN_DIR))
 
-from fastgen_data import (
-    TextToImageDataset,
-    build_text_to_image_multiresolution_dataloader,
-    resolve_cache_root,
-    resolve_under_root,
-)
+from fastgen_data import build_text_to_image_multiresolution_dataloader
+from fastgen_data.paths import resolve_cache_root, resolve_under_root
+from fastgen_data.text_to_image_dataset import TextToImageDataset
 
 
 def test_cache_root_uses_unset_or_empty_fallback(make_fastgen_cache, monkeypatch, tmp_path):

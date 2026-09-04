@@ -23,9 +23,7 @@ packing remain behind the adapter protocol and belong in
 
 from __future__ import annotations
 
-import contextlib
-import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -40,7 +38,6 @@ from ..flow_matching import (
     integrate_interval_velocities,
     make_shifted_flow_grid,
 )
-from ..pipeline import DistillationPipeline
 
 __all__ = [
     "PDDLayerSpec",
@@ -91,21 +88,12 @@ class PDDLayerSpec:
             _require_int(self.output_channels, name="output_channels")
 
 
-@dataclass(frozen=True)
-class _FusionRequest:
-    start: int
-    end: int
-    grid: torch.Tensor
-
-
 class PDDOutputProjection(nn.Linear):
     """A widened linear projection with one output head per PDD interval.
 
-    Outside :meth:`fuse_block`, ``forward`` returns the full widened output.
-    Inside the context, ``forward`` computes the selected block's weighted
-    projection in float32 and returns the base-sized output. Fusion state is
-    synchronous and thread-owned; nested contexts in one thread are supported,
-    while concurrent access from another thread is rejected.
+    ``forward`` returns the full widened output unless an explicit fusion tuple
+    ``(start, end, grid)`` is supplied. Fused parameters are computed in float32
+    and applied without mutating the module or replacing its registered weights.
     """
 
     def __init__(
@@ -145,23 +133,6 @@ class PDDOutputProjection(nn.Linear):
         self.base_out_features = base_out_features
         self.grid_size = grid_size
         self.layer_spec = layer_spec
-        self._fusion_stack: list[_FusionRequest] = []
-        self._fusion_owner_thread: int | None = None
-        self._fusion_lock = threading.Lock()
-
-    def __getstate__(self) -> dict[str, Any]:
-        """Exclude the process-local lock while preserving ordinary module deepcopy."""
-        with self._fusion_lock:
-            if self._fusion_stack:
-                raise RuntimeError("cannot copy or serialize an active PDD fusion context.")
-            state = super().__getstate__()
-            state.pop("_fusion_lock", None)
-            return state
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore module state with a fresh process-local fusion lock."""
-        super().__setstate__(state)
-        self._fusion_lock = threading.Lock()
 
     @property
     def patch_factor(self) -> int:
@@ -262,14 +233,13 @@ class PDDOutputProjection(nn.Linear):
             .reshape(self.grid_size, self.base_out_features, *trailing_shape)
         )
 
-    @contextlib.contextmanager
-    def fuse_block(self, start: int, end: int, grid: torch.Tensor) -> Iterator[PDDOutputProjection]:
-        """Temporarily return the fused base-sized projection for ``[start, end)``.
-
-        Contexts may nest synchronously in one thread. Because fusion selection is
-        stored on the module, a second thread may neither enter a context nor call
-        ``forward`` until the owning context exits.
-        """
+    def _fused_parameters(
+        self,
+        start: int,
+        end: int,
+        grid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Compute block-fused parameters for the half-open interval ``[start, end)``."""
         if isinstance(start, bool) or isinstance(end, bool):
             raise TypeError("start and end must be integers, not bool.")
         if not isinstance(start, int) or not isinstance(end, int):
@@ -278,58 +248,33 @@ class PDDOutputProjection(nn.Linear):
             raise ValueError(
                 f"grid must contain {self.grid_size + 1} nodes, got shape {tuple(grid.shape)}."
             )
-        fusion_coefficients(grid, start, end)
-
-        thread_id = threading.get_ident()
-        request = _FusionRequest(start=start, end=end, grid=grid)
-        with self._fusion_lock:
-            if self._fusion_stack and self._fusion_owner_thread != thread_id:
-                raise RuntimeError("PDD fusion context is already active in another thread.")
-            if not self._fusion_stack:
-                self._fusion_owner_thread = thread_id
-            self._fusion_stack.append(request)
-        try:
-            yield self
-        finally:
-            with self._fusion_lock:
-                if not self._fusion_stack or self._fusion_stack[-1] is not request:
-                    raise RuntimeError("PDD fusion contexts exited out of order.")
-                self._fusion_stack.pop()
-                if not self._fusion_stack:
-                    self._fusion_owner_thread = None
-
-    def _fused_parameters(
-        self, request: _FusionRequest
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Compute block-fused parameters from the registered widened parameter."""
-        coefficients = fusion_coefficients(request.grid, request.start, request.end).to(
+        coefficients = fusion_coefficients(grid, start, end).to(
             device=self.weight.device,
             dtype=torch.float32,
         )
-        head_weights = self._tensor_by_head(self.weight)[request.start : request.end]
+        head_weights = self._tensor_by_head(self.weight)[start:end]
         fused_weight = torch.einsum("n,n...->...", coefficients, head_weights.float()).to(
             self.weight.dtype
         )
         if self.bias is None:
             return fused_weight, None
-        head_bias = self._tensor_by_head(self.bias)[request.start : request.end]
+        head_bias = self._tensor_by_head(self.bias)[start:end]
         fused_bias = torch.einsum("n,n...->...", coefficients, head_bias.float()).to(
             self.bias.dtype
         )
         return fused_weight, fused_bias
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply the widened or currently scoped fused projection."""
-        with self._fusion_lock:
-            if not self._fusion_stack:
-                request = None
-            else:
-                if self._fusion_owner_thread != threading.get_ident():
-                    raise RuntimeError("PDD fused forward was called from a non-owning thread.")
-                request = self._fusion_stack[-1]
-        if request is None:
+    def forward(
+        self,
+        input: torch.Tensor,
+        *,
+        fusion: tuple[int, int, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Apply the widened projection or an explicitly selected fused block."""
+        if fusion is None:
             return F.linear(input, self.weight, self.bias)
-        fused_weight, fused_bias = self._fused_parameters(request)
+        start, end, grid = fusion
+        fused_weight, fused_bias = self._fused_parameters(start, end, grid)
         return F.linear(input, fused_weight, fused_bias)
 
 
@@ -422,7 +367,7 @@ class PDDModelAdapter(Protocol):
         ...
 
 
-class PDDPipeline(DistillationPipeline):
+class PDDPipeline:
     """PDD losses and fused sampler over a single core-owned grid."""
 
     def __init__(
@@ -435,12 +380,9 @@ class PDDPipeline(DistillationPipeline):
         """Store the models/config/adapter and freeze the optional training teacher."""
         if not isinstance(config, PDDConfig):
             raise TypeError(f"config must be PDDConfig, got {type(config).__name__}.")
-        if teacher is None:
-            self.student = student
-            self.teacher = None
-            self.config = config
-        else:
-            super().__init__(student, teacher, config)
+        self.student = student
+        self.teacher = None if teacher is None else teacher.eval().requires_grad_(False)
+        self.config = config
         self.adapter = adapter
 
     def time_grid(self, device: torch.device | str | None = None) -> torch.Tensor:

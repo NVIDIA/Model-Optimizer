@@ -149,7 +149,7 @@ def test_formerly_vendored_files_use_standard_nvidia_header():
 
 
 def test_data_builders_importable_and_accept_shared_cache_options():
-    """The real-data builder exposes the negative embedding and deterministic split seams."""
+    """The real-data builder exposes the shared negative-embedding seam."""
     pytest.importorskip("nemo_automodel")
     pytest.importorskip("torch")
 
@@ -158,7 +158,6 @@ def test_data_builders_importable_and_accept_shared_cache_options():
     assert callable(fastgen_data.build_text_to_image_multiresolution_dataloader)
     sig = inspect.signature(fastgen_data.build_text_to_image_multiresolution_dataloader)
     assert "negative_prompt_embedding_path" in sig.parameters
-    assert "split" in sig.parameters
     # Default None => CFG-less construction works without the negative embedding (it is optional).
     assert sig.parameters["negative_prompt_embedding_path"].default is None
 

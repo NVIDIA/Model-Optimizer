@@ -27,7 +27,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from torch import nn
 
 from ..config import PDDConfig
@@ -65,19 +64,10 @@ _CONTROLLED_MODEL_KWARGS = {
     "return_dict",
     "timestep",
     "txt_seq_lens",
+    "_pdd_fusion",
 }
 
 _QWEN_IMAGE_PDD_EXECUTION_ATTRIBUTE = "_modelopt_qwen_image_pdd_execution"
-_QWEN_IMAGE_PDD_CHILDREN = (
-    "pos_embed",
-    "time_text_embed",
-    "txt_norm",
-    "img_in",
-    "txt_in",
-    "transformer_blocks",
-    "norm_out",
-    "proj_out",
-)
 
 
 def _require_binary_mask(mask: torch.Tensor, *, name: str) -> None:
@@ -114,27 +104,15 @@ def _qwen_image_pdd_forward(
     controlnet_block_samples: Any = None,
     additional_t_cond: torch.Tensor | None = None,
     return_dict: bool = True,
+    _pdd_fusion: tuple[int, int, torch.Tensor] | None = None,
 ) -> Any:
     """Run Qwen-Image with the masked joint-attention contract required by PDD."""
-    if hidden_states.ndim != 3 or hidden_states.dtype != torch.bfloat16:
-        raise TypeError("Qwen PDD hidden_states must be packed BF16 [B, P, C].")
-    if (
-        not isinstance(encoder_hidden_states, torch.Tensor)
-        or encoder_hidden_states.ndim != 3
-        or encoder_hidden_states.dtype != torch.bfloat16
-    ):
-        raise TypeError("Qwen PDD encoder_hidden_states must be BF16 [B, S, D].")
-    if not isinstance(encoder_hidden_states_mask, torch.Tensor):
-        raise TypeError("Qwen PDD requires encoder_hidden_states_mask.")
     if not isinstance(timestep, torch.Tensor) or timestep.dtype != torch.float32:
         raise TypeError("Qwen PDD timestep must remain FP32 at transformer entry.")
-    batch_size = hidden_states.shape[0]
-    if encoder_hidden_states.shape[0] != batch_size:
-        raise ValueError("Qwen PDD image and text batch sizes must match.")
-    if timestep.shape != (batch_size,):
-        raise ValueError("Qwen PDD timestep must contain one value per batch item.")
-    if img_shapes is None or len(img_shapes) != batch_size:
-        raise ValueError("Qwen PDD img_shapes must contain one entry per batch item.")
+    if not isinstance(encoder_hidden_states, torch.Tensor) or not isinstance(
+        encoder_hidden_states_mask, torch.Tensor
+    ):
+        raise TypeError("Qwen PDD requires text embeddings and their attention mask.")
     if attention_kwargs:
         raise ValueError("Qwen PDD does not support nonempty attention_kwargs.")
     if guidance is not None:
@@ -143,76 +121,44 @@ def _qwen_image_pdd_forward(
         raise ValueError("Qwen PDD does not support ControlNet block samples.")
     if additional_t_cond is not None:
         raise ValueError("Qwen PDD does not support additional timestep conditioning.")
-    if type(return_dict) is not bool:
-        raise TypeError("Qwen PDD return_dict must be a bool.")
-    if encoder_hidden_states_mask.ndim != 2 or tuple(encoder_hidden_states_mask.shape) != tuple(
-        encoder_hidden_states.shape[:2]
-    ):
-        raise ValueError("Qwen PDD mask must match the text batch and sequence dimensions.")
-    if encoder_hidden_states_mask.device != encoder_hidden_states.device:
-        raise ValueError("Qwen PDD mask and text embeddings must share a device.")
-    if (
-        encoder_hidden_states_mask.dtype.is_floating_point
-        or encoder_hidden_states_mask.dtype.is_complex
-    ):
-        raise TypeError("Qwen PDD mask must use an integer or boolean dtype.")
-    _require_binary_mask(encoder_hidden_states_mask, name="Qwen PDD")
-    expected_max_txt_seq_len = int(
-        encoder_hidden_states_mask.sum(dim=1).max().to(torch.int32).item()
-    )
-    if txt_seq_lens is not None:
-        expected_txt_seq_lens = encoder_hidden_states_mask.sum(dim=1).to(torch.int32).tolist()
-        if txt_seq_lens != expected_txt_seq_lens:
-            raise ValueError("Qwen PDD txt_seq_lens must equal the valid mask lengths.")
-    if max_txt_seq_len is None:
-        max_txt_seq_len = expected_max_txt_seq_len
-    elif max_txt_seq_len != expected_max_txt_seq_len:
-        raise ValueError("Qwen PDD max_txt_seq_len must equal the maximum valid mask length.")
+    del txt_seq_lens
+    max_txt_seq_len = encoder_hidden_states.shape[1]
+    encoder_hidden_states_mask = encoder_hidden_states_mask.to(torch.bool)
 
     hidden_states = self.img_in(hidden_states)
     encoder_hidden_states = self.txt_in(self.txt_norm(encoder_hidden_states))
-    if timestep.dtype != torch.float32:
-        raise RuntimeError("Qwen PDD timestep was rounded before time_text_embed.")
     temb = self.time_text_embed(timestep, hidden_states)
     image_rotary_emb = self.pos_embed(
         img_shapes,
         max_txt_seq_len=max_txt_seq_len,
         device=hidden_states.device,
     )
-    image_mask = torch.ones(
-        (batch_size, hidden_states.shape[1]),
-        dtype=torch.bool,
-        device=hidden_states.device,
-    )
-    joint_attention_mask = torch.cat(
-        (encoder_hidden_states_mask.to(torch.bool), image_mask),
-        dim=1,
-    )[:, None, None, :]
-    block_attention_kwargs = {"attention_mask": joint_attention_mask}
-
     for block in self.transformer_blocks:
         if torch.is_grad_enabled() and self.gradient_checkpointing:
             encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
                 block,
                 hidden_states,
                 encoder_hidden_states,
-                None,
+                encoder_hidden_states_mask,
                 temb,
                 image_rotary_emb,
-                block_attention_kwargs,
             )
         else:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                encoder_hidden_states_mask=None,
+                encoder_hidden_states_mask=encoder_hidden_states_mask,
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
-                joint_attention_kwargs=block_attention_kwargs,
             )
 
     hidden_states = self.norm_out(hidden_states, temb)
-    output = self.proj_out(hidden_states)
+    if _pdd_fusion is None:
+        output = self.proj_out(hidden_states)
+    else:
+        if not isinstance(self.proj_out, PDDOutputProjection):
+            raise TypeError("Qwen PDD fusion requires a PDDOutputProjection.")
+        output = self.proj_out(hidden_states, fusion=_pdd_fusion)
     if not return_dict:
         return (output,)
 
@@ -284,18 +230,6 @@ def enable_qwen_image_pdd_forward(transformer: nn.Module) -> nn.Module:
     existing_forward = transformer.__dict__.get("forward")
     if existing_forward is not None:
         raise RuntimeError("Qwen root already has a different instance-level forward override.")
-    missing = [
-        name
-        for name in _QWEN_IMAGE_PDD_CHILDREN
-        if not isinstance(getattr(transformer, name, None), nn.Module)
-    ]
-    if missing:
-        raise RuntimeError(f"Qwen root is missing required PDD forward modules: {missing}.")
-    if (
-        not isinstance(transformer.transformer_blocks, nn.ModuleList)
-        or not transformer.transformer_blocks
-    ):
-        raise RuntimeError("Qwen PDD requires a nonempty transformer_blocks ModuleList.")
     if _config_guidance_embeds(transformer):
         raise ValueError("Qwen PDD does not support transformer guidance embeddings.")
     if getattr(transformer, "peft_config", None):
@@ -315,11 +249,6 @@ def enable_qwen_image_pdd_forward(transformer: nn.Module) -> nn.Module:
 def _validate_qwen_pdd_config(config: PDDConfig) -> None:
     if not isinstance(config, PDDConfig):
         raise TypeError(f"config must be PDDConfig, got {type(config).__name__}.")
-    if config.num_train_timesteps is not None:
-        raise ValueError(
-            "Qwen-Image PDD requires num_train_timesteps=None because the adapter "
-            "forwards normalized continuous grid time."
-        )
 
 
 def convert_qwen_image_to_pdd(
@@ -555,9 +484,10 @@ class QwenImagePDDAdapter:
         *,
         condition_name: str,
         prepared_condition: tuple[torch.Tensor, torch.Tensor] | None = None,
+        fusion: tuple[int, int, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if prepared_condition is None:
-            encoder_hidden_states, attention_mask = self._prepare_call_collectively(
+            encoder_hidden_states, attention_mask = self._prepare_call(
                 model,
                 state,
                 time,
@@ -576,63 +506,19 @@ class QwenImagePDDAdapter:
             raise TypeError("Qwen PDD execution requires FP32 time.")
         packed_state = pack_latents(state).to(model_dtype)
         encoder_hidden_states = encoder_hidden_states.to(model_dtype)
-        max_txt_seq_len = int(attention_mask.sum(dim=1).max().to(torch.int32).item())
+        call_kwargs = dict(model_kwargs)
+        if fusion is not None:
+            call_kwargs["_pdd_fusion"] = fusion
         output = model(
             hidden_states=packed_state,
             timestep=time,
             encoder_hidden_states=encoder_hidden_states,
             encoder_hidden_states_mask=attention_mask,
             img_shapes=build_img_shapes(batch_size, height, width),
-            max_txt_seq_len=max_txt_seq_len,
             return_dict=False,
-            **model_kwargs,
+            **call_kwargs,
         )
         return self._extract_packed_output(output)
-
-    @staticmethod
-    def _raise_collective_preflight_error(
-        local_error: Exception | None,
-        *,
-        state: torch.Tensor,
-    ) -> None:
-        if dist.is_available() and dist.is_initialized():
-            failed = torch.tensor(local_error is not None, dtype=torch.int32, device=state.device)
-            dist.all_reduce(failed, op=dist.ReduceOp.MAX)
-            if bool(failed):
-                if local_error is not None:
-                    raise local_error
-                raise RuntimeError("Qwen PDD preflight failed on another rank.")
-        elif local_error is not None:
-            raise local_error
-
-    def _prepare_call_collectively(
-        self,
-        model: nn.Module,
-        state: torch.Tensor,
-        time: torch.Tensor,
-        condition: Any,
-        model_kwargs: Mapping[str, Any],
-        *,
-        condition_name: str,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        prepared: tuple[torch.Tensor, torch.Tensor] | None = None
-        local_error: Exception | None = None
-        try:
-            prepared = self._prepare_call(
-                model,
-                state,
-                time,
-                condition,
-                model_kwargs,
-                condition_name=condition_name,
-            )
-        except Exception as error:
-            local_error = error
-
-        self._raise_collective_preflight_error(local_error, state=state)
-        if prepared is None:
-            raise RuntimeError("Qwen PDD preflight did not prepare a model call.")
-        return prepared
 
     def _prepare_teacher_cfg_calls(
         self,
@@ -646,33 +532,23 @@ class QwenImagePDDAdapter:
         tuple[torch.Tensor, torch.Tensor],
         tuple[torch.Tensor, torch.Tensor],
     ]:
-        """Make rank-local CFG validation fail collectively before either teacher call."""
-        prepared_condition: tuple[torch.Tensor, torch.Tensor] | None = None
-        prepared_negative_condition: tuple[torch.Tensor, torch.Tensor] | None = None
-        local_error: Exception | None = None
-        try:
-            prepared_condition = self._prepare_call(
-                model,
-                state,
-                time,
-                condition,
-                model_kwargs,
-                condition_name="condition",
-            )
-            prepared_negative_condition = self._prepare_call(
-                model,
-                state,
-                time,
-                negative_condition,
-                model_kwargs,
-                condition_name="negative_condition",
-            )
-        except Exception as error:
-            local_error = error
-
-        self._raise_collective_preflight_error(local_error, state=state)
-        if prepared_condition is None or prepared_negative_condition is None:
-            raise RuntimeError("Qwen teacher CFG preflight did not prepare both model calls.")
+        """Validate both local CFG calls before either model execution begins."""
+        prepared_condition = self._prepare_call(
+            model,
+            state,
+            time,
+            condition,
+            model_kwargs,
+            condition_name="condition",
+        )
+        prepared_negative_condition = self._prepare_call(
+            model,
+            state,
+            time,
+            negative_condition,
+            model_kwargs,
+            condition_name="negative_condition",
+        )
         return prepared_condition, prepared_negative_condition
 
     @staticmethod
@@ -807,16 +683,16 @@ class QwenImagePDDAdapter:
         **model_kwargs: Any,
     ) -> torch.Tensor:
         """Run one conditional Qwen call with its final projection fused for a block."""
-        projection = self._fused_projection(model, self.config.grid_size)
-        with projection.fuse_block(start, end, grid):
-            packed = self._call_packed(
-                model,
-                state,
-                time,
-                condition,
-                model_kwargs,
-                condition_name="condition",
-            )
+        self._fused_projection(model, self.config.grid_size)
+        packed = self._call_packed(
+            model,
+            state,
+            time,
+            condition,
+            model_kwargs,
+            condition_name="condition",
+            fusion=(start, end, grid),
+        )
         return self._unpack_single(packed, state)
 
     @torch.no_grad()

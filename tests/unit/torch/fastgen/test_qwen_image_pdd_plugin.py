@@ -26,7 +26,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import modelopt.torch.fastgen.plugins.qwen_image_pdd as qwen_image_pdd_plugin
-from modelopt.torch.fastgen import PDDConfig, PDDPipeline
+from modelopt.torch.fastgen import PDDConfig, PDDOutputProjection, PDDPipeline
 from modelopt.torch.fastgen.flow_matching import fusion_coefficients
 from modelopt.torch.fastgen.plugins import QwenImagePDDAdapter
 from modelopt.torch.fastgen.plugins.qwen_image import build_img_shapes, pack_latents, unpack_latents
@@ -79,9 +79,12 @@ class _TinyQwenTransformer(_QwenImageTestDouble):
         encoder_hidden_states,
         encoder_hidden_states_mask,
         img_shapes,
-        max_txt_seq_len,
+        max_txt_seq_len=None,
         **kwargs,
     ):
+        if max_txt_seq_len is None:
+            max_txt_seq_len = encoder_hidden_states.shape[1]
+        fusion = kwargs.pop("_pdd_fusion", None)
         condition_value = encoder_hidden_states.mean(dim=(1, 2), keepdim=True)
         condition_value = condition_value + 0.01 * encoder_hidden_states_mask.sum(
             dim=1, keepdim=True
@@ -89,7 +92,11 @@ class _TinyQwenTransformer(_QwenImageTestDouble):
         hidden = torch.tanh(self.backbone(hidden_states))
         hidden = hidden + condition_value.to(hidden.dtype)
         hidden = hidden + (0.1 * timestep[:, None, None]).to(hidden.dtype)
-        output = self.proj_out(hidden)
+        if fusion is None:
+            output = self.proj_out(hidden)
+        else:
+            assert isinstance(self.proj_out, PDDOutputProjection)
+            output = self.proj_out(hidden, fusion=fusion)
         self.calls.append(
             {
                 "hidden_states": hidden_states.detach().clone(),
@@ -114,9 +121,7 @@ def _config(*, guidance_scale: float | None = 4.0, grid_size: int = 4) -> PDDCon
         block_size_min=1,
         block_size_max=grid_size,
         inference_blocks=[2, 2] if grid_size == 4 else [grid_size],
-        student_sample_steps=2 if grid_size == 4 else 1,
         guidance_scale=guidance_scale,
-        num_train_timesteps=None,
     )
 
 
@@ -230,33 +235,6 @@ def test_fused_student_matches_explicit_packed_weight_fusion() -> None:
     assert student.proj_out(projection.weight.new_zeros(1, 5)).shape[-1] == 16
 
 
-def test_teacher_cfg_remote_preflight_failure_stops_both_model_calls(monkeypatch) -> None:
-    teacher = _TinyQwenTransformer()
-    adapter = QwenImagePDDAdapter(_config(guidance_scale=4.0))
-    state, time, condition, negative_condition = _inputs()
-
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_available", lambda: True)
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "is_initialized", lambda: True)
-
-    def report_remote_failure(failed, *, op):
-        assert not bool(failed)
-        assert op is torch.distributed.ReduceOp.MAX
-        failed.fill_(1)
-
-    monkeypatch.setattr(qwen_image_pdd_plugin.dist, "all_reduce", report_remote_failure)
-
-    with pytest.raises(RuntimeError, match="preflight failed on another rank"):
-        adapter.teacher_velocity(
-            teacher,
-            state,
-            time,
-            condition=condition,
-            negative_condition=negative_condition,
-        )
-
-    assert teacher.calls == []
-
-
 def test_teacher_cfg_zero_guided_norm_uses_qwen_clamp() -> None:
     class ZeroGuidedTeacher(_QwenImageTestDouble):
         def __init__(self) -> None:
@@ -355,6 +333,7 @@ def _mr210_qwen_forward_oracle(
     max_txt_seq_len: int,
 ) -> torch.Tensor:
     """Test-local MR210 operation order; intentionally independent of production binding."""
+    encoder_hidden_states_mask = encoder_hidden_states_mask.to(torch.bool)
     hidden_states = model.img_in(hidden_states)
     encoder_hidden_states = model.txt_in(model.txt_norm(encoder_hidden_states))
     temb = model.time_text_embed(timestep, hidden_states)
@@ -363,23 +342,13 @@ def _mr210_qwen_forward_oracle(
         max_txt_seq_len=max_txt_seq_len,
         device=hidden_states.device,
     )
-    image_mask = torch.ones(
-        (hidden_states.shape[0], hidden_states.shape[1]),
-        dtype=torch.bool,
-        device=hidden_states.device,
-    )
-    joint_attention_mask = torch.cat(
-        (encoder_hidden_states_mask.to(torch.bool), image_mask),
-        dim=1,
-    )[:, None, None, :]
     for block in model.transformer_blocks:
         encoder_hidden_states, hidden_states = block(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
-            encoder_hidden_states_mask=None,
+            encoder_hidden_states_mask=encoder_hidden_states_mask,
             temb=temb,
             image_rotary_emb=image_rotary_emb,
-            joint_attention_kwargs={"attention_mask": joint_attention_mask},
         )
     return model.proj_out(model.norm_out(hidden_states, temb))
 
@@ -586,8 +555,8 @@ def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     generator = torch.Generator().manual_seed(20260715)
     state = torch.randn(2, 2, 4, 4, generator=generator)
     time = torch.tensor([0.875, 0.25], dtype=torch.float32)
-    encoder_hidden_states = torch.randn(2, 3, 12, generator=generator).to(torch.bfloat16)
-    mask = torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.long)
+    encoder_hidden_states = torch.randn(2, 4, 12, generator=generator).to(torch.bfloat16)
+    mask = torch.tensor([[1, 1, 0, 0], [1, 0, 1, 0]], dtype=torch.long)
     poisoned = encoder_hidden_states.clone()
     poisoned[~mask.bool()] = (
         torch.randn(
@@ -607,8 +576,8 @@ def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     captured_masks: list[torch.Tensor] = []
 
     def capture_block_mask(_module, _args, kwargs):
-        assert kwargs["encoder_hidden_states_mask"] is None
-        captured_masks.append(kwargs["joint_attention_kwargs"]["attention_mask"].detach().clone())
+        assert kwargs.get("joint_attention_kwargs") is None
+        captured_masks.append(kwargs["encoder_hidden_states_mask"].detach().clone())
 
     hook = student.transformer_blocks[0].register_forward_pre_hook(
         capture_block_mask,
@@ -640,9 +609,7 @@ def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     torch.testing.assert_close(canonical_poisoned, canonical_baseline, rtol=0, atol=0)
     torch.testing.assert_close(strict_poisoned, strict_baseline, rtol=0, atol=0)
     assert len(captured_masks) == 2
-    expected_mask = torch.cat((mask.bool(), torch.ones(2, 4, dtype=torch.bool)), dim=1)
-    expected_mask = expected_mask[:, None, None, :]
-    assert all(torch.equal(captured, expected_mask) for captured in captured_masks)
+    assert all(torch.equal(captured, mask.bool()) for captured in captured_masks)
 
 
 def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
@@ -754,9 +721,6 @@ def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
 
 
 def test_qwen_pdd_rejects_unsupported_configuration_and_inputs() -> None:
-    with pytest.raises(ValueError, match="num_train_timesteps=None"):
-        QwenImagePDDAdapter(_config().model_copy(update={"num_train_timesteps": 1000}))
-
     transformer = _TinyQwenTransformer()
     config = _config()
     adapter = QwenImagePDDAdapter(config)

@@ -44,7 +44,6 @@ def test_widened_diffusers_projection_restores_pdd_fusion_metadata(tmp_path) -> 
         block_size_min=1,
         block_size_max=4,
         inference_blocks=[2, 2],
-        student_sample_steps=2,
     )
     transformer = get_tiny_qwen_image_transformer(num_layers=1)
     base_out_channels = transformer.out_channels
@@ -77,9 +76,8 @@ def test_inference_block_override_is_validated(tmp_path) -> None:
         "  block_size_min: 1\n"
         "  block_size_max: 8\n"
         "  inference_blocks: [4, 4]\n"
-        "  student_sample_steps: 2\n"
     )
 
     blocks = _parse_blocks("2, 2,4")
     assert blocks == [2, 2, 4]
-    assert _load_config(config_path, blocks).inference_blocks == blocks
+    assert _load_config(config_path, blocks).inference_blocks == tuple(blocks)

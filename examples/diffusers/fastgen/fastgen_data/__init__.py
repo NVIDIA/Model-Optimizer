@@ -39,16 +39,12 @@ import re
 # (``nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}``).
 # Convert a missing-helper ImportError into an actionable message naming the supported release.
 try:
-    from . import collate_fns as _collate_fns
-    from . import paths as _paths
-    from . import resume as _resume
-    from . import splits as _splits
-    from . import text_to_image_dataset as _text_to_image_dataset
-    from .collate_fns import *
-    from .paths import *
-    from .resume import *
-    from .splits import *
-    from .text_to_image_dataset import *
+    from .collate_fns import (
+        build_text_to_image_multiresolution_dataloader,
+        collate_fn_text_prompts,
+        collate_fn_text_to_image,
+    )
+    from .resume import rebuild_stateful_dataloader
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "fastgen_data could not import its dependencies. It requires a stock "
@@ -59,15 +55,12 @@ except ImportError as exc:  # pragma: no cover - environment guard
         f"Underlying import error: {exc!r}"
     ) from exc
 
-__all__: list[str] = []
-for _module in (
-    _collate_fns,
-    _paths,
-    _resume,
-    _splits,
-    _text_to_image_dataset,
-):
-    __all__.extend(_module.__all__)
+__all__ = [
+    "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_text_prompts",
+    "collate_fn_text_to_image",
+    "rebuild_stateful_dataloader",
+]
 
 
 def _warn_if_unsupported_upstream() -> None:

@@ -148,7 +148,6 @@ def _config(*, teacher_integrator: str = "euler") -> PDDConfig:
         block_size_min=2,
         block_size_max=4,
         inference_blocks=[4, 4],
-        student_sample_steps=2,
         teacher_integrator=teacher_integrator,
     )
 
