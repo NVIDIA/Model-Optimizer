@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration tests for the calibration-free Kimi-K3 checkpoint converter."""
+"""Tests for the calibration-free Kimi-K3 checkpoint converter.
+
+Lives here rather than under ``tests/examples/kimi/``: these are CPU-only and CI has no
+kimi example lane, so they never ran there. ``tests/unit`` runs on every change.
+"""
 
 import copy
 import importlib.util

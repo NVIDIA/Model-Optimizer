@@ -1,0 +1,333 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Run ``examples/megatron_bridge`` scripts without a ``torchrun`` launch per step.
+
+A launch spends ~25s importing torch/megatron/modelopt before doing any work, and one example test
+runs several. Single-rank commands drive the script's ``main()`` directly in the pytest process,
+which is where that cost disappears (the suite goes from ~21min to ~4min on one GPU). Multi-rank
+commands drive ``torchrun`` itself in-process, which only saves the launcher's own imports -- the
+pytest process cannot be more than one rank -- but keeps torchrun's fresh worker processes.
+
+The script's own ``get_args()`` still runs, so CLI flags and recipe strings stay covered. Not
+covered: the ``torchrun`` invocation and the ``__main__`` block (``dist.setup()``, ``dist.abort()``
+and ``dist.cleanup()``).
+
+Megatron and torch.distributed.run are imported lazily on purpose: this module is imported at
+collection time, and importing ``megatron.bridge`` initialises CUDA in the pytest process, which
+would hold a context on device 0 for the whole session even when every step runs under torchrun.
+"""
+
+import contextlib
+import gc
+import importlib
+import importlib.util
+import logging
+import os
+import signal
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+from _test_utils.examples.run_command import MODELOPT_ROOT
+from _test_utils.torch.distributed.utils import get_free_port
+
+import modelopt.torch.utils.distributed as dist
+
+_SINK = None  # never closed: a handler built inside a capture keeps a reference to it
+
+
+def _sink():
+    """One long-lived stream on the real stdout, whose fd is redirected per step.
+
+    A per-step stream closed on exit would leave a permanently-closed file behind for anything that
+    captured it -- e.g. the common module-level ``logging.StreamHandler(sys.stdout)``, where
+    ``sys.stdout`` is this sink while a step runs and the handler outlives it in ``sys.modules``.
+    """
+    global _SINK
+    if _SINK is None:
+        _SINK = os.fdopen(os.dup(1), "w", buffering=1, errors="replace")
+    return _SINK
+
+
+# torchrun's PContext installs handlers for these and never restores them.
+_LAUNCHER_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+
+
+@contextlib.contextmanager
+def _capture_output():
+    """Capture everything a step emits, in the order it happened.
+
+    Three sources have to end up in the same place: ``print`` from the script, records from loggers
+    Megatron-Bridge uses for lines tests assert on, and fd-level writes from ``torchrun`` workers
+    and C extensions. Under pytest's fd capture ``sys.stdout``/``sys.stderr`` are objects over
+    pytest's own temp file rather than fds 1/2, so both a redirect and an fd swap are needed.
+
+    Buffered, not streamed: the caller prints the result, which pytest shows for a failing test.
+    Echoing it live would not reach the CI log anyway -- without ``-s``, fd 1 is already pytest's
+    own capture file. Piping it to stream for real cost the 1-GPU suite 3m43 -> 9m06 in
+    backpressure, so surviving a job-level SIGKILL would need a file outside the process.
+    """
+    holder = [""]
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as tmp:
+        handler = logging.StreamHandler()  # bound to the swapped fd 2 below
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root = logging.getLogger()
+        with logging._lock:  # any getLogger() from a background thread mutates loggerDict
+            others = [
+                lg for lg in root.manager.loggerDict.values() if isinstance(lg, logging.Logger)
+            ]
+        # Lower levels only for loggers that own their output: a propagating logger still needs its
+        # own level lowered, or it drops the record before root sees it. The boost is load-bearing:
+        # without it test_distill_validate_only cannot see "skipping training ...". It does mean the
+        # capture is a superset of what a torchrun user sees, so these assertions check that the
+        # step did the right work, not that its logging is user-visible.
+        levels = {lg: lg.level for lg in [root, *others] if lg.handlers or not lg.propagate}
+        # Attach the handler only where the record cannot reach root, or it is written twice.
+        handled = [root, *(lg for lg in others if not lg.propagate)]
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sink = _sink()  # before the swap, so it holds the real stdout
+        saved_out, saved_err, saved_sink = os.dup(1), os.dup(2), os.dup(sink.fileno())
+        try:
+            # Inside the try: a raise between here and the restore would otherwise leave fds 1/2
+            # pointing at a temp file the ``with`` then closes, silencing the rest of the session.
+            os.dup2(tmp.fileno(), 1)
+            os.dup2(tmp.fileno(), 2)
+            sink.flush()
+            os.dup2(tmp.fileno(), sink.fileno())  # move its fd rather than replacing the object
+            handler.setStream(sink)
+            for lg in levels:
+                if lg.level > logging.INFO:
+                    lg.setLevel(logging.INFO)
+            for lg in handled:
+                lg.addHandler(handler)
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                yield holder
+        finally:
+            for lg in handled:
+                lg.removeHandler(handler)
+            for lg, level in levels.items():
+                lg.setLevel(level)
+            sink.flush()
+            os.dup2(saved_sink, sink.fileno())
+            os.close(saved_sink)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.dup2(saved_out, 1)
+            os.dup2(saved_err, 2)
+            os.close(saved_out)
+            os.close(saved_err)
+            tmp.seek(0)
+            holder[0] = tmp.read()
+
+
+@contextlib.contextmanager
+def _preserved_signal_handlers():
+    """Put back handlers a step installs; with a subprocess launcher, process exit did this.
+
+    Both paths need it: ``PContext.start()`` installs its own, and a Megatron training loop run
+    in-process is if anything likelier to (graceful exit, checkpoint-on-signal). Losing them breaks
+    pytest's Ctrl-C and CI cancellation for the rest of the session.
+    """
+    saved = {s: signal.getsignal(s) for s in _LAUNCHER_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, handler in saved.items():
+            if handler is not None:  # installed from C; not restorable via signal.signal()
+                signal.signal(sig, handler)
+
+
+def reset_megatron_global_state() -> None:
+    """Drop the global state a finished single-rank step leaves behind.
+
+    Steps that run here share one interpreter, so anything global has to be put back or it leaks
+    into the next test. Failure-tolerant on purpose: this also runs after a failed step, where the
+    model may be half-built, and it must not mask the error that got us here.
+    """
+    with contextlib.suppress(Exception):
+        from megatron.core import parallel_state
+
+        parallel_state.destroy_model_parallel()
+    with contextlib.suppress(Exception):
+        # A separate singleton from the parallel state, initialised by the training path.
+        from megatron.core.rerun_state_machine import destroy_rerun_state_machine
+
+        destroy_rerun_state_machine()
+    with contextlib.suppress(Exception):
+        # Collect first: empty_cache() only returns blocks nothing references, and a finished step
+        # can leave its model reachable from the imported module. Without this a later test ran
+        # against a fragmented allocator ~9x slower.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def _load_example_module(script: str, example_path: str):
+    """Import an example script under a namespaced module name.
+
+    ``import_module("quantize")`` would consult ``sys.modules`` first and could pick up an
+    unrelated top-level module of the same name, and would leave the example cached under a
+    generic name.
+    """
+    example_dir = str(MODELOPT_ROOT / "examples" / example_path)
+    name = f"_modelopt_example_{example_path.replace('/', '_')}_{Path(script).stem}"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(example_dir) / Path(script).name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    sys.path.insert(0, example_dir)  # the script's own sibling imports
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    finally:
+        sys.path.remove(example_dir)
+    return module
+
+
+def _require_drivable(script: str, example_path: str) -> None:
+    """Check the script exposes the ``get_args()`` + ``main()`` shape this runner drives."""
+    module = _load_example_module(script, example_path)
+    if not callable(getattr(module, "get_args", None)) or not callable(
+        getattr(module, "main", None)
+    ):
+        raise AssertionError(f"{script} must define get_args() and main(args)")
+
+
+def requested_world_size(cmd_parts: list[str]) -> int | None:
+    """World size a ``torchrun`` command asks for, or ``None`` if it is not a plain integer."""
+    parts = [str(p) for p in cmd_parts]
+    for i, part in enumerate(parts):
+        if part.startswith("--nproc_per_node="):
+            value = part.split("=", 1)[1]
+        elif part == "--nproc_per_node" and i + 1 < len(parts):
+            value = parts[i + 1]  # torchrun accepts the space-separated form too
+        else:
+            continue
+        return int(value) if value.isdigit() else None  # "gpu"/"auto"
+    return None
+
+
+def run_example_in_process(cmd_parts: list[str], example_path: str) -> str:
+    """Drive a single-rank step's real ``get_args()`` + ``main()`` here. Returns its stdout."""
+    # Set unconditionally: the per-test environment restore drops these while the process group
+    # stays initialised, so a later step would otherwise run with a live group and no launch vars.
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["LOCAL_RANK"] = "0"
+    if not dist.is_initialized():
+        # Not setdefault: another suite may have left a stale MASTER_PORT in the environment, and
+        # binding an occupied port blocks in rendezvous until timeout instead of failing fast.
+        os.environ["MASTER_PORT"] = str(get_free_port())
+        dist.setup()  # also sets the CUDA device
+
+    script = next(p for p in cmd_parts if str(p).endswith(".py"))
+    argv = [str(p) for p in cmd_parts[cmd_parts.index(script) :]]
+    example_dir = str(MODELOPT_ROOT / "examples" / example_path)
+    cwd = os.getcwd()
+    os.chdir(example_dir)  # match the subprocess path, which runs with the example dir as cwd
+    native = [""]  # bound up front: readable even if the capture fails to start
+    try:
+        module = _load_example_module(str(script), example_path)
+        reset_megatron_global_state()  # a previous step left its own parallel state behind
+        try:
+            # get_args() inside the guard: argparse calls parser.error() -> SystemExit on a flag
+            # that has drifted from the example's parser, which is the failure this suite most
+            # wants to report clearly rather than raise bare out of the runner. argv stays patched
+            # across main() as well, which the subprocess path had.
+            with (
+                _preserved_signal_handlers(),
+                _capture_output() as native,
+                patch.object(sys, "argv", argv),
+            ):
+                args = module.get_args()
+                module.main(args)
+        except SystemExit as e:
+            if e.code not in (0, None):
+                raise RuntimeError(f"{script} exited with code {e.code}") from e
+        return native[0]
+    except BaseException as e:
+        # The caller matches transient-HuggingFace markers on this alongside the traceback.
+        e.captured_output = native[0]
+        raise
+    finally:
+        os.chdir(cwd)
+        print(native[0])  # keep the step's output in the test log
+
+
+def run_torchrun_in_process(cmd_parts: list[str], example_path: str) -> str:
+    """Drive ``torchrun`` itself in-process, letting it spawn fresh workers as usual.
+
+    Used for multi-rank steps. Only the launcher's imports are saved, but the workers are fresh
+    processes, so none of the global state a reused process would inherit applies. Borrowed from
+    Megatron-Bridge's own functional tests.
+    """
+    from torch.distributed.run import main as torchrun_main
+
+    reset_megatron_global_state()  # release device 0 before the workers claim it
+    example_dir = MODELOPT_ROOT / "examples" / example_path
+    script = next(p for p in cmd_parts if str(p).endswith(".py"))
+    argv = [str(p) for p in cmd_parts]
+    argv[argv.index(str(script))] = str(example_dir / Path(script).name)
+    if not any(a.startswith(("--master_port", "--master-port")) for a in argv):
+        # The rendezvous store now lives in a long-lived process, so do not rely on torchrun's
+        # fixed default port being free by the time the next step starts.
+        argv.insert(1, f"--master_port={get_free_port()}")
+    cwd = os.getcwd()
+    os.chdir(example_dir)
+    cap = [""]
+    try:
+        with (
+            _preserved_signal_handlers(),
+            _capture_output() as cap,
+            patch.object(sys, "argv", argv),
+        ):
+            torchrun_main()
+        return cap[0]
+    except BaseException as e:
+        # ChildFailedError only carries the worker's traceback when the entrypoint is decorated
+        # with @record, which the examples are not -- so the captured output is all the caller has.
+        e.captured_output = cap[0]
+        raise
+    finally:
+        os.chdir(cwd)
+        print(cap[0])  # keep the step's output in the test log
+
+
+def run_example_step(cmd_parts: list[str], example_path: str) -> str:
+    """Run an example step without shelling out.
+
+    Every step must be ``torchrun --nproc_per_node=<int> <script>.py``, with the script exposing
+    ``get_args()`` + ``main()``. Anything else raises: falling back to a subprocess would still
+    pass, only ~6x slower, so a step that breaks the convention has to fail instead of quietly
+    costing the suite its speed-up.
+    """
+    script = next((str(p) for p in cmd_parts if str(p).endswith(".py")), None)
+    if script is None:
+        raise AssertionError(f"step must invoke a .py script: {cmd_parts}")
+    world_size = requested_world_size(cmd_parts)
+    if world_size is None:
+        raise AssertionError(f"--nproc_per_node must be a plain integer: {cmd_parts}")
+    if world_size > 1:
+        # torchrun imports the script in fresh children, so get_args()/main() need not exist here.
+        return run_torchrun_in_process(cmd_parts, example_path)
+    _require_drivable(script, example_path)
+    return run_example_in_process(cmd_parts, example_path)
