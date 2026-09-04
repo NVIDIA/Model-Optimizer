@@ -70,6 +70,7 @@ from modelopt.torch.quantization.config import (
     W4A8_AWQ_BETA_CFG,
 )
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.qtensor import INT4QTensor, QTensorWrapper
 
 
 @pytest.mark.parametrize(
@@ -408,12 +409,15 @@ def test_to_quantized_weight_int4_block_size(quantization):
     assert torch.equal(packed[0], torch.full((in_dim,), 0x21, dtype=torch.uint8, device="cuda"))
     assert torch.equal(packed[1], torch.full((in_dim,), 0x43, dtype=torch.uint8, device="cuda"))
 
-    with pytest.raises(ValueError, match="Expected 2 weight scaling factors"):
-        to_quantized_weight(weight, scales[..., :-1], quantization, block_size=block_size)
-
-    partial_weight = torch.cat((weight, quantized_values), dim=-1)
+    partial_weight = torch.cat((weight, quantized_values.repeat(1, 2)), dim=-1)
     with pytest.raises(NotImplementedError, match="partial blocks are not supported"):
         to_quantized_weight(partial_weight, scales, quantization, block_size=block_size)
+
+    compressed_weight, _ = INT4QTensor.quantize(partial_weight, block_size)
+    with pytest.raises(NotImplementedError, match="partial blocks are not supported"):
+        to_quantized_weight(
+            QTensorWrapper(compressed_weight), scales, quantization, block_size=block_size
+        )
 
 
 @pytest.mark.parametrize("quantization", [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ])
