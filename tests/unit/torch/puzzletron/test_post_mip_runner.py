@@ -16,6 +16,7 @@
 """Tests for post-MIP execution, including managed downstream evaluation."""
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,9 +24,14 @@ import pytest
 from omegaconf import OmegaConf
 
 import modelopt.torch.puzzletron.stages.future as future_stages
+import puzzletron_orchestrator.post_mip as orchestration_post_mip
 from examples.puzzletron import run_post_mip_node as post_mip_entrypoint
 from modelopt.torch.puzzletron.post_mip import runner
-from modelopt.torch.puzzletron.post_mip.evidence import collect_kd_exposure, kd_exposure_metrics
+from modelopt.torch.puzzletron.post_mip.evidence import (
+    collect_kd_exposure,
+    exact_checkpoint_evidence,
+    kd_exposure_metrics,
+)
 from modelopt.torch.puzzletron.post_mip.records import (
     ArchitectureCandidate,
     ArtifactKind,
@@ -89,54 +95,26 @@ def test_post_mip_kd_always_requests_a_consolidated_output():
     assert settings["max_steps"] == 8
 
 
-@pytest.mark.parametrize(
-    "profile",
-    [
-        "qwen35_vlm_e2e_full_eval",
-        "qwen35_vlm_realworldqa",
-        "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2",
-        "qwen35_vlm_realworldqa2_prefix2",
-        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1",
-        "qwen35_vlm_short_v1",
-    ],
-)
-def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch, profile):
+def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypatch):
     # Keep the examples-layer VLM dependencies out of core test collection.
     from examples.puzzletron.evaluation.vlm import post_mip as vlm_post_mip
 
     calls = []
     monkeypatch.setattr(vlm_post_mip, "register_profiles", lambda: calls.append(True))
 
-    post_mip_entrypoint._register_evaluation_profiles({"post_mip": None})
     post_mip_entrypoint._register_evaluation_profiles(
         {
             "post_mip": {
                 "flows": {
-                    "null_flow": None,
-                    "invalid_flow": [],
                     "params": {
                         "nodes": {
-                            "null_node": None,
-                            "invalid_node": [],
-                            "generic_eval": {
-                                "type": "downstream_evaluation",
-                                "config": None,
-                            },
-                            "invalid_config": {
-                                "type": "downstream_evaluation",
-                                "config": [],
-                            },
-                            "invalid_list_profile": {
-                                "type": "downstream_evaluation",
-                                "config": {"profile": []},
-                            },
-                            "invalid_mapping_profile": {
-                                "type": "downstream_evaluation",
-                                "config": {"profile": {}},
-                            },
                             "checkpoint_eval": {
                                 "type": "downstream_evaluation",
-                                "config": {"profile": profile},
+                                "config": {
+                                    "profile": (
+                                        "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+                                    )
+                                },
                             },
                         }
                     },
@@ -146,6 +124,113 @@ def test_worker_entrypoint_registers_configured_vlm_evaluation_profile(monkeypat
     )
 
     assert calls == [True]
+
+
+def test_worker_entrypoint_leaves_unknown_vlm_profile_to_fail_closed(monkeypatch, tmp_path):
+    from examples.puzzletron.evaluation.vlm import post_mip as vlm_post_mip
+
+    calls = []
+    monkeypatch.setattr(vlm_post_mip, "register_profiles", lambda: calls.append(True))
+    monkeypatch.setattr(runner, "_DOWNSTREAM_EVALUATION_PROFILES", {})
+    post_mip_entrypoint._register_evaluation_profiles(
+        {
+            "post_mip": {
+                "flows": {
+                    "params": {
+                        "nodes": {
+                            "checkpoint_eval": {
+                                "type": "downstream_evaluation",
+                                "config": {"profile": "qwen35_vlm_unknown"},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+    assert calls == [True]
+
+    node = SimpleNamespace(
+        node_id="checkpoint_eval",
+        config={"config": {"profile": "qwen35_vlm_unknown"}},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(tmp_path / "checkpoint")},
+    )
+
+    with pytest.raises(ValueError, match="unsupported downstream evaluation profile"):
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
+
+
+def test_aggregate_entrypoint_uses_resolved_config(monkeypatch, tmp_path):
+    resolved = {
+        "evaluation": {"evaluator_revision": "compiled-revision"},
+        "puzzle_dir": str(tmp_path),
+    }
+    resolved_path = tmp_path / "resolved.json"
+    resolved_path.write_text(json.dumps(resolved))
+    received = []
+    monkeypatch.setenv("PUZZLETRON_SOURCE_REVISION", "ambient-revision")
+    monkeypatch.setattr(
+        orchestration_post_mip,
+        "aggregate_post_mip_node",
+        lambda config, stage_id: received.append((config, stage_id)) or {"status": "success"},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_post_mip_node.py",
+            "--resolved-config",
+            str(resolved_path),
+            "--stage-id",
+            "post.params.select",
+            "--aggregate",
+        ],
+    )
+
+    post_mip_entrypoint.main()
+
+    assert received == [(resolved, "post.params.select")]
+
+
+def test_aggregate_entrypoint_preserves_authored_config_overrides(monkeypatch, tmp_path):
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text("puzzle_dir: /campaign\n")
+    resolved = {"puzzle_dir": "/campaign", "value": 2}
+    loaded = []
+    received = []
+    monkeypatch.setattr(
+        post_mip_entrypoint,
+        "load_experiment_config",
+        lambda path, *, overrides: loaded.append((path, overrides)) or resolved,
+    )
+    monkeypatch.setattr(
+        orchestration_post_mip,
+        "aggregate_post_mip_node",
+        lambda config, stage_id: received.append((config, stage_id)) or {"status": "success"},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_post_mip_node.py",
+            "--config",
+            str(config_path),
+            "--stage-id",
+            "post.params.select",
+            "--aggregate",
+            "--override",
+            "value=2",
+        ],
+    )
+
+    post_mip_entrypoint.main()
+
+    assert loaded == [(str(config_path), ["value=2"])]
+    assert received == [(resolved, "post.params.select")]
 
 
 def test_online_eval_settings_deep_merge_automodel_overrides():
@@ -549,6 +634,52 @@ def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_p
             )
 
 
+def test_short_v3_profile_uses_vllm_and_binds_the_embedded_row_manifest_digest(
+    monkeypatch, tmp_path
+):
+    from examples.puzzletron.evaluation.vlm import contracts, post_mip
+
+    monkeypatch.setattr(runner, "_DOWNSTREAM_EVALUATION_PROFILES", {})
+    post_mip.register_profiles()
+    assert (
+        runner._DOWNSTREAM_EVALUATION_PROFILES[
+            "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+        ]
+        is post_mip.evaluate_frozen_campaign_v3_checkpoint
+    )
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    exact_rows = contracts.load_profile("short-vllm-v2").exact_rows
+    assert exact_rows is not None
+    expected_digest = post_mip.suites.manifest_sha256(exact_rows)
+    captured = {}
+
+    def fake_evaluate(args, *, settings_overrides, preflight_callback):
+        captured.update(args=args, settings=settings_overrides)
+        preflight_callback({"quick_manifest_sha256": expected_digest, "status": "ready"})
+        return {"runs": [{"metrics": {"accuracy": 0.5}, "result_path": "result.json"}]}
+
+    monkeypatch.setattr(post_mip, "evaluate", fake_evaluate)
+    result = post_mip.evaluate_frozen_campaign_v3_checkpoint(
+        checkpoint,
+        output_root=tmp_path / "output",
+        settings={"row_manifest_sha256": expected_digest, "batch_size": 1},
+    )
+
+    assert captured["args"].profile == "short-vllm-v2"
+    assert captured["args"].quick_manifest is None
+    assert captured["settings"] == {}
+    assert result["checkpoint"] == str(checkpoint)
+
+    with pytest.raises(ValueError, match="differs from the campaign identity"):
+        post_mip.evaluate_frozen_campaign_v3_checkpoint(
+            checkpoint,
+            output_root=tmp_path / "mismatch",
+            settings={"row_manifest_sha256": "a" * 64},
+        )
+
+
 def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tmp_path):
     candidate = tmp_path / "candidate"
     reference = tmp_path / "teacher"
@@ -559,8 +690,19 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
     def fake_evaluate(checkpoint_path, *, output_root, settings):
         calls.append((Path(checkpoint_path), output_root, settings))
         score = 0.4 if Path(checkpoint_path) == candidate else 0.5
+        parser_status = "parsed" if Path(checkpoint_path) == candidate else "fallback_random"
         result_path = tmp_path / f"{Path(checkpoint_path).name}.json"
-        result_path.write_text("{}")
+        result_path.write_text(
+            json.dumps(
+                {
+                    "mmmu_parser_audit": {
+                        "sample_count": 1,
+                        "status_counts": {parser_status: 1},
+                    },
+                    "sample_counts": {"ifeval": 1},
+                }
+            )
+        )
         profile_path = tmp_path / f"{Path(checkpoint_path).name}-profile.json"
         profile_path.write_text(
             json.dumps(
@@ -572,6 +714,13 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
                     "dataset_revisions": {"ifeval": "dataset-revision"},
                     "frame_policy": None,
                     "generation_policy": {"temperature": 0, "do_sample": False},
+                    "backend_limitations": [],
+                    "output_budget_contract": {
+                        "ifeval": {
+                            "adapter": "fixture",
+                            "effective_max_new_tokens": 16,
+                        }
+                    },
                     "sample_limit": 8,
                     "quick_manifest_sha256": "a" * 64,
                     "repetitions": 1,
@@ -599,12 +748,25 @@ def test_downstream_evaluation_compares_candidate_with_reference(monkeypatch, tm
         evaluator_revision="source-revision",
         settings={"tasks": ["ifeval"]},
         candidate=fake_evaluate(candidate, output_root=tmp_path, settings={"tasks": ["ifeval"]}),
+        reference=fake_evaluate(reference, output_root=tmp_path, settings={"tasks": ["ifeval"]}),
     )
     assert identity["architecture_id"] == "architecture"
     assert identity["kd"] == {"producer_node": "kd_256", "exposure": None}
     assert identity["evaluator"]["revision"] == "source-revision"
     assert identity["evaluator"]["resolved_profile"]["dataset_revisions"] == {
         "ifeval": "dataset-revision"
+    }
+    assert identity["evaluator"]["resolved_profile"]["backend_limitations"] == []
+    assert identity["evaluator"]["resolved_profile"]["output_budget_contract"] == {
+        "ifeval": {"adapter": "fixture", "effective_max_new_tokens": 16}
+    }
+    assert identity["evaluation_evidence"] == {
+        "mmmu_parser_audit": {"sample_count": 1, "status_counts": {"parsed": 1}},
+        "sample_counts": {"ifeval": 1},
+    }
+    assert identity["reference_evaluation_evidence"] == {
+        "mmmu_parser_audit": {"sample_count": 1, "status_counts": {"fallback_random": 1}},
+        "sample_counts": {"ifeval": 1},
     }
     calls.clear()
     node = SimpleNamespace(
@@ -693,9 +855,12 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
 
     def fake_evaluate(checkpoint_path, *, output_root, settings):
         calls.append(Path(checkpoint_path))
+        result_path = Path(output_root) / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({"sample_counts": {"fixture": 1}}))
         return {
             "metrics": {"accuracy": 0.5 if Path(checkpoint_path) == reference else 0.4},
-            "result_path": str(Path(output_root) / "result.json"),
+            "result_path": str(result_path),
         }
 
     def fake_fingerprint(checkpoint_path):
@@ -766,12 +931,92 @@ def test_global_kd_resume_reports_durable_incremental_gpu_hours(tmp_path):
     assert kd_exposure_metrics(exposure)["exposure.actual_incremental_gpu_hours"] == 1.25
 
 
-def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
+def test_exact_checkpoint_evidence_reads_physical_shapes_and_counts(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        json.dumps(
+            {
+                "block_configs": [{"subblock_configs": []}],
+                "text_config": {
+                    "hidden_size": 8,
+                    "num_hidden_layers": 1,
+                },
+            }
+        )
+    )
+    header = json.dumps(
+        {"model.weight": {"dtype": "F32", "shape": [2, 3], "data_offsets": [0, 24]}}
+    ).encode()
+    (checkpoint / "model.safetensors").write_bytes(
+        len(header).to_bytes(8, "little") + header + bytes(24)
+    )
+
+    evidence = exact_checkpoint_evidence(checkpoint)
+
+    assert evidence["geometry"] == {
+        "block_configs": [{"subblock_configs": []}],
+        "hidden_size": 8,
+        "num_hidden_layers": 1,
+    }
+    assert evidence["parameter_count"] == 6
+    assert evidence["tensor_count"] == 1
+    assert evidence["tensor_shapes"] == {"model.weight": {"dtype": "F32", "shape": [2, 3]}}
+
+
+def test_result_manifest_freezes_pre_kd_and_learning_curve(monkeypatch, tmp_path):
+    block_configs = [
+        {
+            "subblock_configs": [
+                {
+                    "kind": "attention",
+                    "name": "attention",
+                    "num_kv_heads": 1,
+                    "num_query_heads": 3,
+                },
+                {
+                    "kind": "ffn",
+                    "name": "ffn",
+                    "intermediate_size": 3328,
+                },
+                {
+                    "kind": "mamba",
+                    "name": "mamba",
+                    "head_dim": 112,
+                    "num_groups": 14,
+                    "num_heads": 14,
+                    "state_dim": 112,
+                },
+            ]
+        }
+    ]
+
+    def checkpoint_evidence(checkpoint):
+        # KD may persist numerically sensitive parameters in a wider dtype without
+        # changing the student's physical geometry.
+        dtype = "BF16" if Path(checkpoint).name == "pre-kd" else "F32"
+        return {
+            "content_manifest_sha256": Path(checkpoint).name,
+            "geometry": {
+                "block_configs": block_configs,
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+            },
+            "parameter_count": 6,
+            "tensor_count": 1,
+            "tensor_shapes": {"model.weight": {"dtype": dtype, "shape": [2, 3]}},
+        }
+
+    monkeypatch.setattr(
+        runner,
+        "_exact_checkpoint_evidence",
+        checkpoint_evidence,
+    )
     ledger = CandidateLedger(tmp_path / "ledger")
     architecture_id = "architecture"
     ledger.architectures[architecture_id] = ArchitectureCandidate(
         architecture_id=architecture_id,
-        block_configs=[],
+        block_configs=block_configs,
         mip_metrics={"parameter_ratio": 0.9},
     )
     parent = None
@@ -797,6 +1042,22 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
     teacher.mkdir()
     reference_fingerprint = runner._checkpoint_fingerprint(teacher)
     profile = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
+    quick_row_identities = {
+        "realworldqa": [{"source_sample_id": f"test:{index}"} for index in range(8)],
+        "mmmu_val": [{"source_sample_id": f"validation:{index}"} for index in range(8)],
+        "mvbench": [
+            {
+                "source_sample_id": f"action_sequence:{index}",
+                "leaf_task": "mvbench_action_sequence",
+            }
+            for index in range(8)
+        ],
+    }
+    sample_counts = {
+        "modelopt_vlm_benchmark_mmmu_val": 8,
+        "modelopt_vlm_benchmark_mvbench_action_sequence": 8,
+        "modelopt_vlm_benchmark_realworldqa": 8,
+    }
 
     def evaluation_identity(steps):
         return {
@@ -804,6 +1065,20 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
             "reference_checkpoint_fingerprint": reference_fingerprint,
             "architecture_id": architecture_id,
             "kd": {"producer_node": f"kd_{steps}", "exposure": {"cumulative_steps": steps}},
+            "evaluation_evidence": {
+                "sample_counts": sample_counts,
+                "mmmu_parser_audit": {
+                    "sample_count": 8,
+                    "status_counts": {"fallback_random": 1, "parsed": 7},
+                },
+            },
+            "reference_evaluation_evidence": {
+                "sample_counts": sample_counts,
+                "mmmu_parser_audit": {
+                    "sample_count": 8,
+                    "status_counts": {"invalid_open": 1, "parsed": 7},
+                },
+            },
             "evaluator": {
                 "profile": profile,
                 "revision": "source-revision",
@@ -820,7 +1095,25 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
                     },
                     "frame_policy": {"mvbench": 32},
                     "generation_policy": {"do_sample": False},
+                    "backend_limitations": [],
+                    "output_budget_contract": {
+                        "mmmu_val": {
+                            "adapter": "qwen3_5",
+                            "effective_max_new_tokens": 128,
+                        },
+                        "realworldqa": {
+                            "adapter": "qwen3_5",
+                            "effective_max_new_tokens": 16,
+                        },
+                    },
                     "sample_limit": None,
+                    "quick_selected_rows": 24,
+                    "quick_row_identities": quick_row_identities,
+                    "quick_task_denominators": {
+                        "mmmu_val": {"selected_rows": 8, "population_rows": 900},
+                        "mvbench": {"selected_rows": 8, "population_rows": 4000},
+                        "realworldqa": {"selected_rows": 8, "population_rows": 765},
+                    },
                     "quick_manifest_sha256": "a" * 64,
                     "repetitions": 1,
                 },
@@ -923,6 +1216,139 @@ def test_result_manifest_freezes_pre_kd_and_learning_curve(tmp_path):
         evaluation_identity(128),
         evaluation_identity(256),
     ]
+
+    def expected_evaluation_result(accuracy):
+        return {
+            "candidate_evidence": {
+                "mmmu_parser_audit": {
+                    "sample_count": 8,
+                    "status_counts": {"fallback_random": 1, "parsed": 7},
+                },
+                "sample_counts": sample_counts,
+            },
+            "metrics": {"accuracy": accuracy},
+            "reference_evidence": {
+                "mmmu_parser_audit": {
+                    "sample_count": 8,
+                    "status_counts": {"invalid_open": 1, "parsed": 7},
+                },
+                "sample_counts": sample_counts,
+            },
+        }
+
+    assert manifest["exact_result"] == {
+        "axis_inventory": block_configs,
+        "checkpoint_and_lineage_identities": {
+            "architecture_id": architecture_id,
+            "milestones": [
+                {
+                    "checkpoint_fingerprint": f"student-{steps}",
+                    "content_manifest_sha256": f"step-{steps}",
+                    "producer_node": f"kd_{steps}",
+                    "steps": steps,
+                }
+                for steps in (64, 128, 256)
+            ],
+            "pre_kd_content_manifest_sha256": "pre-kd",
+            "pre_kd_checkpoint_fingerprint": "student-0",
+            "reference_checkpoint_fingerprint": reference_fingerprint,
+        },
+        "denominators": {
+            "mmmu_val": {"population_rows": 900, "selected_rows": 8},
+            "mvbench": {"population_rows": 4000, "selected_rows": 8},
+            "realworldqa": {"population_rows": 765, "selected_rows": 8},
+        },
+        "evaluation_results": {
+            "milestones": [
+                {"steps": steps, **expected_evaluation_result(steps / 1000)}
+                for steps in (64, 128, 256)
+            ],
+            "pre_kd": expected_evaluation_result(0.1),
+        },
+        "evaluator_contract": {
+            "backend_limitations": [],
+            "evaluator_revision": "source-revision",
+            "generation_policy": {"do_sample": False},
+            "lmms_eval_revision": "lmms-revision",
+            "output_budget_contract": {
+                "mmmu_val": {
+                    "adapter": "qwen3_5",
+                    "effective_max_new_tokens": 128,
+                },
+                "realworldqa": {
+                    "adapter": "qwen3_5",
+                    "effective_max_new_tokens": 16,
+                },
+            },
+            "profile": profile,
+        },
+        "kd_exposure": [{"cumulative_steps": steps} for steps in (64, 128, 256)],
+        "parameter_counts": {
+            "materialized_checkpoint": 6,
+            "mip_estimates": {"parameter_ratio": 0.9},
+        },
+        "realized_geometry_and_tensor_shapes": {
+            "geometry": {
+                "block_configs": block_configs,
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+            },
+            "tensor_count": 1,
+            "tensor_shapes": {"model.weight": {"dtype": "BF16", "shape": [2, 3]}},
+        },
+        "row_outcomes": {
+            "expected": 24,
+            "failed": 0,
+            "milestone_sample_counts": [
+                sample_counts,
+                sample_counts,
+                sample_counts,
+            ],
+            "missing": 0,
+            "pre_kd_sample_counts": sample_counts,
+        },
+        "selected_sample_ids": quick_row_identities,
+        "stage_completion": {
+            "milestones": [
+                {"evaluation": "success", "kd": "success", "steps": steps}
+                for steps in (64, 128, 256)
+            ],
+            "pre_kd": "success",
+        },
+    }
+
+    def mismatched_checkpoint_evidence(checkpoint):
+        evidence = checkpoint_evidence(checkpoint)
+        if Path(checkpoint).name == "step-128":
+            evidence["tensor_shapes"]["model.weight"]["shape"] = [2, 4]
+        return evidence
+
+    monkeypatch.setattr(runner, "_exact_checkpoint_evidence", mismatched_checkpoint_evidence)
+    with pytest.raises(RuntimeError, match="checkpoint geometry differs"):
+        runner._aggregate_result_manifest(
+            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "wrong-geometry-execution"
+        )
+    monkeypatch.setattr(runner, "_exact_checkpoint_evidence", checkpoint_evidence)
+
+    missing_audit = evaluation_identity(128)
+    del missing_audit["evaluation_evidence"]["mmmu_parser_audit"]
+    (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": missing_audit}))
+    with pytest.raises(RuntimeError, match="invalid MMMU parser-audit evidence"):
+        runner._aggregate_result_manifest(
+            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "missing-audit-execution"
+        )
+
+    wrong_distribution = evaluation_identity(128)
+    wrong_distribution["evaluation_evidence"]["sample_counts"] = {
+        **sample_counts,
+        "modelopt_vlm_benchmark_mvbench_action_sequence": 7,
+        "modelopt_vlm_benchmark_realworldqa": 9,
+    }
+    (tmp_path / "comparison-128.json").write_text(json.dumps({"identity": wrong_distribution}))
+    with pytest.raises(RuntimeError, match="sample counts do not match"):
+        runner._aggregate_result_manifest(
+            {"puzzle_dir": str(tmp_path)}, ledger, node, input_set, "wrong-counts-execution"
+        )
 
     mismatched = evaluation_identity(128)
     mismatched["evaluator"]["resolved_profile"]["dataset_revisions"]["mmmu_val"] = (

@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import math
+import re
+import shlex
 from collections.abc import Sequence
 from dataclasses import asdict
 from difflib import get_close_matches
@@ -25,6 +27,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import yaml
+
+if (__package__ or "").startswith("puzzletron_orchestrator"):
+    from puzzletron_orchestrator.profiles import expand_mip_variants, select_mip_values
+else:
+    from ..mip.profiles import expand_mip_variants, select_mip_values
 
 from .config import load_experiment_config
 from .identity import execution_contract_hash, with_contract_hash
@@ -53,6 +60,7 @@ from .schema import (
 from .stages import (
     configured_parent_stage_ids,
     configured_stage_ids,
+    default_stage_resource,
     distributed_stage_ids,
     stage_ids,
 )
@@ -62,6 +70,7 @@ __all__ = [
     "compile_campaign_plan",
     "load_execution_config",
     "load_runner_config",
+    "mip_resource",
     "plan_to_dict",
     "resolve_stage_execution_specs",
     "validate_runner_ready",
@@ -90,6 +99,8 @@ _SLURM_FIELDS = {
     "partition_interactive",
     "partition_batch",
     "partition_cpu",
+    "cpu_cpus_per_task",
+    "cpu_memory_mb",
     "interactive_max_nodes",
     "max_nodes",
     "time_limit",
@@ -98,7 +109,8 @@ _SLURM_FIELDS = {
 }
 _INVENTORY_FIELDS = {"hosts", "rendezvous_host", "rendezvous_port_base"}
 _HOST_FIELDS = {"hostname", "gpus"}
-_EXECUTION_FIELDS = {"defaults", "stages"}
+_EXECUTION_FIELDS = {"schema_version", "defaults", "stages"}
+_SUPPORTED_EXECUTION_SCHEMA_VERSION = 1
 _EXECUTION_DEFAULT_FIELDS = {
     "artifact_settling_timeout_seconds",
     "failure_policy",
@@ -158,6 +170,7 @@ def _post_mip_stage_metadata(config: Mapping[str, Any]) -> tuple[dict[str, Any],
             "parents": node.dependency_stage_ids,
             "distributed": node.capabilities.distributed,
             "default_strategy": ExecutionStrategy(node.capabilities.default_strategy),
+            "default_resource": node.capabilities.default_resource,
             "config": dict(node.config.get("config") or {}),
         }
         for node in compile_post_mip_flows(config)
@@ -210,8 +223,42 @@ def _command_sequence(value: Any, *, path: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+_ENV_ASSIGNMENT = re.compile(r"\b(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*([^\s;]+)", re.IGNORECASE)
+_SECRET_VARIABLE_SUFFIXES = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY")
+_INHERITED_VARIABLE = re.compile(r"\$(?:[A-Z_][A-Z0-9_]*|\{[A-Z_][A-Z0-9_]*\})", re.IGNORECASE)
+
+
+def _reject_inline_secret_assignments(commands: Sequence[str], *, path: str) -> None:
+    """Keep literal credentials out of rendered and persisted worker scripts."""
+
+    for command in commands:
+        for match in _ENV_ASSIGNMENT.finditer(command):
+            variable = match.group(1).upper()
+            if not any(
+                variable == suffix or variable.endswith(f"_{suffix}")
+                for suffix in _SECRET_VARIABLE_SUFFIXES
+            ):
+                continue
+            value = match.group(2).strip("\"'")
+            if _INHERITED_VARIABLE.fullmatch(value):
+                continue
+            raise ValueError(
+                f"{path} assigns a literal value to {match.group(1)!r}; inherit it from the "
+                "environment or source a protected setup_env file instead"
+            )
+
+
 def _validate_execution_payload(execution: Mapping[str, Any]) -> None:
     _reject_unknown_fields(execution, _EXECUTION_FIELDS, path="execution")
+    schema_version = execution.get("schema_version")
+    if schema_version is not None and (
+        type(schema_version) is not int or schema_version != _SUPPORTED_EXECUTION_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"Unsupported execution schema {schema_version!r}; expected "
+            f"{_SUPPORTED_EXECUTION_SCHEMA_VERSION}. Regenerate the campaign bundles using the "
+            "setup --resume command in the generated campaign README."
+        )
     defaults = _required_mapping(execution.get("defaults", {}), path="execution.defaults")
     _reject_unknown_fields(defaults, _EXECUTION_DEFAULT_FIELDS, path="execution.defaults")
     if "failure_policy" in defaults:
@@ -334,6 +381,8 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
         contract_payload.get("postrun_commands", contract_payload.get("postrun")),
         path="runner.execution_contract.postrun_commands",
     )
+    _reject_inline_secret_assignments(prerun, path="runner.execution_contract.prerun_commands")
+    _reject_inline_secret_assignments(postrun, path="runner.execution_contract.postrun_commands")
     contract = ExecutionContract(
         repository=str(contract_payload.get("repository", ".")),
         venv=str(contract_payload.get("venv", ".venv")),
@@ -362,6 +411,22 @@ def load_runner_config(path: str | Path) -> RunnerEnvironment:
             partition_interactive=slurm_payload.get("partition_interactive"),
             partition_batch=slurm_payload.get("partition_batch"),
             partition_cpu=slurm_payload.get("partition_cpu"),
+            cpu_cpus_per_task=(
+                _positive_int(
+                    slurm_payload["cpu_cpus_per_task"],
+                    path="runner.slurm.cpu_cpus_per_task",
+                )
+                if slurm_payload.get("cpu_cpus_per_task") is not None
+                else None
+            ),
+            cpu_memory_mb=(
+                _positive_int(
+                    slurm_payload["cpu_memory_mb"],
+                    path="runner.slurm.cpu_memory_mb",
+                )
+                if slurm_payload.get("cpu_memory_mb") is not None
+                else None
+            ),
             interactive_max_nodes=_positive_int(
                 slurm_payload.get("interactive_max_nodes", 2),
                 path="runner.slurm.interactive_max_nodes",
@@ -527,6 +592,7 @@ def resolve_stage_execution_specs(
     enabled_stages: tuple[str, ...],
     *,
     dynamic_defaults: Mapping[str, ExecutionStrategy] | None = None,
+    dynamic_resources: Mapping[str, str] | None = None,
 ) -> dict[str, StageExecutionSpec]:
     """Resolve per-stage execution specs with defaults."""
 
@@ -538,6 +604,7 @@ def resolve_stage_execution_specs(
     default_policy = FailurePolicy(str(defaults.get("failure_policy", FailurePolicy.STRICT.value)))
     stage_payload = _mapping(execution.get("stages"))
     dynamic_defaults = dict(dynamic_defaults or {})
+    dynamic_resources = dict(dynamic_resources or {})
     resolved: dict[str, StageExecutionSpec] = {}
 
     for stage_id in enabled_stages:
@@ -568,7 +635,18 @@ def resolve_stage_execution_specs(
         partition = normalize_slurm_partition(
             payload.get("partition", defaults.get("partition")), path=partition_path
         )
-        resource = str(payload.get("resource", defaults.get("resource", "gpu")))
+        default_resource = dynamic_resources.get(stage_id)
+        if default_resource is None:
+            default_resource = default_stage_resource(stage_id)
+        if "resource" in payload:
+            resource_path = f"execution.stages.{stage_id}.resource"
+            resource = str(payload["resource"])
+        elif "resource" in defaults:
+            resource_path = "execution.defaults.resource"
+            resource = str(defaults["resource"])
+        else:
+            resource_path = None
+            resource = default_resource
         if resource not in {"cpu", "gpu"}:
             raise ValueError(
                 f"stage {stage_id!r} resource must be 'cpu' or 'gpu', got {resource!r}"
@@ -588,6 +666,226 @@ def resolve_stage_execution_specs(
     return resolved
 
 
+def mip_resource(experiment_config: Mapping[str, Any]) -> str:
+    """Return the resource required by the effective MIP/realization behavior."""
+
+    mip_runs = _mapping(experiment_config.get("mip")).get("runs")
+    if isinstance(mip_runs, Mapping) and mip_runs:
+        return "cpu"
+    if bool(experiment_config.get("skip_realize_model", False)):
+        return "cpu"
+    raw_realize_model = experiment_config.get("realize_model")
+    if not isinstance(raw_realize_model, Mapping):
+        return "cpu"
+    realize_model = _mapping(raw_realize_model)
+    return "cpu" if bool(realize_model.get("skip_validation", False)) else "gpu"
+
+
+def _validate_mip_resource_override(
+    execution: Mapping[str, Any], *, required_resource: str
+) -> None:
+    """Reject a MIP resource that contradicts the effective experiment behavior."""
+
+    stages = _mapping(execution.get("stages"))
+    mip = _mapping(stages.get("mip"))
+    defaults = _mapping(execution.get("defaults"))
+    if "resource" in mip:
+        path = "execution.stages.mip.resource"
+        configured = str(mip["resource"])
+    elif "resource" in defaults:
+        path = "execution.defaults.resource"
+        configured = str(defaults["resource"])
+    else:
+        return
+    if configured == required_resource:
+        return
+    if required_resource == "gpu":
+        raise ValueError(
+            f"{path} cannot be {configured!r} because realize_model.skip_validation=false "
+            "runs realized-checkpoint validation on GPUs; set it to 'gpu' or disable "
+            "realization validation"
+        )
+    raise ValueError(
+        f"{path} cannot be {configured!r} because the effective MIP path is CPU-only; remove "
+        "that setting or set it to 'cpu'"
+    )
+
+
+def _named_mip_regeneration_error(path: str, message: str, *, experiment_path: Path) -> ValueError:
+    campaign_dir = experiment_path.parent.parent
+    if (
+        experiment_path.name == "experiment.yaml"
+        and experiment_path.parent.name in {"smoke", "production"}
+        and not campaign_dir.name.startswith(".puzzletron-v2-")
+    ):
+        resume_command = (
+            "python examples/puzzletron/puzzletron_setup_v2.py --resume "
+            f"{shlex.quote(str(campaign_dir))}"
+        )
+        recovery = f"regenerate both bundles with `{resume_command}`"
+    else:
+        recovery = (
+            "fix these named-MIP fields, or, for a setup-generated config, run the exact "
+            "resume command in the generated campaign README"
+        )
+    return ValueError(
+        f"{path} {message}. This campaign uses the current named width/depth MIP interface; "
+        f"{recovery}, then rerun the orchestrator dry-run"
+    )
+
+
+def _validate_named_mip_search_domains(
+    runs: Mapping[str, Any],
+    *,
+    widths: tuple[int, ...],
+    maximum_depth: int,
+    experiment_path: Path,
+) -> None:
+    for run_id, raw_run in runs.items():
+        if raw_run is False:
+            continue
+        run_path = f"mip.runs.{run_id}"
+        if not isinstance(raw_run, Mapping):
+            raise _named_mip_regeneration_error(
+                run_path, "must be a mapping or false", experiment_path=experiment_path
+            )
+        variants = raw_run.get("variants") or {}
+        if not isinstance(variants, Mapping):
+            raise _named_mip_regeneration_error(
+                f"{run_path}.variants", "must be a mapping", experiment_path=experiment_path
+            )
+        for variant_id, variant in variants.items():
+            if not isinstance(variant, Mapping):
+                raise _named_mip_regeneration_error(
+                    f"{run_path}.variants.{variant_id}",
+                    "must be a mapping",
+                    experiment_path=experiment_path,
+                )
+    try:
+        variants = expand_mip_variants({"runs": runs})
+    except (TypeError, ValueError) as error:
+        raise _named_mip_regeneration_error(
+            "mip.runs", str(error), experiment_path=experiment_path
+        ) from error
+    for variant in variants:
+        search = _mapping(variant.config.get("search_space"))
+        try:
+            select_mip_values(search.get("embedding"), widths, "embedding")
+        except (TypeError, ValueError) as error:
+            raise _named_mip_regeneration_error(
+                variant.selector_path("embedding"),
+                f"must use configured embedding_pruning.widths={list(widths)}",
+                experiment_path=experiment_path,
+            ) from error
+        raw_depth = search.get("depth")
+        if isinstance(raw_depth, Mapping) and set(raw_depth) != {"range"}:
+            continue
+        try:
+            select_mip_values(raw_depth, tuple(range(maximum_depth + 1)), "depth")
+        except (TypeError, ValueError) as error:
+            raise _named_mip_regeneration_error(
+                variant.selector_path("depth"),
+                f"must select removals between 0 and the configured maximum {maximum_depth}",
+                experiment_path=experiment_path,
+            ) from error
+
+
+def _validate_named_mip_geometry(
+    experiment_config: Mapping[str, Any], *, experiment_path: Path
+) -> None:
+    """Reject stale named-MIP bundles before worker launch."""
+
+    mip = _mapping(experiment_config.get("mip"))
+    runs = mip.get("runs")
+    embedding = _mapping(experiment_config.get("embedding_pruning"))
+    if not isinstance(runs, Mapping) or not runs:
+        if embedding.get("enabled"):
+            raise _named_mip_regeneration_error(
+                "mip.runs",
+                "must define at least one active named solve for the enabled scenario driver",
+                experiment_path=experiment_path,
+            )
+        return
+    if not any(run is not False for run in runs.values()):
+        raise _named_mip_regeneration_error(
+            "mip.runs",
+            "must define at least one active named solve",
+            experiment_path=experiment_path,
+        )
+
+    model_info = _mapping(experiment_config.get("model_info"))
+    hidden_size = model_info.get("hidden_size")
+    num_layers = model_info.get("num_hidden_layers")
+    if not isinstance(hidden_size, int) or isinstance(hidden_size, bool) or hidden_size < 1:
+        raise _named_mip_regeneration_error(
+            "model_info.hidden_size",
+            "must contain the positive inspected teacher width",
+            experiment_path=experiment_path,
+        )
+    if not isinstance(num_layers, int) or isinstance(num_layers, bool) or num_layers < 1:
+        raise _named_mip_regeneration_error(
+            "model_info.num_hidden_layers",
+            "must contain the positive inspected teacher depth",
+            experiment_path=experiment_path,
+        )
+
+    raw_widths = embedding.get("widths")
+    if (
+        not embedding.get("enabled")
+        or not isinstance(raw_widths, Sequence)
+        or isinstance(raw_widths, (str, bytes))
+    ):
+        raise _named_mip_regeneration_error(
+            "embedding_pruning",
+            "must enable the scenario driver and list the inspected teacher width",
+            experiment_path=experiment_path,
+        )
+    if any(
+        not isinstance(width, int) or isinstance(width, bool) or width < 1 for width in raw_widths
+    ):
+        raise _named_mip_regeneration_error(
+            "embedding_pruning.widths",
+            "must contain only positive integer widths",
+            experiment_path=experiment_path,
+        )
+    widths = tuple(int(width) for width in raw_widths)
+    if not widths or hidden_size not in widths or max(widths) != hidden_size:
+        raise _named_mip_regeneration_error(
+            "embedding_pruning.widths",
+            f"must include teacher hidden_size={hidden_size} as its largest width",
+            experiment_path=experiment_path,
+        )
+
+    depth = _mapping(experiment_config.get("depth_importance") or experiment_config.get("depth"))
+    maximum = depth.get("max_subblocks_to_remove", depth.get("max_removals", 0))
+    granularity = str(depth.get("granularity", "block")).lower()
+    teacher_depth = (
+        depth.get("expected_initial_sublayers") if granularity == "subblock" else num_layers
+    )
+    if not isinstance(teacher_depth, int) or isinstance(teacher_depth, bool) or teacher_depth < 1:
+        raise _named_mip_regeneration_error(
+            "depth_importance.expected_initial_sublayers",
+            "must contain the positive inspected teacher sublayer depth",
+            experiment_path=experiment_path,
+        )
+    if (
+        not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or not 0 <= maximum < teacher_depth
+    ):
+        raise _named_mip_regeneration_error(
+            "depth_importance.max_subblocks_to_remove",
+            f"must be a non-negative count below the inspected teacher limit {teacher_depth}",
+            experiment_path=experiment_path,
+        )
+    _validate_named_mip_search_domains(
+        runs,
+        widths=widths,
+        maximum_depth=maximum,
+        experiment_path=experiment_path,
+    )
+
+
 def compile_campaign_plan(
     *,
     experiment_config_path: str | Path,
@@ -601,6 +899,8 @@ def compile_campaign_plan(
     _validate_execution_payload(execution)
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
+    _validate_named_mip_geometry(experiment_config, experiment_path=experiment_path)
+    required_mip_resource = mip_resource(experiment_config)
     puzzle_dir = Path(
         experiment_config.get("puzzle_dir")
         or (experiment_config.get("experiment") or {}).get("dir")
@@ -619,27 +919,33 @@ def compile_campaign_plan(
         if stage_filter not in enabled:
             raise ValueError(f"Stage {stage_filter!r} is not enabled in the experiment config")
         enabled = (stage_filter,)
+    if "mip" in enabled:
+        _validate_mip_resource_override(execution, required_resource=required_mip_resource)
     dynamic_execution_defaults = {
         row["stage_id"]: row["default_strategy"] for row in post_mip_stages
     }
+    dynamic_resource_defaults = {
+        row["stage_id"]: row["default_resource"] for row in post_mip_stages
+    }
+    dynamic_resource_defaults["mip"] = required_mip_resource
     execution_specs = resolve_stage_execution_specs(
         execution,
         enabled,
         dynamic_defaults=dynamic_execution_defaults,
+        dynamic_resources=dynamic_resource_defaults,
     )
     execution_defaults = _mapping(execution.get("defaults"))
     final_report = _mapping(_mapping(execution.get("stages")).get("final_report"))
-    final_report_partition_path = (
-        "execution.stages.final_report.partition"
-        if "partition" in final_report
-        else "execution.defaults.partition"
-    )
-    final_report_partition = normalize_slurm_partition(
-        final_report.get("partition", execution_defaults.get("partition")),
-        path=final_report_partition_path,
-    )
-    if final_report_partition is None and runner.slurm is not None:
+    if final_report.get("partition") is not None:
+        final_report_partition = normalize_slurm_partition(
+            final_report["partition"], path="execution.stages.final_report.partition"
+        )
+    elif runner.slurm is not None and runner.slurm.partition_cpu is not None:
         final_report_partition = runner.slurm.partition_cpu
+    else:
+        final_report_partition = normalize_slurm_partition(
+            execution_defaults.get("partition"), path="execution.defaults.partition"
+        )
     distributed = set(distributed_stage_ids())
     nodes: list[StagePlanNode] = []
     post_mip_by_stage = {row["stage_id"]: row for row in post_mip_stages}
@@ -710,7 +1016,13 @@ def compile_campaign_plan(
             allocation_total_gpus = allocation.total_gpus
             allocation_exclusive = allocation.exclusive
         partition = spec.partition
-        if partition is None and spec.resource == "cpu" and runner.slurm is not None:
+        stage_execution = _mapping(_mapping(execution.get("stages")).get(stage_id))
+        if (
+            spec.resource == "cpu"
+            and runner.slurm is not None
+            and runner.slurm.partition_cpu is not None
+            and stage_execution.get("partition") is None
+        ):
             partition = runner.slurm.partition_cpu
         nodes.append(
             StagePlanNode(

@@ -75,10 +75,7 @@ def largest_remainder_quotas(
     if len(names) != len(set(names)):
         raise ValueError("row count names must be unique")
     source_total = sum(rows for _, rows, _ in entries)
-    exact = [
-        (name, Fraction(total * rows, source_total), index)
-        for name, rows, index in entries
-    ]
+    exact = [(name, Fraction(total * rows, source_total), index) for name, rows, index in entries]
     quotas = {name: int(value) for name, value, _ in exact}
     remaining = total - sum(quotas.values())
     ranked = sorted(
@@ -179,12 +176,15 @@ def _resolve_revision(source: str, requested: str | None) -> str:
 
 def _load_existing_manifest(output_dir: Path) -> dict[str, Any] | None:
     candidates = (
-        output_dir / ACQUISITION_MANIFEST,
         output_dir / "manifest.json",
+        output_dir / ACQUISITION_MANIFEST,
     )
     for path in candidates:
         if path.is_file():
-            return json.loads(path.read_text())
+            try:
+                return json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
     return None
 
 
@@ -201,6 +201,32 @@ def _reuse_or_reject(output_dir: Path, identity: Mapping[str, Any]) -> dict[str,
             f"existing materialization at {output_dir} does not match requested acquisition"
         )
     return existing
+
+
+def _ensure_json_manifest(path: Path, payload: Mapping[str, Any]) -> None:
+    expected = dict(payload)
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = None
+        if existing == expected:
+            return
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(expected, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _resolve_or_reuse_revision(
@@ -341,6 +367,7 @@ def materialize_nemotron_vlm_dataset(
 ) -> dict[str, Any]:
     """Materialize a bounded, row-proportional Nemotron image-conversation subset."""
 
+    from ..orchestration.dataset_payload import vlm_materialization_is_complete
     from .multimodal import (
         materialize_normalized_conversation_samples,
         normalize_nemotron_vlm_sample,
@@ -355,6 +382,12 @@ def materialize_nemotron_vlm_dataset(
     identity = spec.identity(revision=revision)
     reused = _reuse_or_reject(spec.output_dir, identity)
     if reused is not None:
+        if not vlm_materialization_is_complete(spec.output_dir, reused):
+            raise ValueError(
+                f"existing materialization payload is incomplete or corrupt: {spec.output_dir}"
+            )
+        _ensure_json_manifest(spec.output_dir / "manifest.json", reused)
+        _ensure_json_manifest(spec.output_dir / ACQUISITION_MANIFEST, reused)
         return reused
     sample_loader = sample_loader or _default_vlm_sample_loader
     iterators = [
@@ -441,10 +474,12 @@ def materialize_nemotron_vlm_dataset(
                 f"first failures={failures[:3]}"
             )
 
-    return materialize_normalized_conversation_samples(
+    result = materialize_normalized_conversation_samples(
         normalized_samples(),
         spec.output_dir,
         acquisition=identity,
         diagnostics=diagnostics,
         expected_count=spec.num_samples,
     )
+    _ensure_json_manifest(spec.output_dir / ACQUISITION_MANIFEST, result)
+    return result

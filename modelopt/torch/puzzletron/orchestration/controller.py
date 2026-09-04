@@ -35,6 +35,8 @@ from .adapters.stage_compat import stage_is_complete
 from .compiler import _resolve_artifact_settling_timeout_seconds, plan_to_dict
 from .dashboard import StageView, format_duration, progress_eta, progress_fraction
 from .executors import BareMetalSSHExecutor, Executor, LocalExecutor, SlurmExecutor
+from .executors.slurm import render_slurm_attempt_script
+from .expectations import ExpectationResult, verify_expected_results
 from .identity import stable_hash
 from .logging import OrchestratorLogger
 from .progress import summarize_stage_artifacts
@@ -123,6 +125,7 @@ class DryRunSubmission:
     stage_id: str
     work_id: str
     attempt_id: str
+    resource: str
     nodes: int
     gpus: int
     gpus_per_node: int
@@ -135,6 +138,7 @@ class DryRunSubmission:
     launcher: str
     exclusive: bool
     argv: tuple[str, ...]
+    scheduler_script: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,7 +163,18 @@ def dry_run_plan(
         adapter = adapter_for_stage(node)
         work_plan = adapter.plan(plan, node)
         for item in work_plan.items:
-            attempt_id = str(uuid.uuid4())
+            attempt_id = stable_hash(
+                {
+                    "contract_hash": plan.contract_hash,
+                    "experiment_config": plan.experiment_config,
+                    "execution_defaults": plan.execution_defaults,
+                    "stage": node,
+                    "work": item,
+                    "overrides": plan.overrides,
+                },
+                prefix="dryrun",
+                length=24,
+            )
             attempt = adapter.command(
                 plan=plan,
                 node=node,
@@ -169,11 +184,17 @@ def dry_run_plan(
                 overrides=list(plan.overrides),
             )
             topology = resolve_task_topology(attempt)
+            scheduler_script = (
+                render_slurm_attempt_script(attempt, plan.runner)
+                if plan.runner.kind == "slurm"
+                else None
+            )
             submissions.append(
                 DryRunSubmission(
                     stage_id=node.stage_id,
                     work_id=item.work_id,
                     attempt_id=attempt_id,
+                    resource=node.resource,
                     nodes=attempt.allocation_nodes,
                     gpus=attempt.allocation_gpus,
                     gpus_per_node=topology.gpus_per_node,
@@ -186,6 +207,7 @@ def dry_run_plan(
                     launcher=topology.launcher.value,
                     exclusive=attempt.exclusive,
                     argv=attempt.command.argv,
+                    scheduler_script=scheduler_script,
                 )
             )
     return submissions
@@ -1344,6 +1366,7 @@ class CampaignController:
         overrides: list[str] | None = None,
         once: bool = False,
         max_iterations: int | None = None,
+        expectation_contract: str | Path | None = None,
     ) -> dict[str, Any]:
         """Run the controller until all stages complete or a fatal failure occurs."""
 
@@ -1541,19 +1564,41 @@ class CampaignController:
             if clean_completion
             else FinalReportResult(status="skipped")
         )
+        expectation_result: ExpectationResult | None = None
+        if expectation_contract is not None and clean_completion:
+            if report_result.status != "completed":
+                expectation_result = ExpectationResult(
+                    status="invalid",
+                    exit_code=2,
+                    comparison_path=None,
+                    reason="required final campaign report generation failed",
+                )
+            else:
+                expectation_result = verify_expected_results(
+                    expectation_contract,
+                    puzzle_dir=self.plan.puzzle_dir,
+                )
+            if expectation_result.exit_code:
+                halted = True
+                self.logger.error(
+                    "campaign expectation verification "
+                    f"{expectation_result.status}: {expectation_result.reason or 'comparison failed'}"
+                )
         if detached:
             self.logger.shutdown(
                 "controller detached; jobs remain active and the same command will recover them"
             )
         elif cancelled:
             self.logger.shutdown("campaign stopped by user; rerun the same command to resume")
+        elif expectation_result is not None and expectation_result.exit_code:
+            self.logger.error("campaign halted after expectation verification failure")
         elif halted:
             self.logger.error("campaign halted after a stage failure")
         elif self._manual_waiting is not None:
             self.logger.wait("campaign paused for a durable manual-filter decision")
         else:
             self.logger.success("selected campaign plan completed")
-        return {
+        result = {
             "completed": [
                 node.stage_id
                 for node in self.plan.stages
@@ -1570,3 +1615,15 @@ class CampaignController:
             "iterations": iterations,
             **report_result.as_dict(),
         }
+        if expectation_result is not None:
+            result.update(expectation_result.as_dict())
+        elif expectation_contract is not None:
+            result.update(
+                ExpectationResult(
+                    status="skipped",
+                    exit_code=2,
+                    comparison_path=None,
+                    reason="campaign did not reach clean completion",
+                ).as_dict()
+            )
+        return result

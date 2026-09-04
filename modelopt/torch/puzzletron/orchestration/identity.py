@@ -145,6 +145,8 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
             "partition_interactive": runner.slurm.partition_interactive,
             "partition_batch": runner.slurm.partition_batch,
             "partition_cpu": runner.slurm.partition_cpu,
+            "cpu_cpus_per_task": runner.slurm.cpu_cpus_per_task,
+            "cpu_memory_mb": runner.slurm.cpu_memory_mb,
             "interactive_max_nodes": runner.slurm.interactive_max_nodes,
             "max_nodes": runner.slurm.max_nodes,
             "time_limit": runner.slurm.time_limit,

@@ -40,6 +40,7 @@ from .evidence import checkpoint_fingerprint as _checkpoint_fingerprint
 from .evidence import collect_kd_exposure, kd_exposure_metrics
 from .evidence import downstream_evaluation_identity as _downstream_evaluation_identity
 from .evidence import evaluation_contract as _evaluation_contract
+from .evidence import exact_checkpoint_evidence as _exact_checkpoint_evidence
 from .filters import apply_filter
 from .identity import (
     expected_post_mip_execution_identity,
@@ -56,6 +57,7 @@ __all__ = [
 ]
 
 _DOWNSTREAM_EVALUATION_PROFILES: dict[str, Callable[..., dict[str, Any]]] = {}
+_MMMU_PARSER_STATUSES = {"fallback_random", "invalid_open", "parsed", "parsed_open"}
 
 
 def register_downstream_evaluation_profile(
@@ -669,6 +671,7 @@ def _downstream_evaluation(
         evaluator_revision=evaluator_revision,
         settings=settings,
         candidate=candidate,
+        reference=reference,
         reference_checkpoint_fingerprint=reference_checkpoint_fingerprint,
     )
     observation_comparison, observation_metrics = _compare_recorded_observation(
@@ -1049,6 +1052,11 @@ def _aggregate_result_manifest(
             pre_kd_evaluation_observation,
             label=f"pre-KD evaluation {pre_kd_evaluation!r}",
         )
+        if pre_kd_evaluation_observation.status != "success":
+            raise RuntimeError(
+                f"pre-KD evaluation {pre_kd_evaluation!r} is not complete for "
+                f"{revision.architecture_id}"
+            )
         expected_evaluation_contract = _evaluation_contract(
             pre_kd_identity,
             label="pre-KD",
@@ -1078,6 +1086,11 @@ def _aggregate_result_manifest(
                     "missing evaluation milestone "
                     f"{milestone['evaluation']!r} for {revision.architecture_id}"
                 )
+            if kd_observation.status != "success" or evaluation_observation.status != "success":
+                raise RuntimeError(
+                    f"incomplete {int(milestone['steps'])}-step KD/evaluation milestone for "
+                    f"{revision.architecture_id}"
+                )
             kd_revision = ledger.revisions[kd_observation.output_revision_id]
             milestone_identity = comparison_identity(
                 evaluation_observation,
@@ -1100,6 +1113,9 @@ def _aggregate_result_manifest(
                     "kd_node": str(milestone["kd"]),
                     "evaluation_node": str(milestone["evaluation"]),
                     "checkpoint": kd_revision.artifact["checkpoint"],
+                    "revision_id": kd_revision.revision_id,
+                    "kd_status": kd_observation.status,
+                    "evaluation_status": evaluation_observation.status,
                     "kd_metrics": kd_observation.metrics,
                     "evaluation_metrics": evaluation_observation.metrics,
                     "kd_artifacts": kd_observation.artifacts,
@@ -1107,11 +1123,277 @@ def _aggregate_result_manifest(
                     "evaluation_identity": milestone_identity,
                 }
             )
+        architecture = canonicalize(asdict(ledger.architectures[revision.architecture_id]))
+        resolved_profile = pre_kd_identity["evaluator"]["resolved_profile"]
+        expected_rows = resolved_profile["quick_selected_rows"]
+
+        def expected_generated_sample_counts() -> dict[str, int]:
+            source_tasks = resolved_profile.get("source_tasks")
+            denominators = resolved_profile.get("quick_task_denominators")
+            identities = resolved_profile.get("quick_row_identities")
+            if (
+                not isinstance(source_tasks, list)
+                or not isinstance(denominators, Mapping)
+                or not isinstance(identities, Mapping)
+                or set(source_tasks) != set(denominators)
+                or set(source_tasks) != set(identities)
+            ):
+                raise RuntimeError("evaluation profile has invalid exact-row task evidence")
+            expected: dict[str, int] = {}
+            for source_task in source_tasks:
+                denominator = denominators.get(source_task)
+                rows = identities.get(source_task)
+                selected = (
+                    denominator.get("selected_rows") if isinstance(denominator, Mapping) else None
+                )
+                if (
+                    not isinstance(source_task, str)
+                    or isinstance(selected, bool)
+                    or not isinstance(selected, int)
+                    or selected <= 0
+                    or not isinstance(rows, list)
+                    or len(rows) != selected
+                ):
+                    raise RuntimeError("evaluation profile has invalid exact-row task evidence")
+                if source_task in {"mvbench", "video_mmmu"}:
+                    for row in rows:
+                        leaf = row.get("leaf_task") if isinstance(row, Mapping) else None
+                        if not isinstance(leaf, str) or not leaf.startswith(f"{source_task}_"):
+                            raise RuntimeError(
+                                "evaluation profile has invalid exact-row task evidence"
+                            )
+                        task = f"modelopt_vlm_benchmark_{leaf}"
+                        expected[task] = expected.get(task, 0) + 1
+                else:
+                    expected[f"modelopt_vlm_benchmark_{source_task}"] = selected
+            if sum(expected.values()) != expected_rows:
+                raise RuntimeError("evaluation profile has invalid exact-row task evidence")
+            return dict(sorted(expected.items()))
+
+        expected_sample_counts = expected_generated_sample_counts()
+
+        def exact_evaluation_evidence(
+            identity: Mapping[str, Any],
+            *,
+            evidence_key: str,
+            label: str,
+        ) -> dict[str, Any]:
+            evidence = identity.get(evidence_key)
+            if not isinstance(evidence, Mapping):
+                raise RuntimeError(f"{label} is missing positive sample-count evidence")
+            counts = evidence.get("sample_counts")
+            if not isinstance(counts, Mapping) or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value <= 0
+                or int(value) != value
+                for value in counts.values()
+            ):
+                raise RuntimeError(f"{label} is missing positive sample-count evidence")
+            normalized = {str(task): int(value) for task, value in counts.items()}
+            if dict(sorted(normalized.items())) != expected_sample_counts:
+                raise RuntimeError(f"{label} sample counts do not match the exact-row manifest")
+            result: dict[str, Any] = {"sample_counts": normalized}
+            if "mmmu_val" not in resolved_profile["source_tasks"]:
+                return result
+            audit = evidence.get("mmmu_parser_audit")
+            denominators = resolved_profile["quick_task_denominators"]
+            mmmu_denominator = denominators.get("mmmu_val")
+            expected_mmmu_samples = (
+                mmmu_denominator.get("selected_rows")
+                if isinstance(mmmu_denominator, Mapping)
+                else None
+            )
+            sample_count = audit.get("sample_count") if isinstance(audit, Mapping) else None
+            status_counts = audit.get("status_counts") if isinstance(audit, Mapping) else None
+            if (
+                isinstance(sample_count, bool)
+                or not isinstance(sample_count, int)
+                or isinstance(expected_mmmu_samples, bool)
+                or not isinstance(expected_mmmu_samples, int)
+                or expected_mmmu_samples <= 0
+                or sample_count != expected_mmmu_samples
+                or not isinstance(status_counts, Mapping)
+                or not status_counts
+                or any(
+                    status not in _MMMU_PARSER_STATUSES
+                    or isinstance(count, bool)
+                    or not isinstance(count, int)
+                    or count < 0
+                    for status, count in status_counts.items()
+                )
+            ):
+                raise RuntimeError(f"{label} has invalid MMMU parser-audit evidence")
+            normalized_status_counts = {
+                str(status): int(count) for status, count in status_counts.items()
+            }
+            if sum(normalized_status_counts.values()) != sample_count:
+                raise RuntimeError(f"{label} has invalid MMMU parser-audit evidence")
+            result["mmmu_parser_audit"] = {
+                "sample_count": sample_count,
+                "status_counts": dict(sorted(normalized_status_counts.items())),
+            }
+            return result
+
+        def exact_evaluation_result(
+            identity: Mapping[str, Any], metrics: Mapping[str, Any], *, label: str
+        ) -> dict[str, Any]:
+            return canonicalize(
+                {
+                    "metrics": metrics,
+                    "candidate_evidence": exact_evaluation_evidence(
+                        identity,
+                        evidence_key="evaluation_evidence",
+                        label=f"{label} candidate",
+                    ),
+                    "reference_evidence": exact_evaluation_evidence(
+                        identity,
+                        evidence_key="reference_evaluation_evidence",
+                        label=f"{label} reference",
+                    ),
+                }
+            )
+
+        pre_kd_evaluation_result = exact_evaluation_result(
+            pre_kd_identity,
+            pre_kd_evaluation_observation.metrics,
+            label="pre-KD evaluation",
+        )
+        milestone_evaluation_results = [
+            {
+                "steps": row["steps"],
+                **exact_evaluation_result(
+                    row["evaluation_identity"],
+                    row["evaluation_metrics"],
+                    label=f"{row['steps']}-step evaluation",
+                ),
+            }
+            for row in milestones
+        ]
+        pre_kd_sample_counts = pre_kd_evaluation_result["candidate_evidence"]["sample_counts"]
+        milestone_sample_counts = [
+            result["candidate_evidence"]["sample_counts"] for result in milestone_evaluation_results
+        ]
+        pre_kd_checkpoint_evidence = _exact_checkpoint_evidence(pre_kd.artifact["checkpoint"])
+        milestone_checkpoint_evidence = [
+            _exact_checkpoint_evidence(row["checkpoint"]) for row in milestones
+        ]
+
+        def tensor_dimensions(checkpoint_evidence: Mapping[str, Any]) -> dict[str, Any]:
+            return {
+                name: tensor["shape"]
+                for name, tensor in checkpoint_evidence["tensor_shapes"].items()
+            }
+
+        for row, checkpoint_evidence in zip(milestones, milestone_checkpoint_evidence, strict=True):
+            if (
+                checkpoint_evidence["geometry"] != pre_kd_checkpoint_evidence["geometry"]
+                or checkpoint_evidence["parameter_count"]
+                != pre_kd_checkpoint_evidence["parameter_count"]
+                or tensor_dimensions(checkpoint_evidence)
+                != tensor_dimensions(pre_kd_checkpoint_evidence)
+            ):
+                raise RuntimeError(
+                    f"{row['steps']}-step checkpoint geometry differs from the materialized student"
+                )
+
+        exact_exposure_fields = {
+            "cumulative_steps",
+            "global_batch_size",
+            "cumulative_examples",
+            "max_sample_length",
+            "effective_tokens",
+            "effective_tokens_source",
+            "token_upper_bound",
+            "estimated_cumulative_gpu_hours",
+        }
+
+        def exact_kd_exposure(row: Mapping[str, Any]) -> dict[str, Any]:
+            exposure = row["evaluation_identity"]["kd"].get("exposure")
+            if not isinstance(exposure, Mapping):
+                raise RuntimeError(f"{row['steps']}-step KD is missing exposure evidence")
+            return {key: exposure[key] for key in sorted(exact_exposure_fields) if key in exposure}
+
+        exact_result = {
+            "selected_sample_ids": resolved_profile["quick_row_identities"],
+            "axis_inventory": architecture["block_configs"],
+            "evaluator_contract": {
+                "profile": pre_kd_identity["evaluator"]["profile"],
+                "evaluator_revision": pre_kd_identity["evaluator"]["revision"],
+                "lmms_eval_revision": resolved_profile["lmms_eval_revision"],
+                "generation_policy": resolved_profile["generation_policy"],
+                "backend_limitations": resolved_profile["backend_limitations"],
+                "output_budget_contract": resolved_profile["output_budget_contract"],
+            },
+            "evaluation_results": {
+                "pre_kd": pre_kd_evaluation_result,
+                "milestones": milestone_evaluation_results,
+            },
+            "realized_geometry_and_tensor_shapes": {
+                "geometry": pre_kd_checkpoint_evidence["geometry"],
+                "tensor_count": pre_kd_checkpoint_evidence["tensor_count"],
+                "tensor_shapes": pre_kd_checkpoint_evidence["tensor_shapes"],
+            },
+            "parameter_counts": {
+                "materialized_checkpoint": pre_kd_checkpoint_evidence["parameter_count"],
+                "mip_estimates": {
+                    key: value
+                    for key, value in architecture["mip_metrics"].items()
+                    if "param" in key
+                },
+            },
+            "stage_completion": {
+                "pre_kd": pre_kd_evaluation_observation.status,
+                "milestones": [
+                    {
+                        "kd": row["kd_status"],
+                        "evaluation": row["evaluation_status"],
+                        "steps": row["steps"],
+                    }
+                    for row in milestones
+                ],
+            },
+            "checkpoint_and_lineage_identities": {
+                "architecture_id": revision.architecture_id,
+                "pre_kd_content_manifest_sha256": pre_kd_checkpoint_evidence[
+                    "content_manifest_sha256"
+                ],
+                "pre_kd_checkpoint_fingerprint": pre_kd_identity[
+                    "candidate_checkpoint_fingerprint"
+                ],
+                "reference_checkpoint_fingerprint": pre_kd_identity[
+                    "reference_checkpoint_fingerprint"
+                ],
+                "milestones": [
+                    {
+                        "checkpoint_fingerprint": row["evaluation_identity"][
+                            "candidate_checkpoint_fingerprint"
+                        ],
+                        "content_manifest_sha256": checkpoint_evidence["content_manifest_sha256"],
+                        "producer_node": row["evaluation_identity"]["kd"]["producer_node"],
+                        "steps": row["steps"],
+                    }
+                    for row, checkpoint_evidence in zip(
+                        milestones, milestone_checkpoint_evidence, strict=True
+                    )
+                ],
+            },
+            "kd_exposure": [exact_kd_exposure(row) for row in milestones],
+            "denominators": resolved_profile["quick_task_denominators"],
+            "row_outcomes": {
+                "expected": expected_rows,
+                "missing": 0,
+                "failed": 0,
+                "pre_kd_sample_counts": pre_kd_sample_counts,
+                "milestone_sample_counts": milestone_sample_counts,
+            },
+        }
         payload = {
             "schema": "modelopt.puzzletron.kd-learning-curve/v1",
             "execution_identity": execution_identity,
             "architecture_id": revision.architecture_id,
-            "architecture": canonicalize(asdict(ledger.architectures[revision.architecture_id])),
+            "architecture": architecture,
+            "exact_result": exact_result,
             "pre_kd": {
                 "revision_id": pre_kd.revision_id,
                 "checkpoint": pre_kd.artifact["checkpoint"],

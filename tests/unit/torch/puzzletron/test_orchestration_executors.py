@@ -150,6 +150,8 @@ def test_render_sbatch_script_requests_gpus_per_node():
         slurm=SlurmRunnerConfig(
             account="acct",
             partition=["gpu-a", "gpu-b"],
+            cpu_cpus_per_task=4,
+            cpu_memory_mb=32768,
         ),
     )
     attempt = AttemptSpec(
@@ -175,18 +177,26 @@ def test_render_sbatch_script_requests_gpus_per_node():
     assert "#SBATCH --nodes=2" in script
     assert "#SBATCH --partition=gpu-a,gpu-b" in script
     assert "#SBATCH --no-requeue" in script
+    assert "#SBATCH --cpus-per-task" not in script
+    assert "#SBATCH --mem=" not in script
     assert "source /site/setup-envs.sh" in script
     assert script.startswith("#!/bin/bash\n")
     srun = next(line for line in script.splitlines() if line.startswith("srun "))
     assert "--account=acct" in srun
     assert "--job-name=pt-vllm" in srun
+    assert "--cpus-per-task" not in srun
 
 
 def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
     runner = RunnerEnvironment(
         kind="slurm",
         contract=ExecutionContract(repository="/repo", venv="/repo/.venv"),
-        slurm=SlurmRunnerConfig(account="acct", partition="cpu"),
+        slurm=SlurmRunnerConfig(
+            account="acct",
+            partition="cpu",
+            cpu_cpus_per_task=4,
+            cpu_memory_mb=32768,
+        ),
     )
     attempt = AttemptSpec(
         attempt_id="a1",
@@ -211,9 +221,12 @@ def test_render_sbatch_script_omits_gpu_requests_for_cpu_stage():
 
     assert "#SBATCH --partition=cpu" in script
     assert "#SBATCH --gpus" not in script
+    assert "#SBATCH --cpus-per-task=4" in script
+    assert "#SBATCH --mem=32768M" in script
     srun = next(line for line in script.splitlines() if line.startswith("srun "))
     assert "--gpus-per-task" not in srun
     assert "--gpu-bind" not in srun
+    assert "--cpus-per-task=4" in srun
 
 
 @pytest.mark.parametrize("configured_log_dir", [False, True], ids=("fallback", "configured"))

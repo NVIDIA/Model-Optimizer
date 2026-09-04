@@ -30,7 +30,12 @@ from ..task_topology import resolve_task_topology
 from .baremetal import _run_command
 from .base import Executor
 
-__all__ = ["SlurmExecutor", "render_hook_lines", "render_sbatch_script"]
+__all__ = [
+    "SlurmExecutor",
+    "render_hook_lines",
+    "render_sbatch_script",
+    "render_slurm_attempt_script",
+]
 
 
 class _CapturedStreams(Protocol):
@@ -189,6 +194,12 @@ def render_sbatch_script(
             f"#SBATCH --ntasks-per-node={step_tasks_per_node}",
         ]
     )
+    cpu_stage = attempt.allocation_gpus == 0
+    if cpu_stage and runner.slurm is not None:
+        if runner.slurm.cpu_cpus_per_task is not None:
+            header_lines.append(f"#SBATCH --cpus-per-task={runner.slurm.cpu_cpus_per_task}")
+        if runner.slurm.cpu_memory_mb is not None:
+            header_lines.append(f"#SBATCH --mem={runner.slurm.cpu_memory_mb}M")
     if step_gpus_per_node:
         header_lines.append(f"#SBATCH --gpus-per-node={step_gpus_per_node}")
     header_lines.append(f"#SBATCH --output={log_path}")
@@ -225,6 +236,8 @@ def render_sbatch_script(
         "--distribution=block:block",
         '--nodelist="$PUZZLETRON_TASK_HOSTS"',
     ]
+    if cpu_stage and runner.slurm is not None and runner.slurm.cpu_cpus_per_task is not None:
+        srun_parts.append(f"--cpus-per-task={runner.slurm.cpu_cpus_per_task}")
     if topology.gpus_per_task:
         srun_parts.extend(
             (
@@ -248,6 +261,33 @@ def render_sbatch_script(
     return script
 
 
+def _slurm_attempt_partition(attempt: AttemptSpec, runner: RunnerEnvironment) -> str | None:
+    slurm = runner.slurm
+    if slurm is None:
+        raise ValueError("Slurm rendering requires runner.slurm")
+    partition = attempt.metadata.get("partition") or slurm.partition_for_nodes(
+        attempt.allocation_nodes
+    )
+    return str(partition) if partition is not None else None
+
+
+def render_slurm_attempt_script(attempt: AttemptSpec, runner: RunnerEnvironment) -> str:
+    """Render the exact Slurm request used to submit one campaign attempt."""
+
+    slurm = runner.slurm
+    if slurm is None:
+        raise ValueError("Slurm rendering requires runner.slurm")
+    return render_sbatch_script(
+        attempt=attempt,
+        runner=runner,
+        partition=_slurm_attempt_partition(attempt, runner),
+        account=slurm.account,
+        time_limit=slurm.time_limit,
+        qos=slurm.qos,
+        job_name=f"{slurm.job_name_prefix}-{attempt.stage_id[:18]}-{attempt.attempt_id[:8]}",
+    )
+
+
 class SlurmExecutor(Executor):
     backend = "slurm"
 
@@ -265,24 +305,10 @@ class SlurmExecutor(Executor):
         slurm = self.runner.slurm
         if slurm is None:
             raise RuntimeError("Slurm executor lost its runner configuration")
-        partition = attempt.metadata.get("partition") or slurm.partition_for_nodes(
-            attempt.allocation_nodes
-        )
-        if partition is not None:
-            partition = str(partition)
+        partition = _slurm_attempt_partition(attempt, self.runner)
         job_name = f"{slurm.job_name_prefix}-{attempt.stage_id[:18]}-{attempt.attempt_id[:8]}"
         script_path = self.scripts_dir / f"{attempt.stage_id}_{attempt.attempt_id}.sh"
-        script_path.write_text(
-            render_sbatch_script(
-                attempt=attempt,
-                runner=self.runner,
-                partition=partition,
-                account=slurm.account,
-                time_limit=slurm.time_limit,
-                qos=slurm.qos,
-                job_name=job_name,
-            )
-        )
+        script_path.write_text(render_slurm_attempt_script(attempt, self.runner))
         script_path.chmod(0o755)
         job_id = None
         errors: list[str] = []

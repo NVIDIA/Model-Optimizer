@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compile and print packed submissions without submitting jobs.",
+        help="Compile and print packed submissions and scheduler scripts without submitting jobs.",
     )
     parser.add_argument("--local", action="store_true", help="Use the local subprocess executor.")
     parser.add_argument(
@@ -102,6 +102,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Seconds between scheduler polls (default: 5).",
+    )
+    parser.add_argument(
+        "--expect",
+        type=Path,
+        help=(
+            "After full completion, require the final report and verify campaign artifacts "
+            "against this versioned expectation contract."
+        ),
     )
     return parser
 
@@ -142,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                 "stage_id": item.stage_id,
                 "work_id": item.work_id,
                 "attempt_id": item.attempt_id,
+                "resource": item.resource,
                 "nodes": item.nodes,
                 "gpus": item.gpus,
                 "gpus_per_node": item.gpus_per_node,
@@ -154,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
                 "launcher": item.launcher,
                 "exclusive": item.exclusive,
                 "argv": list(item.argv),
+                "scheduler_script": item.scheduler_script,
             }
             for item in submissions
         ]
@@ -169,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides=args.override,
         once=args.once,
         max_iterations=args.max_iterations,
+        expectation_contract=args.expect,
     )
     failed_stages = list(result.get("failed_stages") or ())
     if failed_stages:
@@ -177,6 +188,9 @@ def main(argv: list[str] | None = None) -> int:
             for path in paths:
                 logger.error(f"{stage_id} log: {path}")
     print(json.dumps(result, indent=2))
+    expectation_exit_code = result.get("expectation_exit_code")
+    if expectation_exit_code is not None:
+        return int(expectation_exit_code)
     return 0 if not result.get("halted") else 1
 
 

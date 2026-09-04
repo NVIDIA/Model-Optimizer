@@ -1,15 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """AutoModel-native validation for realized Puzzletron checkpoints."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from omegaconf import DictConfig
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
 
@@ -29,9 +43,7 @@ def _validation_config(hydra_cfg: DictConfig, args: DictConfig) -> DictConfig:
     scoring = clone_hydra_config(args)
     if "automodel" not in scoring:
         scoring.automodel = clone_hydra_config(
-            hydra_cfg.scoring.automodel
-            if hydra_cfg.get("scoring", None) is not None
-            else {}
+            hydra_cfg.scoring.automodel if hydra_cfg.get("scoring", None) is not None else {}
         )
     scoring.backend = "automodel"
     scoring.teacher_dir = str(args.teacher_dir)
@@ -67,6 +79,7 @@ def validate_realized_checkpoints_automodel(
         scoring,
         params["eval_iters"],
         params["use_puzzletron_dataloader"],
+        data_cfg=params["data_cfg"],
     )
     try:
         teacher_scores = _extract_teacher_targets(teacher_recipe, cache, params)
@@ -90,6 +103,7 @@ def validate_realized_checkpoints_automodel(
             scoring,
             params["eval_iters"],
             params["use_puzzletron_dataloader"],
+            data_cfg=params["data_cfg"],
         )
         try:
             _score_candidate(

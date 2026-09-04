@@ -54,6 +54,7 @@ class NodeCapabilities:
     distributed: bool = False
     implemented: bool = True
     default_strategy: str = "single"
+    default_resource: str = "gpu"
 
 
 @dataclass(frozen=True)

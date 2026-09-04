@@ -30,6 +30,7 @@ from modelopt.torch.puzzletron.stages.graph import (
 
 # Frozen compatibility oracle for the reviewed semantic projection contract.
 _EXPECTED_SEMANTIC_CONFIG_SECTIONS = {
+    "prepare_dataset": ("prepare_dataset", "data", "dataset_path"),
     "convert": ("convert",),
     "tokenize_data": (
         "tokenize_data",
@@ -66,7 +67,15 @@ _EXPECTED_SEMANTIC_CONFIG_SECTIONS = {
         "library",
         "pruning",
     ),
-    "mip": ("mip", "realize_model", "replacement_scoring", "vllm_stats", "library", "bypass"),
+    "mip": (
+        "mip",
+        "realize_model",
+        "skip_realize_model",
+        "replacement_scoring",
+        "vllm_stats",
+        "library",
+        "bypass",
+    ),
     "zero_shot_evaluation": ("zero_shot_evaluation", "convert", "replacement_scoring"),
     "aiperf": ("aiperf", "zero_shot_evaluation"),
     "global_distillation_sanity": (
@@ -92,6 +101,7 @@ _EXPECTED_SEMANTIC_CONFIG_SECTIONS = {
 
 def test_registry_contains_every_public_stage_in_deterministic_topological_order():
     assert tuple(STAGE_REGISTRY) == (
+        "prepare_dataset",
         "convert",
         "tokenize_data",
         "vllm_stats",
@@ -113,6 +123,7 @@ def test_registry_contains_every_public_stage_in_deterministic_topological_order
         "post_distillation_evaluation",
     )
     assert topological_stage_ids() == tuple(STAGE_REGISTRY)
+    assert STAGE_REGISTRY["prepare_dataset"].default_resource == "cpu"
     assert all(spec.report_order == index for index, spec in enumerate(STAGE_SPECS))
 
 
@@ -143,6 +154,15 @@ def test_dynamic_stage_semantic_projection_keeps_stage_id_fallback() -> None:
     assert semantic_stage_config(config, "post.custom") == config
 
 
+def test_mip_semantic_projection_tracks_realization_enablement() -> None:
+    disabled = semantic_stage_config({"skip_realize_model": True}, "mip")
+    enabled = semantic_stage_config({"skip_realize_model": False}, "mip")
+
+    assert disabled == {"skip_realize_model": True}
+    assert enabled == {"skip_realize_model": False}
+    assert disabled != enabled
+
+
 def test_semantic_projection_uses_authored_config_unless_effective_view_is_requested() -> None:
     config = {
         "model": {"source": "normalized-model"},
@@ -166,6 +186,11 @@ def test_semantic_projection_uses_authored_config_unless_effective_view_is_reque
 
 
 def test_registry_uses_the_approved_fixed_dependencies():
+    assert selected_parent_stage_ids("prepare_dataset", {}) == ()
+    assert selected_parent_stage_ids("convert", {}) == ()
+    assert selected_parent_stage_ids("convert", {"prepare_dataset": {"enabled": True}}) == (
+        "prepare_dataset",
+    )
     assert selected_parent_stage_ids("tokenize_data", {}) == ("convert",)
     assert selected_parent_stage_ids("vllm_stats", {}) == ("convert",)
     assert selected_parent_stage_ids("depth_importance", {}) == ("tokenize_data",)

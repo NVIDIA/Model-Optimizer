@@ -181,9 +181,11 @@ def materialize_normalized_conversation_samples(
             stream.write("\n]\n")
         if expected_count is not None and sample_count != int(expected_count):
             raise RuntimeError(f"materialized {sample_count}/{int(expected_count)} expected rows")
+        samples_sha256 = hashlib.sha256((transaction / "samples.json").read_bytes()).hexdigest()
         manifest = {
             "version": 1,
             "sample_count": sample_count,
+            "samples_sha256": samples_sha256,
             "image_count": len(image_manifest),
             "sources": [
                 {"dataset": dataset, "revision": revision}

@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Normalize named MIP profiles and compile their aggregate constraints."""
 
@@ -13,6 +25,7 @@ from typing import Any, Iterable, Mapping
 
 __all__ = [
     "BoundValue",
+    "ConcreteMIPVariant",
     "DepthSelection",
     "HomogeneousPolicy",
     "MIPProfile",
@@ -20,7 +33,9 @@ __all__ = [
     "ProfileConstraint",
     "SolverOptions",
     "compile_profile_constraints",
+    "expand_mip_variants",
     "normalize_mip_profiles",
+    "select_mip_values",
 ]
 
 
@@ -142,6 +157,26 @@ class MIPProfile:
                 for constraint in self.constraints
                 if constraint.workload is not None
             )
+        )
+
+
+@dataclass(frozen=True)
+class ConcreteMIPVariant:
+    """One run/variant/matrix combination before objective expansion."""
+
+    run_id: str
+    variant_id: str
+    implicit_variant: bool
+    matrix: dict[str, Any]
+    config: dict[str, Any]
+    objectives: Any
+    selector_sources: dict[str, str]
+
+    def selector_path(self, selector: str) -> str:
+        """Return the authored path that supplied one effective selector."""
+
+        return self.selector_sources.get(
+            selector, f"mip.runs.{self.run_id}.search_space.{selector}"
         )
 
 
@@ -290,7 +325,9 @@ def _normalize_constraints(
     return tuple(constraints)
 
 
-def _selected_values(raw: Any, available: tuple[int, ...], label: str) -> tuple[int, ...]:
+def select_mip_values(raw: Any, available: tuple[int, ...], label: str) -> tuple[int, ...]:
+    """Resolve one scalar, list, or range selector against available values."""
+
     if raw is None or raw == "all":
         return available
     if isinstance(raw, Mapping):
@@ -392,12 +429,9 @@ def _homogeneous_policy(raw: Mapping[str, Any] | None) -> HomogeneousPolicy:
             raise TypeError("constraint_closeness must be a mapping")
         unknown_closeness = set(closeness) - {"weights"}
         if unknown_closeness:
-            raise ValueError(
-                f"unknown constraint_closeness fields: {sorted(unknown_closeness)}"
-            )
+            raise ValueError(f"unknown constraint_closeness fields: {sorted(unknown_closeness)}")
         weights = {
-            str(key): float(value)
-            for key, value in dict(closeness.get("weights") or {}).items()
+            str(key): float(value) for key, value in dict(closeness.get("weights") or {}).items()
         }
         if any(value <= 0 for value in weights.values()):
             raise ValueError("constraint-closeness weights must be positive")
@@ -469,14 +503,14 @@ def _depth_selections(
     if not isinstance(raw, Mapping) or set(raw) == {"range"}:
         return tuple(
             DepthSelection.total_prefix(value)
-            for value in _selected_values(raw, available_depths, "depth")
+            for value in select_mip_values(raw, available_depths, "depth")
         )
     if "total" in raw:
         if set(raw) != {"total"}:
             raise ValueError("depth.total cannot be combined with typed depth keys")
         return tuple(
             DepthSelection.total_prefix(value)
-            for value in _selected_values(raw["total"], available_depths, "depth.total")
+            for value in select_mip_values(raw["total"], available_depths, "depth.total")
         )
     if not raw:
         raise ValueError("typed depth selector must contain at least one sublayer kind")
@@ -491,50 +525,28 @@ def _depth_selections(
 
     kinds = tuple(str(kind) for kind in raw)
     domains = [
-        _selected_values(
+        select_mip_values(
             raw[kind],
             tuple(range(available_by_kind[kind] + 1)),
             f"depth.{kind}",
         )
         for kind in kinds
     ]
-    return tuple(
-        DepthSelection(tuple(sorted(zip(kinds, counts))))
-        for counts in product(*domains)
-    )
+    return tuple(DepthSelection(tuple(sorted(zip(kinds, counts)))) for counts in product(*domains))
 
 
-def normalize_mip_profiles(
-    mip_cfg: Mapping[str, Any],
-    *,
-    available_depths: Iterable[int],
-    available_embeddings: Iterable[int],
-    available_depth_counts: Mapping[str, int] | None = None,
-    depth_granularity: str = "subblock",
-) -> tuple[MIPProfile, ...]:
-    """Validate and compile public ``mip.runs`` into concrete solve specs."""
+def expand_mip_variants(mip_cfg: Mapping[str, Any]) -> tuple[ConcreteMIPVariant, ...]:
+    """Validate and expand named runs into effective run/variant/matrix configurations."""
 
-    workloads = _normalize_workloads(mip_cfg.get("workloads") or {})
-    legacy = {
-        key: mip_cfg.get(key)
-        for key in ("profiles", "constraint_profiles", "latency_constraint_profiles")
-        if mip_cfg.get(key)
-    }
-    if legacy:
-        raise ValueError(
-            "legacy MIP profile fields are no longer supported; use mip.runs: "
-            + ", ".join(sorted(legacy))
-        )
     raw_runs = mip_cfg.get("runs") or {}
     if not isinstance(raw_runs, Mapping):
         raise TypeError("mip.runs must be a mapping of independent run names")
-    depths_available = tuple(int(value) for value in available_depths)
-    embeddings_available = tuple(int(value) for value in available_embeddings)
     defaults = dict(mip_cfg.get("defaults") or {})
     unknown_defaults = set(defaults) - {"objectives", "solver", "homogeneous"}
     if unknown_defaults:
         raise ValueError(f"unknown mip.defaults fields: {sorted(unknown_defaults)}")
-    profiles = []
+
+    concrete_variants = []
     for run_id, run_value in raw_runs.items():
         if run_value is False:
             continue
@@ -572,6 +584,8 @@ def normalize_mip_profiles(
                     f"unknown fields in MIP variant {run_id}.{variant_id}: "
                     f"{sorted(unknown_variant)}"
                 )
+            run_search = dict(run.get("search_space") or {})
+            variant_search = dict(variant.get("search_space") or {})
             for matrix in _matrix_rows(variant.get("matrix")):
                 concrete = {
                     "constraints": _merge_mapping(
@@ -594,68 +608,110 @@ def normalize_mip_profiles(
                         concrete["search_space"][path] = value
                     else:
                         _apply_matrix_path(concrete, path, value)
-                search = concrete["search_space"]
-                axes_default = search.get("axes_default", "all")
-                if axes_default is None:
-                    axes_default = "teacher"
-                if axes_default not in {"all", "teacher"}:
-                    raise ValueError("axes_default must be all or teacher")
-                axes = search.get("axes") or {}
-                if not isinstance(axes, Mapping):
-                    raise TypeError("search_space.axes must be a mapping")
-                depth_selections = _depth_selections(
-                    search.get("depth"),
-                    depths_available,
-                    available_depth_counts=available_depth_counts,
-                    depth_granularity=depth_granularity,
-                )
-                embeddings = _selected_values(
-                    search.get("embedding"), embeddings_available, "embedding"
-                )
-                objectives = _objective_specs(
-                    variant.get(
-                        "objectives",
-                        run.get("objectives", defaults.get("objectives")),
+                concrete_variants.append(
+                    ConcreteMIPVariant(
+                        run_id=str(run_id),
+                        variant_id=str(variant_id),
+                        implicit_variant=implicit_variant,
+                        matrix=matrix,
+                        config=concrete,
+                        objectives=variant.get(
+                            "objectives", run.get("objectives", defaults.get("objectives"))
+                        ),
+                        selector_sources={
+                            selector: (
+                                f"mip.runs.{run_id}.variants.{variant_id}.matrix.{selector}"
+                                if selector in matrix
+                                else f"mip.runs.{run_id}.variants.{variant_id}.search_space.{selector}"
+                                if selector in variant_search
+                                else f"mip.runs.{run_id}.search_space.{selector}"
+                            )
+                            for selector in ("embedding", "depth")
+                        },
                     )
                 )
-                matrix_suffix = tuple(
-                    f"{_slug(key)}-{_slug(value)}" for key, value in matrix.items()
+    return tuple(concrete_variants)
+
+
+def normalize_mip_profiles(
+    mip_cfg: Mapping[str, Any],
+    *,
+    available_depths: Iterable[int],
+    available_embeddings: Iterable[int],
+    available_depth_counts: Mapping[str, int] | None = None,
+    depth_granularity: str = "subblock",
+) -> tuple[MIPProfile, ...]:
+    """Validate and compile public ``mip.runs`` into concrete solve specs."""
+
+    workloads = _normalize_workloads(mip_cfg.get("workloads") or {})
+    legacy = {
+        key: mip_cfg.get(key)
+        for key in ("profiles", "constraint_profiles", "latency_constraint_profiles")
+        if mip_cfg.get(key)
+    }
+    if legacy:
+        raise ValueError(
+            "legacy MIP profile fields are no longer supported; use mip.runs: "
+            + ", ".join(sorted(legacy))
+        )
+    depths_available = tuple(int(value) for value in available_depths)
+    embeddings_available = tuple(int(value) for value in available_embeddings)
+    profiles = []
+    for concrete_variant in expand_mip_variants(mip_cfg):
+        concrete = concrete_variant.config
+        search = concrete["search_space"]
+        axes_default = search.get("axes_default", "all")
+        if axes_default is None:
+            axes_default = "teacher"
+        if axes_default not in {"all", "teacher"}:
+            raise ValueError("axes_default must be all or teacher")
+        axes = search.get("axes") or {}
+        if not isinstance(axes, Mapping):
+            raise TypeError("search_space.axes must be a mapping")
+        depth_selections = _depth_selections(
+            search.get("depth"),
+            depths_available,
+            available_depth_counts=available_depth_counts,
+            depth_granularity=depth_granularity,
+        )
+        embeddings = select_mip_values(search.get("embedding"), embeddings_available, "embedding")
+        objectives = _objective_specs(concrete_variant.objectives)
+        matrix_suffix = tuple(
+            f"{_slug(key)}-{_slug(value)}" for key, value in concrete_variant.matrix.items()
+        )
+        constraints = _normalize_constraints(concrete["constraints"], workloads)
+        homogeneous = _homogeneous_policy(concrete["homogeneous"])
+        constraint_metrics = {constraint.metric for constraint in constraints}
+        unknown_weights = set(dict(homogeneous.constraint_weights)) - constraint_metrics
+        if unknown_weights:
+            raise ValueError(
+                "homogeneous constraint-closeness weights name unknown constraints: "
+                f"{sorted(unknown_weights)}"
+            )
+        for objective in objectives:
+            profile_parts = [concrete_variant.run_id]
+            if not concrete_variant.implicit_variant:
+                profile_parts.append(concrete_variant.variant_id)
+            profile_parts.extend(matrix_suffix)
+            if len(objectives) > 1:
+                profile_parts.append(f"objective-{_slug(objective.metric)}-{objective.direction}")
+            profiles.append(
+                MIPProfile(
+                    profile_id="--".join(profile_parts),
+                    run_id=concrete_variant.run_id,
+                    variant_id=concrete_variant.variant_id,
+                    objective=objective,
+                    solver=_solver_options(concrete["solver"]),
+                    homogeneous=homogeneous,
+                    constraints=constraints,
+                    workloads=deepcopy(workloads),
+                    depths=tuple(selection.total for selection in depth_selections),
+                    depth_selections=depth_selections,
+                    embedding_widths=embeddings,
+                    axes_default=str(axes_default),
+                    axis_options={str(key): deepcopy(value) for key, value in axes.items()},
                 )
-                constraints = _normalize_constraints(concrete["constraints"], workloads)
-                homogeneous = _homogeneous_policy(concrete["homogeneous"])
-                constraint_metrics = {constraint.metric for constraint in constraints}
-                unknown_weights = set(dict(homogeneous.constraint_weights)) - constraint_metrics
-                if unknown_weights:
-                    raise ValueError(
-                        "homogeneous constraint-closeness weights name unknown constraints: "
-                        f"{sorted(unknown_weights)}"
-                    )
-                for objective in objectives:
-                    profile_parts = [str(run_id)]
-                    if not implicit_variant:
-                        profile_parts.append(str(variant_id))
-                    profile_parts.extend(matrix_suffix)
-                    if len(objectives) > 1:
-                        profile_parts.append(
-                            f"objective-{_slug(objective.metric)}-{objective.direction}"
-                        )
-                    profiles.append(
-                        MIPProfile(
-                            profile_id="--".join(profile_parts),
-                            run_id=str(run_id),
-                            variant_id=str(variant_id),
-                            objective=objective,
-                            solver=_solver_options(concrete["solver"]),
-                            homogeneous=homogeneous,
-                            constraints=constraints,
-                            workloads=deepcopy(workloads),
-                            depths=tuple(selection.total for selection in depth_selections),
-                            depth_selections=depth_selections,
-                            embedding_widths=embeddings,
-                            axes_default=str(axes_default),
-                            axis_options={str(key): deepcopy(value) for key, value in axes.items()},
-                        )
-                    )
+            )
     ids = [profile.profile_id for profile in profiles]
     if len(ids) != len(set(ids)):
         raise ValueError("MIP run expansion produced duplicate concrete solve IDs")
@@ -703,16 +759,16 @@ def compile_profile_constraints(
 ) -> dict[str, float | tuple[float | None, float | None]]:
     """Resolve percentages and produce direct additive MIP constraints."""
 
-    compiled = {}
+    compiled: dict[str, float | tuple[float | None, float | None]] = {}
     for constraint in profile.constraints:
         teacher = teacher_totals.get(constraint.workload)
         if teacher is None:
-            raise ValueError(
-                f"teacher totals are missing for workload {constraint.workload!r}"
-            )
+            raise ValueError(f"teacher totals are missing for workload {constraint.workload!r}")
         workload_suffix = f"@{constraint.workload}" if constraint.workload else ""
         key = f"stats.{constraint.stat_name}{workload_suffix}"
         if constraint.metric == "throughput":
+            if constraint.workload is None:
+                raise ValueError("throughput constraints require a workload")
             workload = profile.workloads[constraint.workload]
             teacher_runtime = teacher.get("runtime_ms")
             # Throughput bounds invert when expressed as runtime bounds.

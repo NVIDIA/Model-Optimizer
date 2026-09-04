@@ -30,6 +30,7 @@ __all__ = [
     "collect_kd_exposure",
     "downstream_evaluation_identity",
     "evaluation_contract",
+    "exact_checkpoint_evidence",
     "kd_exposure_metrics",
 ]
 
@@ -44,7 +45,12 @@ _PROFILE_FIELDS = (
     "dataset_revisions",
     "frame_policy",
     "generation_policy",
+    "backend_limitations",
+    "output_budget_contract",
     "sample_limit",
+    "quick_selected_rows",
+    "quick_row_identities",
+    "quick_task_denominators",
     "quick_manifest_sha256",
     "repetitions",
 )
@@ -56,6 +62,9 @@ _EXPOSURE_FIELDS = (
     "effective_tokens",
     "effective_tokens_source",
     "token_upper_bound",
+    "estimated_cumulative_gpu_hours",
+    "actual_incremental_gpu_hours",
+    "actual_cumulative_gpu_hours",
 )
 
 
@@ -135,6 +144,61 @@ def checkpoint_fingerprint(checkpoint: str | Path) -> str:
     return str(checkpoint_identity(checkpoint)["fingerprint"])
 
 
+def exact_checkpoint_evidence(checkpoint: str | Path) -> dict[str, Any]:
+    """Read root-independent physical geometry and content identity from a checkpoint."""
+
+    from ..benchmarks.provenance import checkpoint_identity
+
+    root = Path(checkpoint)
+    config = json.loads((root / "config.json").read_text())
+    text_config = (
+        config.get("text_config") if isinstance(config.get("text_config"), Mapping) else config
+    )
+    block_configs = config.get("block_configs")
+    if not isinstance(block_configs, list):
+        block_configs = text_config.get("block_configs")
+    if not isinstance(block_configs, list) or not block_configs:
+        raise RuntimeError(f"materialized checkpoint has no block_configs: {root}")
+
+    tensor_shapes: dict[str, dict[str, Any]] = {}
+    for shard in sorted(root.glob("*.safetensors")):
+        with shard.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                raise RuntimeError(f"invalid safetensors header in {shard}")
+            header_size = int.from_bytes(prefix, "little")
+            if not 0 < header_size <= 100 * 1024 * 1024:
+                raise RuntimeError(f"invalid safetensors header size in {shard}: {header_size}")
+            header_bytes = stream.read(header_size)
+            if len(header_bytes) != header_size:
+                raise RuntimeError(f"truncated safetensors header in {shard}")
+        header = json.loads(header_bytes)
+        for name, metadata in header.items():
+            if name == "__metadata__":
+                continue
+            if name in tensor_shapes:
+                raise RuntimeError(f"duplicate tensor {name!r} in materialized checkpoint")
+            shape = [int(dimension) for dimension in metadata["shape"]]
+            tensor_shapes[name] = {"dtype": str(metadata["dtype"]), "shape": shape}
+    if not tensor_shapes:
+        raise RuntimeError(f"materialized checkpoint has no safetensors: {root}")
+
+    identity = checkpoint_identity(root)
+    return canonicalize(
+        {
+            "content_manifest_sha256": identity["content_manifest_sha256"],
+            "geometry": {
+                "block_configs": block_configs,
+                "hidden_size": text_config.get("hidden_size"),
+                "num_hidden_layers": text_config.get("num_hidden_layers", len(block_configs)),
+            },
+            "parameter_count": identity["parameter_count"],
+            "tensor_count": identity["tensor_count"],
+            "tensor_shapes": tensor_shapes,
+        }
+    )
+
+
 def _selected_json(path: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:
     if not path:
         return None
@@ -150,6 +214,7 @@ def downstream_evaluation_identity(
     evaluator_revision: Any,
     settings: Mapping[str, Any],
     candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
     reference_checkpoint_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Bind one comparison to its checkpoints, training, data, and evaluator."""
@@ -177,6 +242,12 @@ def downstream_evaluation_identity(
                 "settings": evaluator_settings,
                 "resolved_profile": _selected_json(candidate.get("profile_path"), _PROFILE_FIELDS),
             },
+            "evaluation_evidence": _selected_json(
+                candidate.get("result_path"), ("sample_counts", "mmmu_parser_audit")
+            ),
+            "reference_evaluation_evidence": _selected_json(
+                reference.get("result_path"), ("sample_counts", "mmmu_parser_audit")
+            ),
         }
     )
 

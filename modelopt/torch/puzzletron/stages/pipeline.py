@@ -1139,7 +1139,10 @@ def mip_stage(config: dict[str, Any], manifest: StageManifest):
         )
         coverage_report.require_complete()
     solution_paths: list[str] = []
-    with _distributed(hydra_cfg):
+    # Solve-only MIP is direct, single-writer CPU work. Realized-checkpoint
+    # validation is launched with torchrun, and legacy torchrun launches remain
+    # compatible with this stage entry point.
+    with _distributed_if_launched(hydra_cfg):
         coverage_path = (
             _puzzle_dir(config, hydra_cfg) / "artifacts" / "mip" / "artifact_coverage.json"
         )

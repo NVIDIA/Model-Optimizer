@@ -28,7 +28,7 @@ from modelopt.torch.puzzletron.orchestration.compiler import (
     plan_to_dict,
     resolve_stage_execution_specs,
 )
-from modelopt.torch.puzzletron.orchestration.controller import CampaignController
+from modelopt.torch.puzzletron.orchestration.controller import CampaignController, dry_run_plan
 from modelopt.torch.puzzletron.orchestration.identity import execution_contract_hash, hash_payload
 from modelopt.torch.puzzletron.orchestration.schema import (
     ExecutionContract,
@@ -111,6 +111,7 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
     specs = resolve_stage_execution_specs(
         {},
         (
+            "mip",
             "width_importance",
             "vllm_stats",
             "depth_importance",
@@ -119,6 +120,7 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
             "aiperf",
         ),
     )
+    assert specs["mip"].resource == "cpu"
     assert specs["width_importance"].strategy is ExecutionStrategy.SINGLE
     assert specs["vllm_stats"].strategy is ExecutionStrategy.SHARDED
     assert specs["depth_importance"].strategy is ExecutionStrategy.PERSISTENT_POOL
@@ -128,6 +130,301 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
 
     configured = resolve_stage_execution_specs(execution, ("vllm_stats",))
     assert configured["vllm_stats"].instances == 16
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0, "1", 2])
+def test_compile_rejects_incompatible_generated_execution_schema(
+    tmp_configs, schema_version
+) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+    payload = yaml.safe_load(execution_path.read_text())
+    payload["execution"]["schema_version"] = schema_version
+    execution_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError) as error:
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=load_execution_config(execution_path),
+        )
+    assert str(error.value) == (
+        f"Unsupported execution schema {schema_version!r}; expected 1. Regenerate the campaign "
+        "bundles using the "
+        "setup --resume command in the generated campaign README."
+    )
+
+
+def test_compile_accepts_unversioned_manual_execution_config(tmp_configs) -> None:
+    experiment_path, runner_path, execution_path = tmp_configs
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+        stage_filter="width_importance",
+    )
+
+    assert plan.stages[0].stage_id == "width_importance"
+
+
+def _write_named_mip_experiment(experiment_path: Path) -> dict:
+    experiment = {
+        "experiment": {"dir": str(experiment_path.parent / "run")},
+        "model_info": {"hidden_size": 1024, "num_hidden_layers": 24},
+        "embedding_pruning": {"enabled": True, "widths": [1024]},
+        "depth_importance": {
+            "enabled": False,
+            "granularity": "subblock",
+            "expected_initial_sublayers": 48,
+            "max_subblocks_to_remove": 0,
+        },
+        "mip": {
+            "enabled": True,
+            "runs": {
+                "params-90": {
+                    "search_space": {"embedding": [1024], "depth": [0]},
+                }
+            },
+        },
+        "skip_realize_model": False,
+        "realize_model": {"skip_validation": False},
+    }
+    experiment_path.parent.mkdir(parents=True, exist_ok=True)
+    experiment_path.write_text(yaml.safe_dump(experiment))
+    return experiment
+
+
+def test_named_mip_plan_uses_the_public_worker_on_the_cpu_route(tmp_configs) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    _write_named_mip_experiment(experiment_path)
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": "cpu"}}},
+        stage_filter="mip",
+    )
+    submission = dry_run_plan(plan)[0]
+
+    assert submission.launcher == "direct"
+    assert submission.gpus == 0
+    assert any(
+        str(argument).endswith("examples/puzzletron/main.py") for argument in submission.argv
+    )
+    assert submission.argv[submission.argv.index("--worker-stage") + 1] == "mip"
+
+
+def test_named_mip_ranges_select_available_geometry(tmp_configs) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = _write_named_mip_experiment(experiment_path)
+    search = experiment["mip"]["runs"]["params-90"]["search_space"]
+    search["embedding"] = {"range": [900, 1100]}
+    search["depth"] = "0..1"
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": "cpu"}}},
+        stage_filter="mip",
+    )
+
+    assert plan.stages[0].resource == "cpu"
+
+
+def test_named_mip_validates_effective_variant_search_space(tmp_configs) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = _write_named_mip_experiment(experiment_path)
+    run = experiment["mip"]["runs"]["params-90"]
+    run["search_space"]["embedding"] = [768]
+    run["variants"] = {"teacher": {"search_space": {"embedding": [1024]}}}
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": "cpu"}}},
+        stage_filter="mip",
+    )
+
+    assert plan.stages[0].resource == "cpu"
+
+
+@pytest.mark.parametrize(("selector", "value"), [("embedding", [768]), ("depth", [1])])
+def test_named_mip_rejects_stale_matrix_selector(
+    tmp_configs, selector: str, value: list[int]
+) -> None:
+    _experiment_path, runner_path, _execution_path = tmp_configs
+    experiment_path = _experiment_path.parent / "campaign" / "production" / "experiment.yaml"
+    experiment = _write_named_mip_experiment(experiment_path)
+    run = experiment["mip"]["runs"]["params-90"]
+    run["variants"] = {"stale": {"matrix": {selector: [value]}}}
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    with pytest.raises(ValueError) as error:
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution={"stages": {"mip": {"resource": "cpu"}}},
+            stage_filter="mip",
+        )
+
+    assert str(error.value).startswith(f"mip.runs.params-90.variants.stale.matrix.{selector}")
+    assert f"puzzletron_setup_v2.py --resume {experiment_path.parent.parent}" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("case", "error_path"),
+    [
+        ("empty_driver", "embedding_pruning"),
+        ("reduced_width_only", "embedding_pruning.widths"),
+        ("depth_outside_generated_domain", "mip.runs.params-90.search_space.depth"),
+        ("malformed_selector", "mip.runs.params-90.search_space.embedding"),
+        ("invalid_run", "mip.runs.params-90"),
+        ("invalid_variant", "mip.runs.params-90.variants.bad"),
+        ("all_disabled_runs", "mip.runs"),
+        ("missing_named_runs", "mip.runs"),
+    ],
+)
+def test_compile_rejects_stale_named_mip_geometry(tmp_configs, case: str, error_path: str) -> None:
+    _experiment_path, runner_path, _execution_path = tmp_configs
+    experiment_path = _experiment_path.parent / "campaign" / "production" / "experiment.yaml"
+    experiment = _write_named_mip_experiment(experiment_path)
+    if case == "empty_driver":
+        experiment["embedding_pruning"] = {"enabled": False, "widths": []}
+    elif case == "reduced_width_only":
+        experiment["embedding_pruning"]["widths"] = [768]
+    elif case == "depth_outside_generated_domain":
+        experiment["mip"]["runs"]["params-90"]["search_space"]["depth"] = [1]
+    elif case == "malformed_selector":
+        experiment["mip"]["runs"]["params-90"]["search_space"]["embedding"] = "legacy"
+    elif case == "invalid_run":
+        experiment["mip"]["runs"]["params-90"] = "legacy"
+    elif case == "invalid_variant":
+        experiment["mip"]["runs"]["params-90"]["variants"] = {"bad": "legacy"}
+    elif case == "all_disabled_runs":
+        experiment["mip"]["runs"] = {"params-90": False}
+    else:
+        experiment["mip"]["runs"] = {}
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    with pytest.raises(ValueError) as error:
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution={"stages": {"mip": {"resource": "cpu"}}},
+            stage_filter="mip",
+        )
+
+    assert str(error.value).startswith(error_path)
+    assert f"puzzletron_setup_v2.py --resume {experiment_path.parent.parent}" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("skip_realize_model", "skip_validation"),
+    [(True, False), (False, True)],
+)
+def test_compile_routes_mip_without_model_validation_to_cpu(
+    tmp_configs, skip_realize_model: bool, skip_validation: bool
+) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = yaml.safe_load(experiment_path.read_text())
+    experiment.update(
+        {
+            "skip_realize_model": skip_realize_model,
+            "realize_model": {"skip_validation": skip_validation},
+        }
+    )
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": "cpu"}}},
+        stage_filter="mip",
+    )
+    mip = plan.stages[0]
+    submission = dry_run_plan(plan)[0]
+
+    assert mip.resource == "cpu"
+    assert mip.total_gpus == 0
+    assert not mip.distributed
+    assert submission.launcher == "direct"
+    assert submission.scheduler_script is not None
+    assert "#SBATCH --gpus-per-node" not in submission.scheduler_script
+    assert "srun --gpus-per-task" not in submission.scheduler_script
+
+
+def test_compile_routes_mip_model_validation_to_gpu_mesh(tmp_configs) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = yaml.safe_load(experiment_path.read_text())
+    experiment.update(
+        {
+            "skip_realize_model": False,
+            "realize_model": {
+                "skip_validation": False,
+                "automodel": {"parallel": {"cp": 4, "pp": 2}},
+            },
+        }
+    )
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": "gpu"}}},
+        stage_filter="mip",
+    )
+    mip = plan.stages[0]
+    submission = dry_run_plan(plan)[0]
+
+    assert mip.resource == "gpu"
+    assert mip.mesh["cp"] == 4
+    assert mip.mesh["pp"] == 2
+    assert mip.total_gpus == 8
+    assert mip.distributed
+    assert submission.launcher == "torchrun"
+    assert submission.gpus == 8
+    assert submission.scheduler_script is not None
+    assert "#SBATCH --gpus-per-node=8" in submission.scheduler_script
+    assert "--gpus-per-task=8" in submission.scheduler_script
+
+
+@pytest.mark.parametrize(
+    ("skip_validation", "execution", "message"),
+    [
+        (
+            False,
+            {"stages": {"mip": {"resource": "cpu"}}},
+            "execution.stages.mip.resource cannot be 'cpu' because "
+            "realize_model.skip_validation=false runs realized-checkpoint validation on GPUs; "
+            "set it to 'gpu' or disable realization validation",
+        ),
+        (
+            True,
+            {"defaults": {"resource": "gpu"}},
+            "execution.defaults.resource cannot be 'gpu' because the effective MIP path is "
+            "CPU-only; remove that setting or set it to 'cpu'",
+        ),
+    ],
+)
+def test_compile_rejects_mip_resource_mismatch(
+    tmp_configs, skip_validation: bool, execution: dict, message: str
+) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = yaml.safe_load(experiment_path.read_text())
+    experiment["skip_realize_model"] = False
+    experiment["realize_model"] = {"skip_validation": skip_validation}
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    with pytest.raises(ValueError) as error:
+        compile_campaign_plan(
+            experiment_config_path=experiment_path,
+            runner=load_runner_config(runner_path),
+            execution=execution,
+            stage_filter="mip",
+        )
+    assert str(error.value) == message
 
 
 def test_runner_config_rejects_unknown_field_with_suggestion(tmp_configs) -> None:
@@ -161,6 +458,8 @@ def test_runner_config_preserves_legacy_partition_routing(tmp_configs) -> None:
             "partition_interactive": "interactive",
             "partition_batch": "batch",
             "partition_cpu": "cpu",
+            "cpu_cpus_per_task": 4,
+            "cpu_memory_mb": 32768,
             "interactive_max_nodes": 2,
         }
     )
@@ -172,6 +471,27 @@ def test_runner_config_preserves_legacy_partition_routing(tmp_configs) -> None:
     assert runner.slurm.partition_for_nodes(1) == "interactive"
     assert runner.slurm.partition_for_nodes(3) == "batch"
     assert runner.slurm.partition_cpu == "cpu"
+    assert runner.slurm.cpu_cpus_per_task == 4
+    assert runner.slurm.cpu_memory_mb == 32768
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("cpu_cpus_per_task", True, TypeError),
+        ("cpu_cpus_per_task", 0, ValueError),
+        ("cpu_memory_mb", 1.5, TypeError),
+        ("cpu_memory_mb", 0, ValueError),
+    ],
+)
+def test_runner_config_rejects_invalid_cpu_resources(tmp_configs, field, value, error) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["slurm"][field] = value
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(error, match=field):
+        load_runner_config(runner_path)
 
 
 def test_runner_config_normalizes_multiple_eligible_partitions(tmp_configs) -> None:
@@ -199,6 +519,29 @@ def test_partition_set_changes_slurm_execution_contract_identity() -> None:
     )
 
     assert execution_contract_hash(first) != execution_contract_hash(second)
+
+
+def test_cpu_resources_change_slurm_execution_contract_identity() -> None:
+    baseline = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", cpu_cpus_per_task=4, cpu_memory_mb=16384),
+    )
+    resized = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", cpu_cpus_per_task=4, cpu_memory_mb=32768),
+    )
+
+    assert execution_contract_hash(baseline) != execution_contract_hash(resized)
+
+    more_cpus = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct", cpu_cpus_per_task=8, cpu_memory_mb=16384),
+    )
+
+    assert execution_contract_hash(baseline) != execution_contract_hash(more_cpus)
 
 
 def test_partition_schema_migration_changes_slurm_execution_contract_identity() -> None:
@@ -294,6 +637,41 @@ def test_runner_config_rejects_invalid_command_sequence(tmp_configs) -> None:
 
     with pytest.raises(TypeError, match="prerun_commands must be a string or a sequence"):
         load_runner_config(runner_path)
+
+
+@pytest.mark.parametrize("field", ["prerun_commands", "postrun_commands"])
+@pytest.mark.parametrize("value", ["literal-value", "${API_KEY:-literal-value}"])
+def test_runner_config_rejects_literal_secrets_in_persisted_hooks(
+    tmp_configs, field, value
+) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["execution_contract"][field] = [f"export API_KEY={value}"]
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    with pytest.raises(ValueError) as error:
+        load_runner_config(runner_path)
+    assert str(error.value) == (
+        f"runner.execution_contract.{field} assigns a literal value to 'API_KEY'; inherit it "
+        "from the environment or source a protected setup_env file instead"
+    )
+
+
+def test_runner_config_allows_nonsecret_tokenizer_setting_and_inherited_secret(
+    tmp_configs,
+) -> None:
+    _, runner_path, _ = tmp_configs
+    payload = yaml.safe_load(runner_path.read_text())
+    payload["runner"]["execution_contract"]["prerun_commands"] = [
+        "export TOKENIZERS_PARALLELISM=false",
+        "export API_KEY=${API_KEY}",
+    ]
+    runner_path.write_text(yaml.safe_dump(payload))
+
+    assert load_runner_config(runner_path).contract.prerun_commands == (
+        "export TOKENIZERS_PARALLELISM=false",
+        "export API_KEY=${API_KEY}",
+    )
 
 
 @pytest.mark.parametrize(
@@ -526,7 +904,10 @@ def test_compile_campaign_plan_migrates_legacy_cpu_partition(tmp_configs):
     execution_payload["execution"]["stages"]["convert"] = {
         "strategy": "single",
         "resource": "cpu",
+        "partition": None,
     }
+    execution_payload["execution"]["stages"]["final_report"] = {"partition": None}
+    execution_payload["execution"]["defaults"]["partition"] = "gpu"
     execution_path.write_text(yaml.safe_dump(execution_payload))
 
     plan = compile_campaign_plan(
@@ -538,6 +919,33 @@ def test_compile_campaign_plan_migrates_legacy_cpu_partition(tmp_configs):
 
     assert convert.partition == "cpu"
     assert plan.final_report_partition == "cpu"
+
+
+def test_cpu_partition_takes_precedence_over_global_execution_partition(tmp_configs):
+    experiment_path, runner_path, execution_path = tmp_configs
+    runner_payload = yaml.safe_load(runner_path.read_text())
+    runner_payload["runner"]["slurm"]["partition_cpu"] = "cpu"
+    runner_path.write_text(yaml.safe_dump(runner_payload))
+    execution_payload = yaml.safe_load(execution_path.read_text())
+    execution_payload["execution"]["defaults"]["partition"] = "gpu"
+    execution_payload["execution"]["stages"]["convert"] = {"partition": "cpu-explicit"}
+    execution_payload["execution"]["stages"]["final_report"] = {"partition": "cpu-report"}
+    execution_path.write_text(yaml.safe_dump(execution_payload))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution=load_execution_config(execution_path),
+    )
+
+    assert (
+        next(node for node in plan.stages if node.stage_id == "convert").partition == "cpu-explicit"
+    )
+    assert next(node for node in plan.stages if node.stage_id == "build_library").partition == "cpu"
+    assert (
+        next(node for node in plan.stages if node.stage_id == "width_importance").partition == "gpu"
+    )
+    assert plan.final_report_partition == "cpu-report"
 
 
 def test_compile_campaign_plan_routes_final_report_to_eligible_cpu_partitions(tmp_configs):
@@ -571,10 +979,17 @@ def test_post_mip_compiler_topologically_orders_serialized_nodes() -> None:
                         "best": {
                             "type": "filter",
                             "input": "final_eval",
+                            "mode": "top_k",
                             "metric": "final_eval.kl_div",
+                            "top_k": 1,
                         },
                         "final_eval": {"type": "evaluation", "input": "initial"},
-                        "initial": {"type": "filter", "metric": "mip.score"},
+                        "initial": {
+                            "type": "filter",
+                            "mode": "top_k",
+                            "metric": "mip.score",
+                            "top_k": 1,
+                        },
                     },
                 }
             }
@@ -584,6 +999,7 @@ def test_post_mip_compiler_topologically_orders_serialized_nodes() -> None:
     stages = _post_mip_stage_metadata(config)
 
     assert [stage["node_id"] for stage in stages] == ["initial", "final_eval", "best"]
+    assert [stage["default_resource"] for stage in stages] == ["cpu", "gpu", "cpu"]
 
 
 def test_compile_campaign_plan_allocates_downstream_evaluation_from_vllm_topology(
@@ -593,6 +1009,13 @@ def test_compile_campaign_plan_allocates_downstream_evaluation_from_vllm_topolog
     experiment = yaml.safe_load(experiment_path.read_text())
     experiment.update(
         {
+            "model_info": {"hidden_size": 1024, "num_hidden_layers": 24},
+            "embedding_pruning": {"enabled": True, "widths": [1024]},
+            "depth_importance": {
+                "granularity": "subblock",
+                "expected_initial_sublayers": 48,
+                "max_subblocks_to_remove": 0,
+            },
             "mip": {"runs": {"runtime": {}}},
             "post_mip": {
                 "flows": {

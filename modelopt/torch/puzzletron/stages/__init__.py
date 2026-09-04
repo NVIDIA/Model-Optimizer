@@ -68,7 +68,7 @@ DEFAULT_HANDLERS = {
     "post_distillation_evaluation": post_distillation_evaluation_stage,
 }
 
-__all__ = [
+__all__ = [  # noqa: PLE0604 -- mirror the public graph exports without duplicating the list.
     *_graph.__all__,
     "DEFAULT_HANDLERS",
     "activation_stage",

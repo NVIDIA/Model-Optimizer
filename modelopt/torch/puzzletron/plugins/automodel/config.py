@@ -98,6 +98,20 @@ def _trust_remote_code(hydra_cfg) -> bool:
     )
 
 
+def _inject_authored_model_backend(recipe: dict, hydra_cfg) -> dict:
+    """Apply an explicit AutoModel backend before descriptor requirements are merged."""
+    model_config = _as_dict(hydra_cfg.get("model", None))
+    if "automodel_backend" not in model_config:
+        return recipe
+    backend = _as_dict(model_config["automodel_backend"])
+    if not backend:
+        raise ValueError("model.automodel_backend must be a non-empty mapping")
+    model = dict(recipe.get("model") or {})
+    model["backend"] = backend
+    recipe["model"] = model
+    return recipe
+
+
 def _inject_canonical_data(
     recipe: dict,
     hydra_cfg,
@@ -532,7 +546,7 @@ def build_recipe_config(hydra_cfg) -> dict:
     checkpoint path, AnyModel descriptor, and ``force_hf`` into its ``model`` block.
     """
     automodel_cfg = hydra_cfg.pruning.get("automodel", None)
-    recipe = build_stage_recipe_config(automodel_cfg)
+    recipe = _inject_authored_model_backend(build_stage_recipe_config(automodel_cfg), hydra_cfg)
 
     model = dict(recipe.get("model", {}))
     model.setdefault("_target_", _FROM_PRETRAINED_TARGET)
@@ -630,7 +644,7 @@ def build_solution_recipe_config(hydra_cfg, model_path) -> dict:
     ``scoring.automodel.parallel``.
     """
     automodel_cfg = hydra_cfg.scoring.get("automodel", None)
-    recipe = build_stage_recipe_config(automodel_cfg)
+    recipe = _inject_authored_model_backend(build_stage_recipe_config(automodel_cfg), hydra_cfg)
     force_hf = bool(_as_dict(automodel_cfg).get("force_hf", False))
     runtime_cfg = hydra_cfg.get("_runtime", {}) or {}
     descriptor = hydra_cfg.get("descriptor", None) or runtime_cfg.get("descriptor", None)

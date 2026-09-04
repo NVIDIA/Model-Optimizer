@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import struct
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +62,30 @@ __all__ = [
 ]
 
 _WEIGHT = ".weight"
+
+
+def _safetensor_payload_size(path: Path) -> int:
+    """Return the exact tensor-data bytes in one safetensors shard."""
+
+    file_size = path.stat().st_size
+    with path.open("rb") as stream:
+        encoded_header_size = stream.read(8)
+    if len(encoded_header_size) != 8:
+        raise RuntimeError(f"invalid safetensors header: {path}")
+    header_size = struct.unpack("<Q", encoded_header_size)[0]
+    payload_size = file_size - 8 - header_size
+    if payload_size < 0:
+        raise RuntimeError(f"invalid safetensors header size: {path}")
+    return payload_size
+
+
+def _checkpoint_payload_size(checkpoint_dir: Path, weight_map: dict[str, str]) -> int:
+    """Return tensor bytes across the unique emitted safetensors shards."""
+
+    return sum(
+        _safetensor_payload_size(checkpoint_dir / relative)
+        for relative in sorted(set(weight_map.values()))
+    )
 
 
 def _shard_requires_rewrite(
@@ -120,12 +145,7 @@ def _slice_gated_up(up: torch.Tensor, keep: torch.Tensor, intermediate: int) -> 
 def _newly_removed_subblock(child, teacher) -> bool:
     """Return whether an active teacher subblock became a child no-op."""
 
-    return bool(
-        child is not None
-        and child.no_op
-        and teacher is not None
-        and not teacher.no_op
-    )
+    return bool(child is not None and child.no_op and teacher is not None and not teacher.no_op)
 
 
 def block_targets_from_replacements(
@@ -150,7 +170,9 @@ def block_targets_from_replacements(
             if isinstance(child, dict):
                 child = BlockConfig(**child)
             if not isinstance(child, BlockConfig):
-                raise TypeError(f"Expected BlockConfig child replacement, got {type(child).__name__}")
+                raise TypeError(
+                    f"Expected BlockConfig child replacement, got {type(child).__name__}"
+                )
             teacher_block_config = teacher_block_configs[layer_idx]
             if isinstance(teacher_block_config, dict):
                 teacher_block_config = BlockConfig(**teacher_block_config)
@@ -161,7 +183,9 @@ def block_targets_from_replacements(
             if ffn is not None and not isinstance(ffn, FFNConfig):
                 raise TypeError(f"Expected FFNConfig for 'ffn', got {type(ffn).__name__}")
             if attn is not None and not isinstance(attn, AttentionConfig):
-                raise TypeError(f"Expected AttentionConfig for 'attention', got {type(attn).__name__}")
+                raise TypeError(
+                    f"Expected AttentionConfig for 'attention', got {type(attn).__name__}"
+                )
             moe = child.get_subblock("moe")
             mamba = child.get_subblock("mamba")
             mla = child.get_subblock("mla")
@@ -200,7 +224,9 @@ def block_targets_from_replacements(
                 # provenance, but indexing the sorted tensors by them again
                 # would select a different expert set.
                 expert_keep_indices=None,
-                target_expert_intermediate=moe.expert_intermediate_size if moe is not None else None,
+                target_expert_intermediate=moe.expert_intermediate_size
+                if moe is not None
+                else None,
                 target_shared_expert_intermediate=(
                     moe.shared_expert_intermediate_size if moe is not None else None
                 ),
@@ -282,9 +308,7 @@ def materialize_hidden_width_checkpoint(
         sorted_dir,
         trust_remote_code=descriptor.requires_trust_remote_code(),
     )
-    teacher_hidden_width = int(
-        descriptor.get_language_model_config(teacher_config).hidden_size
-    )
+    teacher_hidden_width = int(descriptor.get_language_model_config(teacher_config).hidden_size)
     spec = descriptor.embedding_pruning_spec(
         teacher_config,
         widths=(teacher_hidden_width, int(hidden_width)),
@@ -500,9 +524,7 @@ def materialize_checkpoint_from_sorted(
         embedding_spec.validate_width(target_hidden_width)
     ple_spec = descriptor.ple_pruning_spec(teacher_config)
     teacher_ple_width = int(getattr(lm, "hidden_size_per_layer_input", 0) or 0)
-    target_ple_width = int(
-        getattr(child_lm, "hidden_size_per_layer_input", teacher_ple_width) or 0
-    )
+    target_ple_width = int(getattr(child_lm, "hidden_size_per_layer_input", teacher_ple_width) or 0)
     if target_ple_width > teacher_ple_width:
         raise ValueError(
             f"PLE target width {target_ple_width} exceeds teacher width {teacher_ple_width}"
@@ -524,17 +546,10 @@ def materialize_checkpoint_from_sorted(
     weight_files = source_weight_files
     source_is_indexed = (sorted_dir / "model.safetensors.index.json").is_file()
     source_index = (
-        json.loads(source_index_path.read_text(encoding="utf-8"))
-        if source_is_indexed
-        else {}
+        json.loads(source_index_path.read_text(encoding="utf-8")) if source_is_indexed else {}
     )
     source_weight_map = dict(source_index.get("weight_map") or {})
-    source_total_size = (source_index.get("metadata") or {}).get("total_size")
-    can_link_unchanged = (
-        source_is_indexed
-        and isinstance(source_total_size, int)
-        and bool(source_weight_map)
-    )
+    can_link_unchanged = source_is_indexed and bool(source_weight_map)
     source_keys_by_shard: dict[str, set[str]] = {}
     for key, shard in source_weight_map.items():
         source_keys_by_shard.setdefault(str(shard), set()).add(str(key))
@@ -566,7 +581,6 @@ def materialize_checkpoint_from_sorted(
 
     weight_map: dict[str, str] = dict(source_weight_map) if can_link_unchanged else {}
     tensor_count = len(weight_map)
-    total_size = int(source_total_size) if can_link_unchanged else 0
     output_shards = 0
     hardlinked_shards = 0
     shard_kwargs = dict(
@@ -595,9 +609,14 @@ def materialize_checkpoint_from_sorted(
                 for relative in weight_files
             }
             for future in as_completed(futures):
-                hardlinked, new_entries, rewritten_source_keys, removed_size, added_size, added_count = (
-                    future.result()
-                )
+                (
+                    hardlinked,
+                    new_entries,
+                    rewritten_source_keys,
+                    _removed_size,
+                    _added_size,
+                    added_count,
+                ) = future.result()
                 if hardlinked:
                     hardlinked_shards += 1
                     output_shards += 1
@@ -605,7 +624,6 @@ def materialize_checkpoint_from_sorted(
                 for key in rewritten_source_keys:
                     if weight_map.pop(key, None) is not None:
                         tensor_count -= 1
-                total_size -= removed_size
                 if not new_entries:
                     continue
                 for key, shard_file in new_entries.items():
@@ -613,9 +631,9 @@ def materialize_checkpoint_from_sorted(
                         raise RuntimeError(f"tensor {key} was written by multiple output shards")
                     weight_map[key] = shard_file
                 tensor_count += added_count
-                total_size += added_size
                 output_shards += 1
 
+        total_size = _checkpoint_payload_size(tmp_dir, weight_map)
         if source_is_indexed:
             index_metadata = dict(source_index.get("metadata") or {})
             index_metadata["total_size"] = total_size
@@ -678,9 +696,7 @@ def materialize_model_from_sorted(sorted_dir, layer_replacements, descriptor, ch
     child_lm = descriptor.get_language_model_config(child_model_config)
     target_hidden_width = int(getattr(child_lm, "hidden_size", lm.hidden_size))
     teacher_ple_width = int(getattr(lm, "hidden_size_per_layer_input", 0) or 0)
-    target_ple_width = int(
-        getattr(child_lm, "hidden_size_per_layer_input", teacher_ple_width) or 0
-    )
+    target_ple_width = int(getattr(child_lm, "hidden_size_per_layer_input", teacher_ple_width) or 0)
     num_q = lm.num_attention_heads
     head_dim = getattr(lm, "head_dim", None) or (lm.hidden_size // num_q)
     layer_prefix_tmpl = descriptor.layer_block_name(0).rsplit(".", 1)[0] + ".{i}"
@@ -733,7 +749,11 @@ def materialize_model_from_sorted(sorted_dir, layer_replacements, descriptor, ch
         model.tie_weights()
     lm_child_config = descriptor.get_language_model_config(child_model_config)
     tied_embeddings = bool(
-        getattr(lm_child_config, "tie_word_embeddings", getattr(child_model_config, "tie_word_embeddings", False))
+        getattr(
+            lm_child_config,
+            "tie_word_embeddings",
+            getattr(child_model_config, "tie_word_embeddings", False),
+        )
     )
     allowed_missing = {"lm_head.weight"} if tied_embeddings else set()
     missing_keys = [key for key in incompatible.missing_keys if key not in allowed_missing]
@@ -815,11 +835,17 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
                     sd[layout.o_key] = tensor.view(tensor.shape[0], orig_q, hd)[:, keep_q].reshape(
                         tensor.shape[0], -1
                     )
-                for wkey, kept in ((layout.q_key, keep_q), (layout.k_key, keep_kv), (layout.v_key, keep_kv)):
+                for wkey, kept in (
+                    (layout.q_key, keep_q),
+                    (layout.k_key, keep_kv),
+                    (layout.v_key, keep_kv),
+                ):
                     bkey = _bias_key(wkey)
                     if bkey in sd:
                         if wkey == layout.q_key:
-                            sd[bkey] = slice_query_rows_by_head(sd[bkey], kept, hd, orig_q).reshape(-1)
+                            sd[bkey] = slice_query_rows_by_head(sd[bkey], kept, hd, orig_q).reshape(
+                                -1
+                            )
                         else:
                             sd[bkey] = sd[bkey].view(-1, hd)[kept].reshape(-1)
                         # o bias (output) unchanged
@@ -872,7 +898,9 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
         if kv_rank is not None and 0 < kv_rank < orig_kv_rank:
             if layout.mla_kv_a_key in sd:
                 tensor = sd[layout.mla_kv_a_key]
-                sd[layout.mla_kv_a_key] = torch.cat((tensor[:kv_rank], tensor[orig_kv_rank:]), dim=0)
+                sd[layout.mla_kv_a_key] = torch.cat(
+                    (tensor[:kv_rank], tensor[orig_kv_rank:]), dim=0
+                )
             kv_a_bias = _bias_key(layout.mla_kv_a_key)
             if kv_a_bias in sd:
                 tensor = sd[kv_a_bias]
@@ -933,7 +961,10 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
                             sd[key] = sd[key][:, :, : k // group_size]
             if k is not None and layout.moe_expert_up_keys and layout.moe_expert_down_keys:
                 keep = torch.arange(k)
-                num_e = min(target.target_num_experts or layout.moe_num_experts or 0, len(layout.moe_expert_up_keys))
+                num_e = min(
+                    target.target_num_experts or layout.moe_num_experts or 0,
+                    len(layout.moe_expert_up_keys),
+                )
                 for e in range(num_e):
                     up_key, down_key = layout.moe_expert_up_keys[e], layout.moe_expert_down_keys[e]
                     orig_intermediate = int(layout.moe_expert_intermediate or 0)
@@ -947,10 +978,7 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
                             sd[bkey] = _slice_gated_up(sd[bkey], keep, orig_intermediate)
 
             sk = target.target_shared_expert_intermediate
-            if (
-                sk is not None
-                and sk < int(layout.moe_shared_intermediate or 0)
-            ):
+            if sk is not None and sk < int(layout.moe_shared_intermediate or 0):
                 keep = torch.arange(sk)
                 orig_intermediate = int(layout.moe_shared_intermediate)
                 if layout.moe_shared_gate_key and layout.moe_shared_gate_key in sd:
@@ -970,10 +998,7 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
                     sd[layout.moe_shared_down_key] = sd[layout.moe_shared_down_key][:, keep]
 
             lk = target.target_latent_dim
-            if (
-                lk is not None
-                and lk < int(layout.moe_latent_dim or 0)
-            ):
+            if lk is not None and lk < int(layout.moe_latent_dim or 0):
                 if layout.moe_fc1_latent_key in sd:
                     sd[layout.moe_fc1_latent_key] = sd[layout.moe_fc1_latent_key][:lk]
                 bkey = _bias_key(layout.moe_fc1_latent_key)
@@ -1030,7 +1055,11 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
             )
             if key
         }
-        if layout.mamba_prefix and mamba_resident_keys.intersection(sd) and not layout.gated_delta_net:
+        if (
+            layout.mamba_prefix
+            and mamba_resident_keys.intersection(sd)
+            and not layout.gated_delta_net
+        ):
             orig_heads = layout.mamba_num_heads
             orig_hd = layout.mamba_head_dim
             orig_groups = layout.mamba_num_groups or 1
@@ -1039,8 +1068,16 @@ def materialize_solution_state_dict(state_dict, layouts, targets: dict[int, Bloc
             thd = target.target_mamba_head_dim or orig_hd
             tsd = target.target_mamba_state_dim or orig_state_dim
             needs_mamba_slice = (
-                (target.target_mamba_heads is not None and orig_heads is not None and th < orig_heads)
-                or (target.target_mamba_head_dim is not None and orig_hd is not None and thd < orig_hd)
+                (
+                    target.target_mamba_heads is not None
+                    and orig_heads is not None
+                    and th < orig_heads
+                )
+                or (
+                    target.target_mamba_head_dim is not None
+                    and orig_hd is not None
+                    and thd < orig_hd
+                )
                 or (
                     target.target_mamba_state_dim is not None
                     and orig_state_dim is not None

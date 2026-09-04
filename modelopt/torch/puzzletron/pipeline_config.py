@@ -39,6 +39,7 @@ __all__ = [
 
 
 STAGE_ALIASES = {
+    "prepare-dataset": "prepare_dataset",
     "tokenize-data": "tokenize_data",
     "width-importance": "width_importance",
     "sort-sanity": "sort_sanity",

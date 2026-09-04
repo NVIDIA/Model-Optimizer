@@ -65,7 +65,7 @@ def test_baseline_only_scoring_does_not_require_candidate_solutions(tmp_path):
     assert pending_ids == []
 
 
-def test_native_automodel_gdn_rejects_compact_runtime_candidate():
+def test_native_automodel_gdn_applies_and_restores_compact_runtime_candidate():
     # Optional dependency: native AutoModel Qwen modules are not installed in every test env.
     pytest.importorskip("nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn")
     from nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn import CPAwareGatedDeltaNet
@@ -118,8 +118,12 @@ def test_native_automodel_gdn_rejects_compact_runtime_candidate():
     original_state = set(vars(gdn))
     original_forward_hooks = dict(gdn._forward_hooks)
 
-    with pytest.raises(RuntimeError, match="refusing to score reduced geometry"):
-        apply_runtime_candidate(layer, teacher, child)
+    handle = apply_runtime_candidate(layer, teacher, child)
+
+    assert "forward" in vars(gdn)
+    assert gdn.forward.__func__ is not original_forward
+
+    handle.remove()
 
     assert gdn.forward.__func__ is original_forward
     assert set(vars(gdn)) == original_state

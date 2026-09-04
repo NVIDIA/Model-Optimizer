@@ -15,12 +15,20 @@
 
 """CPU tests for materialize-from-sorted-teacher (slice/merge -> smaller real weights)."""
 
+import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn.functional as F
+from safetensors.torch import load_file, save_file
 
+from modelopt.torch.puzzletron.anymodel.converter.generic_decoder import GenericDecoderConverter
+from modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor import (
+    LlamaModelDescriptor,
+)
 from modelopt.torch.puzzletron.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -35,9 +43,12 @@ from modelopt.torch.puzzletron.checkpoint_transactions import (
 from modelopt.torch.puzzletron.pruning.materialize import (
     BlockTarget,
     block_targets_from_replacements,
+    materialize_checkpoint_from_sorted,
     materialize_solution_state_dict,
 )
 from modelopt.torch.puzzletron.pruning.sorted_teacher import build_layer_layouts
+from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
+from tests._test_utils.torch.transformers_models import create_tiny_llama_dir
 
 
 def test_block_targets_use_prefix_after_sorted_teacher_expert_permutation():
@@ -277,6 +288,91 @@ def test_materialize_no_op_removes_sublayer_tensors_but_keeps_other_half():
     )
     assert not any(".self_attn." in key for key in attention_removed)
     assert any(".mlp." in key for key in attention_removed)
+
+
+@pytest.mark.parametrize(
+    "source_index_mode",
+    ["missing_total_size", "correct_total_size", "stale_total_size", "unindexed"],
+)
+def test_streaming_materialization_records_exact_output_tensor_bytes(
+    tmp_path: Path, source_index_mode: str
+) -> None:
+    source = create_tiny_llama_dir(tmp_path)
+    config = load_model_config(source)
+    teacher_blocks = GenericDecoderConverter.create_block_configs(LlamaModelDescriptor, config)
+    LlamaModelDescriptor.set_block_configs(config, teacher_blocks)
+    config.block_configs = [block.to_dict() for block in teacher_blocks]
+    config.save_pretrained(source)
+
+    if source_index_mode != "unindexed":
+        tensors = load_file(source / "model.safetensors")
+        shards = {
+            "model-00001-of-00002.safetensors": {
+                key: value for key, value in tensors.items() if key.startswith("model.layers.0.")
+            },
+            "model-00002-of-00002.safetensors": {
+                key: value
+                for key, value in tensors.items()
+                if not key.startswith("model.layers.0.")
+            },
+        }
+        (source / "model.safetensors").unlink()
+        for filename, shard in shards.items():
+            save_file(shard, source / filename, metadata={"format": "pt"})
+        metadata = {"format": "pt"}
+        source_tensor_bytes = sum(
+            tensor.numel() * tensor.element_size() for tensor in tensors.values()
+        )
+        if source_index_mode == "correct_total_size":
+            metadata["total_size"] = source_tensor_bytes
+        elif source_index_mode == "stale_total_size":
+            metadata["total_size"] = source_tensor_bytes + 123
+        (source / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "metadata": metadata,
+                    "weight_map": {
+                        key: filename for filename, shard in shards.items() for key in shard
+                    },
+                }
+            )
+        )
+
+    child_config = copy.deepcopy(config)
+    first = teacher_blocks[0]
+    child_block = BlockConfig(
+        subblock_configs=tuple(
+            replace(subblock, intermediate_size=16) if isinstance(subblock, FFNConfig) else subblock
+            for subblock in first.subblock_configs
+        )
+    )
+    child_config.block_configs = [child_block, *teacher_blocks[1:]]
+    output = tmp_path / f"materialized-{source_index_mode}"
+
+    materialize_checkpoint_from_sorted(
+        source,
+        [{"parent_layer_indices": [0], "child_block_configs": [child_block]}],
+        LlamaModelDescriptor,
+        child_config,
+        output,
+    )
+
+    output_index_path = output / "model.safetensors.index.json"
+    output_index = json.loads(output_index_path.read_text()) if output_index_path.exists() else None
+    output_weight_files = (
+        set(output_index["weight_map"].values())
+        if output_index is not None
+        else {"model.safetensors"}
+    )
+    output_tensors = {}
+    for filename in output_weight_files:
+        output_tensors.update(load_file(output / filename))
+    exact_size = sum(tensor.numel() * tensor.element_size() for tensor in output_tensors.values())
+    manifest = json.loads((output / REALIZATION_MANIFEST).read_text())
+    if output_index is not None:
+        assert output_index["metadata"]["total_size"] == exact_size
+    assert manifest["total_size"] == exact_size
+    assert manifest["hardlinked_shards"] == (0 if source_index_mode == "unindexed" else 1)
 
 
 def test_realization_retry_reconstructs_only_missing_checkpoint(tmp_path: Path):

@@ -20,8 +20,10 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from ..schema import (
     AttemptSpec,
@@ -71,6 +73,30 @@ def _run_aggregation_command(
     """Run one argv-only aggregation process within a finite deadline."""
 
     return asyncio.run(_communicate_with_timeout(argv, cwd=cwd, timeout_seconds=timeout_seconds))
+
+
+@contextmanager
+def _resolved_aggregation_config(plan: CampaignPlan) -> Iterator[Path]:
+    """Materialize the compiled config for one controller-local aggregation."""
+
+    root = plan.puzzle_dir / "orchestration"
+    root.mkdir(parents=True, exist_ok=True)
+    path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".post_mip_aggregation_",
+            suffix=".json",
+            dir=root,
+            delete=False,
+        ) as stream:
+            path = Path(stream.name)
+            json.dump(plan.experiment_config, stream, sort_keys=True)
+        yield path
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
 
 
 def _post_mip_identity_api() -> Any:
@@ -283,17 +309,6 @@ class PostMIPAdapter(WorkAdapter):
     ) -> PublishedOutput | None:
         repo = Path(plan.runner.contract.repository)
         script = repo / "examples" / "puzzletron" / "run_post_mip_node.py"
-        argv = [
-            sys.executable,
-            str(script),
-            "--config",
-            plan.experiment_config_path,
-            "--stage-id",
-            node.stage_id,
-            "--aggregate",
-        ]
-        for override in plan.overrides:
-            argv.extend(["--override", override])
         timeout_seconds = float(
             plan.execution_defaults.get(
                 "artifact_settling_timeout_seconds",
@@ -301,11 +316,20 @@ class PostMIPAdapter(WorkAdapter):
             )
         )
         try:
-            return_code, stdout, stderr = _run_aggregation_command(
-                argv,
-                cwd=repo,
-                timeout_seconds=timeout_seconds,
-            )
+            with _resolved_aggregation_config(plan) as resolved_config_path:
+                return_code, stdout, stderr = _run_aggregation_command(
+                    [
+                        sys.executable,
+                        str(script),
+                        "--resolved-config",
+                        str(resolved_config_path),
+                        "--stage-id",
+                        node.stage_id,
+                        "--aggregate",
+                    ],
+                    cwd=repo,
+                    timeout_seconds=timeout_seconds,
+                )
         except TimeoutError as error:
             raise RuntimeError(
                 f"{node.stage_id} aggregation timed out after {timeout_seconds:g}s"

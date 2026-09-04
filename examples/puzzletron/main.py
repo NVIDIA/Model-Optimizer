@@ -432,6 +432,16 @@ def _run_tokenize_data_stage(config: dict):
     return script_tokenize_data_stage(config)
 
 
+def _run_prepare_dataset_stage(config: dict):
+    if __package__:
+        from .prepare_dataset import prepare_dataset_stage as package_prepare_dataset_stage
+
+        return package_prepare_dataset_stage(config)
+    from prepare_dataset import prepare_dataset_stage as script_prepare_dataset_stage
+
+    return script_prepare_dataset_stage(config)
+
+
 def _run_worker(args: argparse.Namespace) -> None:
     cfg = mtpz.pipeline_config.pipeline_config_from_path(
         args.config,
@@ -447,6 +457,8 @@ def _run_worker(args: argparse.Namespace) -> None:
     composite_only = {"replacement_scoring", "mip"}
     if not _stage_enabled(cfg, args.worker_stage):
         result = mtpz.stage_runner.run_stage(cfg, args.worker_stage, handlers={})
+    elif args.worker_stage == "prepare_dataset":
+        result = _run_prepare_dataset_stage(cfg)
     elif args.worker_stage == "tokenize_data":
         result = _run_tokenize_data_stage(cfg)
     elif embedding_root and args.worker_stage in composite_only:

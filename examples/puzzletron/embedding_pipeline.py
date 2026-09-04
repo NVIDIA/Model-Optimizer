@@ -133,6 +133,15 @@ def finalize_replacement_scoring_diagnostics(config: dict) -> dict:
 def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
     teacher = scenario / "ckpts" / "sorted_teacher"
     scenario_manifest = json.loads((scenario / "scenario_manifest.json").read_text())
+    hidden_width = scenario_manifest.get("hidden_width")
+    if type(hidden_width) is not int or hidden_width <= 0:
+        raise ValueError("scenario manifest must declare a positive integer hidden_width")
+    expected_width_dir = f"width-{hidden_width:04d}"
+    if scenario.parent.name != expected_width_dir:
+        raise ValueError(
+            "scenario manifest hidden_width does not match its width directory: "
+            f"expected {expected_width_dir}, got {scenario.parent.name}"
+        )
     replacement_scoring = config.get("replacement_scoring") or {}
     subblock = str(replacement_scoring.get("granularity")) == "subblock"
     stem = (
@@ -151,6 +160,7 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         "embedding_pruning.enabled=false",
         f"replacement_library_path={scenario / 'replacement_library.json'}",
         f"build_library.source_checkpoint_dir={teacher}",
+        f"build_library.hidden_width={hidden_width}",
         "++vllm_stats.runtime_stats.execution=inline",
         f"replacement_scoring.teacher_dir={teacher}",
         f"++replacement_scoring.source_checkpoint_dir={teacher}",
@@ -162,6 +172,8 @@ def _scenario_overrides(config: dict, scenario: Path) -> tuple[str, ...]:
         f"++scoring_diagnostic.scores_dir={scoring_output}",
         f"++scoring_diagnostic.output_dir={scenario / 'artifacts/scoring_diagnostic'}",
     ]
+    if dataset_path := config.get("dataset_path"):
+        overrides.append(f"dataset_path={dataset_path}")
     packed_token_cache_path = replacement_scoring.get("packed_token_cache_path")
     if packed_token_cache_path:
         overrides.append(f"++replacement_scoring.packed_token_cache_path={packed_token_cache_path}")
