@@ -30,7 +30,11 @@
 # unit is not imported: every pattern it turns off (router gates, `lm_head`, the linear-attn
 # `conv1d` and `in_proj_a`/`in_proj_b`, ...) is already off and is not matched by
 # `*.experts.*`. Note `*.experts.*` requires a literal `.experts.`, so `mlp.shared_experts.*`
-# does not match it and the shared experts stay BF16.
+# does not match it and the shared experts stay BF16. The same literal is why the vision tower
+# needs no explicit disable here: it is a dense ViT whose 224 modules carry no `experts` in any
+# name, so `*.experts.*` cannot reach `model.visual.*`. The wider
+# `nvfp4_experts_dense_mlp-kv_fp8_cast` sibling does need one -- its `*mlp.*_proj*` patterns
+# match the vision tower's identically named `gate_proj`/`up_proj`/`down_proj` leaves.
 #
 # Two model-specific notes:
 #

@@ -414,6 +414,12 @@ checkpoint's** quant config verbatim:
   the experts-only scope rather than a mixed-precision map, and pins
   `layerwise.enable=false`, which this VLM requires because its decoder layers
   nest under `model.language_model.layers`.
+- **`models/zai-org/GLM-5.3-Flash/ptq/nvfp4_experts_dense_mlp-kv_fp8_cast`**
+  widens that scope to the dense MLP as well. `mlp_layer_types` marks only layers
+  0-2 `dense`, so this adds just 9 modules (`mlp.gate_proj` / `up_proj` /
+  `down_proj`) on top of the routed experts. The vision tower reuses those same
+  leaf names, so a single `*visual*` disable is appended **last** to keep
+  `model.visual.*` in BF16 — the experts-only variant needs no such rule.
 
 *Why special:* unlike any general recipe, these **mix FP8 and NVFP4 across
 different component types — or individual layers** — and hardcode the precise
