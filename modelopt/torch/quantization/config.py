@@ -1251,6 +1251,17 @@ class GPTQCalibConfig(QuantizeAlgorithmConfig):
         per-column error propagation into one launch per GPTQ block.""",
     )
 
+    skip_max_init: bool = ModeloptField(
+        default=False,
+        title="Skip the max-calibration that initializes amax before the GPTQ update.",
+        description="GPTQ normally runs ``max_calibrate`` first so every quantizer has an amax to "
+        "round against. When an earlier stage of an ``algo_cfg`` pipeline already produced that "
+        "amax -- e.g. an ``mse`` range search -- re-deriving it from max would discard the search "
+        "and make GPTQ compensate against a grid the model will not use. The calibration-plan "
+        "executor sets this automatically for non-leading GPTQ stages; it must not be set when "
+        "GPTQ runs first, since nothing else would initialize amax.",
+    )
+
     @model_validator(mode="after")
     def _gptq_qdq_default(self):
         """Inject ``get_qdq_activations_from_prev_layer=True`` unless the user set it.

@@ -154,7 +154,11 @@ ALGO_CAPABILITIES: dict[str, AlgoCapabilities] = {
     "gptq": AlgoCapabilities(
         granularity="module",
         role="weight",
-        requires=frozenset({_W, "acts"}),
+        # GPTQ rounds against an existing quantization grid; it declares `weight_amax` as an
+        # input so a preceding range search (`mse`, `local_hessian`) is recognized as feeding
+        # it rather than as dead work. When nothing produced one, GPTQ initializes it itself
+        # (`skip_max_init=False`), which is why an unsatisfied `weight_amax` is not an error.
+        requires=frozenset({_W, "acts", _W_AMAX}),
         produces=frozenset({_W, _W_AMAX}),
         self_forwards=True,
     ),

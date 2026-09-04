@@ -2298,6 +2298,7 @@ def gptq(
     perc_damp: float = 0.01,
     block_size: int = 128,
     fused: bool = False,
+    skip_max_init: bool = False,
     should_process: Callable[[str], bool] | None = None,
 ):
     """GPTQ quantization.
@@ -2312,7 +2313,8 @@ def gptq(
 
     Per-module steps:
 
-    1. ``max_calibrate`` to set amax values from the current activations.
+    1. ``max_calibrate`` to set amax values from the current activations, unless
+       ``skip_max_init`` says an earlier pipeline stage already produced them.
     2. Promote eligible quantizers to ``StaticBlockScaleQuantizer`` (two-level scaling).
     3. Collect per-linear-layer Hessian matrices via forward hooks.
     4. Blockwise weight updates using the inverse Hessian to compensate for
@@ -2325,11 +2327,18 @@ def gptq(
         perc_damp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         fused: If True, use fused Triton kernel for NVFP4 static quantization.
+        skip_max_init: If True, keep the amax an earlier stage established instead of
+            re-deriving it from max. GPTQ compensates rounding error against a specific
+            quantization grid, so when a previous stage searched a better grid (e.g. ``mse``)
+            the compensation must be computed against *that* grid, not a fresh max one.
     """
     total_start = time.time()
 
-    # TODO: Add support for other scale setting strateiges like weight-mse or local-hessian
-    max_calibrate(model, forward_loop=forward_loop, should_process=should_process)
+    # Scale setting: max by default, or whatever a previous pipeline stage established.
+    # Note this also seeds the input quantizers, so it may only be skipped when an earlier
+    # stage has already calibrated them -- which is what the executor's handoff guarantees.
+    if not skip_max_init:
+        max_calibrate(model, forward_loop=forward_loop, should_process=should_process)
 
     quantized_layers = [
         (n, m)

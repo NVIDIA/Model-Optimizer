@@ -108,6 +108,20 @@ def _weight_amax(model):
     }
 
 
+def _run_chain(cfg, quant_cfg=None):
+    """Calibrate a fresh model with one scoped pipeline; returns weight amax by name."""
+    model = mtq.quantize(
+        _model(),
+        {
+            "quant_cfg": quant_cfg or QUANT_CFG,
+            "algorithm": None,
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": cfg}],
+        },
+        _forward_loop,
+    )
+    return _weight_amax(model)
+
+
 # ---------------------------------------------------------------------------- config
 
 
@@ -317,6 +331,54 @@ def test_handoff_is_dropped_for_algorithms_without_the_matching_knob():
         _forward_loop,
     )
     assert _weight_amax(model)
+
+
+def test_range_search_then_gptq_is_recognized_as_a_handoff(quantized):
+    """GPTQ rounds against an existing grid, so a preceding search feeds it, not dies."""
+    plan = compile_algo_cfg(
+        {
+            "algo_cfg": [{"module_name": "*mlp*", "cfg": ["mse", {"method": "gptq"}]}],
+            "algorithm": None,
+        },
+        quantized,
+    )
+    assert [stage.algo for stage in plan] == ["mse", "gptq"]
+    assert derive_handoff(quantized, plan, 0) == {}
+    assert derive_handoff(quantized, plan, 1) == {"skip_max_init": True}
+
+
+def test_leading_gptq_still_initializes_its_own_amax(quantized):
+    plan = compile_algo_cfg(
+        {"algo_cfg": [{"module_name": "*mlp*", "cfg": ["gptq"]}], "algorithm": None}, quantized
+    )
+    assert derive_handoff(quantized, plan, 0) == {}
+
+
+def test_gptq_preserves_a_preceding_range_search():
+    """The point of the chain: GPTQ compensates against the grid MSE searched.
+
+    Prior art for this ordering is DeepCompressor's QoQ recipes, which run their weight
+    range search before the GPTQ kernel rather than after.
+    """
+    gptq = {"method": "gptq", "block_size": 32}
+    only_mse = _run_chain(["mse"])
+    only_gptq = _run_chain([gptq])
+    chained = _run_chain(["mse", gptq])
+
+    probe = "layers.0.mlp.gate_proj.weight_quantizer"
+    # GPTQ kept MSE's amax instead of re-deriving it from max ...
+    assert torch.equal(chained[probe], only_mse[probe])
+    # ... and the resulting model is not the one plain GPTQ produces.
+    assert not torch.equal(chained[probe], only_gptq[probe])
+
+
+def test_awq_then_mse_refines_the_smoothed_weights():
+    """MSE re-searches the amax on AWQ's smoothed weights: a forward-free awq_clip."""
+    only_awq = _run_chain(["awq_lite"])
+    chained = _run_chain(["awq_lite", "mse"])
+
+    assert set(only_awq) == set(chained)
+    assert any(not torch.equal(only_awq[k], chained[k]) for k in only_awq)
 
 
 def test_leading_mse_still_initializes_its_own_amax(quantized):
