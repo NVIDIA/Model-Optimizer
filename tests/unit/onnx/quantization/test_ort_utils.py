@@ -17,12 +17,41 @@ import logging
 import sys
 import types
 
+import pytest
+
 from modelopt.onnx.quantization import ort_utils
 from modelopt.onnx.quantization.ort_utils import create_input_shapes_profile
 
 
 def _raise_trt_unavailable():
     raise RuntimeError("trt unavailable")
+
+
+def test_check_for_trtexec_rejects_version_below_minimum(monkeypatch):
+    monkeypatch.setattr(ort_utils.shutil, "which", lambda _: "/usr/bin/trtexec")
+    monkeypatch.setattr(
+        ort_utils,
+        "_run_trtexec",
+        lambda **_: types.SimpleNamespace(
+            stdout="&&&& FAILED TensorRT.trtexec [TensorRT v101601]", stderr=""
+        ),
+    )
+
+    with pytest.raises(ImportError, match=r"version must be >= 11\.0, found 10\.16"):
+        ort_utils._check_for_trtexec("11.0")
+
+
+def test_check_for_trtexec_accepts_version_at_minimum(monkeypatch):
+    monkeypatch.setattr(ort_utils.shutil, "which", lambda _: "/usr/bin/trtexec")
+    monkeypatch.setattr(
+        ort_utils,
+        "_run_trtexec",
+        lambda **_: types.SimpleNamespace(
+            stdout="&&&& PASSED TensorRT.trtexec [TensorRT v110000] [b114]", stderr=""
+        ),
+    )
+
+    assert ort_utils._check_for_trtexec("11.0") == "/usr/bin/trtexec"
 
 
 def test_create_input_shapes_profile_forwards_trust_remote_code(monkeypatch):

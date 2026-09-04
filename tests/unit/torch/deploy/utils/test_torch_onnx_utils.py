@@ -31,7 +31,9 @@ from modelopt.torch._deploy.utils import (
     generate_onnx_input,
     get_onnx_bytes_and_metadata,
 )
-from modelopt.torch._deploy.utils.torch_onnx import _to_expected_onnx_type
+from modelopt.torch._deploy.utils.torch_onnx import _to_expected_onnx_type, is_fp4_quantized
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.utils import standardize_model_args, unflatten_tree
 
 deploy_benchmark_all = get_deploy_models()
@@ -165,6 +167,26 @@ class SingleArgModel(nn.Module):
 class DoubleArgModel(nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor):
         return torch.add(x, y) - x
+
+
+def test_is_fp4_quantized_detects_enabled_input_or_weight_quantizer():
+    model = nn.Module()
+    config = QuantizerAttributeConfig(
+        num_bits=(2, 1),
+        block_sizes={-1: 16, "type": "static", "scale_bits": (4, 3)},
+    )
+    model.input_quantizer = TensorQuantizer(config)
+    model.weight_quantizer = TensorQuantizer(config)
+
+    model.input_quantizer.disable()
+
+    assert is_fp4_quantized(model)
+
+    model.weight_quantizer.disable()
+    assert not is_fp4_quantized(model)
+
+    model.input_quantizer.enable()
+    assert is_fp4_quantized(model)
 
 
 @pytest.mark.parametrize(

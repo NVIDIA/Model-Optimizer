@@ -29,6 +29,7 @@ import timm
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from _trt_compat import check_dynamic_nvfp4_trt_support, request_uses_dynamic_nvfp4
 from datasets import load_dataset
 from download_example_onnx import export_to_onnx
 from evaluation import evaluate
@@ -525,7 +526,11 @@ def main():
     parser.add_argument(
         "--trt_build",
         action="store_true",
-        help="Build a TensorRT engine from the exported ONNX model using trtexec.",
+        help=(
+            "Build a TensorRT engine from the exported ONNX model using trtexec. "
+            "Dynamic NVFP4 (W4A4) builds require TensorRT 11.0 or newer. "
+            "For TensorRT 10.16, use --quantize_mode=nvfp4 --recipe=w4a16_nvfp4."
+        ),
     )
     parser.add_argument(
         "--no_pretrained",
@@ -546,6 +551,15 @@ def main():
             "--recipe is not supported with --quantize_mode=auto; "
             "use --auto_quantization_formats instead."
         )
+    if args.trt_build and request_uses_dynamic_nvfp4(
+        args.quantize_mode,
+        args.recipe,
+        args.auto_quantization_formats,
+    ):
+        try:
+            check_dynamic_nvfp4_trt_support()
+        except ImportError as e:
+            parser.error(str(e))
 
     # Create model and move to appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

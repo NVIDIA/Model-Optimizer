@@ -17,6 +17,7 @@ import argparse
 import csv
 
 import timm
+from _trt_compat import check_dynamic_nvfp4_trt_support, onnx_uses_dynamic_nvfp4
 from evaluation import evaluate
 
 from modelopt.torch._deploy._runtime import RuntimeRegistry
@@ -25,7 +26,13 @@ from modelopt.torch._deploy.utils import OnnxBytes
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Dynamic NVFP4 (W4A4) models require TensorRT 11.0 or newer. "
+            "For TensorRT 10.16, re-export with "
+            "--quantize_mode=nvfp4 --recipe=w4a16_nvfp4."
+        )
+    )
     parser.add_argument(
         "--onnx_path",
         type=str,
@@ -80,6 +87,12 @@ def main():
     )
 
     args = parser.parse_args()
+    if onnx_uses_dynamic_nvfp4(args.onnx_path):
+        try:
+            check_dynamic_nvfp4_trt_support()
+        except ImportError as e:
+            parser.error(str(e))
+
     deployment = {
         "runtime": "TRT",
         "precision": args.engine_precision,

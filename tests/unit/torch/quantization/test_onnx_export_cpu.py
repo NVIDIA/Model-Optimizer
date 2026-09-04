@@ -32,9 +32,11 @@ from onnx import TensorProto, helper, numpy_helper
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.tensor_quant as tensor_quant
 from modelopt.onnx import utils
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.onnx.export.nvfp4_exporter import _encode_nvfp4_block_scale
 from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import is_quantized_linear
 
@@ -98,11 +100,87 @@ def test_nvfp4_exported_onnx_is_topologically_sorted(monkeypatch):
 
     buffer.seek(0)
     exported_model = onnx.load_model_from_string(buffer.read())
+    original_inputs = [value.name for value in exported_model.graph.input]
     assert any(node.op_type == "TRT_FP4QDQ" for node in exported_model.graph.node)
 
     converted_model = NVFP4QuantExporter.process_model(exported_model)
     assert not any(node.op_type == "TRT_FP4QDQ" for node in converted_model.graph.node)
+    assert [value.name for value in converted_model.graph.input] == original_inputs
+    assert {value.name for value in converted_model.graph.input}.isdisjoint(
+        initializer.name for initializer in converted_model.graph.initializer
+    )
     onnx.checker.check_model(converted_model)
+
+
+def test_nvfp4_weight_only_deploy_export(monkeypatch):
+    sample_input = SimpleLinear().get_input()
+    monkeypatch.setattr(tensor_quant, "dynamic_block_quantize_op", lambda inputs, *args: inputs)
+    model = mtq.quantize(
+        SimpleLinear().eval(),
+        mtq.NVFP4_DEFAULT_CFG,
+        forward_loop=lambda calibrated_model: calibrated_model(sample_input),
+    )
+
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear):
+            module.input_quantizer.disable()
+            module.weight_quantizer._onnx_quantizer_type = "static"
+
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(model, sample_input, weights_dtype="fp16")
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    exported_model = onnx.load_model_from_string(next(iter(onnx_bytes_obj.onnx_model.values())))
+    initializer_types = {
+        initializer.name: initializer.data_type for initializer in exported_model.graph.initializer
+    }
+
+    assert not any(
+        node.op_type in {"TRT_FP4QDQ", "TRT_FP4DynamicQuantize"}
+        for node in exported_model.graph.node
+    )
+    assert any(
+        node.op_type == "DequantizeLinear"
+        and node.input
+        and initializer_types.get(node.input[0]) == onnx.TensorProto.FLOAT4E2M1
+        for node in exported_model.graph.node
+    )
+    onnx.checker.check_model(exported_model)
+
+
+def test_nvfp4_dynamic_deploy_export(monkeypatch):
+    sample_input = SimpleLinear().get_input()
+    monkeypatch.setattr(tensor_quant, "dynamic_block_quantize_op", lambda inputs, *args: inputs)
+
+    def find_custom_nodes_without_tensorrt(sanitizer):
+        sanitizer.custom_ops = {
+            node.op_type
+            for node in sanitizer.model.graph.node
+            if node.op_type == "TRT_FP4DynamicQuantize"
+        }
+
+    monkeypatch.setattr(GraphSanitizer, "find_custom_nodes", find_custom_nodes_without_tensorrt)
+    model = mtq.quantize(
+        SimpleLinear().eval(),
+        mtq.NVFP4_DEFAULT_CFG,
+        forward_loop=lambda calibrated_model: calibrated_model(sample_input),
+    )
+
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(model, sample_input, weights_dtype="fp16")
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    exported_model = onnx.load_model_from_string(next(iter(onnx_bytes_obj.onnx_model.values())))
+    initializer_types = {
+        initializer.name: initializer.data_type for initializer in exported_model.graph.initializer
+    }
+
+    assert any(node.op_type == "TRT_FP4DynamicQuantize" for node in exported_model.graph.node)
+    assert any(
+        node.op_type == "DequantizeLinear"
+        and node.input
+        and initializer_types.get(node.input[0]) == onnx.TensorProto.FLOAT4E2M1
+        for node in exported_model.graph.node
+    )
+    assert utils.get_opset_version(exported_model) >= 23
+    assert {value.name for value in exported_model.graph.input}.isdisjoint(initializer_types)
+    onnx.checker.check_model(exported_model)
 
 
 @pytest.mark.parametrize(

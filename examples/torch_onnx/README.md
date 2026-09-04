@@ -74,6 +74,25 @@ Quantization configs are loaded from the YAML preset recipes under
 `--recipe=<preset basename or path to a QuantizeConfig YAML>` to use a different
 recipe (e.g. `--recipe=nvfp4_awq_lite` or `--recipe=/path/to/my_quant_cfg.yaml`).
 
+### TensorRT Compatibility
+
+Building a dynamic W4A4 NVFP4 vision model requires TensorRT 11.0 or later.
+TensorRT 10.16 users can explicitly select the validated weight-only W4A16
+NVFP4 recipe instead:
+
+```bash
+python torch_quant_to_onnx.py \
+    --timm_model_name=vit_small_patch16_224 \
+    --quantize_mode=nvfp4 \
+    --recipe=w4a16_nvfp4 \
+    --onnx_save_path=vit_small_patch16_224.w4a16_nvfp4.onnx \
+    --trt_build
+```
+
+The fallback changes the quantization behavior: Linear weights use NVFP4 while
+their activations remain in higher precision. The existing FP8 Conv2d override
+still applies.
+
 ### Conv2d Quantization Override
 
 TensorRT only supports FP8 and INT8 for convolution operations. When quantizing models with Conv2d layers (like SwinTransformer), the script automatically applies the following overrides:
@@ -88,7 +107,8 @@ TensorRT only supports FP8 and INT8 for convolution operations. When quantizing 
 
 If the input model is of type image classification, use the following script to evaluate it. The script automatically downloads and uses the [ILSVRC/imagenet-1k](https://huggingface.co/datasets/ILSVRC/imagenet-1k) dataset from Hugging Face. This gated repository requires authentication via Hugging Face access token. See <https://huggingface.co/docs/hub/en/security-tokens> for details.
 
-> *Note: TensorRT 10.11 or later is required to evaluate the MXFP8 or NVFP4 ONNX models.*
+> *Note: TensorRT 10.11 or later is required to evaluate MXFP8 ONNX models. W4A4
+> NVFP4 vision models require TensorRT 11.0 or later.*
 
 ```bash
 python ../onnx_ptq/evaluate.py \

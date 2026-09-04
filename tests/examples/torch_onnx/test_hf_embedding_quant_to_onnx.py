@@ -22,6 +22,8 @@ from _test_utils.torch.transformers_models import (
     create_tiny_llama_seq_cls_dir,
 )
 
+from modelopt.torch.quantization.backends.utils import fp4_compatible
+
 # Tiny stand-ins for the target architectures: a plain encoder for the embedding
 # path and a sequence-classification model (with a `score` head, kept unquantized
 # by the recipe) for the reranking path.
@@ -43,10 +45,13 @@ _TINY_CONFIG = {
 @pytest.mark.parametrize(
     ("model_kind", "recipe", "expected_op"),
     [
-        (
+        pytest.param(
             "embedding",
             "huggingface/nemotron_llama/ptq/nvfp4_output_quant_proj",
             "TRT_FP4DynamicQuantize",
+            marks=pytest.mark.skipif(
+                not fp4_compatible(), reason="FP4 is not supported on this GPU"
+            ),
         ),
         (
             "reranking",

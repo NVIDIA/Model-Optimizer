@@ -18,9 +18,19 @@ import onnx
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
+from modelopt.torch.quantization.backends.utils import fp4_compatible
+
 # TODO: Add int4_awq once the INT4 exporter supports non-MatMul/Gemm consumer patterns
 # (e.g., DQ -> Reshape -> Slice in small ViT / SwinTransformer ONNX graphs).
-_QUANT_MODES = ["fp8", "int8", "mxfp8", "nvfp4", "auto"]
+_REQUIRES_FP4 = pytest.mark.skipif(not fp4_compatible(), reason="FP4 is not supported on this GPU")
+
+_QUANT_MODES = [
+    "fp8",
+    "int8",
+    "mxfp8",
+    pytest.param("nvfp4", marks=_REQUIRES_FP4),
+    pytest.param("auto", marks=[_REQUIRES_FP4, pytest.mark.timeout(600)]),
+]
 
 _MODELS = {
     "vit_tiny": ("vit_tiny_patch16_224", '{"depth": 1}'),
@@ -47,6 +57,46 @@ def test_torch_onnx(model_key, quantize_mode):
     )
     cmd_parts.extend(["--no_pretrained", "--trt_build"])
     run_example_command(cmd_parts, "torch_onnx")
+
+
+def _run_vit_small_nvfp4(tmp_path, recipe=None):
+    onnx_save_path = tmp_path / f"vit_small_patch16_224.{recipe or 'nvfp4'}.onnx"
+    cmd_parts = extend_cmd_parts(
+        ["python", "torch_quant_to_onnx.py"],
+        timm_model_name="vit_small_patch16_224",
+        quantize_mode="nvfp4",
+        recipe=recipe,
+        onnx_save_path=onnx_save_path,
+        calibration_data_size="1",
+    )
+    cmd_parts.extend(["--no_pretrained", "--trt_build"])
+    run_example_command(cmd_parts, "torch_onnx")
+    return onnx.load(onnx_save_path)
+
+
+@_REQUIRES_FP4
+@pytest.mark.timeout(600)
+def test_vit_small_nvfp4_trt_build(tmp_path):
+    model = _run_vit_small_nvfp4(tmp_path)
+
+    assert any(node.op_type == "TRT_FP4DynamicQuantize" for node in model.graph.node)
+
+
+@_REQUIRES_FP4
+@pytest.mark.timeout(600)
+def test_vit_small_w4a16_nvfp4_trt_build(tmp_path):
+    model = _run_vit_small_nvfp4(tmp_path, recipe="w4a16_nvfp4")
+    initializer_types = {
+        initializer.name: initializer.data_type for initializer in model.graph.initializer
+    }
+
+    assert not any(node.op_type == "TRT_FP4DynamicQuantize" for node in model.graph.node)
+    assert any(
+        node.op_type == "DequantizeLinear"
+        and node.input
+        and initializer_types.get(node.input[0]) == onnx.TensorProto.FLOAT4E2M1
+        for node in model.graph.node
+    )
 
 
 def test_torch_onnx_recipe_flag(tmp_path):

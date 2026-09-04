@@ -168,18 +168,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [diffusers, torch_onnx, torch_trt]
+        include:
+          - example: diffusers
+            docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
+            timeout_minutes: 45
+          - example: torch_onnx
+            docker_image: "nvcr.io/nvidia/tensorrt:26.06-py3"
+            timeout_minutes: 90
+          - example: torch_trt
+            docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
+            timeout_minutes: 45
     uses: ./.github/workflows/_example_tests_runner.yml
     permissions:
       contents: read
     secrets: inherit
     with:
-      # Pinned to 26.05 (TensorRT 10): torch-tensorrt is capped at <2.13 (== 2.12.1),
-      # which needs libnvinfer.so.10; newer tensorrt containers drop it. Bump only once
-      # a torch-tensorrt build for the newer TensorRT is available.
-      docker_image: "nvcr.io/nvidia/tensorrt:26.05-py3"
+      # torch_trt stays on TensorRT 10 because torch-tensorrt needs libnvinfer.so.10;
+      # torch_onnx uses TensorRT 11 for W4A4 NVFP4 engine coverage.
+      docker_image: ${{ matrix.docker_image }}
       example: ${{ matrix.example }}
-      timeout_minutes: 45
+      timeout_minutes: ${{ matrix.timeout_minutes }}
       pip_install_extras: "[onnx,hf,dev-test]"
       runner: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && 'linux-amd64-gpu-rtxpro6000-latest-1' || 'linux-amd64-gpu-rtxpro6000-latest-2' }}
       allow_failure: ${{ contains(format(',{0},', vars.ALLOW_FAILURE_EXAMPLE_TESTS), format(',{0},', matrix.example)) }}
