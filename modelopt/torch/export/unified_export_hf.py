@@ -1554,6 +1554,15 @@ def export_hf_checkpoint(
             :func:`_postprocess_safetensors` for diffusion model exports.
             See its docstring for supported keys.
     """
+    # Local: layerwise_export imports this module.
+    from .layerwise_export import LAYERWISE_EXPORTER_ATTR
+
+    exporter = getattr(model, LAYERWISE_EXPORTER_ATTR, None)
+    if exporter is not None:
+        # Per-layer export wrote the shards during calibration; this writes the rest.
+        exporter.finalize(extra_state_dict=extra_state_dict)
+        return
+
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
