@@ -25,7 +25,11 @@ from _test_utils.torch.quantization.tied_modules import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.export.model_utils import TiedWeightMap
+from modelopt.torch.export.model_utils import (
+    TiedWeightMap,
+    get_language_model_from_vl,
+    is_multimodal_model,
+)
 from modelopt.torch.export.quant_utils import (
     fuse_prequant_layernorm,
     postprocess_state_dict,
@@ -33,6 +37,38 @@ from modelopt.torch.export.quant_utils import (
 )
 from modelopt.torch.export.unified_export_hf import _resolve_export_dtype
 from modelopt.torch.quantization.nn import TensorQuantizer
+
+
+def test_multimodal_detection_accepts_null_architectures():
+    """Unified export treats absent architecture metadata as an empty list."""
+    model = SimpleNamespace(config=SimpleNamespace(architectures=None))
+
+    assert not is_multimodal_model(model)
+
+
+def test_language_model_extraction_accepts_aliased_compatibility_property():
+    """A top-level compatibility property may alias the standardized nested LM root."""
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = model.model.language_model
+
+    assert get_language_model_from_vl(model) == [
+        model,
+        model.model,
+        model.model.language_model,
+    ]
+
+
+def test_language_model_extraction_rejects_competing_roots():
+    """Language-model extraction must not select distinct roots by traversal order."""
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = torch.nn.Module()
+
+    with pytest.raises(ValueError, match="multiple language-model roots"):
+        get_language_model_from_vl(model)
 
 
 @pytest.mark.parametrize(

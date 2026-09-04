@@ -26,14 +26,29 @@ from _test_utils.torch.export.utils import (
 
 import modelopt.torch.export.unified_export_megatron as unified_export_megatron
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
 from modelopt.torch.export.layer_utils import get_quantization_format
 from modelopt.torch.export.model_config import (
+    KV_CACHE_FP8,
+    KV_CACHE_FP8_K_NVFP4_V,
+    KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_NVFP4,
     QUANTIZATION_W4A8_AWQ,
 )
-from modelopt.torch.export.quant_utils import get_kv_cache_scaling_factor, get_quant_config
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.export.quant_utils import (
+    get_kv_cache_scaling_factor,
+    get_quant_config,
+    postprocess_state_dict,
+)
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer, TensorQuantizer
+
+
+class _FakeAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.k_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
 
 
 class _FakeKVCacheQuantizer(torch.nn.Module):
@@ -114,6 +129,336 @@ def test_nvfp4_static_quantizer_export():
     quant_config = get_quant_config(model)
     assert quant_config["quantization"]["quant_algo"] == "NVFP4"
     assert quant_config["quantization"]["group_size"] == 16
+
+
+def test_projection_output_quantizers_are_not_exported_as_kv_cache():
+    model = ToyModel()
+    config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.output_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10)))
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] is None
+    assert "kv_cache_quantized_layers" not in quantization
+
+
+def test_uniform_vlm_export_ignores_disabled_vision_attention():
+    model = ToyModel()
+    weight_config = {
+        "quant_cfg": [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+            {
+                "quantizer_name": "*.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    mtq.quantize(
+        model,
+        weight_config,
+        lambda quantized_model: quantized_model(torch.randn(1, 4, 10)),
+    )
+    model.language_model = torch.nn.Module()
+    model.language_model.attention = _FakeAttention()
+    model.vision_attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*[kv]_bmm_quantizer", "enable": False},
+            {
+                "quantizer_name": "language_model.*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
+    assert "kv_cache_quantized_layers" not in quantization
+
+    model._modelopt_kv_cache_auto_quantize_state = {}
+    with pytest.raises(NotImplementedError, match="uniform quantized-weight format"):
+        get_quant_config(model)
+
+
+def test_quant_config_tolerates_ambiguous_language_model_roots():
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = torch.nn.Module()
+    model.model.language_model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["kv_cache_quant_algo"] is None
+
+
+@pytest.mark.parametrize(
+    ("quantizer_cfg", "expected_format"),
+    [
+        ({"num_bits": (4, 3), "constant_amax": 1.0}, "FP8"),
+        (
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "constant_amax": 1.0,
+            },
+            "NVFP4",
+        ),
+    ],
+)
+def test_uniform_kv_only_export_preserves_legacy_schema(quantizer_cfg, expected_format):
+    model = torch.nn.Module()
+    model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": quantizer_cfg,
+                "enable": True,
+            },
+        ],
+    )
+
+    hf_quant_config = get_quant_config(model)
+    quantization = hf_quant_config["quantization"]
+    assert quantization["quant_algo"] is None
+    assert quantization["kv_cache_quant_algo"] == expected_format
+    assert quantization["quantized_layers"] == {}
+    assert "kv_cache_quantized_layers" not in quantization
+
+    converted = convert_hf_quant_config_format(hf_quant_config)
+    assert "quant_algo" not in converted
+    assert converted["kv_cache_scheme"] == (
+        {"dynamic": False, "num_bits": 8, "type": "float"}
+        if expected_format == "FP8"
+        else expected_format
+    )
+    assert "kv_cache_quantized_layers" not in converted
+
+
+def test_uniform_kv_autoquant_export_retains_per_layer_mixed_envelope():
+    model = torch.nn.Module()
+    model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+    model._modelopt_kv_cache_auto_quantize_state = {}
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quantized_layers"] == {}
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quantized_layers"] == {"attention": {"quant_algo": "FP8"}}
+
+
+def test_partial_uniform_kv_with_uniform_weights_preserves_legacy_schema():
+    model = ToyModel()
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*.weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "enable": True,
+                },
+                {
+                    "quantizer_name": "*.input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "enable": True,
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda quantized_model: quantized_model(torch.randn(1, 4, 10)),
+    )
+    model.attn0 = _FakeAttention()
+    model.attn1 = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*[kv]_bmm_quantizer", "enable": False},
+            {
+                "quantizer_name": "attn0.*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
+    assert "kv_cache_quantized_layers" not in quantization
+
+
+def test_mixed_kv_cache_quantization_exports_per_layer_map():
+    class FakeAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k_bmm_quantizer = TensorQuantizer()
+            self.v_bmm_quantizer = TensorQuantizer()
+
+    model = torch.nn.Module()
+    model.attn0 = FakeAttention()
+    model.attn1 = FakeAttention()
+    model.attn2 = FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model.attn0,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            }
+        ],
+    )
+    mtq.set_quantizer_by_cfg(
+        model.attn1,
+        [
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            }
+        ],
+    )
+    mtq.set_quantizer_by_cfg(
+        model.attn2,
+        [
+            {
+                "quantizer_name": "*k_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            },
+            {
+                "quantizer_name": "*v_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            },
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quantized_layers"] == {}
+    assert quantization["kv_cache_quantized_layers"] == {
+        "attn0": {"quant_algo": "FP8"},
+        "attn1": {"quant_algo": "NVFP4"},
+        "attn2": {"quant_algo": "FP8_K_NVFP4_V"},
+    }
+
+
+def test_unsupported_asymmetric_kv_cache_pair_fails_export():
+    class FakeAttention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k_bmm_quantizer = TensorQuantizer()
+            self.v_bmm_quantizer = TensorQuantizer()
+
+    model = FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {
+                "quantizer_name": "*k_bmm_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "use_constant_amax": True,
+                },
+            },
+            {
+                "quantizer_name": "*v_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "use_constant_amax": True},
+            },
+        ],
+    )
+
+    with pytest.raises(NotImplementedError, match="Unsupported mixed K/V cache"):
+        get_quant_config(model)
+
+
+def test_mixed_kv_cache_postprocess_uses_each_layers_format():
+    state_dict = {
+        "attn0.k_bmm_quantizer._amax": torch.tensor([448.0]),
+        "attn0.v_bmm_quantizer._amax": torch.tensor([224.0]),
+        "attn1.k_bmm_quantizer._amax": torch.tensor([112.0]),
+        "attn1.v_bmm_quantizer._amax": torch.tensor([56.0]),
+    }
+    layer_formats = {
+        "attn0": {"quant_algo": KV_CACHE_FP8},
+        "attn1": {"quant_algo": KV_CACHE_NVFP4},
+        "attn2": {"quant_algo": KV_CACHE_FP8_K_NVFP4_V},
+    }
+    state_dict.update(
+        {
+            "attn2.k_bmm_quantizer._amax": torch.tensor([448.0]),
+            "attn2.v_bmm_quantizer._amax": torch.tensor([112.0]),
+        }
+    )
+
+    processed = postprocess_state_dict(state_dict, 448.0, layer_formats)
+
+    assert processed == {
+        "attn0.k_proj.k_scale": torch.tensor([1.0]),
+        "attn0.v_proj.v_scale": torch.tensor([0.5]),
+        "attn1.k_proj.k_scale": torch.tensor([0.25]),
+        "attn1.v_proj.v_scale": torch.tensor([0.125]),
+        "attn2.k_proj.k_scale": torch.tensor([1.0]),
+        "attn2.v_proj.v_scale": torch.tensor([0.25]),
+    }
 
 
 class _FakeTopKRouter(torch.nn.Module):

@@ -37,7 +37,12 @@ from .layer_utils import is_moe, sync_moe_gate_up_amax
 from .model_config import FUSION_FREE_FORMATS, QUANTIZATION_NVFP4
 from .model_utils import TiedWeightMap
 from .quant_aware_conversion import build_reverse_name_mapper, revert_quant_config_names
-from .quant_utils import _postprocess_single_tensor, get_quant_config, get_quantization_format
+from .quant_utils import (
+    _get_kv_cache_postprocess_config,
+    _postprocess_single_tensor,
+    get_quant_config,
+    get_quantization_format,
+)
 from .registry import ExportContext, PrepareMoEInputsRegistry
 from .unified_export_hf import (
     _add_mtp_exclusions,
@@ -201,7 +206,7 @@ class LayerwiseExporter:
         # export_layer replaces as it goes, so by finalize() the model looks unquantized.
         self._quant_config = get_quant_config(model, is_modelopt_qlora=self._ctx.is_modelopt_qlora)
         # Not get_kv_cache_dtype: it does not recurse, so on the root it answers None.
-        self._kv_cache_format = self._quant_config["quantization"]["kv_cache_quant_algo"]
+        self._kv_cache_format = _get_kv_cache_postprocess_config(self._quant_config["quantization"])
         self._finalized = False
 
         self._name_mapper = None

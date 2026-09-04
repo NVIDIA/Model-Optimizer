@@ -489,7 +489,7 @@ def test_get_scaling_factor(
             {
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
-                "kv_cache_quant_algo": "FP8",
+                "kv_cache_quant_algo": None,
             },
         ),
         (
@@ -497,7 +497,7 @@ def test_get_scaling_factor(
             {
                 "exclude_modules": ["linears.0", "linears.2"],
                 "quant_algo": "FP8",
-                "kv_cache_quant_algo": "INT8",
+                "kv_cache_quant_algo": None,
             },
         ),
     ],

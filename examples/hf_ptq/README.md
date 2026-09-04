@@ -477,8 +477,39 @@ leaving the original recipe unchanged.
 For models without backprop support (e.g. Llama-4), use the `kl_div` scoring method — see the shipped
 `general/auto_quantize/nvfp4_fp8_kl_div_at_5p4bits` recipe.
 
-KV cache is applied as a uniform post-step, not part of the per-layer search. An AutoQuantize recipe
-falls back to `--kv_cache_qformat` (default `fp8_cast`) unless it sets an explicit `kv_cache` field.
+Weight AutoQuantize recipes still apply KV cache as a uniform post-step and fall back to
+`--kv_cache_qformat` (default `fp8_cast`) unless they set an explicit `kv_cache` field.
+
+KV-cache AutoQuantize recipes use the same `mtq.auto_quantize` API and set
+`constraints.cost_model: kv_cache` with an `effective_bits` target. Their
+`candidate_formats` are complete K/V cache configs whose config-level `effective_bits` includes
+packed scale overhead. The width-weighted budget covers eligible layers; `disabled_layers` are
+preserved and excluded. BF16 is used only as the isolated-KL reference, not as a solver choice.
+The shipped recipe searches FP8-cast K/V (8.0 bits/scalar) and NVFP4-cast K/V
+(4.5 bits/scalar) at 5.4 bits/scalar. It intentionally excludes FP8-K/NVFP4-V because the
+companion vLLM implementation does not support that asymmetric per-layer format:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path Qwen/Qwen3-1.7B \
+  --recipe general/auto_quantize/kv_fp8_nvfp4_cast_kl_div_at_5p4bits \
+  --auto_quantize_checkpoint /path/to/kv_autoquant.pth \
+  --export_path /path/to/qwen3-1.7b-mixed-kv
+```
+
+Each candidate uses an explicit constant scale, avoiding an additional calibration pass while
+keeping persistent K/V scales in the unified HF checkpoint. Unified export records the selected
+formats in `kv_cache_quantized_layers` and writes
+the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
+`--auto_quantize_checkpoint` stores the resumable raw search state.
+
+> [!NOTE]
+> Layer-wise KV checkpoints require the companion
+> [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
+> vLLM release containing it. The repository's currently pinned vLLM 0.26.0 does not consume
+> `kv_cache_quantized_layers`, so these checkpoints are export-only in that stock environment.
+> Do not deploy them with the pinned runtime. Full FP8 K/V and full NVFP4 K/V use existing vLLM
+> kernels once the layer-wise metadata consumer is available.
 
 The one runtime flag is `--auto_quantize_checkpoint` — save/restore the search state to resume an
 interrupted search (skips re-scoring):
@@ -514,6 +545,8 @@ mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
 ## Multi-Node Post-Training Quantization with FSDP2
 
 ModelOpt enables quantization of LLMs across multiple GPU nodes using FSDP2 for distributed model sharding and calibration, exposed via the `--use_fsdp2` flag on the standard `hf_ptq.py` entry point.
+
+> *KV-cache AutoQuantize recipes are not supported with `--use_fsdp2` and are rejected before model loading. Distributed KV sensitivity scoring, selection, and checkpoint writes must be synchronized before this combination can be enabled safely. Existing weight AutoQuantize recipes retain their previous experimental warning with FSDP2.*
 
 ### Usage
 
