@@ -492,13 +492,6 @@ class TestCastFunctions:
         assert np.all(result == expected_array)
 
 
-def test_graphsurgeon_value_info_accepts_onnx_dtype():
-    tensor = gs.Variable("input", dtype=TensorProto.BFLOAT16, shape=[1])
-    value_info = _export_value_info_proto(tensor, do_type_check=True)
-
-    assert value_info.type.tensor_type.elem_type == TensorProto.BFLOAT16
-
-
 class TestFP8QuantExporter:
     """Test suite for FP8QuantExporter."""
 
@@ -508,7 +501,11 @@ class TestFP8QuantExporter:
         weight = gs.Constant("weight", weight_data)
         scale = gs.Constant("linear/weight_quantizer/scale", scale_data)
         quantized = gs.Variable("quantized", dtype=np.uint8, shape=weight_data.shape)
-        dequantized = gs.Variable("dequantized", dtype=ml_dtypes.bfloat16, shape=weight_data.shape)
+        dequantized = gs.Variable(
+            "dequantized", dtype=TensorProto.BFLOAT16, shape=weight_data.shape
+        )
+        value_info = _export_value_info_proto(dequantized, do_type_check=True)
+        assert value_info.type.tensor_type.elem_type == TensorProto.BFLOAT16
         graph = gs.Graph(
             nodes=[
                 gs.Node(
@@ -530,6 +527,7 @@ class TestFP8QuantExporter:
 
         onnx.checker.check_model(converted_model)
         assert [node.op_type for node in converted_model.graph.node] == ["DequantizeLinear"]
+        assert converted_model.graph.output[0].type.tensor_type.elem_type == TensorProto.BFLOAT16
         fp8_weight = next(
             initializer
             for initializer in converted_model.graph.initializer

@@ -24,7 +24,6 @@ import os
 import shutil
 import tempfile
 from contextlib import nullcontext
-from itertools import chain
 from typing import Any
 
 import onnx
@@ -528,12 +527,21 @@ def get_onnx_bytes_and_metadata(
     if isinstance(model, (DataParallel, DistributedDataParallel)):
         model = model.module
 
-    source_floating_dtypes = {
-        tensor.dtype
-        for tensor in chain(model.parameters(), model.buffers())
-        if tensor.is_floating_point()
+    source_parameter_dtypes = {
+        parameter.dtype for parameter in model.parameters() if parameter.is_floating_point()
     }
-    source_floating_dtype_names = ", ".join(sorted(map(str, source_floating_dtypes))) or "none"
+    source_parameter_dtype_names = ", ".join(sorted(map(str, source_parameter_dtypes))) or "none"
+    uses_fp4 = is_fp4_quantized(model)
+    uses_mxfp8 = is_mxfp8_quantized(model)
+    uses_fp8 = is_fp8_quantized(model)
+    uses_int8 = is_int8_quantized(model)
+    uses_other_unsupported_quantizer = is_int4_quantized(model) or uses_mxfp8 or uses_int8
+    is_bf16_fp8_noop = (
+        weights_dtype == "bf16"
+        and source_parameter_dtypes == {torch.bfloat16}
+        and uses_fp8
+        and not (uses_fp4 or uses_other_unsupported_quantizer)
+    )
 
     # Standardize model args and also tensorize them so they also appear in the onnx graph!
     # Floats/ints are tensorized when they are provided, but not tensorized when they are not
@@ -557,11 +565,7 @@ def get_onnx_bytes_and_metadata(
     input_none_names = list(set(tree_spec_input.names) - set(input_names))
 
     use_torch_autocast = not (
-        is_fp4_quantized(model)
-        or is_mxfp8_quantized(model)
-        or is_fp8_quantized(model)
-        or is_int8_quantized(model)
-        or weights_dtype == "fp32"
+        uses_fp4 or uses_mxfp8 or uses_fp8 or uses_int8 or weights_dtype == "fp32"
     )
     autocast = torch.autocast("cuda") if use_torch_autocast else nullcontext()
 
@@ -583,6 +587,22 @@ def get_onnx_bytes_and_metadata(
         )
         return onnx_model.to_bytes(), model_metadata
 
+    if weights_dtype == "fp16" and uses_fp8 and torch.bfloat16 in source_parameter_dtypes:
+        raise ValueError(
+            "Converting a BF16 FP8 ONNX graph to FP16 is not supported yet "
+            f"(source parameter dtypes: {source_parameter_dtype_names})"
+        )
+
+    if (
+        weights_dtype == "bf16"
+        and (uses_fp8 or uses_other_unsupported_quantizer)
+        and not is_bf16_fp8_noop
+    ):
+        raise AssertionError(
+            "Converting a quantized ONNX graph to BF16 is not supported yet "
+            f"(source parameter dtypes: {source_parameter_dtype_names})"
+        )
+
     # Export onnx model from pytorch model
     # As the maximum size of protobuf is 2GB, we cannot use io.BytesIO() buffer during export.
     model_name = model_name or model.__class__.__name__
@@ -591,16 +611,12 @@ def get_onnx_bytes_and_metadata(
 
     # Configure quantizers if the model is quantized in NVFP4 or MXFP8 mode
     quantizer_context = (
-        configure_linear_module_onnx_quantizers(model)
-        if is_fp4_quantized(model) or is_mxfp8_quantized(model)
-        else nullcontext()
+        configure_linear_module_onnx_quantizers(model) if uses_fp4 or uses_mxfp8 else nullcontext()
     )
     # Disable FP8 Conv weight quantizers: TorchScript custom ops produce outputs with
     # unknown shapes, causing _convolution symbolic to fail. Conv weights are quantized
     # to FP8 in post-processing by FP8QuantExporter instead.
-    conv_wq_context = (
-        _disable_fp8_conv_weight_quantizers(model) if is_fp8_quantized(model) else nullcontext()
-    )
+    conv_wq_context = _disable_fp8_conv_weight_quantizers(model) if uses_fp8 else nullcontext()
     with torch.inference_mode(), autocast, quantizer_context, conv_wq_context:
         additional_kwargs = {}
         if not dynamo_export:
@@ -642,28 +658,8 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    uses_fp8 = is_fp8_quantized(model)
-    uses_other_unsupported_quantizer = (
-        is_int4_quantized(model) or is_mxfp8_quantized(model) or is_int8_quantized(model)
-    )
-    if weights_dtype == "fp16" and uses_fp8 and torch.bfloat16 in source_floating_dtypes:
-        raise AssertionError(
-            "Converting a BF16 FP8 ONNX graph to FP16 is not supported yet "
-            f"(source floating dtypes: {source_floating_dtype_names})"
-        )
-
-    is_bf16_fp8_noop = (
-        weights_dtype == "bf16"
-        and source_floating_dtypes == {torch.bfloat16}
-        and uses_fp8
-        and not uses_other_unsupported_quantizer
-    )
     if weights_dtype in ["fp16", "bf16"] and not is_bf16_fp8_noop:
         if uses_other_unsupported_quantizer or uses_fp8:
-            assert weights_dtype == "fp16", (
-                "Converting a quantized ONNX graph to BF16 is not supported yet "
-                f"(source floating dtypes: {source_floating_dtype_names})"
-            )
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
                 keep_io_types=False,
@@ -687,7 +683,7 @@ def get_onnx_bytes_and_metadata(
     onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # Remove Cast nodes around Q/DQ for optimal TRT fusion
-    if is_fp8_quantized(model):
+    if uses_fp8:
         onnx_opt_graph = fold_q_fp16_to_fp32_casts(onnx_opt_graph)
         onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
 

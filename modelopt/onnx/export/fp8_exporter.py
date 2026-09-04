@@ -34,10 +34,10 @@ _FP8_E4M3_MAX = 448.0
 _FP8_E4M3_SOFTMAX_SCALE = 1.0 / _FP8_E4M3_MAX
 
 
-def _torch_from_numpy(array: np.ndarray) -> torch.Tensor:
-    """Convert a NumPy array to a PyTorch tensor while preserving BF16 values."""
+def _torch_from_numpy_for_fp8(array: np.ndarray) -> torch.Tensor:
+    """Convert a NumPy array to the PyTorch dtype used for FP8 normalization."""
     if array.dtype == ml_dtypes.bfloat16:
-        return torch.from_numpy(array.view(np.int16)).view(torch.bfloat16)
+        return torch.from_numpy(array.view(np.int16)).view(torch.bfloat16).float()
     return torch.from_numpy(array)
 
 
@@ -56,7 +56,7 @@ class FP8QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def compress_weights(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-        """Compresses FP32/FP16 weights to FP8 by folding QDQ nodes to DQ only.
+        """Compresses FP32/FP16/BF16 weights to FP8 by folding QDQ nodes to DQ only.
 
         Even though modelopt supports FP8 onnx export, the weights are represented in fp32 + QDQ.
         The storage is therefore very bad. In this function,
@@ -64,7 +64,7 @@ class FP8QuantExporter(ONNXQuantExporter):
         weights in the output model. TRT custom ops are converted to native ONNX DequantizeLinear.
 
         Parameters:
-            onnx_model: ONNX model with FP32/FP16 weights and TRT_FP8 QDQ nodes.
+            onnx_model: ONNX model with FP32/FP16/BF16 weights and TRT_FP8 QDQ nodes.
 
         Returns:
             ONNX model with FP8 weights and native ONNX DQ nodes for weights (QDQ preserved for activations).
@@ -86,11 +86,8 @@ class FP8QuantExporter(ONNXQuantExporter):
 
                 weights = node.inputs[0]
                 scale = node.inputs[1]
-                torch_weights = _torch_from_numpy(weights.values)
-                torch_scale = _torch_from_numpy(scale.values)
-                if torch.bfloat16 in (torch_weights.dtype, torch_scale.dtype):
-                    torch_weights = torch_weights.float()
-                    torch_scale = torch_scale.float()
+                torch_weights = _torch_from_numpy_for_fp8(weights.values)
+                torch_scale = _torch_from_numpy_for_fp8(scale.values)
                 quantizer_name = scale.name.rsplit("/", 1)[0]
                 dq_op = node.outputs[0].outputs[0]
                 if dq_op.op != "TRT_FP8DequantizeLinear":
@@ -205,7 +202,7 @@ class FP8QuantExporter(ONNXQuantExporter):
             if any(out.op == "DequantizeLinear" for out in weight_input.outputs):
                 continue
 
-            torch_weights = _torch_from_numpy(weight_input.values.copy())
+            torch_weights = _torch_from_numpy_for_fp8(weight_input.values.copy())
             amax = torch_weights.abs().max().float()
             if amax == 0:
                 continue
@@ -218,10 +215,7 @@ class FP8QuantExporter(ONNXQuantExporter):
                     np.array(np.inf, dtype=scale_data.dtype),
                     out=scale_data,
                 )
-            torch_scale = _torch_from_numpy(scale_data)
-            if torch.bfloat16 in (torch_weights.dtype, torch_scale.dtype):
-                torch_weights = torch_weights.float()
-                torch_scale = torch_scale.float()
+            torch_scale = _torch_from_numpy_for_fp8(scale_data)
 
             # Quantize weights to FP8 (WAR: numpy doesn't support fp8)
             fp8_data = (
