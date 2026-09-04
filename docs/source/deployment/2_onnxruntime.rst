@@ -15,16 +15,77 @@ ONNX Runtime uses execution providers (EPs) to run models efficiently across a r
 
 Choose the EP that best matches your model, hardware and deployment requirements.
 
-TensorRT-RTX calibration backends
-=================================
+TensorRT-RTX calibration and deployment
+=======================================
 
-ModelOpt currently uses the legacy TensorRT-RTX EP by default. The standalone EP ABI plugin will
-become the default in a future release. To use the ABI EP now, install its package and pass
-``--calibration_eps NvTensorRtRtx --trt_rtx_backend abi``. ModelOpt registers the plugin
-only when this backend is selected; CUDA EP calibration remains available independently.
-See the `TensorRT-RTX EP ABI documentation
-<https://github.com/NVIDIA/TensorRT-RTX-EP-ABI>`_ for package requirements and plugin
-usage.
+ModelOpt currently uses the legacy TensorRT-RTX EP by default for calibration. The standalone ABI
+EP will become the default in a future release. To use the ABI EP for calibration now, pass
+``--calibration_eps NvTensorRtRtx --trt_rtx_backend abi``. CUDA EP calibration remains available
+independently.
+
+For deployment, choose one of the following TensorRT-RTX EP paths. The legacy package contains an
+ONNX Runtime build with the EP included, whereas the ABI path uses a standard ONNX Runtime package
+and a separately registered plugin.
+
+Legacy TensorRT-RTX EP
+----------------------
+
+Install the legacy package and ensure that the required TensorRT-RTX libraries are available on
+``PATH``:
+
+.. code-block:: bash
+
+    python -m pip install onnxruntime-trt-rtx
+
+Create the inference session by selecting the built-in provider:
+
+.. code-block:: python
+
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(
+        "model.onnx",
+        providers=["NvTensorRTRTXExecutionProvider"],
+    )
+
+TensorRT-RTX ABI EP
+-------------------
+
+Install ONNX Runtime and the standalone CUDA 13 plugin package:
+
+.. code-block:: bash
+
+    python -m pip install "onnxruntime>=1.24" onnxruntime-ep-nv-tensorrt-rtx-cu13
+
+Register the plugin, select its devices, and attach them to the session options before creating the
+inference session:
+
+.. code-block:: python
+
+    import onnxruntime as ort
+    import onnxruntime_ep_nv_tensorrt_rtx as trt_rtx_ep
+
+    ep_name = trt_rtx_ep.get_ep_name()
+    ort.register_execution_provider_library(ep_name, trt_rtx_ep.get_library_path())
+
+    trt_rtx_devices = [device for device in ort.get_ep_devices() if device.ep_name == ep_name]
+    if not trt_rtx_devices:
+        raise RuntimeError("No TensorRT-RTX ABI EP device was found")
+
+    session_options = ort.SessionOptions()
+    session_options.add_provider_for_devices(trt_rtx_devices, {})
+    session = ort.InferenceSession("model.onnx", sess_options=session_options)
+
+    # Release every session using the plugin before unregistering it.
+    del session
+    ort.unregister_execution_provider_library(ep_name)
+
+See the `ONNX Runtime TensorRT-RTX EP documentation
+<https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html>`_ for provider
+options shared by the legacy and ABI paths. For ABI compatibility, packaging, and more complete
+examples, refer to the `NVIDIA TensorRT-RTX EP ABI documentation
+<https://github.com/NVIDIA/TensorRT-RTX-EP-ABI>`_ and the `TensorRT-RTX ABI plugin package
+<https://pypi.org/project/onnxruntime-ep-nv-tensorrt-rtx-cu13/>`_.
 
 .. note:: Currently, DirectML backend doesn't support 8-bit precision. So, 8-bit quantized models should be deployed on other backends like ORT-CUDA etc. However, DML path does support INT4 quantized models.
 
