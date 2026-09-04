@@ -34,6 +34,7 @@ from example_utils import (
     cleanup_distributed,
     copy_custom_model_files,
     create_vlm_calibration_loop,
+    default_layerwise_resume_dir,
     get_model,
     get_processor,
     get_tokenizer,
@@ -43,9 +44,11 @@ from example_utils import (
     mlflow_run,
     mtp_layer_prefixes_from_checkpoint,
     needs_checkpoint_path_update,
+    recipe_layerwise_blocks,
     resolve_checkpoint_dir,
     resolve_mlflow_args,
     run_nemotron_vl_preview,
+    set_layerwise_export_dir,
     setup_distributed_args,
     validate_fsdp2_supported,
 )
@@ -509,6 +512,26 @@ def _recipe_is_auto_quantize(recipe: str | None) -> bool:
     return recipe is not None and isinstance(load_recipe(recipe), ModelOptAutoQuantizeRecipe)
 
 
+def _validate_recipe_calibration(args: argparse.Namespace, recipe) -> None:
+    """Require image-text calibration when a PTQ recipe enables visual input quantizers."""
+    if not isinstance(recipe, ModelOptPTQRecipe) or args.calib_with_images:
+        return
+
+    visual_input_entry = next(
+        (
+            entry
+            for entry in reversed(recipe.quantize.quant_cfg)
+            if entry.quantizer_name == "*visual.*input_quantizer"
+        ),
+        None,
+    )
+    if visual_input_entry is not None and visual_input_entry.enable:
+        raise ValueError(
+            "Vision Encoder quantization recipes require --calib_with_images so visual input "
+            "quantizers receive activation calibration data."
+        )
+
+
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
@@ -623,11 +646,15 @@ def load_model(args: argparse.Namespace):
         default_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
 
-        # Quantize only the language model, but keep the full_model for calibration forward.
-        extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(full_model)
-        if extracted_lm is not None:
-            language_model = extracted_lm
-            model_type = extracted_model_type
+        # Plain PTQ quantizes only the language model. Recipes keep the complete VLM so their
+        # quantizer rules can target vision and language components in one state.
+        if args.recipe is None:
+            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                full_model
+            )
+            if extracted_lm is not None:
+                language_model = extracted_lm
+                model_type = extracted_model_type
     else:
         if args.specdec_offline_dataset is not None:
             language_model = full_model
@@ -719,7 +746,7 @@ def mono_quantize(
     calib_dataloader: DataLoader,
     is_nemotron_vl_model: bool,
 ):
-    """Plain quantization of the given language model to a single quantization configuration."""
+    """Plain quantization of the selected model target to one quantization configuration."""
 
     model_is_already_quantized = is_quantized(language_model)
 
@@ -738,9 +765,10 @@ def mono_quantize(
             warnings.warn("Dynamic quantization. Calibration skipped.")
         calibrate_loop = None
         if use_calibration:
-            # For Nemotron VL image calibration, the dataloader yields multimodal kwargs (e.g., pixel_values).
-            # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
-            if args.calib_with_images and is_nemotron_vl_model:
+            # Image calibration batches contain multimodal kwargs (for example pixel_values).
+            # They must be consumed by the complete VLM even when only a nested component is the
+            # quantization target; the full forward still exercises that component's quantizers.
+            if args.calib_with_images:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
                 calibrate_loop = create_forward_loop(
@@ -758,7 +786,7 @@ def mono_quantize(
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
         # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model:
+        if is_nemotron_vl_model and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -766,6 +794,65 @@ def mono_quantize(
 
     else:
         warnings.warn("Skipping quantization: model is already quantized.")
+
+
+def assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes) -> None:
+    """Refuse layerwise export before calibration starts, not after it writes a checkpoint.
+
+    Layerwise export writes the finished checkpoint during calibration, so anything that
+    would rewrite or contradict that checkpoint afterwards has to be caught here -- once
+    calibration begins, the user has already paid for the whole run.
+    """
+    if is_multimodal_model(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support multimodal models: calibration runs on the "
+            "extracted language model, so the shards and config.json would describe that "
+            "submodel rather than the full VLM, and the VLM export path would then "
+            "overwrite config.json with the unquantized source config."
+        )
+
+    if mtp_layer_prefixes:
+        raise NotImplementedError(
+            f"layerwise.export_dir does not support models with MTP layers {mtp_layer_prefixes}: "
+            "their exclusions and any orphaned MTP weights are applied after calibration, by "
+            "which point every shard and the quant config are already written."
+        )
+
+    if has_spec_opt(full_model):
+        raise NotImplementedError(
+            "layerwise.export_dir does not support speculative-decoding models: "
+            "export_speculative_decoding() would write a second checkpoint over the same "
+            "--export_path."
+        )
+
+    if args.cast_mxfp4_to_nvfp4:
+        raise NotImplementedError(
+            "layerwise.export_dir is not compatible with --cast_mxfp4_to_nvfp4: the cast "
+            "rewrites weights after calibration, by which point every shard is written."
+        )
+
+    # Mirrors export_quantized's branches: a second exporter would overwrite --export_path.
+    for flag, value, exporter in (
+        ("--vllm_fakequant_export", args.vllm_fakequant_export, "export_hf_vllm_fq_checkpoint()"),
+        ("--sparsity_fmt", args.sparsity_fmt != "dense", "export_tensorrt_llm_checkpoint()"),
+        (
+            # int8_sq is the export-format constant, int8_smoothquant the qformat preset.
+            "--qformat int8_smoothquant",
+            any(t in args.qformat for t in ("int8_sq", "int8_smoothquant")),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+        (
+            "an encoder-decoder model_type (t5/bart/whisper)",
+            getattr(full_model.config, "model_type", None) in ("t5", "bart", "whisper"),
+            "export_tensorrt_llm_checkpoint()",
+        ),
+    ):
+        if value:
+            raise NotImplementedError(
+                f"layerwise.export_dir is not compatible with {flag}: {exporter} would write a "
+                "second checkpoint over the same --export_path that layerwise calibration "
+                "already populated."
+            )
 
 
 def export_quantized(
@@ -870,11 +957,22 @@ def export_quantized(
                 if mtp_layer_prefixes:
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
-                export_hf_checkpoint(
-                    full_model,
-                    export_dir=export_path,
-                    extra_state_dict=mtp_state_dict,
-                )
+                if args.layerwise_export:
+                    if mtp_state_dict:
+                        raise NotImplementedError(
+                            "layerwise.export_dir does not support models with MTP weights: "
+                            "they are loaded after calibration has already written every "
+                            "shard, so they would be missing from the checkpoint. Export "
+                            "without layerwise.export_dir."
+                        )
+                    # Calibration already wrote every shard, the index and the configs.
+                    print(f"Layerwise export already wrote the checkpoint to {export_path}")
+                else:
+                    export_hf_checkpoint(
+                        full_model,
+                        export_dir=export_path,
+                        extra_state_dict=mtp_state_dict,
+                    )
 
                 if args.qformat == "w4a16_nvfp4":
                     warnings.warn(
@@ -1119,6 +1217,7 @@ def quantize_main(
                 f"Expected PTQ or AutoQuantize recipe, but got {type(recipe).__name__} "
                 f"from {args.recipe}"
             )
+        _validate_recipe_calibration(args, recipe)
 
     # AutoQuantize is recipe-driven: everything downstream reads the resolved AutoQuantizeConfig.
     if isinstance(recipe, ModelOptAutoQuantizeRecipe):
@@ -1128,17 +1227,22 @@ def quantize_main(
         aq_config = None
         fixed_quantize_config = None
 
-    def _is_layerwise(obj):
-        if isinstance(obj, ModelOptPTQRecipe):
-            return _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, ModelOptAutoQuantizeRecipe):
-            return obj.quantize is not None and _is_layerwise(obj.quantize.algorithm)
-        if isinstance(obj, list):
-            return any(_is_layerwise(a) for a in obj)
-        layerwise = getattr(obj, "layerwise", None)
-        return bool(getattr(layerwise, "enable", False))
+    layerwise_cfgs = recipe_layerwise_blocks(recipe)
+    is_layerwise = any(cfg.get("enable", False) for cfg in layerwise_cfgs)
 
-    is_layerwise = _is_layerwise(recipe)
+    # The value is a placeholder, replaced with --export_path below; presence is the switch.
+    args.layerwise_export = any(cfg.get("export_dir") is not None for cfg in layerwise_cfgs)
+    if args.layerwise_export:
+        if isinstance(recipe, ModelOptAutoQuantizeRecipe):
+            # Only the mono-quantize path retargets export_dir and runs the refusals;
+            # auto_quantize would export to the placeholder and skip the real export.
+            raise NotImplementedError(
+                "layerwise.export_dir is not supported with an AutoQuantize recipe; "
+                "use a PTQ recipe, or drop export_dir and export afterwards."
+            )
+        if not args.skip_generate:
+            print("Layerwise export: forcing --skip_generate, the model is left in export form.")
+        args.skip_generate = True
 
     if args.batch_size == 0:
         # For VL models with image-text calibration, skip automatic batch size detection
@@ -1263,12 +1367,32 @@ def quantize_main(
         # Complementary to recipe `*mtp*` wildcards (name-match); this catches MTP layers
         # identified by index.
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
+        if args.layerwise_export and not mtp_layer_prefixes:
+            # Only the FSDP2 loader flags these before quantization. Per-layer export has
+            # to refuse *before* calibration, or the run writes a complete-looking
+            # checkpoint and only then discovers it is missing the MTP weights.
+            mtp_layer_prefixes = mtp_layer_prefixes_from_checkpoint(args.pyt_ckpt_path)
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:
                 pattern = f"*{prefix}*"
                 quant_cfg["quant_cfg"].append({"quantizer_name": pattern, "enable": False})
                 print(f"Excluding MTP layer from quantization: {pattern}")
+
+        # Before resolve_checkpoint_dir, which hashes the config: with the placeholder
+        # still in it, two --export_path values would share one checkpoint dir.
+        if args.layerwise_export:
+            assert_layerwise_export_compatible(args, full_model, mtp_layer_prefixes)
+            quant_cfg = set_layerwise_export_dir(quant_cfg, args.export_path)
+            print(f"Layerwise export enabled: writing quantized shards to {args.export_path}")
+            # The shards are only a resume artifact if the manifest that names the resume
+            # point survives alongside them; see default_layerwise_resume_dir.
+            quant_cfg, moved = default_layerwise_resume_dir(quant_cfg, args.export_path)
+            if moved:
+                print(
+                    "Layerwise checkpoint_dir co-located with the export path so a resumed "
+                    "run finds its manifest next to the shards it must not overwrite."
+                )
 
         if needs_checkpoint_path_update(quant_cfg):
             quant_cfg, resolved_dir = resolve_checkpoint_dir(quant_cfg, args.pyt_ckpt_path)

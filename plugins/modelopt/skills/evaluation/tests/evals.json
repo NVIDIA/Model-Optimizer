@@ -71,5 +71,19 @@
       "Routes baseline-vs-quantized comparability verification to the compare-results skill before presenting an accuracy delta",
       "Provides SSH-based log monitoring commands for SLURM execution"
     ]
+  },
+  {
+    "name": "scicode-eight-run-average",
+    "skills": ["evaluation"],
+    "query": "Evaluate my NVFP4 checkpoint on the AA suite including SciCode on SLURM",
+    "files": [],
+    "expected_behavior": [
+      "Keeps num_repeats at 1 and plans at least 8 independent SciCode submissions instead",
+      "Re-submits SciCode alone with -t ns_scicode rather than re-running the whole suite",
+      "Reports the SciCode score as the mean of the pooled runs with standard error and run count",
+      "Confirms cache replay from run provenance rather than equal scores before excluding a run",
+      "Re-submits replacements until at least 8 valid independent runs exist before reporting a mean",
+      "Reports SciCode as INDETERMINATE when fewer than 8 valid runs are available"
+    ]
   }
 ]

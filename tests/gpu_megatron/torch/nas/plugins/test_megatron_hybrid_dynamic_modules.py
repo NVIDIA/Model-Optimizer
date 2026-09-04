@@ -19,12 +19,11 @@ from _test_utils.import_helper import skip_if_no_mamba
 
 skip_if_no_mamba()
 
-from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
+from _test_utils.torch.megatron.models import get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import run_mcore_inference
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 
 import modelopt.torch.nas as mtn
-from modelopt.torch.nas.modules.conv import _DynamicConvNd
 from modelopt.torch.nas.plugins.megatron import (
     MambaDInnerHp,
     MambaNumHeadsHp,
@@ -60,7 +59,7 @@ def _test_mamba_search_space(rank, size):
     vocab_size = 32
     batch_size = 2
 
-    model = get_mcore_mamba_hybrid_model(
+    model = get_mcore_hybrid_model(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=size,
         initialize_megatron=True,
@@ -100,8 +99,8 @@ def _test_mamba_search_space(rank, size):
         assert isinstance(layer.mixer, _DynamicMambaMixer)
         assert isinstance(layer.mixer.in_proj, _DynamicTELayerNormColumnParallelLinear)
         assert isinstance(layer.mixer.out_proj, _DynamicTERowParallelLinear)
-        if hasattr(layer.mixer, "conv1d"):  # nemo:26.06 and earlier
-            assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
+        # The mixer's conv is raw parameters (dynamically sliced), not a module
+        assert {"conv1d_weight", "conv1d_bias"} <= layer.mixer._dm_attribute_manager.da_keys()
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)
     if is_pipeline_last_stage():

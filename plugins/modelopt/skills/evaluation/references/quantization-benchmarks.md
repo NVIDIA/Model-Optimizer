@@ -63,8 +63,9 @@ merged into the `aa/` multi-task list.
   do **not** lower them for quant comparisons, or noise will mask real
   regressions. The field name differs by harness: `n_samples` for simple-evals
   (AIME `64`) and tau2-bench (Tau2 `8`); `num_repeats` for nemo-skills
-  (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench/SciCode `8`, IFBench `5`,
-  MMLU-Pro `1`).
+  (AA-LCR/GPQA `16`, AA-Omniscience `10`, LiveCodeBench `8`, IFBench `5`,
+  MMLU-Pro `1`). **SciCode is the exception** — `num_repeats: 1` x 8+ separate
+  submissions, averaged (`tasks/aa/scicode.md`).
 - **Judge / user-simulator endpoints** are required by AA-LCR, HLE AA,
   AA-Omniscience, and Tau2-Bench Telecom. Keep the judge and (for Tau2)
   user-simulator models fixed across baseline and quantized runs for

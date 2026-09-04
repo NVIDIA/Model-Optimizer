@@ -109,6 +109,16 @@ for an "AA" request. If the user asks for MRCR:
 
 ### Step 1 — Prerequisites
 
+> **SSH:** NEL opens its own connection as a bare `ssh <user>@<host>` with **no `-i`**, so a
+> non-default key filename makes every submit fail with `Permission denied (publickey,password)`
+> even though your own tooling works. Add an `IdentityFile` entry to `~/.ssh/config` per cluster and
+> verify with `ssh -o BatchMode=yes <user>@<host> true`.
+
+> **Config placement gotchas**, each of which costs one failed submission: `sbatch_comment` belongs
+> under `execution:`, not `cluster:` (otherwise inert, and the idle-GPU reaper kills the job); pyxis
+> needs `registry#path:tag` for non-DockerHub images or it prepends `docker.io` and 404s; NEL rejects
+> **file** mounts ("Mount paths must be directories") — put file overrides in `pre_cmd`.
+
 Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`. If user has an existing config, skip to Step 8 (optionally review for `???` and quantization flags first).
 
 **Set up `.env` now (not Step 8).** The working `.env` lives at the **workspace root** — the directory you run `nel` from — matching `modelopttools:eval-config`'s convention; do **not** create it under the skill dir. (NEL does not discover `.env` by path: it reads secrets from the shell env via the `host:` prefix after you `source`, so the location is purely *which file you source* before `nel run`. Keeping the single `.env` at the workspace root avoids a stale duplicate under the symlinked, shared `.agents/` skill tree.) For judge-scored / user-sim tasks (HLE, AA-LCR, Tau2), seed it from the template if absent — the template ships under the skill dir, the working `.env` does not: `[ -f .env ] || cp "$SKILL_DIR/recipes/env.example" .env`. Then try `modelopttools:eval-config` (if available) to fill the judge `model_id`/`url` rows (user adds the secret key). Needed before Step 5, which substitutes those values into task `<VAR>` placeholders.
@@ -127,7 +137,7 @@ Run `nel --version`; if missing, instruct `pip install nemo-evaluator-launcher`.
   | **GDPVal** (Stirrup agent, agentic) | `recipes/tasks/gym/gdpval.md` + `references/gym-gdpval.md`, `recipes/examples/gym/example_gdpval.yaml` | **Yes** | any AA request (see the AA rule below) |
   | **MRCR** (simple agent, long-context) | `recipes/tasks/gym/mrcr.md`, `recipes/examples/gym/example_mrcr.yaml` | **No** | only when the user asks for MRCR by name, or for long-context coverage |
 
-**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run.
+**AA rule:** If the user mentions "AA" / "Artificial Analysis", generate the `recipes/tasks/aa/` tasks (one multi-task config) **plus a companion standalone GDPVal config** (`recipes/tasks/gym/gdpval.md`, via the GDPVal branch) — GDPVal is part of the AA suite but a different harness, so it's its own config, never added to the `aa/` `tasks` list. Do not add MMLU-Pro, AIME 2025, or LiveCodeBench unless explicitly asked. GDPVal is the heaviest AA task (standalone, multi-hour, needs the SIF sandbox + judge) — surface it and let the user opt out per run. **SciCode needs at least 8 submissions, not one**, reported as their mean (`recipes/tasks/aa/scicode.md`).
 
 **Shortcut path** (when task list is known up front, e.g. "run AA"):
 
@@ -163,6 +173,26 @@ nel skills build-config --execution <...> --deployment <...> --model_type <...> 
 
 **Model path.** Checkpoint path (`/`, `./`, `../`, `~`, or exists on disk) → set `deployment.checkpoint_path`, leave `hf_model_handle: null`. Else HF handle (one `/`, not on disk) → set `deployment.hf_model_handle`, leave `checkpoint_path: null`.
 
+> **NEVER point `checkpoint_path` at a HuggingFace *cache snapshot* dir.** Entries under
+> `snapshots/<sha>/` are relative symlinks into `../../blobs/`. NEL mounts only the snapshot dir at
+> `/checkpoint`, so every link dangles in-container and vLLM dies with
+> `Invalid repository ID or local directory specified: '/checkpoint'`. Pre-staging into `HF_HOME`
+> does not help — that works for `from_pretrained`, not a mounted directory. Build a hardlink farm
+> (same filesystem, no extra space) and point at that:
+>
+> ```bash
+> find "$SNAP" ! -type d -exec sh -c '
+>   for f; do
+>     rel=${f#"$SNAP"/}; mkdir -p "$DEST/$(dirname "$rel")"
+>     ln -f "$(readlink -f "$f")" "$DEST/$rel"
+>   done' _ {} +
+> ```
+>
+> (`SNAP`/`DEST` must be **exported** — they are read inside a new shell — and the loop preserves
+> nested paths; `basename` would flatten subdirectories into one level.)
+> The same applies to ModelOpt exports whose `--source_ckpt` was a snapshot: the exporter preserves
+> symlinks, shipping a dangling `tokenizer.json`. Check with `find "$OUT" -type l` before serving.
+>
 > **Prefer `checkpoint_path` over `hf_model_handle` on SLURM** — `hf_model_handle` isn't reliably mounted at `/checkpoint`, so the deploy dies with `HFValidationError`. To eval an un-staged HF model, stage it first (`huggingface_hub.snapshot_download`) and point `checkpoint_path` at it. See `example_eval.yaml` for why.
 
 **Auto-detect ModelOpt quantization** (checkpoint paths). Check `config.json` for `quantization_config` (or legacy `hf_quant_config.json`):
@@ -276,10 +306,17 @@ Per-task `max_new_tokens` overrides are forbidden — set one top-level ceiling 
 
 **Cross-check `temperature` / `top_p` / `max_new_tokens` against `references/nvfp4-modelcard-sampling.md`** — the published settings for the 2026 NVFP4 checkpoints under `huggingface.co/nvidia` that disclose them (older releases and cards that publish nothing are absent — for those, read the card; `-DSpark` / `-DFlash` spec-decode variants share their base checkpoint's row, since spec decoding does not change the target's output distribution). **The card is the source of truth; this file is a reference, not a constraint** — use it to confirm a value you read, to fill a gap when the card is silent or ambiguous, and to catch a misreading. Worth consulting whenever the model is an NVFP4 checkpoint **or shares a family with one** (Qwen3.x, GLM-4.7/5.x, Kimi K2.x/K3, MiniMax M2.x/M3, DeepSeek V3.x/V4/R1, Gemma 4, Nemotron 3/3.5, Llama-Nemotron, Mistral Medium 3.5), and especially when you are unsure. It is a dated snapshot, so for anything newer than it, trust the card. See that file's "Lookup" section.
 
+**`temperature` / `top_p` are different: per-task overrides ARE allowed and often required.** Cards often specify sampling per scenario — DeepSeek-V4-Pro-0813 gives `top_p = 0.95` for agentic scenarios and `1.0` otherwise, so a single top-level `0.95` is wrong for every non-agentic task.
+Set the top-level value for the majority case, override only the tasks the card calls out, and apply
+the split identically to baseline and candidate. **The `export.mlflow` tags record only the
+top-level values**, so note any per-task override in the run `description` — otherwise the
+overridden task is reported under sampling params it did not use.
+
 #### `max_new_tokens` — mandatory model-card lookup
 
 1. **Fetch the HF model card before writing the value.** Not optional.
 2. Scan for any `max_tokens` / `max_new_tokens` / "output length" recommendation. Pick the **highest** value the card mentions (Qwen3.6: 32768 general + 81920 math-coding → use **81920**). Annotate with a citing comment.
+   **Card figures are SINGLE-TURN.** On multi-turn / agentic benchmarks the model's own answer is fed back in, so the cap must satisfy `n_turns × max_new_tokens + prompt < max_model_len`. Taking a card's headline "384K output" literally lost SciCode samples to HTTP 400; 65536 was clean. (`references/run-validation.md` already covers checking `finish_reason: length` after a run.)
 3. **Consult `references/nvfp4-modelcard-sampling.md` as a reference.** Listed and in agreement → proceed with confidence. Listed and different → **the card wins**; re-read it, then note the discrepancy for the user rather than auto-correcting either way. Not listed, or the card is silent or ambiguous → take the nearest same-family rows as the value, a far better prior than the generic fallback below. Its `max_num_tokens` column records the card's *headline* cap, so rule 2 above still governs: when a card names more than one cap, the highest wins even if that exceeds the row.
 4. If the card is genuinely silent after a thorough read **and** the family table offers no usable pattern, fall back to: **65536** (reasoning), **16384** (non-reasoning); surface the silence to the user.
 5. **Forbidden:** writing `max_new_tokens: <generic_default>` with a "card not yet checked" comment. Either fetch and apply, or fetch and confirm silence.
@@ -332,6 +369,8 @@ On SLURM, several deploy/eval failures are invisible to `--dry-run` and only sur
 
 Evals that exceed 4h of wall-clock time are handled by **NEL's built-in dependency-chain resume**, not by shrinking the eval. NEL submits the first SLURM job; if it hits walltime, a dependent follow-on job resumes from the response/result caches the first job wrote, then queues another follow-on. Long evals continue across walltime windows automatically. See `references/run-validation.md#nel-timeout-and-resume-behavior` for the full mechanism.
 
+**Never `scancel` a wedged run to free the GPUs.** The dependency-chain resume above fires only on a genuine walltime timeout; `afternotok` explicitly refuses a predecessor that finished `CANCELLED by <uid>` and exits in seconds, discarding the response cache the run had already filled. Let it hit the wall clock instead — one `scancel` threw away ~59 GPU-h of completed generation.
+
 **Preemption / external kill — resume manually with `sbatch run.sub`.** On a preemptible account (common on busy internal clusters) the scheduler can **CANCEL** a run mid-eval for a higher-priority job — `sacct -j <id>` shows `CANCELLED by <uid>` (a `svc-*` service account) with `Elapsed` well under the 4h walltime. NEL does **not** auto-resume this (its dependency chain only fires on a genuine walltime timeout). But the `run.sub` that NEL generated for the job (in its run dir) is **re-submittable** and resumes from the same `output_dir` + response cache (`skip_filled`), continuing from the partial output rather than restarting:
 
 ```bash
@@ -342,7 +381,7 @@ Re-submit again if it's preempted again — each resume re-deploys, then skips a
 
 Implications for the agent:
 
-- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain.
+- Do **not** lower `num_repeats`, split heavy tasks (AA-LCR, SciCode) into separate configs, or otherwise carve up the eval to fit inside 4h. Let NEL chain. (SciCode's mandatory 8+ submissions are independent scored runs, not a walltime workaround.)
 - Do **not** treat a walltime timeout as a failed run. Check `nel status` / `nel info` and the dependent job's logs before declaring failure. `references/run-validation.md` covers what a real failure looks like vs an expected resume event.
 - Bumping `data_parallel_size` / `parallelism` to finish faster is fine when the goal is wall-clock latency, not a walltime workaround — but it's optional, not required, for runs longer than 4h.
 
