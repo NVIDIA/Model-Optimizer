@@ -333,25 +333,12 @@ def test_qwen3p5_smoke_expectation_has_qualified_stable_runtime_values(
     assert contract["schema"] == "modelopt.puzzletron-expected-results/v1"
     assert observation["schema"] == "modelopt.puzzletron-reference-observation/v1"
     assert observation["contract_id"] == contract["id"]
-    assert required <= set(observation["values"])
-    assert set(observation["values"]) - required <= informational
-    exact_result_fields = {
-        field["name"] for field in contract["fields"] if field["pointer"] == "/exact_result"
-    }
-    assert exact_result_fields
-    assert all(observation["values"][name] is None for name in exact_result_fields)
-    field_classifications = {field["name"]: field["classification"] for field in contract["fields"]}
-    assert all(field_classifications[name] == "informational" for name in exact_result_fields)
+    assert set(observation["values"]) == required
+    assert set(observation["values"]).isdisjoint(informational)
+    fields_by_name = {field["name"]: field for field in contract["fields"]}
     assert observation["qualification"]["status"] == "qualified-stable-runtime-values"
     stable_exact_suffixes = {
         "architecture_id",
-        "axis_inventory",
-        "denominators",
-        "evaluator_backend_limitations",
-        "evaluator_generation_policy",
-        "evaluator_lmms_eval_revision",
-        "evaluator_output_budget_contract",
-        "evaluator_profile",
         "hidden_size",
         "kd_cumulative_examples",
         "kd_cumulative_steps",
@@ -362,20 +349,37 @@ def test_qwen3p5_smoke_expectation_has_qualified_stable_runtime_values(
         "num_hidden_layers",
         "parameter_counts",
         "pre_kd_checkpoint_fingerprint",
+        "profile",
         "reference_checkpoint_fingerprint",
-        "row_outcomes",
-        "selected_sample_ids",
+        "schema",
         "stage_completion",
+        "steps",
         "tensor_count",
     }
+    opaque_envelope_suffixes = {
+        "evaluator_contract_schema",
+        "evaluator_revision",
+        "milestone_candidate_evidence_schema",
+        "milestone_reference_evidence_schema",
+        "pre_kd_candidate_evidence_schema",
+        "pre_kd_reference_evidence_schema",
+    }
     for index in range(3):
-        assert field_classifications[f"curve_{index}_evaluator_contract"] == "informational"
-        assert observation["values"][f"curve_{index}_profile"] == smoke_result["profile"]
-        assert (
-            observation["values"][f"curve_{index}_manifest"] == smoke_result["row_manifest_sha256"]
+        assert observation["values"][f"curve_{index}_schema"] == (
+            "modelopt.puzzletron.kd-learning-curve/v2"
         )
+        assert observation["values"][f"curve_{index}_profile"] == smoke_result["profile"]
         assert observation["values"][f"curve_{index}_steps"] == 2
         stable_exact_fields = {f"curve_{index}_{suffix}" for suffix in stable_exact_suffixes}
         assert stable_exact_fields <= required
-        assert all(field_classifications[name] == "exact" for name in stable_exact_fields)
+        assert all(
+            fields_by_name[name]["classification"] == "exact" for name in stable_exact_fields
+        )
         assert all(observation["values"][name] is not None for name in stable_exact_fields)
+        opaque_envelope_fields = {f"curve_{index}_{suffix}" for suffix in opaque_envelope_suffixes}
+        assert opaque_envelope_fields <= informational
+        assert all(
+            fields_by_name[name]["classification"] == "informational"
+            for name in opaque_envelope_fields
+        )
+        assert all(name not in observation["values"] for name in opaque_envelope_fields)

@@ -72,6 +72,12 @@
       "classification": "exact"
     },
     {
+      "name": "report_generation_seconds",
+      "artifact": "report",
+      "pointer": "/generation_seconds",
+      "classification": "informational"
+    },
+    {
       "name": "curve_0_schema",
       "artifact": "curve_0",
       "pointer": "/schema",
@@ -80,13 +86,7 @@
     {
       "name": "curve_0_profile",
       "artifact": "curve_0",
-      "pointer": "/evaluation_identity/profile",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_manifest",
-      "artifact": "curve_0",
-      "pointer": "/evaluation_identity/row_manifest_sha256",
+      "pointer": "/evaluation_contract/evaluator/profile",
       "classification": "exact"
     },
     {
@@ -96,111 +96,9 @@
       "classification": "exact"
     },
     {
-      "name": "curve_0_exact_result",
+      "name": "curve_0_architecture_id",
       "artifact": "curve_0",
-      "pointer": "/exact_result",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_1_profile",
-      "artifact": "curve_1",
-      "pointer": "/evaluation_identity/profile",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_manifest",
-      "artifact": "curve_1",
-      "pointer": "/evaluation_identity/row_manifest_sha256",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_steps",
-      "artifact": "curve_1",
-      "pointer": "/milestones/0/steps",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_exact_result",
-      "artifact": "curve_1",
-      "pointer": "/exact_result",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_2_profile",
-      "artifact": "curve_2",
-      "pointer": "/evaluation_identity/profile",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_manifest",
-      "artifact": "curve_2",
-      "pointer": "/evaluation_identity/row_manifest_sha256",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_steps",
-      "artifact": "curve_2",
-      "pointer": "/milestones/0/steps",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_exact_result",
-      "artifact": "curve_2",
-      "pointer": "/exact_result",
-      "classification": "informational"
-    },
-    {
-      "name": "report_generation_seconds",
-      "artifact": "report",
-      "pointer": "/generation_seconds",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_0_axis_inventory",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/axis_inventory",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_evaluator_contract",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_0_evaluator_profile",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract/profile",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_evaluator_lmms_eval_revision",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_evaluator_generation_policy",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract/generation_policy",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_evaluator_output_budget_contract",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_evaluator_backend_limitations",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/evaluator_contract/backend_limitations",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_denominators",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/denominators",
+      "pointer": "/architecture_id",
       "classification": "exact"
     },
     {
@@ -228,33 +126,9 @@
       "classification": "exact"
     },
     {
-      "name": "curve_0_tensor_shapes",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_0_selected_sample_ids",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/selected_sample_ids",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_row_outcomes",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/row_outcomes",
-      "classification": "exact"
-    },
-    {
       "name": "curve_0_stage_completion",
       "artifact": "curve_0",
       "pointer": "/exact_result/stage_completion",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_0_architecture_id",
-      "artifact": "curve_0",
-      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
       "classification": "exact"
     },
     {
@@ -306,51 +180,63 @@
       "classification": "exact"
     },
     {
-      "name": "curve_1_axis_inventory",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/axis_inventory",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_evaluator_contract",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract",
+      "name": "curve_0_evaluator_revision",
+      "artifact": "curve_0",
+      "pointer": "/evaluation_contract/evaluator/revision",
       "classification": "informational"
     },
     {
-      "name": "curve_1_evaluator_profile",
+      "name": "curve_0_evaluator_contract_schema",
+      "artifact": "curve_0",
+      "pointer": "/evaluation_contract/evaluator/contract/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_pre_kd_candidate_evidence_schema",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluation_results/pre_kd/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_pre_kd_reference_evidence_schema",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluation_results/pre_kd/reference_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_milestone_candidate_evidence_schema",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluation_results/milestones/0/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_0_milestone_reference_evidence_schema",
+      "artifact": "curve_0",
+      "pointer": "/exact_result/evaluation_results/milestones/0/reference_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_schema",
       "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract/profile",
+      "pointer": "/schema",
       "classification": "exact"
     },
     {
-      "name": "curve_1_evaluator_lmms_eval_revision",
+      "name": "curve_1_profile",
       "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
+      "pointer": "/evaluation_contract/evaluator/profile",
       "classification": "exact"
     },
     {
-      "name": "curve_1_evaluator_generation_policy",
+      "name": "curve_1_steps",
       "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract/generation_policy",
+      "pointer": "/milestones/0/steps",
       "classification": "exact"
     },
     {
-      "name": "curve_1_evaluator_output_budget_contract",
+      "name": "curve_1_architecture_id",
       "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_evaluator_backend_limitations",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/evaluator_contract/backend_limitations",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_denominators",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/denominators",
+      "pointer": "/architecture_id",
       "classification": "exact"
     },
     {
@@ -378,33 +264,9 @@
       "classification": "exact"
     },
     {
-      "name": "curve_1_tensor_shapes",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_1_selected_sample_ids",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/selected_sample_ids",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_row_outcomes",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/row_outcomes",
-      "classification": "exact"
-    },
-    {
       "name": "curve_1_stage_completion",
       "artifact": "curve_1",
       "pointer": "/exact_result/stage_completion",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_1_architecture_id",
-      "artifact": "curve_1",
-      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
       "classification": "exact"
     },
     {
@@ -456,51 +318,63 @@
       "classification": "exact"
     },
     {
-      "name": "curve_2_axis_inventory",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/axis_inventory",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_evaluator_contract",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract",
+      "name": "curve_1_evaluator_revision",
+      "artifact": "curve_1",
+      "pointer": "/evaluation_contract/evaluator/revision",
       "classification": "informational"
     },
     {
-      "name": "curve_2_evaluator_profile",
+      "name": "curve_1_evaluator_contract_schema",
+      "artifact": "curve_1",
+      "pointer": "/evaluation_contract/evaluator/contract/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_pre_kd_candidate_evidence_schema",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluation_results/pre_kd/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_pre_kd_reference_evidence_schema",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluation_results/pre_kd/reference_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_milestone_candidate_evidence_schema",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluation_results/milestones/0/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_1_milestone_reference_evidence_schema",
+      "artifact": "curve_1",
+      "pointer": "/exact_result/evaluation_results/milestones/0/reference_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_schema",
       "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract/profile",
+      "pointer": "/schema",
       "classification": "exact"
     },
     {
-      "name": "curve_2_evaluator_lmms_eval_revision",
+      "name": "curve_2_profile",
       "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract/lmms_eval_revision",
+      "pointer": "/evaluation_contract/evaluator/profile",
       "classification": "exact"
     },
     {
-      "name": "curve_2_evaluator_generation_policy",
+      "name": "curve_2_steps",
       "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract/generation_policy",
+      "pointer": "/milestones/0/steps",
       "classification": "exact"
     },
     {
-      "name": "curve_2_evaluator_output_budget_contract",
+      "name": "curve_2_architecture_id",
       "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract/output_budget_contract",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_evaluator_backend_limitations",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/evaluator_contract/backend_limitations",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_denominators",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/denominators",
+      "pointer": "/architecture_id",
       "classification": "exact"
     },
     {
@@ -528,33 +402,9 @@
       "classification": "exact"
     },
     {
-      "name": "curve_2_tensor_shapes",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/realized_geometry_and_tensor_shapes/tensor_shapes",
-      "classification": "informational"
-    },
-    {
-      "name": "curve_2_selected_sample_ids",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/selected_sample_ids",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_row_outcomes",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/row_outcomes",
-      "classification": "exact"
-    },
-    {
       "name": "curve_2_stage_completion",
       "artifact": "curve_2",
       "pointer": "/exact_result/stage_completion",
-      "classification": "exact"
-    },
-    {
-      "name": "curve_2_architecture_id",
-      "artifact": "curve_2",
-      "pointer": "/exact_result/checkpoint_and_lineage_identities/architecture_id",
       "classification": "exact"
     },
     {
@@ -604,6 +454,42 @@
       "artifact": "curve_2",
       "pointer": "/exact_result/kd_exposure/0/token_upper_bound",
       "classification": "exact"
+    },
+    {
+      "name": "curve_2_evaluator_revision",
+      "artifact": "curve_2",
+      "pointer": "/evaluation_contract/evaluator/revision",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_evaluator_contract_schema",
+      "artifact": "curve_2",
+      "pointer": "/evaluation_contract/evaluator/contract/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_pre_kd_candidate_evidence_schema",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluation_results/pre_kd/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_pre_kd_reference_evidence_schema",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluation_results/pre_kd/reference_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_milestone_candidate_evidence_schema",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluation_results/milestones/0/candidate_evidence/schema",
+      "classification": "informational"
+    },
+    {
+      "name": "curve_2_milestone_reference_evidence_schema",
+      "artifact": "curve_2",
+      "pointer": "/exact_result/evaluation_results/milestones/0/reference_evidence/schema",
+      "classification": "informational"
     }
   ]
 }
