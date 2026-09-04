@@ -45,28 +45,13 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Close stale bump PRs and delete their branches
-        if: steps.changes.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BASE="${{ github.ref_name }}"
-          SAFE_BASE=$(echo "$BASE" | tr '/' '-')
-          PREFIX="auto/bump-uv-lock-${SAFE_BASE}-"
-          # Superseded by the PR created below, so close them and clean up the branches.
-          gh pr list --state open --base "$BASE" --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"${PREFIX}\")) | .number" \
-          | while read -r PR; do
-              echo "Closing stale PR #${PR}"
-              gh pr close "$PR" --delete-branch \
-                --comment "Superseded by a newer automated uv.lock bump."
-            done
       - name: Create pull request
         if: steps.changes.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ github.ref_name }}
         run: |
-          BASE="${{ github.ref_name }}"
+          BASE="$BASE_BRANCH"
           SAFE_BASE=$(echo "$BASE" | tr '/' '-')
           BRANCH="auto/bump-uv-lock-${SAFE_BASE}-$(date +%Y-%m-%d)"
           git checkout -b "$BRANCH"
@@ -94,3 +79,20 @@ jobs:
           EOF
           )" \
             --base "$BASE"
+          # Now that the replacement exists, close the bump PRs it supersedes and
+          # delete their branches. Fork PRs are skipped: their heads live in another
+          # repo and only branch name would match.
+          gh pr list --state open --base "$BASE" --limit 100 \
+            --json number,headRefName,isCrossRepository \
+          | jq -r --arg prefix "auto/bump-uv-lock-${SAFE_BASE}-" --arg branch "$BRANCH" '
+              .[]
+              | select(.isCrossRepository | not)
+              | select(.headRefName | startswith($prefix))
+              | select(.headRefName != $branch)
+              | .number
+            ' \
+          | while read -r PR; do
+              echo "Closing superseded PR #${PR}"
+              gh pr close "$PR" --delete-branch \
+                --comment "Superseded by a newer automated uv.lock bump."
+            done
