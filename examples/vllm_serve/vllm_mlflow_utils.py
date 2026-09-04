@@ -60,6 +60,8 @@ EXPERIMENT_ENV = "MLFLOW_EXPERIMENT_NAME"
 RUN_NAME_ENV = "MODELOPT_MLFLOW_RUN_NAME"
 REQUIRED_ENV = "MODELOPT_MLFLOW_REQUIRED"
 COMMAND_ENV = "MODELOPT_MLFLOW_COMMAND"
+JOB_ID_ENV = "MODELOPT_MLFLOW_JOB_ID"
+NEL_JOB_ID_ENV = "NEL_JOB_ID"
 
 # Everything the rank-0 worker needs in its environment to reach the tracking server. The
 # credentials are never set here, only forwarded when the launching shell exported them --
@@ -69,6 +71,7 @@ MLFLOW_ENV_VARS = frozenset(
         TRACKING_URI_ENV,
         EXPERIMENT_ENV,
         RUN_NAME_ENV,
+        JOB_ID_ENV,
         REQUIRED_ENV,
         COMMAND_ENV,
         "MLFLOW_TRACKING_TOKEN",
@@ -118,6 +121,12 @@ def add_mlflow_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="MLflow run name. Default: the UTC start time as YYYYmmdd-HHMMSS.",
     )
+    parser.add_argument(
+        "--mlflow-job-id",
+        "--mlflow_job_id",
+        default=None,
+        help="External job identifier used to resume this MLflow run.",
+   )
 
 
 def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
@@ -152,11 +161,19 @@ def resolve_mlflow_args(args: argparse.Namespace, parser: argparse.ArgumentParse
         or os.environ.get(EXPERIMENT_ENV)
         or default_experiment_name(TOOL_NAME, args.model, quant_variant())
     )
+
+    job_id = (
+        args.mlflow_job_id
+        or os.environ.get(JOB_ID_ENV)
+        or os.environ.get(NEL_JOB_ID_ENV)
+    )
+    if job_id:
+        os.environ[JOB_ID_ENV] = job_id
+    else:
+        os.environ.pop(JOB_ID_ENV, None)
+
     if args.mlflow_run_name:
         os.environ[RUN_NAME_ENV] = args.mlflow_run_name
-    print(
-        f"[mlflow] tracking to {_without_credentials(uri)}, experiment {os.environ[EXPERIMENT_ENV]}"
-    )
 
 
 def _without_credentials(uri: str) -> str:
@@ -389,6 +406,8 @@ def _run_tags(worker: Any) -> dict[str, str]:
         "checkpoint_path": _resolved(model),
         "vllm_version": _vllm_version(),
     }
+    if job_id := os.environ.get(JOB_ID_ENV):
+        tags["job_id"] = job_id
     if served := _stringify(_model_config_value(worker, "served_model_name")):
         tags["served_model_name"] = served
     return tags
