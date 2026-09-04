@@ -45,6 +45,22 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Close stale bump PRs and delete their branches
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASE="${{ github.ref_name }}"
+          SAFE_BASE=$(echo "$BASE" | tr '/' '-')
+          PREFIX="auto/bump-uv-lock-${SAFE_BASE}-"
+          # Superseded by the PR created below, so close them and clean up the branches.
+          gh pr list --state open --base "$BASE" --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"${PREFIX}\")) | .number" \
+          | while read -r PR; do
+              echo "Closing stale PR #${PR}"
+              gh pr close "$PR" --delete-branch \
+                --comment "Superseded by a newer automated uv.lock bump."
+            done
       - name: Create pull request
         if: steps.changes.outputs.changed == 'true'
         env:
