@@ -179,6 +179,7 @@ def test_unused_final_text_outputs_are_frozen_before_optimizer_collection(monkey
     original_descriptor = _Pipeline.__dict__["from_pretrained"]
     with pdd_compat.automodel_pdd_setup():
         setup_pipeline = pdd_compat.automodel_diffusion_train.NeMoAutoDiffusionPipeline
+        assert issubclass(setup_pipeline, _Pipeline)
         student, _ = setup_pipeline.from_pretrained("student", load_for_training=True)
         teacher, _ = setup_pipeline.from_pretrained("teacher", load_for_training=False)
 

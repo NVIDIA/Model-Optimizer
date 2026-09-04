@@ -13,7 +13,7 @@ output distribution. Built on `modelopt.torch.fastgen` and NeMo AutoModel's
 
 ## Requirements & self-contained data path
 
-This example runs against **stock upstream `nemo_automodel==0.5.0`** (see
+This example runs against **stock upstream `nemo_automodel>=0.4.0,<0.6`** (see
 `requirements.txt`) from a **source checkout** of Model-Optimizer — the `examples/` tree is not
 shipped in the `nvidia-modelopt` pip package. Install the example dependencies with:
 

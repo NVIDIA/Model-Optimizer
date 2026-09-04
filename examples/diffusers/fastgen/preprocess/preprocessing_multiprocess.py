@@ -118,7 +118,7 @@ def _save_metadata_shards(
     for item_index, item in enumerate(all_metadata):
         cache_file = Path(item["cache_file"]).resolve(strict=True)
         try:
-            cache_file.relative_to(output_root)
+            relative_cache_file = cache_file.relative_to(output_root)
         except ValueError as exc:
             raise ValueError(
                 f"cache_file for metadata item {item_index} is outside output root "
@@ -127,7 +127,7 @@ def _save_metadata_shards(
         normalized_metadata.append(
             {
                 **item,
-                "cache_file": str(cache_file),
+                "cache_file": relative_cache_file.as_posix(),
             }
         )
 

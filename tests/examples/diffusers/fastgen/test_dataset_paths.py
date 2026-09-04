@@ -196,7 +196,7 @@ def test_builder_logs_effective_root_once_on_rank_zero(make_fastgen_cache, caplo
     assert "selected=6/6" in messages[0]
 
 
-def test_preprocessing_publishes_absolute_paths_for_relative_output(monkeypatch, tmp_path):
+def test_preprocessing_publishes_relocatable_paths(monkeypatch, tmp_path):
     # The metadata publisher does not use OpenCV. Stub that optional video dependency so this
     # CPU-only test executes the real publisher in the lean AutoModel test environment.
     monkeypatch.setitem(sys.modules, "cv2", types.ModuleType("cv2"))
@@ -220,6 +220,9 @@ def test_preprocessing_publishes_absolute_paths_for_relative_output(monkeypatch,
 
     shard = json.loads((output / "metadata_shard_s0000.json").read_text())
     published = pathlib.Path(shard[0]["cache_file"])
-    assert published.is_absolute()
-    assert published == payload.resolve()
-    published.relative_to(output.resolve())
+    assert published == pathlib.Path("sample.pt")
+
+    relocated = tmp_path / "relocated-cache"
+    output.rename(relocated)
+    resolved = resolve_under_root(relocated, published, "sample cache file")
+    assert torch.equal(torch.load(resolved, weights_only=True)["latent"], torch.zeros(1))

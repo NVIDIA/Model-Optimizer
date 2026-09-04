@@ -15,9 +15,9 @@
 
 """Self-contained shared dataloaders for the FastGen diffusion examples.
 
-The data path builds on stock ``nemo_automodel==0.5.0`` where it is model-agnostic and implements
-the example-owned batch contract locally, so the published example does not depend on AutoModel
-source modifications:
+The data path builds on stock ``nemo_automodel>=0.4.0,<0.6`` where it is model-agnostic and
+implements the example-owned batch contract locally, so the published example does not depend on
+AutoModel source modifications:
 
 * ``collate_fns.py`` — the collate functions + dataloader builder. It reuses the upstream
   ``SequentialBucketSampler`` and emits either the ordinary latent-conditioned batch or a
@@ -37,7 +37,7 @@ import re
 
 # Runtime soft-guard: the data path imports unmodified upstream helpers
 # (``nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}``).
-# Convert a missing-helper ImportError into an actionable message naming the supported release.
+# Convert a missing-helper ImportError into an actionable message naming the supported range.
 try:
     from .collate_fns import (
         build_text_to_image_multiresolution_dataloader,
@@ -48,7 +48,7 @@ try:
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "fastgen_data could not import its dependencies. It requires a stock "
-        "nemo_automodel==0.5.0 install (it imports the unmodified upstream helpers "
+        "nemo_automodel>=0.4.0,<0.6 install (it imports the unmodified upstream helpers "
         "nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}). "
         "Install the example dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt\n"
@@ -78,12 +78,12 @@ def _warn_if_unsupported_upstream() -> None:
         raw = str(getattr(nemo_automodel, "__version__", "") or "")
         match = re.match(r"^(\d+)\.(\d+)\.(\d+)", raw)
         version = tuple(int(part) for part in match.groups()) if match else ()
-        if version != (0, 5, 0):
+        if not ((0, 4, 0) <= version < (0, 6, 0)):
             logging.getLogger(__name__).warning(
-                "fastgen_data: installed nemo_automodel %s does not match the tested release "
-                "(==0.5.0). The vendored data/preprocessing code imports unmodified upstream "
+                "fastgen_data: installed nemo_automodel %s is outside the tested range "
+                "(>=0.4.0,<0.6). The vendored data/preprocessing code imports unmodified upstream "
                 "helpers (sampler, base_dataset, multi_tier_bucketing); if imports "
-                "fail or behavior drifts, pin nemo_automodel to the supported release.",
+                "fail or behavior drifts, pin nemo_automodel to the supported range.",
                 raw or "<unknown>",
             )
     except Exception:  # pragma: no cover - never block import on a version probe

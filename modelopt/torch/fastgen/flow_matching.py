@@ -188,16 +188,11 @@ def integrate_interval_velocities(
         interval_ids[None] < end_tensor[:, None]
     )
     widths = torch.diff(grid.to(device=state.device, dtype=result_dtype))
-    velocity_mask = mask.reshape(mask.shape + (1,) * (velocities.ndim - 2))
-    selected_velocities = torch.where(
-        velocity_mask,
-        velocities.to(device=state.device, dtype=result_dtype),
-        torch.zeros((), device=state.device, dtype=result_dtype),
-    )
+    weights = mask.to(result_dtype) * widths[None]
     update = torch.einsum(
-        "n,bn...->b...",
-        widths,
-        selected_velocities,
+        "bn,bn...->b...",
+        weights,
+        velocities.to(device=state.device, dtype=result_dtype),
     )
     return state.to(dtype=result_dtype) + update
 

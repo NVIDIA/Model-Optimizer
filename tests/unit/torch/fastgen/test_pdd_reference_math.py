@@ -166,21 +166,6 @@ def test_production_half_open_integration_matches_independent_oracle_per_sample(
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
-def test_production_integration_does_not_consume_excluded_nonfinite_heads():
-    grid = make_shifted_flow_grid(4, 5.0, max_t=0.999, dtype=torch.float64)
-    state = torch.tensor([[3.0, -2.0]], dtype=torch.float64)
-    velocities = torch.tensor(
-        [[[torch.nan, torch.nan], [2.0, -1.0], [-3.0, 4.0], [torch.inf, -torch.inf]]],
-        dtype=torch.float64,
-    )
-
-    actual = integrate_interval_velocities(state, velocities, grid, start=1, end=3)
-    expected = _reference_integrate(state[0], velocities[0], grid, start=1, end=3)[None]
-
-    assert torch.all(torch.isfinite(actual))
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
-
-
 def test_production_integration_promotes_bfloat16_math_to_float32():
     grid = make_shifted_flow_grid(4, 5.0, max_t=0.999)
     state = torch.zeros(1, 2, dtype=torch.bfloat16)

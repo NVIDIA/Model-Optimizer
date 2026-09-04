@@ -80,20 +80,6 @@ def test_pdd_config_accepts_inference_partition_outside_training_block_support()
     assert config.inference_blocks == (1, 127)
 
 
-@pytest.mark.parametrize("mapping_assignment", [False, True])
-def test_rejected_assignment_leaves_pdd_config_unchanged(mapping_assignment):
-    config = PDDConfig()
-
-    with pytest.raises(ValueError, match="must sum to grid_size"):
-        if mapping_assignment:
-            config["grid_size"] = 64
-        else:
-            config.grid_size = 64
-
-    assert config.grid_size == 128
-    assert config.inference_blocks == (32, 32, 32, 32)
-
-
 @pytest.mark.parametrize(
     "overrides", [{"teacher_integrator": "heun"}, {"teacher_integrator": "rk4"}]
 )

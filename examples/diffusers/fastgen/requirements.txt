@@ -1,11 +1,10 @@
-# Runtime requirements for the Qwen-Image AutoModel examples.
+# Shared runtime requirements for the Qwen-Image AutoModel examples.
 # Torch + diffusers are already pulled in via Model-Optimizer's ``[all]`` extras.
 # The one thing that's NOT shipped with Model-Optimizer is nemo_automodel.
 
-diffusers==0.38.0
 # NeMo AutoModel supplies the parent recipe, FSDP2 wrapping, checkpointer, and upstream diffusion
-# data helpers. PDD's guarded setup compatibility seam is validated against release 0.5.0.
-nemo_automodel[diffusion]==0.5.0
+# data helpers. Keep the existing DMD2 compatibility range; PDD has a narrower requirements file.
+nemo_automodel[diffusion]>=0.4.0,<0.6
 
-# Optional but recommended for the smoke and training logs.
+# Optional but recommended for training logs.
 wandb

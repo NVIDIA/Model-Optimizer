@@ -612,7 +612,7 @@ def test_mr210_joint_mask_ignores_padded_token_values() -> None:
     assert all(torch.equal(captured, mask.bool()) for captured in captured_masks)
 
 
-def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
+def test_mr210_preserves_diffusers_output_contract() -> None:
     student = enable_qwen_image_pdd_forward(_tiny_diffusers_qwen().eval().to(torch.bfloat16))
     generator = torch.Generator().manual_seed(20260716)
     kwargs = {
@@ -623,7 +623,6 @@ def test_mr210_preserves_diffusers_output_and_harmless_call_contract() -> None:
         "encoder_hidden_states_mask": torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.long),
         "timestep": torch.tensor([0.875, 0.25], dtype=torch.float32),
         "img_shapes": build_img_shapes(2, 4, 4),
-        "txt_seq_lens": [3, 1],
         "guidance": None,
     }
 
@@ -690,7 +689,6 @@ def test_mr210_qwen_teacher_cfg_matches_per_token_reference() -> None:
             encoder_hidden_states=embeddings,
             encoder_hidden_states_mask=mask,
             img_shapes=build_img_shapes(2, 4, 4),
-            max_txt_seq_len=int(mask.sum(dim=1).max().item()),
             return_dict=False,
         )[0]
 

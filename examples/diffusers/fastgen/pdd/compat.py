@@ -110,7 +110,7 @@ def automodel_pdd_setup() -> Iterator[None]:
             )
             return manager_args
 
-        class PDDSetupPipeline:
+        class PDDSetupPipeline(automodel_diffusion_train.NeMoAutoDiffusionPipeline):
             @classmethod
             def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
                 del cls

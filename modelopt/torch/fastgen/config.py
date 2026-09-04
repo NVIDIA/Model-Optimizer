@@ -274,14 +274,6 @@ class PDDConfig(ModeloptBaseConfig):
         ),
     )
 
-    def __setattr__(self, name: str, value: object) -> None:
-        """Validate cross-field invariants before changing an initialized field."""
-        if name in type(self).model_fields and name in self.__dict__:
-            candidate = self.model_dump()
-            candidate[name] = value
-            type(self).model_validate(candidate)
-        super().__setattr__(name, value)
-
     @field_validator("grid_max_t", mode="before")
     @classmethod
     def _check_grid_max_t_type(cls, value: object) -> object:

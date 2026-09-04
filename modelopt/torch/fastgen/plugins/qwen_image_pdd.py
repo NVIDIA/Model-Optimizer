@@ -106,9 +106,7 @@ def _qwen_image_pdd_forward(
     encoder_hidden_states_mask: torch.Tensor | None = None,
     timestep: torch.Tensor | None = None,
     img_shapes: list[Any] | None = None,
-    txt_seq_lens: list[int] | None = None,
     guidance: torch.Tensor | None = None,
-    max_txt_seq_len: int | None = None,
     attention_kwargs: dict[str, Any] | None = None,
     controlnet_block_samples: Any = None,
     additional_t_cond: torch.Tensor | None = None,
@@ -130,7 +128,6 @@ def _qwen_image_pdd_forward(
         raise ValueError("Qwen PDD does not support ControlNet block samples.")
     if additional_t_cond is not None:
         raise ValueError("Qwen PDD does not support additional timestep conditioning.")
-    del txt_seq_lens
     max_txt_seq_len = encoder_hidden_states.shape[1]
     encoder_hidden_states_mask = encoder_hidden_states_mask.to(torch.bool)
 
