@@ -212,6 +212,35 @@ class TestRunJobsExtended:
     """Extended run_jobs tests for env merging, test_level, and detach."""
 
     @patch("core.run.Experiment")
+    @patch("core.build_slurm_executor")
+    def test_remote_task_rejects_serialized_credentials(self, mock_slurm, mock_exp, tmp_path):
+        mock_exp_inst = MagicMock()
+        mock_exp_inst._id = "exp_secret"
+        mock_exp_inst.__enter__ = MagicMock(return_value=mock_exp_inst)
+        mock_exp_inst.__exit__ = MagicMock(return_value=False)
+        mock_exp.return_value = mock_exp_inst
+        mock_slurm.return_value = MagicMock()
+
+        task = SandboxTask0(
+            script="test.sh",
+            slurm_config=MagicMock(),
+            environment=[{"HF_TOKEN": "hf_test_secret"}],
+        )
+
+        with pytest.raises(ValueError, match=r"refusing to serialize.*HF_TOKEN"):
+            run_jobs(
+                job_table={"job": SandboxPipeline(task_0=task)},
+                hf_local=None,
+                user="u",
+                identity=None,
+                job_dir=str(tmp_path),
+                packager=MagicMock(),
+                default_slurm_env={},
+                default_local_env={},
+                base_dir=str(tmp_path),
+            )
+
+    @patch("core.run.Experiment")
     @patch("core.build_docker_executor")
     def test_environment_list_merged_to_env(self, mock_docker, mock_exp, tmp_path):
         """List-of-dicts environment is merged into task_env."""

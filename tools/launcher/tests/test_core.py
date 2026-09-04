@@ -38,6 +38,7 @@ from core import (
     SandboxTask2,
     SandboxTask3,
     SandboxTask4,
+    _find_secret_env_keys,
     create_task_from_yaml,
     get_default_env,
     register_factory,
@@ -223,6 +224,36 @@ class TestGetDefaultEnv:
         assert slurm_env["TRITON_CACHE_DIR"] == "/modelopt/triton-cache"
         assert slurm_env["HF_HOME"] == "/modelopt/hf-cache"
         assert local_env["HF_HOME"] == "/modelopt/hf-cache"
+
+    def test_slurm_env_excludes_credentials(self, monkeypatch):
+        credentials = {
+            "HF_TOKEN": "hf_test_secret",
+            "SPECDEC_BENCH_S3_KEY_ID": "test-key-id",
+            "SPECDEC_BENCH_S3_SECRET": "test-s3-secret",
+        }
+        for key, value in credentials.items():
+            monkeypatch.setenv(key, value)
+
+        slurm_env, local_env = get_default_env()
+
+        for key, value in credentials.items():
+            assert key not in slurm_env
+            assert local_env[key] == value
+
+    def test_secret_key_detection(self):
+        environment = {
+            "HF_TOKEN": "secret",
+            "WANDB_API_KEY": "secret",
+            "DATABASE_PASSWORD_FILE": "secret",
+            "TOKENIZERS_PARALLELISM": "false",
+            "EMPTY_SECRET": "",
+        }
+
+        assert _find_secret_env_keys(environment) == [
+            "DATABASE_PASSWORD_FILE",
+            "HF_TOKEN",
+            "WANDB_API_KEY",
+        ]
 
 
 class TestReportVersions:

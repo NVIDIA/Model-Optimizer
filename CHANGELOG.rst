@@ -66,6 +66,7 @@ Changelog
 
 **Bug Fixes**
 
+- Prevent the launcher from serializing credentials into generated Slurm scripts and experiment configs. Put remote job secrets in a mode-600 host-side file and set ``SLURM_ENV_SETUP`` to its absolute path.
 - Avoid querying CUDA/Blackwell capability when ``NVFP4QTensor.quantize`` uses its CPU path or has the optional TensorRT-LLM fast path disabled.
 - Fix NVFP4 ONNX export to quantize FP4 weights with the published FP8 block scales, matching eager ModelOpt packed weights. Block scales below ``2**-9`` are now clamped to that minimum, and non-finite or negative scales raise an error.
 - Fix Megatron-Bridge Quantization Aware Distillation of a vision-language model silently discarding the ModelOpt state, so the distilled checkpoint restored no quantizers and exported as an unquantized model. Re-run QAD to regenerate any affected checkpoint.

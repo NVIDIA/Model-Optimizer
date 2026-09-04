@@ -37,15 +37,33 @@ import yaml
 # ---------------------------------------------------------------------------
 
 DEFAULT_EXPERIMENT_TITLE = "cicd"
+_SECRET_ENV_KEYS = frozenset(
+    {
+        "HF_TOKEN",
+        "SPECDEC_BENCH_S3_KEY_ID",
+        "SPECDEC_BENCH_S3_SECRET",
+    }
+)
+_SECRET_ENV_PATTERN = re.compile(
+    r"(?:^|_)(?:TOKEN|PASSWORD|SECRET|PRIVATE_KEY|ACCESS_KEY|API_KEY)(?:$|_)"
+)
+
+
+def _find_secret_env_keys(environment):
+    """Return environment keys whose values must not be serialized into job scripts."""
+    return sorted(
+        key
+        for key, value in environment.items()
+        if value and (key in _SECRET_ENV_KEYS or _SECRET_ENV_PATTERN.search(key))
+    )
 
 
 def get_default_env(experiment_title=None):
     """Return (slurm_env, local_env) dicts for the given experiment title."""
     title = experiment_title or DEFAULT_EXPERIMENT_TITLE
-    # specdec_bench upload credentials — forwarded so that the YAML pipeline
-    # step `common/specdec_bench/upload_to_s3.sh` can publish to the team
-    # S3 bucket without baking secrets into committed YAMLs. The prefix
-    # disambiguates from any other S3 creds a CI runner might carry.
+    # specdec_bench upload credentials are available to local Docker jobs. Remote
+    # Slurm jobs must load them from SLURM_ENV_SETUP so NeMo Run cannot serialize
+    # them into generated scripts and configs.
     specdec_s3 = {
         "SPECDEC_BENCH_S3_ENDPOINT": os.getenv("SPECDEC_BENCH_S3_ENDPOINT", ""),
         "SPECDEC_BENCH_S3_KEY_ID": os.getenv("SPECDEC_BENCH_S3_KEY_ID", ""),
@@ -57,10 +75,9 @@ def get_default_env(experiment_title=None):
     slurm_env = {
         "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR", f"/{title}/triton-cache"),
         "HF_HOME": os.getenv("HF_HOME", f"/{title}/hf-cache"),
-        "HF_TOKEN": os.getenv("HF_TOKEN", ""),
         "MLM_SKIP_INSTALL": "1",
         "LAUNCH_SCRIPT": "python",
-        **specdec_s3,
+        "SPECDEC_BENCH_S3_ENDPOINT": specdec_s3["SPECDEC_BENCH_S3_ENDPOINT"],
     }
     local_env = {
         "TRITON_CACHE_DIR": os.getenv("TRITON_CACHE_DIR", f"/{title}/triton-cache"),
@@ -578,6 +595,32 @@ def build_slurm_executor(
         additional_parameters=dict(getattr(slurm_config, "additional_parameters", None) or {}),
         **optional_kwargs,
     )
+    env_setup = os.environ.get("SLURM_ENV_SETUP")
+    if env_setup:
+        if not os.path.isabs(env_setup):
+            raise ValueError("SLURM_ENV_SETUP must be an absolute path on the Slurm host")
+        quoted_env_setup = shlex.quote(env_setup)
+        executor.setup_lines = (
+            "set +vx\n"
+            f"if [ ! -f {quoted_env_setup} ] || [ ! -r {quoted_env_setup} ]; then\n"
+            '    echo "SLURM_ENV_SETUP must be a readable file" >&2\n'
+            "    exit 1\n"
+            "fi\n"
+            f"_modelopt_env_mode=$(stat -c '%a' {quoted_env_setup})\n"
+            'if [ "$_modelopt_env_mode" != 600 ] && '
+            '[ "$_modelopt_env_mode" != 400 ]; then\n'
+            '    echo "SLURM_ENV_SETUP must have mode 600 or 400" >&2\n'
+            "    exit 1\n"
+            "fi\n"
+            "unset _modelopt_env_mode\n"
+            "set -a\n"
+            f"if ! source {quoted_env_setup}; then\n"
+            '    echo "Failed to source SLURM_ENV_SETUP" >&2\n'
+            "    exit 1\n"
+            "fi\n"
+            "set +a\n"
+            "set -vx"
+        )
     if getattr(slurm_config, "requeue", False):
         executor.additional_parameters["requeue"] = True
         # The nemo-run sbatch wrapper only calls `scontrol requeue` when
@@ -827,6 +870,14 @@ def run_jobs(
                         experiment_title,
                     )
                     task_env.update(default_slurm_env)
+                    secret_keys = _find_secret_env_keys(task_env)
+                    if secret_keys:
+                        names = ", ".join(secret_keys)
+                        raise ValueError(
+                            f"{task_name}: refusing to serialize secret environment variables "
+                            f"into the Slurm script: {names}. Put them in a mode-600 file on "
+                            "the Slurm host and set SLURM_ENV_SETUP to its absolute path."
+                        )
 
                 # When allow_to_fail is set, use "afterany" so downstream tasks
                 # run even if a predecessor times out or fails.

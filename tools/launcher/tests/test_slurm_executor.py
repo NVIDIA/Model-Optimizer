@@ -31,6 +31,76 @@ class TestBuildSlurmExecutor:
     """Tests for build_slurm_executor mount construction and executor params."""
 
     @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_slurm_env_setup_is_sourced_without_shell_tracing(
+        self, mock_tunnel, mock_executor, monkeypatch
+    ):
+        mock_tunnel.return_value = MagicMock()
+        monkeypatch.setenv("SLURM_ENV_SETUP", "/home/alice/.modelopt-launcher.env")
+        slurm_config = MagicMock(
+            requeue=False,
+            host="test-host",
+            port=22,
+            account="test-account",
+            partition="batch",
+            container="ubuntu:24.04",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=1,
+            array=None,
+        )
+
+        executor = build_slurm_executor(
+            user="alice",
+            identity=None,
+            slurm_config=slurm_config,
+            experiment_id="exp_001",
+            job_dir="/lustre/experiments",
+            task_name="job_0",
+            packager=MagicMock(),
+        )
+
+        assert executor.setup_lines.startswith("set +vx\n")
+        assert "stat -c '%a' /home/alice/.modelopt-launcher.env" in executor.setup_lines
+        assert "source /home/alice/.modelopt-launcher.env" in executor.setup_lines
+        assert executor.setup_lines.endswith("set -vx")
+
+    @patch("core.run.SlurmExecutor")
+    @patch("core.run.SSHTunnel")
+    def test_slurm_env_setup_requires_absolute_path(self, mock_tunnel, mock_executor, monkeypatch):
+        mock_tunnel.return_value = MagicMock()
+        monkeypatch.setenv("SLURM_ENV_SETUP", ".modelopt-launcher.env")
+        slurm_config = MagicMock(
+            requeue=False,
+            host="test-host",
+            port=22,
+            account="test-account",
+            partition="batch",
+            container="ubuntu:24.04",
+            modelopt_install_path="/opt/modelopt",
+            container_mounts=[],
+            srun_args=[],
+            nodes=1,
+            ntasks_per_node=1,
+            gpus_per_node=1,
+            array=None,
+        )
+
+        with pytest.raises(ValueError, match="must be an absolute path"):
+            build_slurm_executor(
+                user="alice",
+                identity=None,
+                slurm_config=slurm_config,
+                experiment_id="exp_001",
+                job_dir="/lustre/experiments",
+                task_name="job_0",
+                packager=MagicMock(),
+            )
+
+    @patch("core.run.SlurmExecutor")
     @patch("core.ControlMasterSSHTunnel")
     def test_controlmaster_env_selects_controlmaster_tunnel(
         self, mock_tunnel, mock_executor, monkeypatch

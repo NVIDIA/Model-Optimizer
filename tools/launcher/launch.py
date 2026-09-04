@@ -25,7 +25,8 @@ Environment variables:
     SLURM_JOB_DIR       Remote directory for job artifacts
     SLURM_USER          Remote Slurm/SSH username (default: local login name)
     SLURM_HF_LOCAL      Path to HuggingFace model cache on the cluster
-    HF_TOKEN            HuggingFace API token
+    HF_TOKEN            HuggingFace API token (local Docker jobs only)
+    SLURM_ENV_SETUP     Absolute path to a protected env file on the Slurm host
     NEMORUN_HOME        NeMo Run home directory (default: current working directory)
 """
 

@@ -8,8 +8,27 @@
 | `SLURM_ACCOUNT` | Slurm account for billing | Yes (remote) |
 | `SLURM_JOB_DIR` | Remote directory for job artifacts | Yes (remote) |
 | `SLURM_HF_LOCAL` | Path to HuggingFace model cache on the cluster | Yes (remote) |
-| `HF_TOKEN` | HuggingFace API token | No |
+| `HF_TOKEN` | HuggingFace API token (local Docker jobs only) | No |
+| `SLURM_ENV_SETUP` | Absolute path to a protected environment file on the Slurm host | No |
 | `NEMORUN_HOME` | NeMo Run home directory (default: cwd) | No |
+
+### Slurm secrets
+
+NeMo Run serializes task environment values into generated sbatch scripts and
+experiment configs. The launcher therefore rejects credential-like variables in
+Slurm task environments. Store credentials in a file on the Slurm host instead:
+
+```bash
+# Run on the Slurm login host, then edit the file to add shell export statements.
+install -m 600 /dev/null ~/.modelopt-launcher.env
+
+# Run where you invoke the launcher. Use the absolute remote path.
+export SLURM_ENV_SETUP=/home/$USER/.modelopt-launcher.env
+```
+
+For example, the remote file can export `HF_TOKEN` or benchmark S3 credentials.
+The launcher sources it with shell tracing disabled before the Slurm step starts;
+the file itself is not copied into NeMo Run's experiment artifacts.
 
 ## YAML Config Format
 
