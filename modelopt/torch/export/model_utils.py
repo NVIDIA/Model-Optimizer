@@ -157,6 +157,18 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     return None
 
 
+def _owns_exported_state(module: nn.Module) -> bool:
+    """Whether a module holds weights of its own that the checkpoint must include.
+
+    Buffers count as well as parameters -- a module can hold only buffers (e.g. a cached mask or a
+    scale) and still need exporting. Non-persistent buffers are skipped, matching ``state_dict()``.
+    """
+    if next(module.parameters(recurse=False), None) is not None:
+        return True
+    non_persistent = getattr(module, "_non_persistent_buffers_set", frozenset())
+    return any(name not in non_persistent for name, _ in module.named_buffers(recurse=False))
+
+
 def get_export_units(model):
     """Split the model into groups that can be exported independently.
 
@@ -165,11 +177,7 @@ def get_export_units(model):
     """
     decoder_layers = LayerActivationCollector.get_decoder_layers(model) or []
     in_layer = {id(sm) for layer in decoder_layers for sm in layer.modules()}
-    root_leaves = [
-        m
-        for m in model.modules()
-        if id(m) not in in_layer and next(m.parameters(recurse=False), None) is not None
-    ]
+    root_leaves = [m for m in model.modules() if id(m) not in in_layer and _owns_exported_state(m)]
     return [[layer] for layer in decoder_layers] + [root_leaves]
 
 
