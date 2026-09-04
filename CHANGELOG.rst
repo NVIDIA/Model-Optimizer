@@ -39,6 +39,10 @@ Changelog
 - Add HuggingFace unified export of quantized Qwen3-VL and Qwen3.5-VL checkpoints (PTQ or QAD) via ``examples/megatron_bridge/export_quantized_megatron_to_hf.py``, Qwen3.5-VL additionally covering GatedDeltaNet linear-attention layers and MoE shared experts. Only the language model is quantized; the vision tower is copied from the source HuggingFace checkpoint.
 - Megatron-Bridge scripts now choose the MoE expert layout automatically from the model config: the faster fused ``TEGroupedMLP`` (grouped GEMM) unless the architecture cannot export it to HuggingFace, in which case ``SequentialMLP`` keeps the checkpoint exportable and ``--no_moe_grouped_gemm`` forces it explicitly. For the affected architectures this changes MoE activation scales from one shared scale to per-expert.
 
+*Speculative Decoding*
+
+- Add the DFlash2 draft variant, selected with ``dflash_architecture_config.projector_type="dflash2"``. It keeps DFlash's one-pass parallel backbone and adds a grouped dynamic convolution around every attention/MLP sublayer (sized by ``conv_kernel_size`` / ``conv_group_size``) plus a low-rank candidate selector (``selector_rank`` / ``selector_top_k``) that scores transitions between adjacent block positions' top-k candidates. The selector's training term is weighted by ``dflash_selector_loss_alpha`` (default 1.0). Exported checkpoints declare ``DFlash2DraftModel`` and match the SGLang/vLLM DFlash2 loaders.
+
 *Misc*
 
 - Add ``nodes_to_exclude`` regex support to the Q/DQ-aware ONNX ``convert_to_f16`` API, matching ``convert_to_mixed_precision`` node-name exclusion semantics while composing with the existing operation and tensor block lists.
