@@ -1,0 +1,13 @@
+{
+  "extends": "short-native-v2",
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "short-vllm-v2",
+  "backend": {
+    "attention_config": {
+      "flash_attn_version": 2
+    },
+    "enable_thinking": false,
+    "name": "vllm",
+    "reasoning_parser": "qwen3"
+  }
+}

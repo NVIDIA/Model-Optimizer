@@ -1,0 +1,2558 @@
+{
+  "extends": "short-native-v2",
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "short-all-native-v2",
+  "lmms_eval_revision": "3e675904f8cba6793de12b91979b04d91754bdf3",
+  "tasks": {
+    "video_mmmu": {
+      "dataset_repository": "lmms-lab/VideoMMMU",
+      "dataset_revision": "d1c35ac933123d79e877b7f1b9506afb0309cf1b",
+      "max_new_tokens": 1024,
+      "scoring_task_config": "tasks/videommmu/video_mmmu.yaml",
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "leaf_task",
+        "index_space": "within-stratum",
+        "population_rows": 900,
+        "selected_rows": 72,
+        "strata": [
+          {
+            "name": "adaptation",
+            "population_rows": 300,
+            "selected_rows": 24
+          },
+          {
+            "name": "comprehension",
+            "population_rows": 300,
+            "selected_rows": 24
+          },
+          {
+            "name": "perception",
+            "population_rows": 300,
+            "selected_rows": 24
+          }
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 6,
+          "p25": 68,
+          "p50": 143,
+          "p75": 218,
+          "p100": 293
+        },
+        "selected_row_identities_sha256": "cccb57bd2f0bd914ef88a2f0ce71a8c2eafd4220bd16b94ba5f18fde6c0ab910"
+      },
+      "rows": [
+        {
+          "source_row_index": 6,
+          "source_sample_id": "adaptation:6",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 18,
+          "source_sample_id": "adaptation:18",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 31,
+          "source_sample_id": "adaptation:31",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 43,
+          "source_sample_id": "adaptation:43",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 56,
+          "source_sample_id": "adaptation:56",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 68,
+          "source_sample_id": "adaptation:68",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 81,
+          "source_sample_id": "adaptation:81",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 93,
+          "source_sample_id": "adaptation:93",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 106,
+          "source_sample_id": "adaptation:106",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 118,
+          "source_sample_id": "adaptation:118",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 131,
+          "source_sample_id": "adaptation:131",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "adaptation:143",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "adaptation:156",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 168,
+          "source_sample_id": "adaptation:168",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 181,
+          "source_sample_id": "adaptation:181",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 193,
+          "source_sample_id": "adaptation:193",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 206,
+          "source_sample_id": "adaptation:206",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 218,
+          "source_sample_id": "adaptation:218",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 231,
+          "source_sample_id": "adaptation:231",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 243,
+          "source_sample_id": "adaptation:243",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 256,
+          "source_sample_id": "adaptation:256",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 268,
+          "source_sample_id": "adaptation:268",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 281,
+          "source_sample_id": "adaptation:281",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 293,
+          "source_sample_id": "adaptation:293",
+          "leaf_task": "video_mmmu_adaptation"
+        },
+        {
+          "source_row_index": 6,
+          "source_sample_id": "comprehension:6",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 18,
+          "source_sample_id": "comprehension:18",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 31,
+          "source_sample_id": "comprehension:31",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 43,
+          "source_sample_id": "comprehension:43",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 56,
+          "source_sample_id": "comprehension:56",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 68,
+          "source_sample_id": "comprehension:68",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 81,
+          "source_sample_id": "comprehension:81",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 93,
+          "source_sample_id": "comprehension:93",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 106,
+          "source_sample_id": "comprehension:106",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 118,
+          "source_sample_id": "comprehension:118",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 131,
+          "source_sample_id": "comprehension:131",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "comprehension:143",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "comprehension:156",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 168,
+          "source_sample_id": "comprehension:168",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 181,
+          "source_sample_id": "comprehension:181",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 193,
+          "source_sample_id": "comprehension:193",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 206,
+          "source_sample_id": "comprehension:206",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 218,
+          "source_sample_id": "comprehension:218",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 231,
+          "source_sample_id": "comprehension:231",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 243,
+          "source_sample_id": "comprehension:243",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 256,
+          "source_sample_id": "comprehension:256",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 268,
+          "source_sample_id": "comprehension:268",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 281,
+          "source_sample_id": "comprehension:281",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 293,
+          "source_sample_id": "comprehension:293",
+          "leaf_task": "video_mmmu_comprehension"
+        },
+        {
+          "source_row_index": 6,
+          "source_sample_id": "perception:6",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 18,
+          "source_sample_id": "perception:18",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 31,
+          "source_sample_id": "perception:31",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 43,
+          "source_sample_id": "perception:43",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 56,
+          "source_sample_id": "perception:56",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 68,
+          "source_sample_id": "perception:68",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 81,
+          "source_sample_id": "perception:81",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 93,
+          "source_sample_id": "perception:93",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 106,
+          "source_sample_id": "perception:106",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 118,
+          "source_sample_id": "perception:118",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 131,
+          "source_sample_id": "perception:131",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 143,
+          "source_sample_id": "perception:143",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 156,
+          "source_sample_id": "perception:156",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 168,
+          "source_sample_id": "perception:168",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 181,
+          "source_sample_id": "perception:181",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 193,
+          "source_sample_id": "perception:193",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 206,
+          "source_sample_id": "perception:206",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 218,
+          "source_sample_id": "perception:218",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 231,
+          "source_sample_id": "perception:231",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 243,
+          "source_sample_id": "perception:243",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 256,
+          "source_sample_id": "perception:256",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 268,
+          "source_sample_id": "perception:268",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 281,
+          "source_sample_id": "perception:281",
+          "leaf_task": "video_mmmu_perception"
+        },
+        {
+          "source_row_index": 293,
+          "source_sample_id": "perception:293",
+          "leaf_task": "video_mmmu_perception"
+        }
+      ]
+    },
+    "videomme": {
+      "dataset_repository": "lmms-lab/Video-MME",
+      "dataset_revision": "ead1408f75b618502df9a1d8e0950166bf0a2a0b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/videomme/videomme.yaml",
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "duration+domain",
+        "index_space": "within-stratum",
+        "population_rows": 2700,
+        "selected_rows": 72,
+        "strata": [
+          {
+            "name": "long|Artistic Performance",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "long|Film & Television",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "long|Knowledge",
+            "population_rows": 270,
+            "selected_rows": 4
+          },
+          {
+            "name": "long|Life Record",
+            "population_rows": 210,
+            "selected_rows": 4
+          },
+          {
+            "name": "long|Multilingual",
+            "population_rows": 30,
+            "selected_rows": 4
+          },
+          {
+            "name": "long|Sports Competition",
+            "population_rows": 150,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Artistic Performance",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Film & Television",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Knowledge",
+            "population_rows": 270,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Life Record",
+            "population_rows": 210,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Multilingual",
+            "population_rows": 30,
+            "selected_rows": 4
+          },
+          {
+            "name": "medium|Sports Competition",
+            "population_rows": 150,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Artistic Performance",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Film & Television",
+            "population_rows": 120,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Knowledge",
+            "population_rows": 270,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Life Record",
+            "population_rows": 210,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Multilingual",
+            "population_rows": 30,
+            "selected_rows": 4
+          },
+          {
+            "name": "short|Sports Competition",
+            "population_rows": 150,
+            "selected_rows": 4
+          }
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 3,
+          "p25": 18,
+          "p50": 56,
+          "p75": 105,
+          "p100": 236
+        },
+        "selected_row_identities_sha256": "fe78a3204ac1d4834fb9acfceaa18a329797cbc2bc840d22212e0de5aa319c81"
+      },
+      "rows": [
+        {
+          "source_row_index": 2355,
+          "source_sample_id": "videomme:2355",
+          "sampling_stratum": "long|Artistic Performance",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "786-1"
+        },
+        {
+          "source_row_index": 2385,
+          "source_sample_id": "videomme:2385",
+          "sampling_stratum": "long|Artistic Performance",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "796-1"
+        },
+        {
+          "source_row_index": 2415,
+          "source_sample_id": "videomme:2415",
+          "sampling_stratum": "long|Artistic Performance",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "806-1"
+        },
+        {
+          "source_row_index": 2445,
+          "source_sample_id": "videomme:2445",
+          "sampling_stratum": "long|Artistic Performance",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "816-1"
+        },
+        {
+          "source_row_index": 2085,
+          "source_sample_id": "videomme:2085",
+          "sampling_stratum": "long|Film & Television",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "696-1"
+        },
+        {
+          "source_row_index": 2115,
+          "source_sample_id": "videomme:2115",
+          "sampling_stratum": "long|Film & Television",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "706-1"
+        },
+        {
+          "source_row_index": 2145,
+          "source_sample_id": "videomme:2145",
+          "sampling_stratum": "long|Film & Television",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "716-1"
+        },
+        {
+          "source_row_index": 2175,
+          "source_sample_id": "videomme:2175",
+          "sampling_stratum": "long|Film & Television",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "726-1"
+        },
+        {
+          "source_row_index": 1833,
+          "source_sample_id": "videomme:1833",
+          "sampling_stratum": "long|Knowledge",
+          "source_stratum_index": 33,
+          "upstream_sample_id": "612-1"
+        },
+        {
+          "source_row_index": 1901,
+          "source_sample_id": "videomme:1901",
+          "sampling_stratum": "long|Knowledge",
+          "source_stratum_index": 101,
+          "upstream_sample_id": "634-3"
+        },
+        {
+          "source_row_index": 1968,
+          "source_sample_id": "videomme:1968",
+          "sampling_stratum": "long|Knowledge",
+          "source_stratum_index": 168,
+          "upstream_sample_id": "657-1"
+        },
+        {
+          "source_row_index": 2036,
+          "source_sample_id": "videomme:2036",
+          "sampling_stratum": "long|Knowledge",
+          "source_stratum_index": 236,
+          "upstream_sample_id": "679-3"
+        },
+        {
+          "source_row_index": 2486,
+          "source_sample_id": "videomme:2486",
+          "sampling_stratum": "long|Life Record",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "829-3"
+        },
+        {
+          "source_row_index": 2538,
+          "source_sample_id": "videomme:2538",
+          "sampling_stratum": "long|Life Record",
+          "source_stratum_index": 78,
+          "upstream_sample_id": "847-1"
+        },
+        {
+          "source_row_index": 2591,
+          "source_sample_id": "videomme:2591",
+          "sampling_stratum": "long|Life Record",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "864-3"
+        },
+        {
+          "source_row_index": 2643,
+          "source_sample_id": "videomme:2643",
+          "sampling_stratum": "long|Life Record",
+          "source_stratum_index": 183,
+          "upstream_sample_id": "882-1"
+        },
+        {
+          "source_row_index": 2673,
+          "source_sample_id": "videomme:2673",
+          "sampling_stratum": "long|Multilingual",
+          "source_stratum_index": 3,
+          "upstream_sample_id": "892-1"
+        },
+        {
+          "source_row_index": 2681,
+          "source_sample_id": "videomme:2681",
+          "sampling_stratum": "long|Multilingual",
+          "source_stratum_index": 11,
+          "upstream_sample_id": "894-3"
+        },
+        {
+          "source_row_index": 2688,
+          "source_sample_id": "videomme:2688",
+          "sampling_stratum": "long|Multilingual",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "897-1"
+        },
+        {
+          "source_row_index": 2696,
+          "source_sample_id": "videomme:2696",
+          "sampling_stratum": "long|Multilingual",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "899-3"
+        },
+        {
+          "source_row_index": 2208,
+          "source_sample_id": "videomme:2208",
+          "sampling_stratum": "long|Sports Competition",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "737-1"
+        },
+        {
+          "source_row_index": 2246,
+          "source_sample_id": "videomme:2246",
+          "sampling_stratum": "long|Sports Competition",
+          "source_stratum_index": 56,
+          "upstream_sample_id": "749-3"
+        },
+        {
+          "source_row_index": 2283,
+          "source_sample_id": "videomme:2283",
+          "sampling_stratum": "long|Sports Competition",
+          "source_stratum_index": 93,
+          "upstream_sample_id": "762-1"
+        },
+        {
+          "source_row_index": 2321,
+          "source_sample_id": "videomme:2321",
+          "sampling_stratum": "long|Sports Competition",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "774-3"
+        },
+        {
+          "source_row_index": 1455,
+          "source_sample_id": "videomme:1455",
+          "sampling_stratum": "medium|Artistic Performance",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "486-1"
+        },
+        {
+          "source_row_index": 1485,
+          "source_sample_id": "videomme:1485",
+          "sampling_stratum": "medium|Artistic Performance",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "496-1"
+        },
+        {
+          "source_row_index": 1515,
+          "source_sample_id": "videomme:1515",
+          "sampling_stratum": "medium|Artistic Performance",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "506-1"
+        },
+        {
+          "source_row_index": 1545,
+          "source_sample_id": "videomme:1545",
+          "sampling_stratum": "medium|Artistic Performance",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "516-1"
+        },
+        {
+          "source_row_index": 1185,
+          "source_sample_id": "videomme:1185",
+          "sampling_stratum": "medium|Film & Television",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "396-1"
+        },
+        {
+          "source_row_index": 1215,
+          "source_sample_id": "videomme:1215",
+          "sampling_stratum": "medium|Film & Television",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "406-1"
+        },
+        {
+          "source_row_index": 1245,
+          "source_sample_id": "videomme:1245",
+          "sampling_stratum": "medium|Film & Television",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "416-1"
+        },
+        {
+          "source_row_index": 1275,
+          "source_sample_id": "videomme:1275",
+          "sampling_stratum": "medium|Film & Television",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "426-1"
+        },
+        {
+          "source_row_index": 933,
+          "source_sample_id": "videomme:933",
+          "sampling_stratum": "medium|Knowledge",
+          "source_stratum_index": 33,
+          "upstream_sample_id": "312-1"
+        },
+        {
+          "source_row_index": 1001,
+          "source_sample_id": "videomme:1001",
+          "sampling_stratum": "medium|Knowledge",
+          "source_stratum_index": 101,
+          "upstream_sample_id": "334-3"
+        },
+        {
+          "source_row_index": 1068,
+          "source_sample_id": "videomme:1068",
+          "sampling_stratum": "medium|Knowledge",
+          "source_stratum_index": 168,
+          "upstream_sample_id": "357-1"
+        },
+        {
+          "source_row_index": 1136,
+          "source_sample_id": "videomme:1136",
+          "sampling_stratum": "medium|Knowledge",
+          "source_stratum_index": 236,
+          "upstream_sample_id": "379-3"
+        },
+        {
+          "source_row_index": 1586,
+          "source_sample_id": "videomme:1586",
+          "sampling_stratum": "medium|Life Record",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "529-3"
+        },
+        {
+          "source_row_index": 1638,
+          "source_sample_id": "videomme:1638",
+          "sampling_stratum": "medium|Life Record",
+          "source_stratum_index": 78,
+          "upstream_sample_id": "547-1"
+        },
+        {
+          "source_row_index": 1691,
+          "source_sample_id": "videomme:1691",
+          "sampling_stratum": "medium|Life Record",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "564-3"
+        },
+        {
+          "source_row_index": 1743,
+          "source_sample_id": "videomme:1743",
+          "sampling_stratum": "medium|Life Record",
+          "source_stratum_index": 183,
+          "upstream_sample_id": "582-1"
+        },
+        {
+          "source_row_index": 1773,
+          "source_sample_id": "videomme:1773",
+          "sampling_stratum": "medium|Multilingual",
+          "source_stratum_index": 3,
+          "upstream_sample_id": "592-1"
+        },
+        {
+          "source_row_index": 1781,
+          "source_sample_id": "videomme:1781",
+          "sampling_stratum": "medium|Multilingual",
+          "source_stratum_index": 11,
+          "upstream_sample_id": "594-3"
+        },
+        {
+          "source_row_index": 1788,
+          "source_sample_id": "videomme:1788",
+          "sampling_stratum": "medium|Multilingual",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "597-1"
+        },
+        {
+          "source_row_index": 1796,
+          "source_sample_id": "videomme:1796",
+          "sampling_stratum": "medium|Multilingual",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "599-3"
+        },
+        {
+          "source_row_index": 1308,
+          "source_sample_id": "videomme:1308",
+          "sampling_stratum": "medium|Sports Competition",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "437-1"
+        },
+        {
+          "source_row_index": 1346,
+          "source_sample_id": "videomme:1346",
+          "sampling_stratum": "medium|Sports Competition",
+          "source_stratum_index": 56,
+          "upstream_sample_id": "449-3"
+        },
+        {
+          "source_row_index": 1383,
+          "source_sample_id": "videomme:1383",
+          "sampling_stratum": "medium|Sports Competition",
+          "source_stratum_index": 93,
+          "upstream_sample_id": "462-1"
+        },
+        {
+          "source_row_index": 1421,
+          "source_sample_id": "videomme:1421",
+          "sampling_stratum": "medium|Sports Competition",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "474-3"
+        },
+        {
+          "source_row_index": 555,
+          "source_sample_id": "videomme:555",
+          "sampling_stratum": "short|Artistic Performance",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "186-1"
+        },
+        {
+          "source_row_index": 585,
+          "source_sample_id": "videomme:585",
+          "sampling_stratum": "short|Artistic Performance",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "196-1"
+        },
+        {
+          "source_row_index": 615,
+          "source_sample_id": "videomme:615",
+          "sampling_stratum": "short|Artistic Performance",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "206-1"
+        },
+        {
+          "source_row_index": 645,
+          "source_sample_id": "videomme:645",
+          "sampling_stratum": "short|Artistic Performance",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "216-1"
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "videomme:285",
+          "sampling_stratum": "short|Film & Television",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "096-1"
+        },
+        {
+          "source_row_index": 315,
+          "source_sample_id": "videomme:315",
+          "sampling_stratum": "short|Film & Television",
+          "source_stratum_index": 45,
+          "upstream_sample_id": "106-1"
+        },
+        {
+          "source_row_index": 345,
+          "source_sample_id": "videomme:345",
+          "sampling_stratum": "short|Film & Television",
+          "source_stratum_index": 75,
+          "upstream_sample_id": "116-1"
+        },
+        {
+          "source_row_index": 375,
+          "source_sample_id": "videomme:375",
+          "sampling_stratum": "short|Film & Television",
+          "source_stratum_index": 105,
+          "upstream_sample_id": "126-1"
+        },
+        {
+          "source_row_index": 33,
+          "source_sample_id": "videomme:33",
+          "sampling_stratum": "short|Knowledge",
+          "source_stratum_index": 33,
+          "upstream_sample_id": "012-1"
+        },
+        {
+          "source_row_index": 101,
+          "source_sample_id": "videomme:101",
+          "sampling_stratum": "short|Knowledge",
+          "source_stratum_index": 101,
+          "upstream_sample_id": "034-3"
+        },
+        {
+          "source_row_index": 168,
+          "source_sample_id": "videomme:168",
+          "sampling_stratum": "short|Knowledge",
+          "source_stratum_index": 168,
+          "upstream_sample_id": "057-1"
+        },
+        {
+          "source_row_index": 236,
+          "source_sample_id": "videomme:236",
+          "sampling_stratum": "short|Knowledge",
+          "source_stratum_index": 236,
+          "upstream_sample_id": "079-3"
+        },
+        {
+          "source_row_index": 686,
+          "source_sample_id": "videomme:686",
+          "sampling_stratum": "short|Life Record",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "229-3"
+        },
+        {
+          "source_row_index": 738,
+          "source_sample_id": "videomme:738",
+          "sampling_stratum": "short|Life Record",
+          "source_stratum_index": 78,
+          "upstream_sample_id": "247-1"
+        },
+        {
+          "source_row_index": 791,
+          "source_sample_id": "videomme:791",
+          "sampling_stratum": "short|Life Record",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "264-3"
+        },
+        {
+          "source_row_index": 843,
+          "source_sample_id": "videomme:843",
+          "sampling_stratum": "short|Life Record",
+          "source_stratum_index": 183,
+          "upstream_sample_id": "282-1"
+        },
+        {
+          "source_row_index": 873,
+          "source_sample_id": "videomme:873",
+          "sampling_stratum": "short|Multilingual",
+          "source_stratum_index": 3,
+          "upstream_sample_id": "292-1"
+        },
+        {
+          "source_row_index": 881,
+          "source_sample_id": "videomme:881",
+          "sampling_stratum": "short|Multilingual",
+          "source_stratum_index": 11,
+          "upstream_sample_id": "294-3"
+        },
+        {
+          "source_row_index": 888,
+          "source_sample_id": "videomme:888",
+          "sampling_stratum": "short|Multilingual",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "297-1"
+        },
+        {
+          "source_row_index": 896,
+          "source_sample_id": "videomme:896",
+          "sampling_stratum": "short|Multilingual",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "299-3"
+        },
+        {
+          "source_row_index": 408,
+          "source_sample_id": "videomme:408",
+          "sampling_stratum": "short|Sports Competition",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "137-1"
+        },
+        {
+          "source_row_index": 446,
+          "source_sample_id": "videomme:446",
+          "sampling_stratum": "short|Sports Competition",
+          "source_stratum_index": 56,
+          "upstream_sample_id": "149-3"
+        },
+        {
+          "source_row_index": 483,
+          "source_sample_id": "videomme:483",
+          "sampling_stratum": "short|Sports Competition",
+          "source_stratum_index": 93,
+          "upstream_sample_id": "162-1"
+        },
+        {
+          "source_row_index": 521,
+          "source_sample_id": "videomme:521",
+          "sampling_stratum": "short|Sports Competition",
+          "source_stratum_index": 131,
+          "upstream_sample_id": "174-3"
+        }
+      ]
+    },
+    "longvideobench_val_v": {
+      "dataset_repository": "longvideobench/LongVideoBench",
+      "dataset_revision": "60d1c89c1919a198b73be39c2babb213b29d6a5c",
+      "max_new_tokens": 32,
+      "scoring_task_config": "tasks/longvideobench/longvideobench_val_v.yaml",
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "split",
+        "index_space": "within-stratum",
+        "population_rows": 1337,
+        "selected_rows": 68,
+        "strata": [
+          {
+            "name": "validation",
+            "population_rows": 1337,
+            "selected_rows": 68
+          }
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 9,
+          "p25": 324,
+          "p50": 658,
+          "p75": 992,
+          "p100": 1327
+        },
+        "selected_row_identities_sha256": "124e56d414789cb93e0a8f50d51b2b212972bb6e89f5174663afc55f843c50c2"
+      },
+      "rows": [
+        {
+          "source_row_index": 9,
+          "source_sample_id": "longvideobench_val_v:9",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 9
+        },
+        {
+          "source_row_index": 29,
+          "source_sample_id": "longvideobench_val_v:29",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 29
+        },
+        {
+          "source_row_index": 49,
+          "source_sample_id": "longvideobench_val_v:49",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 49
+        },
+        {
+          "source_row_index": 68,
+          "source_sample_id": "longvideobench_val_v:68",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 68
+        },
+        {
+          "source_row_index": 88,
+          "source_sample_id": "longvideobench_val_v:88",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 88
+        },
+        {
+          "source_row_index": 108,
+          "source_sample_id": "longvideobench_val_v:108",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 108
+        },
+        {
+          "source_row_index": 127,
+          "source_sample_id": "longvideobench_val_v:127",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 127
+        },
+        {
+          "source_row_index": 147,
+          "source_sample_id": "longvideobench_val_v:147",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 147
+        },
+        {
+          "source_row_index": 167,
+          "source_sample_id": "longvideobench_val_v:167",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 167
+        },
+        {
+          "source_row_index": 186,
+          "source_sample_id": "longvideobench_val_v:186",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 186
+        },
+        {
+          "source_row_index": 206,
+          "source_sample_id": "longvideobench_val_v:206",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 206
+        },
+        {
+          "source_row_index": 226,
+          "source_sample_id": "longvideobench_val_v:226",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 226
+        },
+        {
+          "source_row_index": 245,
+          "source_sample_id": "longvideobench_val_v:245",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 245
+        },
+        {
+          "source_row_index": 265,
+          "source_sample_id": "longvideobench_val_v:265",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 265
+        },
+        {
+          "source_row_index": 285,
+          "source_sample_id": "longvideobench_val_v:285",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 285
+        },
+        {
+          "source_row_index": 304,
+          "source_sample_id": "longvideobench_val_v:304",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 304
+        },
+        {
+          "source_row_index": 324,
+          "source_sample_id": "longvideobench_val_v:324",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 324
+        },
+        {
+          "source_row_index": 344,
+          "source_sample_id": "longvideobench_val_v:344",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 344
+        },
+        {
+          "source_row_index": 363,
+          "source_sample_id": "longvideobench_val_v:363",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 363
+        },
+        {
+          "source_row_index": 383,
+          "source_sample_id": "longvideobench_val_v:383",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 383
+        },
+        {
+          "source_row_index": 403,
+          "source_sample_id": "longvideobench_val_v:403",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 403
+        },
+        {
+          "source_row_index": 422,
+          "source_sample_id": "longvideobench_val_v:422",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 422
+        },
+        {
+          "source_row_index": 442,
+          "source_sample_id": "longvideobench_val_v:442",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 442
+        },
+        {
+          "source_row_index": 462,
+          "source_sample_id": "longvideobench_val_v:462",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 462
+        },
+        {
+          "source_row_index": 481,
+          "source_sample_id": "longvideobench_val_v:481",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 481
+        },
+        {
+          "source_row_index": 501,
+          "source_sample_id": "longvideobench_val_v:501",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 501
+        },
+        {
+          "source_row_index": 521,
+          "source_sample_id": "longvideobench_val_v:521",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 521
+        },
+        {
+          "source_row_index": 540,
+          "source_sample_id": "longvideobench_val_v:540",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 540
+        },
+        {
+          "source_row_index": 560,
+          "source_sample_id": "longvideobench_val_v:560",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 560
+        },
+        {
+          "source_row_index": 580,
+          "source_sample_id": "longvideobench_val_v:580",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 580
+        },
+        {
+          "source_row_index": 599,
+          "source_sample_id": "longvideobench_val_v:599",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 599
+        },
+        {
+          "source_row_index": 619,
+          "source_sample_id": "longvideobench_val_v:619",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 619
+        },
+        {
+          "source_row_index": 639,
+          "source_sample_id": "longvideobench_val_v:639",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 639
+        },
+        {
+          "source_row_index": 658,
+          "source_sample_id": "longvideobench_val_v:658",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 658
+        },
+        {
+          "source_row_index": 678,
+          "source_sample_id": "longvideobench_val_v:678",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 678
+        },
+        {
+          "source_row_index": 697,
+          "source_sample_id": "longvideobench_val_v:697",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 697
+        },
+        {
+          "source_row_index": 717,
+          "source_sample_id": "longvideobench_val_v:717",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 717
+        },
+        {
+          "source_row_index": 737,
+          "source_sample_id": "longvideobench_val_v:737",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 737
+        },
+        {
+          "source_row_index": 756,
+          "source_sample_id": "longvideobench_val_v:756",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 756
+        },
+        {
+          "source_row_index": 776,
+          "source_sample_id": "longvideobench_val_v:776",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 776
+        },
+        {
+          "source_row_index": 796,
+          "source_sample_id": "longvideobench_val_v:796",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 796
+        },
+        {
+          "source_row_index": 815,
+          "source_sample_id": "longvideobench_val_v:815",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 815
+        },
+        {
+          "source_row_index": 835,
+          "source_sample_id": "longvideobench_val_v:835",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 835
+        },
+        {
+          "source_row_index": 855,
+          "source_sample_id": "longvideobench_val_v:855",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 855
+        },
+        {
+          "source_row_index": 874,
+          "source_sample_id": "longvideobench_val_v:874",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 874
+        },
+        {
+          "source_row_index": 894,
+          "source_sample_id": "longvideobench_val_v:894",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 894
+        },
+        {
+          "source_row_index": 914,
+          "source_sample_id": "longvideobench_val_v:914",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 914
+        },
+        {
+          "source_row_index": 933,
+          "source_sample_id": "longvideobench_val_v:933",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 933
+        },
+        {
+          "source_row_index": 953,
+          "source_sample_id": "longvideobench_val_v:953",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 953
+        },
+        {
+          "source_row_index": 973,
+          "source_sample_id": "longvideobench_val_v:973",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 973
+        },
+        {
+          "source_row_index": 992,
+          "source_sample_id": "longvideobench_val_v:992",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 992
+        },
+        {
+          "source_row_index": 1012,
+          "source_sample_id": "longvideobench_val_v:1012",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1012
+        },
+        {
+          "source_row_index": 1032,
+          "source_sample_id": "longvideobench_val_v:1032",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1032
+        },
+        {
+          "source_row_index": 1051,
+          "source_sample_id": "longvideobench_val_v:1051",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1051
+        },
+        {
+          "source_row_index": 1071,
+          "source_sample_id": "longvideobench_val_v:1071",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1071
+        },
+        {
+          "source_row_index": 1091,
+          "source_sample_id": "longvideobench_val_v:1091",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1091
+        },
+        {
+          "source_row_index": 1110,
+          "source_sample_id": "longvideobench_val_v:1110",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1110
+        },
+        {
+          "source_row_index": 1130,
+          "source_sample_id": "longvideobench_val_v:1130",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1130
+        },
+        {
+          "source_row_index": 1150,
+          "source_sample_id": "longvideobench_val_v:1150",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1150
+        },
+        {
+          "source_row_index": 1169,
+          "source_sample_id": "longvideobench_val_v:1169",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1169
+        },
+        {
+          "source_row_index": 1189,
+          "source_sample_id": "longvideobench_val_v:1189",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1189
+        },
+        {
+          "source_row_index": 1209,
+          "source_sample_id": "longvideobench_val_v:1209",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1209
+        },
+        {
+          "source_row_index": 1228,
+          "source_sample_id": "longvideobench_val_v:1228",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1228
+        },
+        {
+          "source_row_index": 1248,
+          "source_sample_id": "longvideobench_val_v:1248",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1248
+        },
+        {
+          "source_row_index": 1268,
+          "source_sample_id": "longvideobench_val_v:1268",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1268
+        },
+        {
+          "source_row_index": 1287,
+          "source_sample_id": "longvideobench_val_v:1287",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1287
+        },
+        {
+          "source_row_index": 1307,
+          "source_sample_id": "longvideobench_val_v:1307",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1307
+        },
+        {
+          "source_row_index": 1327,
+          "source_sample_id": "longvideobench_val_v:1327",
+          "sampling_stratum": "validation",
+          "source_stratum_index": 1327
+        }
+      ]
+    },
+    "mlvu_dev": {
+      "dataset_repository": "sy1998/MLVU_dev",
+      "dataset_revision": "96207eb9aa7101e2a495dd147684a7e618c79e12",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/mlvu/mlvu_dev.yaml",
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "task_type",
+        "index_space": "within-stratum",
+        "population_rows": 2174,
+        "selected_rows": 70,
+        "strata": [
+          {
+            "name": "anomaly_reco",
+            "population_rows": 200,
+            "selected_rows": 10
+          },
+          {
+            "name": "count",
+            "population_rows": 206,
+            "selected_rows": 10
+          },
+          {
+            "name": "ego",
+            "population_rows": 352,
+            "selected_rows": 10
+          },
+          {
+            "name": "needle",
+            "population_rows": 355,
+            "selected_rows": 10
+          },
+          {
+            "name": "order",
+            "population_rows": 259,
+            "selected_rows": 10
+          },
+          {
+            "name": "plotQA",
+            "population_rows": 539,
+            "selected_rows": 10
+          },
+          {
+            "name": "topic_reasoning",
+            "population_rows": 263,
+            "selected_rows": 10
+          }
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 10,
+          "p25": 70,
+          "p50": 134,
+          "p75": 197,
+          "p100": 512
+        },
+        "selected_row_identities_sha256": "7951e7c5fd3671e2d29e1634a372958c9de15aa363650a4d72e336ea4b371c80"
+      },
+      "rows": [
+        {
+          "source_row_index": 365,
+          "source_sample_id": "mlvu_dev:365",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 10,
+          "upstream_sample_id": "Q365"
+        },
+        {
+          "source_row_index": 385,
+          "source_sample_id": "mlvu_dev:385",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 30,
+          "upstream_sample_id": "Q385"
+        },
+        {
+          "source_row_index": 405,
+          "source_sample_id": "mlvu_dev:405",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 50,
+          "upstream_sample_id": "Q405"
+        },
+        {
+          "source_row_index": 425,
+          "source_sample_id": "mlvu_dev:425",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 70,
+          "upstream_sample_id": "Q425"
+        },
+        {
+          "source_row_index": 445,
+          "source_sample_id": "mlvu_dev:445",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 90,
+          "upstream_sample_id": "Q445"
+        },
+        {
+          "source_row_index": 465,
+          "source_sample_id": "mlvu_dev:465",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 110,
+          "upstream_sample_id": "Q465"
+        },
+        {
+          "source_row_index": 485,
+          "source_sample_id": "mlvu_dev:485",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 130,
+          "upstream_sample_id": "Q485"
+        },
+        {
+          "source_row_index": 505,
+          "source_sample_id": "mlvu_dev:505",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 150,
+          "upstream_sample_id": "Q505"
+        },
+        {
+          "source_row_index": 525,
+          "source_sample_id": "mlvu_dev:525",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 170,
+          "upstream_sample_id": "Q525"
+        },
+        {
+          "source_row_index": 545,
+          "source_sample_id": "mlvu_dev:545",
+          "sampling_stratum": "anomaly_reco",
+          "source_stratum_index": 190,
+          "upstream_sample_id": "Q545"
+        },
+        {
+          "source_row_index": 565,
+          "source_sample_id": "mlvu_dev:565",
+          "sampling_stratum": "count",
+          "source_stratum_index": 10,
+          "upstream_sample_id": "Q565"
+        },
+        {
+          "source_row_index": 585,
+          "source_sample_id": "mlvu_dev:585",
+          "sampling_stratum": "count",
+          "source_stratum_index": 30,
+          "upstream_sample_id": "Q585"
+        },
+        {
+          "source_row_index": 606,
+          "source_sample_id": "mlvu_dev:606",
+          "sampling_stratum": "count",
+          "source_stratum_index": 51,
+          "upstream_sample_id": "Q606"
+        },
+        {
+          "source_row_index": 627,
+          "source_sample_id": "mlvu_dev:627",
+          "sampling_stratum": "count",
+          "source_stratum_index": 72,
+          "upstream_sample_id": "Q627"
+        },
+        {
+          "source_row_index": 647,
+          "source_sample_id": "mlvu_dev:647",
+          "sampling_stratum": "count",
+          "source_stratum_index": 92,
+          "upstream_sample_id": "Q647"
+        },
+        {
+          "source_row_index": 668,
+          "source_sample_id": "mlvu_dev:668",
+          "sampling_stratum": "count",
+          "source_stratum_index": 113,
+          "upstream_sample_id": "Q668"
+        },
+        {
+          "source_row_index": 688,
+          "source_sample_id": "mlvu_dev:688",
+          "sampling_stratum": "count",
+          "source_stratum_index": 133,
+          "upstream_sample_id": "Q688"
+        },
+        {
+          "source_row_index": 709,
+          "source_sample_id": "mlvu_dev:709",
+          "sampling_stratum": "count",
+          "source_stratum_index": 154,
+          "upstream_sample_id": "Q709"
+        },
+        {
+          "source_row_index": 730,
+          "source_sample_id": "mlvu_dev:730",
+          "sampling_stratum": "count",
+          "source_stratum_index": 175,
+          "upstream_sample_id": "Q730"
+        },
+        {
+          "source_row_index": 750,
+          "source_sample_id": "mlvu_dev:750",
+          "sampling_stratum": "count",
+          "source_stratum_index": 195,
+          "upstream_sample_id": "Q750"
+        },
+        {
+          "source_row_index": 778,
+          "source_sample_id": "mlvu_dev:778",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 17,
+          "upstream_sample_id": "Q778"
+        },
+        {
+          "source_row_index": 813,
+          "source_sample_id": "mlvu_dev:813",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 52,
+          "upstream_sample_id": "Q813"
+        },
+        {
+          "source_row_index": 849,
+          "source_sample_id": "mlvu_dev:849",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 88,
+          "upstream_sample_id": "Q849"
+        },
+        {
+          "source_row_index": 884,
+          "source_sample_id": "mlvu_dev:884",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 123,
+          "upstream_sample_id": "Q884"
+        },
+        {
+          "source_row_index": 919,
+          "source_sample_id": "mlvu_dev:919",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 158,
+          "upstream_sample_id": "Q919"
+        },
+        {
+          "source_row_index": 954,
+          "source_sample_id": "mlvu_dev:954",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 193,
+          "upstream_sample_id": "Q954"
+        },
+        {
+          "source_row_index": 989,
+          "source_sample_id": "mlvu_dev:989",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 228,
+          "upstream_sample_id": "Q989"
+        },
+        {
+          "source_row_index": 1025,
+          "source_sample_id": "mlvu_dev:1025",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 264,
+          "upstream_sample_id": "Q1025"
+        },
+        {
+          "source_row_index": 1060,
+          "source_sample_id": "mlvu_dev:1060",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 299,
+          "upstream_sample_id": "Q1060"
+        },
+        {
+          "source_row_index": 1095,
+          "source_sample_id": "mlvu_dev:1095",
+          "sampling_stratum": "ego",
+          "source_stratum_index": 334,
+          "upstream_sample_id": "Q1095"
+        },
+        {
+          "source_row_index": 17,
+          "source_sample_id": "mlvu_dev:17",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 17,
+          "upstream_sample_id": "Q17"
+        },
+        {
+          "source_row_index": 53,
+          "source_sample_id": "mlvu_dev:53",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 53,
+          "upstream_sample_id": "Q53"
+        },
+        {
+          "source_row_index": 88,
+          "source_sample_id": "mlvu_dev:88",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 88,
+          "upstream_sample_id": "Q88"
+        },
+        {
+          "source_row_index": 124,
+          "source_sample_id": "mlvu_dev:124",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 124,
+          "upstream_sample_id": "Q124"
+        },
+        {
+          "source_row_index": 159,
+          "source_sample_id": "mlvu_dev:159",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 159,
+          "upstream_sample_id": "Q159"
+        },
+        {
+          "source_row_index": 195,
+          "source_sample_id": "mlvu_dev:195",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 195,
+          "upstream_sample_id": "Q195"
+        },
+        {
+          "source_row_index": 230,
+          "source_sample_id": "mlvu_dev:230",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 230,
+          "upstream_sample_id": "Q230"
+        },
+        {
+          "source_row_index": 266,
+          "source_sample_id": "mlvu_dev:266",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 266,
+          "upstream_sample_id": "Q266"
+        },
+        {
+          "source_row_index": 301,
+          "source_sample_id": "mlvu_dev:301",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 301,
+          "upstream_sample_id": "Q301"
+        },
+        {
+          "source_row_index": 337,
+          "source_sample_id": "mlvu_dev:337",
+          "sampling_stratum": "needle",
+          "source_stratum_index": 337,
+          "upstream_sample_id": "Q337"
+        },
+        {
+          "source_row_index": 1927,
+          "source_sample_id": "mlvu_dev:1927",
+          "sampling_stratum": "order",
+          "source_stratum_index": 12,
+          "upstream_sample_id": "Q1927"
+        },
+        {
+          "source_row_index": 1953,
+          "source_sample_id": "mlvu_dev:1953",
+          "sampling_stratum": "order",
+          "source_stratum_index": 38,
+          "upstream_sample_id": "Q1953"
+        },
+        {
+          "source_row_index": 1979,
+          "source_sample_id": "mlvu_dev:1979",
+          "sampling_stratum": "order",
+          "source_stratum_index": 64,
+          "upstream_sample_id": "Q1979"
+        },
+        {
+          "source_row_index": 2005,
+          "source_sample_id": "mlvu_dev:2005",
+          "sampling_stratum": "order",
+          "source_stratum_index": 90,
+          "upstream_sample_id": "Q2005"
+        },
+        {
+          "source_row_index": 2031,
+          "source_sample_id": "mlvu_dev:2031",
+          "sampling_stratum": "order",
+          "source_stratum_index": 116,
+          "upstream_sample_id": "Q2031"
+        },
+        {
+          "source_row_index": 2057,
+          "source_sample_id": "mlvu_dev:2057",
+          "sampling_stratum": "order",
+          "source_stratum_index": 142,
+          "upstream_sample_id": "Q2057"
+        },
+        {
+          "source_row_index": 2083,
+          "source_sample_id": "mlvu_dev:2083",
+          "sampling_stratum": "order",
+          "source_stratum_index": 168,
+          "upstream_sample_id": "Q2083"
+        },
+        {
+          "source_row_index": 2109,
+          "source_sample_id": "mlvu_dev:2109",
+          "sampling_stratum": "order",
+          "source_stratum_index": 194,
+          "upstream_sample_id": "Q2109"
+        },
+        {
+          "source_row_index": 2135,
+          "source_sample_id": "mlvu_dev:2135",
+          "sampling_stratum": "order",
+          "source_stratum_index": 220,
+          "upstream_sample_id": "Q2135"
+        },
+        {
+          "source_row_index": 2161,
+          "source_sample_id": "mlvu_dev:2161",
+          "sampling_stratum": "order",
+          "source_stratum_index": 246,
+          "upstream_sample_id": "Q2161"
+        },
+        {
+          "source_row_index": 1139,
+          "source_sample_id": "mlvu_dev:1139",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 26,
+          "upstream_sample_id": "Q1139"
+        },
+        {
+          "source_row_index": 1193,
+          "source_sample_id": "mlvu_dev:1193",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 80,
+          "upstream_sample_id": "Q1193"
+        },
+        {
+          "source_row_index": 1247,
+          "source_sample_id": "mlvu_dev:1247",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 134,
+          "upstream_sample_id": "Q1247"
+        },
+        {
+          "source_row_index": 1301,
+          "source_sample_id": "mlvu_dev:1301",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 188,
+          "upstream_sample_id": "Q1301"
+        },
+        {
+          "source_row_index": 1355,
+          "source_sample_id": "mlvu_dev:1355",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 242,
+          "upstream_sample_id": "Q1355"
+        },
+        {
+          "source_row_index": 1409,
+          "source_sample_id": "mlvu_dev:1409",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 296,
+          "upstream_sample_id": "Q1409"
+        },
+        {
+          "source_row_index": 1463,
+          "source_sample_id": "mlvu_dev:1463",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 350,
+          "upstream_sample_id": "Q1463"
+        },
+        {
+          "source_row_index": 1517,
+          "source_sample_id": "mlvu_dev:1517",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 404,
+          "upstream_sample_id": "Q1517"
+        },
+        {
+          "source_row_index": 1571,
+          "source_sample_id": "mlvu_dev:1571",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 458,
+          "upstream_sample_id": "Q1571"
+        },
+        {
+          "source_row_index": 1625,
+          "source_sample_id": "mlvu_dev:1625",
+          "sampling_stratum": "plotQA",
+          "source_stratum_index": 512,
+          "upstream_sample_id": "Q1625"
+        },
+        {
+          "source_row_index": 1665,
+          "source_sample_id": "mlvu_dev:1665",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 13,
+          "upstream_sample_id": "Q1665"
+        },
+        {
+          "source_row_index": 1691,
+          "source_sample_id": "mlvu_dev:1691",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 39,
+          "upstream_sample_id": "Q1691"
+        },
+        {
+          "source_row_index": 1717,
+          "source_sample_id": "mlvu_dev:1717",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 65,
+          "upstream_sample_id": "Q1717"
+        },
+        {
+          "source_row_index": 1744,
+          "source_sample_id": "mlvu_dev:1744",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 92,
+          "upstream_sample_id": "Q1744"
+        },
+        {
+          "source_row_index": 1770,
+          "source_sample_id": "mlvu_dev:1770",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 118,
+          "upstream_sample_id": "Q1770"
+        },
+        {
+          "source_row_index": 1796,
+          "source_sample_id": "mlvu_dev:1796",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 144,
+          "upstream_sample_id": "Q1796"
+        },
+        {
+          "source_row_index": 1822,
+          "source_sample_id": "mlvu_dev:1822",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 170,
+          "upstream_sample_id": "Q1822"
+        },
+        {
+          "source_row_index": 1849,
+          "source_sample_id": "mlvu_dev:1849",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 197,
+          "upstream_sample_id": "Q1849"
+        },
+        {
+          "source_row_index": 1875,
+          "source_sample_id": "mlvu_dev:1875",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 223,
+          "upstream_sample_id": "Q1875"
+        },
+        {
+          "source_row_index": 1901,
+          "source_sample_id": "mlvu_dev:1901",
+          "sampling_stratum": "topic_reasoning",
+          "source_stratum_index": 249,
+          "upstream_sample_id": "Q1901"
+        }
+      ]
+    },
+    "perceptiontest_val_mc": {
+      "dataset_repository": "lmms-lab/PerceptionTest_Val",
+      "dataset_revision": "c5e520d8c4167fb1f135c36e9d6e67312b4f8e6b",
+      "max_new_tokens": 16,
+      "scoring_task_config": "tasks/perceptiontest/val/perceptiontest_mc.yaml",
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "area+reasoning",
+        "index_space": "within-stratum",
+        "population_rows": 19140,
+        "selected_rows": 64,
+        "strata": [
+          {
+            "name": "abstraction|counterfactual",
+            "population_rows": 83,
+            "selected_rows": 5
+          },
+          {
+            "name": "abstraction|descriptive",
+            "population_rows": 5268,
+            "selected_rows": 5
+          },
+          {
+            "name": "abstraction|predictive",
+            "population_rows": 256,
+            "selected_rows": 5
+          },
+          {
+            "name": "memory|counterfactual",
+            "population_rows": 36,
+            "selected_rows": 5
+          },
+          {
+            "name": "memory|descriptive",
+            "population_rows": 575,
+            "selected_rows": 5
+          },
+          {
+            "name": "memory|explanatory",
+            "population_rows": 135,
+            "selected_rows": 5
+          },
+          {
+            "name": "physics|counterfactual",
+            "population_rows": 31,
+            "selected_rows": 5
+          },
+          {
+            "name": "physics|descriptive",
+            "population_rows": 5298,
+            "selected_rows": 5
+          },
+          {
+            "name": "physics|explanatory",
+            "population_rows": 1226,
+            "selected_rows": 5
+          },
+          {
+            "name": "physics|predictive",
+            "population_rows": 383,
+            "selected_rows": 5
+          },
+          {
+            "name": "semantics|counterfactual",
+            "population_rows": 207,
+            "selected_rows": 5
+          },
+          {
+            "name": "semantics|descriptive",
+            "population_rows": 4717,
+            "selected_rows": 5
+          },
+          {
+            "name": "semantics|explanatory",
+            "population_rows": 925,
+            "selected_rows": 4
+          }
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 3,
+          "p25": 38,
+          "p50": 144,
+          "p75": 578,
+          "p100": 4768
+        },
+        "selected_row_identities_sha256": "7e2d17ac3bff117d51cfc27df79cb7d86e3e3ac7c3d32d94da7b1283befe1594"
+      },
+      "rows": [
+        {
+          "source_row_index": 6448,
+          "source_sample_id": "perceptiontest_val_mc:6448",
+          "sampling_stratum": "abstraction|counterfactual",
+          "source_stratum_index": 8,
+          "upstream_sample_id": "video_4364:3"
+        },
+        {
+          "source_row_index": 6519,
+          "source_sample_id": "perceptiontest_val_mc:6519",
+          "sampling_stratum": "abstraction|counterfactual",
+          "source_stratum_index": 24,
+          "upstream_sample_id": "video_7896:3"
+        },
+        {
+          "source_row_index": 6598,
+          "source_sample_id": "perceptiontest_val_mc:6598",
+          "sampling_stratum": "abstraction|counterfactual",
+          "source_stratum_index": 41,
+          "upstream_sample_id": "video_10230:3"
+        },
+        {
+          "source_row_index": 16262,
+          "source_sample_id": "perceptiontest_val_mc:16262",
+          "sampling_stratum": "abstraction|counterfactual",
+          "source_stratum_index": 58,
+          "upstream_sample_id": "video_9279:3"
+        },
+        {
+          "source_row_index": 16332,
+          "source_sample_id": "perceptiontest_val_mc:16332",
+          "sampling_stratum": "abstraction|counterfactual",
+          "source_stratum_index": 74,
+          "upstream_sample_id": "video_612:3"
+        },
+        {
+          "source_row_index": 2460,
+          "source_sample_id": "perceptiontest_val_mc:2460",
+          "sampling_stratum": "abstraction|descriptive",
+          "source_stratum_index": 526,
+          "upstream_sample_id": "video_3553:2"
+        },
+        {
+          "source_row_index": 5068,
+          "source_sample_id": "perceptiontest_val_mc:5068",
+          "sampling_stratum": "abstraction|descriptive",
+          "source_stratum_index": 1580,
+          "upstream_sample_id": "video_11322:2"
+        },
+        {
+          "source_row_index": 8865,
+          "source_sample_id": "perceptiontest_val_mc:8865",
+          "sampling_stratum": "abstraction|descriptive",
+          "source_stratum_index": 2634,
+          "upstream_sample_id": "video_1211:2"
+        },
+        {
+          "source_row_index": 13017,
+          "source_sample_id": "perceptiontest_val_mc:13017",
+          "sampling_stratum": "abstraction|descriptive",
+          "source_stratum_index": 3687,
+          "upstream_sample_id": "video_7836:1"
+        },
+        {
+          "source_row_index": 17745,
+          "source_sample_id": "perceptiontest_val_mc:17745",
+          "sampling_stratum": "abstraction|descriptive",
+          "source_stratum_index": 4741,
+          "upstream_sample_id": "video_4387:1"
+        },
+        {
+          "source_row_index": 12890,
+          "source_sample_id": "perceptiontest_val_mc:12890",
+          "sampling_stratum": "abstraction|predictive",
+          "source_stratum_index": 25,
+          "upstream_sample_id": "video_10565:3"
+        },
+        {
+          "source_row_index": 13117,
+          "source_sample_id": "perceptiontest_val_mc:13117",
+          "sampling_stratum": "abstraction|predictive",
+          "source_stratum_index": 76,
+          "upstream_sample_id": "video_9648:1"
+        },
+        {
+          "source_row_index": 13244,
+          "source_sample_id": "perceptiontest_val_mc:13244",
+          "sampling_stratum": "abstraction|predictive",
+          "source_stratum_index": 128,
+          "upstream_sample_id": "video_8923:1"
+        },
+        {
+          "source_row_index": 13512,
+          "source_sample_id": "perceptiontest_val_mc:13512",
+          "sampling_stratum": "abstraction|predictive",
+          "source_stratum_index": 179,
+          "upstream_sample_id": "video_7597:4"
+        },
+        {
+          "source_row_index": 18362,
+          "source_sample_id": "perceptiontest_val_mc:18362",
+          "sampling_stratum": "abstraction|predictive",
+          "source_stratum_index": 230,
+          "upstream_sample_id": "video_2651:5"
+        },
+        {
+          "source_row_index": 3874,
+          "source_sample_id": "perceptiontest_val_mc:3874",
+          "sampling_stratum": "memory|counterfactual",
+          "source_stratum_index": 3,
+          "upstream_sample_id": "video_9066:0"
+        },
+        {
+          "source_row_index": 3911,
+          "source_sample_id": "perceptiontest_val_mc:3911",
+          "sampling_stratum": "memory|counterfactual",
+          "source_stratum_index": 10,
+          "upstream_sample_id": "video_2719:1"
+        },
+        {
+          "source_row_index": 3957,
+          "source_sample_id": "perceptiontest_val_mc:3957",
+          "sampling_stratum": "memory|counterfactual",
+          "source_stratum_index": 18,
+          "upstream_sample_id": "video_9203:0"
+        },
+        {
+          "source_row_index": 3998,
+          "source_sample_id": "perceptiontest_val_mc:3998",
+          "sampling_stratum": "memory|counterfactual",
+          "source_stratum_index": 25,
+          "upstream_sample_id": "video_5154:1"
+        },
+        {
+          "source_row_index": 4037,
+          "source_sample_id": "perceptiontest_val_mc:4037",
+          "sampling_stratum": "memory|counterfactual",
+          "source_stratum_index": 32,
+          "upstream_sample_id": "video_7255:0"
+        },
+        {
+          "source_row_index": 994,
+          "source_sample_id": "perceptiontest_val_mc:994",
+          "sampling_stratum": "memory|descriptive",
+          "source_stratum_index": 57,
+          "upstream_sample_id": "video_3941:1"
+        },
+        {
+          "source_row_index": 9137,
+          "source_sample_id": "perceptiontest_val_mc:9137",
+          "sampling_stratum": "memory|descriptive",
+          "source_stratum_index": 172,
+          "upstream_sample_id": "video_875:5"
+        },
+        {
+          "source_row_index": 9350,
+          "source_sample_id": "perceptiontest_val_mc:9350",
+          "sampling_stratum": "memory|descriptive",
+          "source_stratum_index": 287,
+          "upstream_sample_id": "video_4505:3"
+        },
+        {
+          "source_row_index": 9564,
+          "source_sample_id": "perceptiontest_val_mc:9564",
+          "sampling_stratum": "memory|descriptive",
+          "source_stratum_index": 402,
+          "upstream_sample_id": "video_11549:4"
+        },
+        {
+          "source_row_index": 17386,
+          "source_sample_id": "perceptiontest_val_mc:17386",
+          "sampling_stratum": "memory|descriptive",
+          "source_stratum_index": 517,
+          "upstream_sample_id": "video_8337:3"
+        },
+        {
+          "source_row_index": 8805,
+          "source_sample_id": "perceptiontest_val_mc:8805",
+          "sampling_stratum": "memory|explanatory",
+          "source_stratum_index": 13,
+          "upstream_sample_id": "video_8238:1"
+        },
+        {
+          "source_row_index": 8893,
+          "source_sample_id": "perceptiontest_val_mc:8893",
+          "sampling_stratum": "memory|explanatory",
+          "source_stratum_index": 40,
+          "upstream_sample_id": "video_4058:1"
+        },
+        {
+          "source_row_index": 8981,
+          "source_sample_id": "perceptiontest_val_mc:8981",
+          "sampling_stratum": "memory|explanatory",
+          "source_stratum_index": 67,
+          "upstream_sample_id": "video_4183:1"
+        },
+        {
+          "source_row_index": 16722,
+          "source_sample_id": "perceptiontest_val_mc:16722",
+          "sampling_stratum": "memory|explanatory",
+          "source_stratum_index": 94,
+          "upstream_sample_id": "video_9149:1"
+        },
+        {
+          "source_row_index": 18569,
+          "source_sample_id": "perceptiontest_val_mc:18569",
+          "sampling_stratum": "memory|explanatory",
+          "source_stratum_index": 121,
+          "upstream_sample_id": "video_4283:1"
+        },
+        {
+          "source_row_index": 11717,
+          "source_sample_id": "perceptiontest_val_mc:11717",
+          "sampling_stratum": "physics|counterfactual",
+          "source_stratum_index": 3,
+          "upstream_sample_id": "video_9300:3"
+        },
+        {
+          "source_row_index": 11750,
+          "source_sample_id": "perceptiontest_val_mc:11750",
+          "sampling_stratum": "physics|counterfactual",
+          "source_stratum_index": 9,
+          "upstream_sample_id": "video_171:2"
+        },
+        {
+          "source_row_index": 11798,
+          "source_sample_id": "perceptiontest_val_mc:11798",
+          "sampling_stratum": "physics|counterfactual",
+          "source_stratum_index": 15,
+          "upstream_sample_id": "video_4710:3"
+        },
+        {
+          "source_row_index": 17813,
+          "source_sample_id": "perceptiontest_val_mc:17813",
+          "sampling_stratum": "physics|counterfactual",
+          "source_stratum_index": 21,
+          "upstream_sample_id": "video_2589:3"
+        },
+        {
+          "source_row_index": 17849,
+          "source_sample_id": "perceptiontest_val_mc:17849",
+          "sampling_stratum": "physics|counterfactual",
+          "source_stratum_index": 27,
+          "upstream_sample_id": "video_6707:3"
+        },
+        {
+          "source_row_index": 2162,
+          "source_sample_id": "perceptiontest_val_mc:2162",
+          "sampling_stratum": "physics|descriptive",
+          "source_stratum_index": 529,
+          "upstream_sample_id": "video_10714:0"
+        },
+        {
+          "source_row_index": 6373,
+          "source_sample_id": "perceptiontest_val_mc:6373",
+          "sampling_stratum": "physics|descriptive",
+          "source_stratum_index": 1589,
+          "upstream_sample_id": "video_3840:0"
+        },
+        {
+          "source_row_index": 10471,
+          "source_sample_id": "perceptiontest_val_mc:10471",
+          "sampling_stratum": "physics|descriptive",
+          "source_stratum_index": 2649,
+          "upstream_sample_id": "video_1567:3"
+        },
+        {
+          "source_row_index": 13179,
+          "source_sample_id": "perceptiontest_val_mc:13179",
+          "sampling_stratum": "physics|descriptive",
+          "source_stratum_index": 3708,
+          "upstream_sample_id": "video_1768:0"
+        },
+        {
+          "source_row_index": 17169,
+          "source_sample_id": "perceptiontest_val_mc:17169",
+          "sampling_stratum": "physics|descriptive",
+          "source_stratum_index": 4768,
+          "upstream_sample_id": "video_2812:0"
+        },
+        {
+          "source_row_index": 7652,
+          "source_sample_id": "perceptiontest_val_mc:7652",
+          "sampling_stratum": "physics|explanatory",
+          "source_stratum_index": 122,
+          "upstream_sample_id": "video_3751:3"
+        },
+        {
+          "source_row_index": 8195,
+          "source_sample_id": "perceptiontest_val_mc:8195",
+          "sampling_stratum": "physics|explanatory",
+          "source_stratum_index": 367,
+          "upstream_sample_id": "video_6995:1"
+        },
+        {
+          "source_row_index": 8619,
+          "source_sample_id": "perceptiontest_val_mc:8619",
+          "sampling_stratum": "physics|explanatory",
+          "source_stratum_index": 613,
+          "upstream_sample_id": "video_1323:1"
+        },
+        {
+          "source_row_index": 13731,
+          "source_sample_id": "perceptiontest_val_mc:13731",
+          "sampling_stratum": "physics|explanatory",
+          "source_stratum_index": 858,
+          "upstream_sample_id": "video_1625:0"
+        },
+        {
+          "source_row_index": 16579,
+          "source_sample_id": "perceptiontest_val_mc:16579",
+          "sampling_stratum": "physics|explanatory",
+          "source_stratum_index": 1103,
+          "upstream_sample_id": "video_617:1"
+        },
+        {
+          "source_row_index": 4535,
+          "source_sample_id": "perceptiontest_val_mc:4535",
+          "sampling_stratum": "physics|predictive",
+          "source_stratum_index": 38,
+          "upstream_sample_id": "video_5408:5"
+        },
+        {
+          "source_row_index": 5180,
+          "source_sample_id": "perceptiontest_val_mc:5180",
+          "sampling_stratum": "physics|predictive",
+          "source_stratum_index": 114,
+          "upstream_sample_id": "video_2732:4"
+        },
+        {
+          "source_row_index": 5898,
+          "source_sample_id": "perceptiontest_val_mc:5898",
+          "sampling_stratum": "physics|predictive",
+          "source_stratum_index": 191,
+          "upstream_sample_id": "video_7998:4"
+        },
+        {
+          "source_row_index": 13907,
+          "source_sample_id": "perceptiontest_val_mc:13907",
+          "sampling_stratum": "physics|predictive",
+          "source_stratum_index": 268,
+          "upstream_sample_id": "video_1539:0"
+        },
+        {
+          "source_row_index": 15729,
+          "source_sample_id": "perceptiontest_val_mc:15729",
+          "sampling_stratum": "physics|predictive",
+          "source_stratum_index": 344,
+          "upstream_sample_id": "video_356:4"
+        },
+        {
+          "source_row_index": 81,
+          "source_sample_id": "perceptiontest_val_mc:81",
+          "sampling_stratum": "semantics|counterfactual",
+          "source_stratum_index": 20,
+          "upstream_sample_id": "video_1482:1"
+        },
+        {
+          "source_row_index": 1794,
+          "source_sample_id": "perceptiontest_val_mc:1794",
+          "sampling_stratum": "semantics|counterfactual",
+          "source_stratum_index": 62,
+          "upstream_sample_id": "video_1906:9"
+        },
+        {
+          "source_row_index": 2310,
+          "source_sample_id": "perceptiontest_val_mc:2310",
+          "sampling_stratum": "semantics|counterfactual",
+          "source_stratum_index": 103,
+          "upstream_sample_id": "video_10287:11"
+        },
+        {
+          "source_row_index": 2784,
+          "source_sample_id": "perceptiontest_val_mc:2784",
+          "sampling_stratum": "semantics|counterfactual",
+          "source_stratum_index": 144,
+          "upstream_sample_id": "video_10446:10"
+        },
+        {
+          "source_row_index": 14956,
+          "source_sample_id": "perceptiontest_val_mc:14956",
+          "sampling_stratum": "semantics|counterfactual",
+          "source_stratum_index": 186,
+          "upstream_sample_id": "video_5971:11"
+        },
+        {
+          "source_row_index": 1137,
+          "source_sample_id": "perceptiontest_val_mc:1137",
+          "sampling_stratum": "semantics|descriptive",
+          "source_stratum_index": 471,
+          "upstream_sample_id": "video_6936:0"
+        },
+        {
+          "source_row_index": 3530,
+          "source_sample_id": "perceptiontest_val_mc:3530",
+          "sampling_stratum": "semantics|descriptive",
+          "source_stratum_index": 1415,
+          "upstream_sample_id": "video_5178:4"
+        },
+        {
+          "source_row_index": 7494,
+          "source_sample_id": "perceptiontest_val_mc:7494",
+          "sampling_stratum": "semantics|descriptive",
+          "source_stratum_index": 2358,
+          "upstream_sample_id": "video_2103:0"
+        },
+        {
+          "source_row_index": 13219,
+          "source_sample_id": "perceptiontest_val_mc:13219",
+          "sampling_stratum": "semantics|descriptive",
+          "source_stratum_index": 3301,
+          "upstream_sample_id": "video_1425:2"
+        },
+        {
+          "source_row_index": 16942,
+          "source_sample_id": "perceptiontest_val_mc:16942",
+          "sampling_stratum": "semantics|descriptive",
+          "source_stratum_index": 4245,
+          "upstream_sample_id": "video_2446:0"
+        },
+        {
+          "source_row_index": 1615,
+          "source_sample_id": "perceptiontest_val_mc:1615",
+          "sampling_stratum": "semantics|explanatory",
+          "source_stratum_index": 115,
+          "upstream_sample_id": "video_3837:1"
+        },
+        {
+          "source_row_index": 9793,
+          "source_sample_id": "perceptiontest_val_mc:9793",
+          "sampling_stratum": "semantics|explanatory",
+          "source_stratum_index": 346,
+          "upstream_sample_id": "video_10838:1"
+        },
+        {
+          "source_row_index": 14460,
+          "source_sample_id": "perceptiontest_val_mc:14460",
+          "sampling_stratum": "semantics|explanatory",
+          "source_stratum_index": 578,
+          "upstream_sample_id": "video_9722:2"
+        },
+        {
+          "source_row_index": 17057,
+          "source_sample_id": "perceptiontest_val_mc:17057",
+          "sampling_stratum": "semantics|explanatory",
+          "source_stratum_index": 809,
+          "upstream_sample_id": "video_665:1"
+        }
+      ]
+    }
+  }
+}

@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import warnings
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,8 +37,12 @@ __all__ = [
     "TASK_PREFIX100_REPEAT2_PROFILE",
     "evaluate_e2e_full_eval_checkpoint",
     "evaluate_frozen_campaign_checkpoint",
+    "evaluate_frozen_campaign_v2_checkpoint",
+    "evaluate_frozen_campaign_v3_checkpoint",
     "evaluate_realworldqa_checkpoint",
     "evaluate_realworldqa_mmmu_prefix100_checkpoint",
+    "evaluate_reproducibility_smoke_checkpoint",
+    "evaluate_reproducibility_smoke_v2_checkpoint",
     "evaluate_short_v1_checkpoint",
     "register_profiles",
 ]
@@ -55,7 +60,11 @@ _MANIFEST_SETTINGS = frozenset({"row_manifest", "row_manifest_sha256"})
 _REALWORLDQA_PROFILE = "qwen35_vlm_realworldqa2_prefix2"
 _BOUNDED_REPEATED_PROFILE = "qwen35_vlm_realworldqa100_mmmu100_prefix100_repeat2"
 TASK_PREFIX100_REPEAT2_PROFILE = _BOUNDED_REPEATED_PROFILE
-_FROZEN_CAMPAIGN_PROFILE = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
+_FROZEN_CAMPAIGN_PROFILE_V1 = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1"
+_FROZEN_CAMPAIGN_PROFILE_V2 = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v2"
+_FROZEN_CAMPAIGN_PROFILE_V3 = "qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3"
+_REPRODUCIBILITY_SMOKE_PROFILE = "qwen35_vlm_core3_24row_smoke_v1"
+_REPRODUCIBILITY_SMOKE_PROFILE_V2 = "qwen35_vlm_core3_24row_smoke_v2"
 
 
 def _run_profile(
@@ -64,6 +73,7 @@ def _run_profile(
     output_root: str | Path,
     settings: Mapping[str, Any],
     suite: str,
+    evaluation_profile: str | None = None,
     require_manifest: bool = False,
 ) -> tuple[argparse.Namespace, dict[str, object], Path]:
     settings = dict(settings)
@@ -76,20 +86,28 @@ def _run_profile(
     output_dir.mkdir(parents=True, exist_ok=True)
     row_manifest = settings.pop("row_manifest", None)
     expected_manifest_sha256 = settings.pop("row_manifest_sha256", None)
-    if require_manifest and (not row_manifest or not expected_manifest_sha256):
+    if (
+        require_manifest
+        and evaluation_profile is None
+        and (not row_manifest or not expected_manifest_sha256)
+    ):
         raise ValueError(
             "frozen 344-row campaign profile requires row_manifest and row_manifest_sha256"
         )
+    if require_manifest and evaluation_profile is not None and not expected_manifest_sha256:
+        raise ValueError("frozen 344-row campaign evaluation profile requires row_manifest_sha256")
+    if row_manifest is not None and evaluation_profile is not None:
+        raise ValueError("an embedded evaluation profile cannot be overridden by row_manifest")
+    if expected_manifest_sha256 is not None and (
+        not isinstance(expected_manifest_sha256, str)
+        or len(expected_manifest_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_manifest_sha256)
+    ):
+        raise ValueError(
+            "frozen 344-row campaign manifest SHA256 must be 64 lowercase hex characters"
+        )
     quick_manifest = Path(row_manifest).expanduser().absolute() if row_manifest else None
     if quick_manifest is not None:
-        if (
-            not isinstance(expected_manifest_sha256, str)
-            or len(expected_manifest_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in expected_manifest_sha256)
-        ):
-            raise ValueError(
-                "frozen 344-row campaign manifest SHA256 must be 64 lowercase hex characters"
-            )
         actual_manifest_sha256 = suites.manifest_sha256(suites.load_quick_manifest(quick_manifest))
         if actual_manifest_sha256 != expected_manifest_sha256:
             raise ValueError(
@@ -99,6 +117,7 @@ def _run_profile(
     args = argparse.Namespace(
         checkpoint=Path(checkpoint_path).expanduser().absolute(),
         output_dir=output_dir,
+        profile=evaluation_profile,
         suite=suite,
         batch_size=int(settings.pop("batch_size", 1)),
         seed=42,
@@ -113,6 +132,14 @@ def _run_profile(
     profile_path = output_dir / "profile.json"
 
     def write_preflight(report: dict[str, object]) -> None:
+        if evaluation_profile is not None and (
+            expected_manifest_sha256 is not None
+            and report.get("quick_manifest_sha256") != expected_manifest_sha256
+        ):
+            raise ValueError(
+                "frozen 344-row campaign manifest SHA256 differs from the campaign identity: "
+                f"{report.get('quick_manifest_sha256')} != {expected_manifest_sha256}"
+            )
         checkpoint.write_generated(
             profile_path,
             json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -140,8 +167,24 @@ def register_profiles() -> None:
         evaluate_realworldqa_mmmu_prefix100_checkpoint,
     )
     register_downstream_evaluation_profile(
-        _FROZEN_CAMPAIGN_PROFILE,
+        _FROZEN_CAMPAIGN_PROFILE_V1,
         evaluate_frozen_campaign_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _FROZEN_CAMPAIGN_PROFILE_V2,
+        evaluate_frozen_campaign_v2_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _FROZEN_CAMPAIGN_PROFILE_V3,
+        evaluate_frozen_campaign_v3_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _REPRODUCIBILITY_SMOKE_PROFILE,
+        evaluate_reproducibility_smoke_checkpoint,
+    )
+    register_downstream_evaluation_profile(
+        _REPRODUCIBILITY_SMOKE_PROFILE_V2,
+        evaluate_reproducibility_smoke_v2_checkpoint,
     )
     # Deprecated compatibility aliases. New recipes must use explicit task and
     # row-selection identities above.
@@ -184,6 +227,110 @@ def evaluate_frozen_campaign_checkpoint(
     }
 
 
+def evaluate_frozen_campaign_v2_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one checkpoint on the current-image frozen campaign profile."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="short",
+        evaluation_profile="short-native-v2",
+        require_manifest=True,
+    )
+    runs = result["runs"]
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
+    return {
+        **runs[0],
+        "profile_path": str(profile_path),
+        "checkpoint": str(args.checkpoint),
+    }
+
+
+def evaluate_frozen_campaign_v3_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate heterogeneous materialized checkpoints with the current vLLM profile."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="short",
+        evaluation_profile="short-vllm-v2",
+        require_manifest=True,
+    )
+    runs = result["runs"]
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
+    return {
+        **runs[0],
+        "profile_path": str(profile_path),
+        "checkpoint": str(args.checkpoint),
+    }
+
+
+def evaluate_reproducibility_smoke_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one checkpoint on the immutable 24-row lifecycle smoke."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="short",
+        evaluation_profile="smoke-native-v1",
+        require_manifest=True,
+    )
+    runs = result["runs"]
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise RuntimeError("pinned VLM 24-row smoke returned an invalid run count")
+    return {
+        **runs[0],
+        "profile_path": str(profile_path),
+        "checkpoint": str(args.checkpoint),
+    }
+
+
+def evaluate_reproducibility_smoke_v2_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate a heterogeneous materialized checkpoint on the 24-row smoke."""
+
+    args, result, profile_path = _run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        suite="short",
+        evaluation_profile="smoke-vllm-v1",
+        require_manifest=True,
+    )
+    runs = result["runs"]
+    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
+        raise RuntimeError("pinned VLM 24-row smoke returned an invalid run count")
+    return {
+        **runs[0],
+        "profile_path": str(profile_path),
+        "checkpoint": str(args.checkpoint),
+    }
+
+
 def evaluate_short_v1_checkpoint(
     checkpoint_path: str | Path,
     *,
@@ -193,7 +340,7 @@ def evaluate_short_v1_checkpoint(
     """Compatibility alias for the explicit frozen-row campaign profile."""
 
     warnings.warn(
-        f"qwen35_vlm_short_v1 is deprecated; use {_FROZEN_CAMPAIGN_PROFILE}",
+        f"qwen35_vlm_short_v1 is deprecated; use {_FROZEN_CAMPAIGN_PROFILE_V1}",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -253,6 +400,17 @@ def evaluate_realworldqa_mmmu_prefix100_checkpoint(
         for name in sorted(metric_names)
     }
     result_paths = [str(item["result_path"]) for item in runs]
+    sample_counts: Counter[str] = Counter()
+    parser_status_counts: Counter[str] = Counter()
+    parser_sample_count = 0
+    for result_path in result_paths:
+        payload = json.loads(Path(result_path).read_text())
+        sample_counts.update({key: int(value) for key, value in payload["sample_counts"].items()})
+        parser_audit = payload.get("mmmu_parser_audit") or {}
+        parser_sample_count += int(parser_audit.get("sample_count", 0))
+        parser_status_counts.update(
+            {key: int(value) for key, value in (parser_audit.get("status_counts") or {}).items()}
+        )
     summary_path = args.output_dir / "realworldqa_mmmu_prefix100_repeat2_summary.json"
     atomic_write_json(
         summary_path,
@@ -261,6 +419,11 @@ def evaluate_realworldqa_mmmu_prefix100_checkpoint(
             "metrics": metrics,
             "profile": _BOUNDED_REPEATED_PROFILE,
             "result_paths": result_paths,
+            "sample_counts": dict(sorted(sample_counts.items())),
+            "mmmu_parser_audit": {
+                "sample_count": parser_sample_count,
+                "status_counts": dict(sorted(parser_status_counts.items())),
+            },
             "suite": args.suite,
         },
     )

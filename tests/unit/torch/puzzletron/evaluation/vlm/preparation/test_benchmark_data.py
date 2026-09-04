@@ -19,6 +19,7 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,16 @@ import pytest
 from examples.puzzletron.evaluation.vlm.preparation import benchmark_data as preparation
 
 _EXPECTED_DATASETS = {
+    "realworldqa": (
+        "lmms-lab/RealWorldQA",
+        "907c4e5228fd1703c710ed937601cb5f89ab8d5c",
+        None,
+    ),
+    "mmmu_val": (
+        "lmms-lab/MMMU",
+        "364f2e2eb107b36e07ff4c5a15f5947a759cef47",
+        None,
+    ),
     "video_mmmu": (
         "lmms-lab/VideoMMMU",
         "d1c35ac933123d79e877b7f1b9506afb0309cf1b",
@@ -64,6 +75,14 @@ def _write_zip(path: Path, members: dict[str, bytes]) -> None:
             archive.writestr(name, payload)
 
 
+def _emulate_atomic_exchange(first: Path, second: Path) -> bool:
+    displaced = second.with_name(f".{second.name}.test-exchange")
+    second.rename(displaced)
+    first.rename(second)
+    displaced.rename(first)
+    return True
+
+
 @pytest.mark.parametrize(
     ("task", "repository", "revision", "directory"),
     [(task, *values) for task, values in _EXPECTED_DATASETS.items()],
@@ -76,6 +95,60 @@ def test_every_preparation_contract_is_explicitly_pinned(task, repository, revis
         revision,
         directory,
     )
+    assert preparation.benchmark_catalog_contract((task,))[task] == {
+        "repository": repository,
+        "revision": revision,
+        "requires_media": directory is not None,
+        "preparation_dir": directory,
+    }
+
+
+def test_prepare_benchmark_datasets_dispatches_media_only_for_media_tasks(tmp_path, monkeypatch):
+    hf_home = tmp_path / "hf-home"
+    prepared = []
+
+    def download(root, task, *, max_workers):
+        del max_workers
+        snapshot = preparation._hub_snapshot(root, task)
+        snapshot.mkdir(parents=True)
+        (snapshot / "dataset-info.json").write_text("{}")
+        return snapshot
+
+    def prepare(root, task, snapshot):
+        prepared.append(task)
+        media_root = root / preparation.DATASETS[task].preparation_dir
+        media_root.mkdir(parents=True)
+        (media_root / "sample.mp4").write_bytes(b"video")
+        payload = {
+            **preparation._marker_payload(task, status="complete"),
+            "snapshot": str(snapshot),
+            "media_root": str(media_root),
+            "files": 1,
+            "bytes": 5,
+        }
+        preparation._write_marker(media_root, payload)
+        return payload
+
+    monkeypatch.setattr(preparation, "_download", download)
+    monkeypatch.setattr(preparation, "_prepare", prepare)
+
+    reports = preparation.prepare_benchmark_datasets(
+        hf_home, ["realworldqa", "mmmu_val", "mvbench"], max_workers=3
+    )
+
+    assert [report["task"] for report in reports] == ["realworldqa", "mmmu_val", "mvbench"]
+    assert [report["requires_media"] for report in reports] == [False, False, True]
+    assert prepared == ["mvbench"]
+
+
+def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "hf-home"
+    alias.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
 
 
 def test_zip_preparation_is_revision_bound_idempotent_and_byte_verified(tmp_path):
@@ -102,6 +175,171 @@ def test_zip_preparation_is_revision_bound_idempotent_and_byte_verified(tmp_path
     (target / "sample.mp4").write_bytes(b"differed")
     with pytest.raises(ValueError, match="differs from the archive"):
         preparation._extract_zip(archive, target)
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "unexpected"])
+def test_complete_media_marker_repairs_owned_root_from_pinned_snapshot(
+    tmp_path, monkeypatch, damage
+):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    preparation._prepare(hf_home, "mmvu_val", snapshot)
+    monkeypatch.setattr(preparation, "_atomic_exchange_directories", _emulate_atomic_exchange)
+    target = hf_home / "mmvu"
+    media = target / "videos/sample.mp4"
+
+    if damage == "missing":
+        media.unlink()
+    elif damage == "corrupt":
+        media.write_bytes(b"wrong")
+    elif damage == "unexpected":
+        (target / "unexpected.bin").write_bytes(b"stale")
+    report = preparation._prepare(hf_home, "mmvu_val", snapshot)
+
+    assert report["status"] == "complete"
+    assert media.read_bytes() == b"video"
+    assert not (target / "unexpected.bin").exists()
+    assert preparation._media_marker_is_current(
+        target,
+        "mmvu_val",
+        json.loads((target / preparation._MARKER_NAME).read_text()),
+    )
+
+
+def test_repair_without_atomic_exchange_preserves_live_root(monkeypatch, tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    preparation._prepare(hf_home, "mmvu_val", snapshot)
+    target = hf_home / "mmvu"
+    media = target / "videos/sample.mp4"
+    media.write_bytes(b"wrong")
+    monkeypatch.setattr(preparation, "_atomic_exchange_directories", lambda *_args: False)
+
+    with pytest.raises(RuntimeError, match="atomic media-directory exchange is unavailable"):
+        preparation._prepare(hf_home, "mmvu_val", snapshot)
+
+    assert target.is_dir()
+    assert media.read_bytes() == b"wrong"
+    assert not tuple(target.parent.glob(f".{target.name}.modelopt-staging.*"))
+    assert not tuple(target.parent.glob(f".{target.name}.modelopt-replaced.*"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (None, None, "readable ownership marker"),
+        ("corrupt", "{", "readable ownership marker"),
+        ("schema", "other/v1", "mismatched ownership: schema"),
+        ("task", "mvbench", "mismatched ownership: task"),
+        ("repository", "other/repository", "mismatched ownership: repository"),
+        ("revision", "other-revision", "mismatched ownership: revision"),
+        ("requires_media", False, "mismatched ownership: requires_media"),
+        ("preparation_dir", "other-root", "mismatched ownership: preparation_dir"),
+    ],
+)
+def test_missing_or_mismatched_media_marker_preserves_unproven_root(
+    tmp_path, field, value, message
+):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    preparation._prepare(hf_home, "mmvu_val", snapshot)
+    target = hf_home / "mmvu"
+    media = target / "videos/sample.mp4"
+    marker = target / preparation._MARKER_NAME
+    if field is None:
+        marker.unlink()
+    elif field == "corrupt":
+        marker.write_text(value)
+    else:
+        payload = json.loads(marker.read_text())
+        payload[field] = value
+        marker.write_text(json.dumps(payload))
+
+    with pytest.raises((FileExistsError, ValueError), match=message):
+        preparation._prepare(hf_home, "mmvu_val", snapshot)
+
+    assert target.is_dir()
+    assert media.read_bytes() == b"video"
+
+
+def test_media_repair_rejects_symlinks_in_owned_root(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    preparation._prepare(hf_home, "mmvu_val", snapshot)
+    target = hf_home / "mmvu"
+    (target / "videos/sample.mp4").unlink()
+    (target / "videos/sample.mp4").symlink_to(tmp_path / "outside")
+
+    with pytest.raises(ValueError, match="repair refuses a symlink"):
+        preparation._prepare(hf_home, "mmvu_val", snapshot)
+
+
+def test_snapshot_inventory_rejects_partial_and_same_size_corruption(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "realworldqa")
+    snapshot.mkdir(parents=True)
+    first = snapshot / "first.json"
+    second = snapshot / "second.json"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    report = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
+
+    assert preparation._snapshot_inventory_is_current(report)
+    second.unlink()
+    assert not preparation._snapshot_inventory_is_current(report)
+    second.write_bytes(b"two")
+    assert preparation._snapshot_inventory_is_current(report)
+    first.write_bytes(b"bad")
+    assert not preparation._snapshot_inventory_is_current(report)
+
+
+def test_snapshot_inventory_seals_and_validates_hub_blob_symlink(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "realworldqa")
+    snapshot.mkdir(parents=True)
+    payload = b"pinned blob"
+    blob_sha256 = hashlib.sha256(payload).hexdigest()
+    blob = snapshot.parent.parent / "blobs" / blob_sha256
+    blob.parent.mkdir()
+    blob.write_bytes(payload)
+    (snapshot / "dataset.parquet").symlink_to(Path("../../blobs") / blob_sha256)
+
+    report = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
+
+    assert preparation._snapshot_inventory_is_current(report)
+    blob.write_bytes(b"broken blob")
+    assert not preparation._snapshot_inventory_is_current(report)
+
+
+def test_snapshot_inventory_rejects_blob_whose_content_differs_from_sha_name(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "realworldqa")
+    snapshot.mkdir(parents=True)
+    blob = snapshot.parent.parent / "blobs" / ("0" * 64)
+    blob.parent.mkdir()
+    blob.write_bytes(b"not the named content")
+    (snapshot / "dataset.parquet").symlink_to(Path("../../blobs") / blob.name)
+
+    with pytest.raises(ValueError, match="differs from its SHA-256 identity"):
+        preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
+
+
+def test_prepare_benchmark_datasets_rejects_catalog_pin_drift(tmp_path):
+    catalog = preparation.benchmark_catalog_contract(("realworldqa",))
+    catalog["realworldqa"]["revision"] = "stale"
+
+    with pytest.raises(ValueError, match="differs from the authoritative catalog"):
+        preparation.prepare_benchmark_datasets(
+            tmp_path / "hf-home", ("realworldqa",), expected_catalog=catalog
+        )
 
 
 @pytest.mark.parametrize("member", ["../escape.mp4", "/absolute.mp4"])
@@ -152,24 +390,78 @@ def test_archive_extraction_rejects_links_and_streams_multipart_tar(tmp_path):
 
 def test_interrupted_initialization_leaves_target_retryable(monkeypatch, tmp_path):
     hf_home = tmp_path / "hf-home"
-    hf_home.mkdir()
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
     target = hf_home / preparation.DATASETS["mmvu_val"].preparation_dir
-    write_marker = preparation._write_marker
+    extract = preparation._extract
 
-    def interrupt(staging, payload):
-        write_marker(staging, payload)
+    def interrupt(*_args):
         raise RuntimeError("interrupted")
 
-    monkeypatch.setattr(preparation, "_write_marker", interrupt)
+    monkeypatch.setattr(preparation, "_extract", interrupt)
     with pytest.raises(RuntimeError, match="interrupted"):
-        preparation._prepare_target(hf_home, "mmvu_val")
+        preparation._prepare(hf_home, "mmvu_val", snapshot)
     assert not target.exists()
+    assert not tuple(target.parent.glob(f".{target.name}.modelopt-staging.*"))
 
-    monkeypatch.setattr(preparation, "_write_marker", write_marker)
-    prepared, complete = preparation._prepare_target(hf_home, "mmvu_val")
-    assert prepared == target
-    assert complete is None
-    assert json.loads((target / preparation._MARKER_NAME).read_text())["status"] == "in_progress"
+    monkeypatch.setattr(preparation, "_extract", extract)
+    report = preparation._prepare(hf_home, "mmvu_val", snapshot)
+    assert report["status"] == "complete"
+    assert (target / "videos/sample.mp4").read_bytes() == b"video"
+
+
+def test_concurrent_media_preparation_is_task_locked_and_publishes_only_complete_root(
+    monkeypatch, tmp_path
+):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    target = hf_home / "mmvu"
+    entered = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    extraction_count = 0
+    results = []
+    errors = []
+
+    def extract(_task, _snapshot, staging):
+        nonlocal extraction_count
+        extraction_count += 1
+        (staging / "videos").mkdir()
+        (staging / "videos/sample.mp4").write_bytes(b"video")
+        entered.set()
+        assert release.wait(timeout=5)
+        return []
+
+    def run(*, second=False):
+        try:
+            results.append(preparation._prepare(hf_home, "mmvu_val", snapshot))
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+        finally:
+            if second:
+                second_done.set()
+
+    monkeypatch.setattr(preparation, "_extract", extract)
+    first = threading.Thread(target=run)
+    first.start()
+    assert entered.wait(timeout=5)
+    second = threading.Thread(target=run, kwargs={"second": True})
+    second.start()
+
+    assert not second_done.wait(timeout=0.1)
+    assert not target.exists()
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not errors
+    assert not first.is_alive() and not second.is_alive()
+    assert extraction_count == 1
+    assert len(results) == 2
+    assert all(result["status"] == "complete" for result in results)
+    assert (target / "videos/sample.mp4").read_bytes() == b"video"
 
 
 def test_range_download_resumes_without_forwarding_credentials_and_verifies_hash(

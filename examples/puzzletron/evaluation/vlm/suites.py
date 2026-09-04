@@ -52,8 +52,10 @@ __all__ = [
     "execution_policy",
     "generation_kwargs",
     "load_quick_manifest",
+    "manifest_row_identities",
     "manifest_selected_rows",
     "manifest_sha256",
+    "manifest_task_denominators",
     "offline_dataset_snapshot",
     "source_tasks",
     "task_name",
@@ -131,6 +133,7 @@ class FramePolicy(TypedDict):
 class GenerationPolicy(TypedDict):
     """Generation fields shared by provenance and execution."""
 
+    enable_thinking: bool
     temperature: int
     do_sample: bool
 
@@ -195,7 +198,7 @@ def execution_policy(suite: str, *, timeout_seconds: float | None) -> ExecutionP
         limit = None
     return {
         "frame": {"reader": "decord", "fps": 2, "max_frames": 32},
-        "generation": {"temperature": 0, "do_sample": False},
+        "generation": {"enable_thinking": False, "temperature": 0, "do_sample": False},
         "limit": limit,
         "repetitions": 2 if suite in {"short", TASK_PREFIX100_REPEAT2_SUITE} else 1,
         "timeout_seconds": (
@@ -317,6 +320,40 @@ def manifest_selected_rows(manifest: dict[str, object]) -> int:
     """Return the total number of exact rows selected across all tasks."""
     manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
     return sum(len(cast("list[object]", entry["rows"])) for entry in manifest_tasks.values())
+
+
+def manifest_row_identities(manifest: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    """Project the exact selected row identities in task and row order."""
+
+    manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
+    return {
+        task: [
+            {
+                key: row[key]
+                for key in ("source_row_index", "source_sample_id", "leaf_task")
+                if key in row
+            }
+            for row in cast("list[dict[str, object]]", entry["rows"])
+        ]
+        for task, entry in manifest_tasks.items()
+    }
+
+
+def manifest_task_denominators(
+    manifest: dict[str, object],
+) -> dict[str, dict[str, int | None]]:
+    """Project selected and population row denominators for every exact task."""
+
+    manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
+    denominators = {}
+    for task, entry in manifest_tasks.items():
+        selection = cast("dict[str, object]", entry.get("selection", {}))
+        population_rows = selection.get("population_rows", entry.get("population_rows"))
+        denominators[task] = {
+            "selected_rows": len(cast("list[object]", entry["rows"])),
+            "population_rows": cast("int | None", population_rows),
+        }
+    return denominators
 
 
 def offline_dataset_snapshot(hf_home: Path, task: str, revision: str) -> Path:

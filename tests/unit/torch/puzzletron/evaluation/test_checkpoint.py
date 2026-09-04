@@ -45,12 +45,9 @@ def test_load_runner_restores_import_state(monkeypatch):
     assert "modelopt.torch.puzzletron.evaluation.lmms" not in sys.modules
 
 
-def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
-    provenance = {
-        "url": checkpoint.LMMS_EVAL_SOURCE["repository"],
-        "vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION},
-    }
-    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
+def test_verify_lmms_eval_revision_rejects_unpatched_current_vcs_install(monkeypatch):
+    provenance = {"vcs_info": {"commit_id": checkpoint.LMMS_EVAL_REVISION}}
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda _source: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
@@ -59,9 +56,23 @@ def test_verify_lmms_eval_revision_rejects_unpatched_vcs_install(monkeypatch):
         checkpoint.verify_lmms_eval_revision()
 
 
+@pytest.mark.parametrize(
+    "expected",
+    [checkpoint.LMMS_EVAL_LEGACY_REVISION, checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION],
+)
+def test_verify_lmms_eval_revision_accepts_clean_historical_vcs_install(monkeypatch, expected):
+    provenance = {"url": checkpoint._LMMS_EVAL_REPOSITORY, "vcs_info": {"commit_id": expected}}
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda _source: None)
+    monkeypatch.setattr(
+        checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
+    )
+
+    assert checkpoint.verify_lmms_eval_revision(expected) == expected
+
+
 def test_verify_lmms_eval_revision_accepts_clean_pinned_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
-    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda _source: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
@@ -102,7 +113,7 @@ def test_verify_lmms_eval_revision_accepts_clean_imported_source_checkout(
 
 def test_verify_lmms_eval_revision_rejects_dirty_editable_checkout(monkeypatch, tmp_path):
     provenance = {"dir_info": {"editable": True}, "url": tmp_path.as_uri()}
-    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda _source: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )
@@ -126,7 +137,7 @@ def test_verify_lmms_eval_revision_rejects_dirty_editable_checkout(monkeypatch, 
     ],
 )
 def test_verify_lmms_eval_revision_rejects_unverifiable_editable_install(monkeypatch, provenance):
-    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda: None)
+    monkeypatch.setattr(checkpoint, "_imported_lmms_eval_revision", lambda _source: None)
     monkeypatch.setattr(
         checkpoint.importlib.metadata, "distribution", lambda _name: _distribution(provenance)
     )

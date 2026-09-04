@@ -1,0 +1,129 @@
+{
+  "extends": "short-native-v2",
+  "schema": "modelopt.vlm-evaluation-profile/v1",
+  "name": "smoke-native-v1",
+  "tasks": {
+    "realworldqa": {
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "split",
+        "index_space": "within-stratum",
+        "population_rows": 765,
+        "selected_rows": 8,
+        "strata": [
+          {"name": "test", "population_rows": 765, "selected_rows": 8}
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 47,
+          "p25": 143,
+          "p50": 334,
+          "p75": 525,
+          "p100": 717
+        },
+        "selected_row_identities_sha256": "18cfff65ce81ca45537a6de3f17184ed51d23c24247e364b5a565a8ef368f70c"
+      },
+      "rows": [
+        {"source_row_index": 47, "source_sample_id": "test:47"},
+        {"source_row_index": 143, "source_sample_id": "test:143"},
+        {"source_row_index": 239, "source_sample_id": "test:239"},
+        {"source_row_index": 334, "source_sample_id": "test:334"},
+        {"source_row_index": 430, "source_sample_id": "test:430"},
+        {"source_row_index": 525, "source_sample_id": "test:525"},
+        {"source_row_index": 621, "source_sample_id": "test:621"},
+        {"source_row_index": 717, "source_sample_id": "test:717"}
+      ]
+    },
+    "mmmu_val": {
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "subject",
+        "index_space": "within-stratum",
+        "population_rows": 900,
+        "selected_rows": 8,
+        "strata": [
+          {"name": "Accounting", "population_rows": 30, "selected_rows": 0},
+          {"name": "Agriculture", "population_rows": 30, "selected_rows": 1},
+          {"name": "Architecture_and_Engineering", "population_rows": 30, "selected_rows": 0},
+          {"name": "Art", "population_rows": 30, "selected_rows": 0},
+          {"name": "Art_Theory", "population_rows": 30, "selected_rows": 0},
+          {"name": "Basic_Medical_Science", "population_rows": 30, "selected_rows": 1},
+          {"name": "Biology", "population_rows": 30, "selected_rows": 0},
+          {"name": "Chemistry", "population_rows": 30, "selected_rows": 0},
+          {"name": "Clinical_Medicine", "population_rows": 30, "selected_rows": 0},
+          {"name": "Computer_Science", "population_rows": 30, "selected_rows": 1},
+          {"name": "Design", "population_rows": 30, "selected_rows": 0},
+          {"name": "Diagnostics_and_Laboratory_Medicine", "population_rows": 30, "selected_rows": 0},
+          {"name": "Economics", "population_rows": 30, "selected_rows": 0},
+          {"name": "Electronics", "population_rows": 30, "selected_rows": 1},
+          {"name": "Energy_and_Power", "population_rows": 30, "selected_rows": 0},
+          {"name": "Finance", "population_rows": 30, "selected_rows": 0},
+          {"name": "Geography", "population_rows": 30, "selected_rows": 1},
+          {"name": "History", "population_rows": 30, "selected_rows": 0},
+          {"name": "Literature", "population_rows": 30, "selected_rows": 0},
+          {"name": "Manage", "population_rows": 30, "selected_rows": 0},
+          {"name": "Marketing", "population_rows": 30, "selected_rows": 1},
+          {"name": "Materials", "population_rows": 30, "selected_rows": 0},
+          {"name": "Math", "population_rows": 30, "selected_rows": 0},
+          {"name": "Mechanical_Engineering", "population_rows": 30, "selected_rows": 0},
+          {"name": "Music", "population_rows": 30, "selected_rows": 1},
+          {"name": "Pharmacy", "population_rows": 30, "selected_rows": 0},
+          {"name": "Physics", "population_rows": 30, "selected_rows": 0},
+          {"name": "Psychology", "population_rows": 30, "selected_rows": 0},
+          {"name": "Public_Health", "population_rows": 30, "selected_rows": 1},
+          {"name": "Sociology", "population_rows": 30, "selected_rows": 0}
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 15,
+          "p25": 15,
+          "p50": 15,
+          "p75": 15,
+          "p100": 15
+        },
+        "selected_row_identities_sha256": "9b2488fac1079e6c920455c9dda9eee5755229868bf710bd1b75902434fdb702"
+      },
+      "rows": [
+        {"source_row_index": 45, "source_sample_id": "validation_Agriculture_16"},
+        {"source_row_index": 165, "source_sample_id": "validation_Basic_Medical_Science_16"},
+        {"source_row_index": 285, "source_sample_id": "validation_Computer_Science_16"},
+        {"source_row_index": 405, "source_sample_id": "validation_Electronics_16"},
+        {"source_row_index": 495, "source_sample_id": "validation_Geography_16"},
+        {"source_row_index": 615, "source_sample_id": "validation_Marketing_16"},
+        {"source_row_index": 735, "source_sample_id": "validation_Music_16"},
+        {"source_row_index": 855, "source_sample_id": "validation_Public_Health_16"}
+      ]
+    },
+    "mvbench": {
+      "selection": {
+        "method": "systematic-midpoint",
+        "stratified_by": "leaf_task",
+        "index_space": "within-stratum",
+        "population_rows": 200,
+        "selected_rows": 8,
+        "strata": [
+          {"name": "action_sequence", "population_rows": 200, "selected_rows": 8}
+        ],
+        "selected_index_quantiles": {
+          "method": "lower-order-statistic",
+          "p0": 12,
+          "p25": 37,
+          "p50": 87,
+          "p75": 137,
+          "p100": 187
+        },
+        "selected_row_identities_sha256": "45b0dfeef2216c9741aecd10cbd68b7f1c83f0dbbc71c5b3d01752d9191be0b6"
+      },
+      "rows": [
+        {"source_row_index": 12, "source_sample_id": "action_sequence:12", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 37, "source_sample_id": "action_sequence:37", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 62, "source_sample_id": "action_sequence:62", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 87, "source_sample_id": "action_sequence:87", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 112, "source_sample_id": "action_sequence:112", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 137, "source_sample_id": "action_sequence:137", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 162, "source_sample_id": "action_sequence:162", "leaf_task": "mvbench_action_sequence"},
+        {"source_row_index": 187, "source_sample_id": "action_sequence:187", "leaf_task": "mvbench_action_sequence"}
+      ]
+    }
+  }
+}

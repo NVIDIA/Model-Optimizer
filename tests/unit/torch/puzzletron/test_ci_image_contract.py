@@ -18,6 +18,7 @@
 import hashlib
 import json
 import re
+import subprocess
 
 import yaml
 
@@ -119,6 +120,7 @@ def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_ro
         "-    printer = get_printer(Settings()._jupyter)",
         "-    return printer",
         "-        self.printer = get_wandb_printer()",
+        "-                sampling_params = SamplingParams(**params)",
         "-from latex2sympy2 import latex2sympy",
         "+from latex2sympy2_extended import latex2sympy",
         "-from latex2sympy2 import latex2sympy",
@@ -132,6 +134,7 @@ def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_ro
     ]
     assert lmms_source["compatibility_patch_files"] == [
         "lmms_eval/loggers/wandb_logger.py",
+        "lmms_eval/models/simple/vllm.py",
         "lmms_eval/tasks/emma/utils.py",
         "lmms_eval/tasks/mathvision/eval_utils.py",
         "lmms_eval/tasks/stare/utils.py",
@@ -143,6 +146,76 @@ def test_lmms_eval_compatibility_patch_reconciles_worker_dependencies(project_ro
     assert 'git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero --check' in dockerfile
     assert 'git -C "${LMMS_EVAL_ROOT}" apply --unidiff-zero "/opt/puzzletron/patches/' in dockerfile
     assert 'python -m pip install -e "${LMMS_EVAL_ROOT}[qwen]"' in dockerfile
+
+
+def test_lmms_eval_vllm_patch_preserves_task_sampling_and_rejects_drift(
+    project_root_path, tmp_path
+):
+    puzzletron_root = project_root_path / "examples/puzzletron"
+    environment = json.loads((puzzletron_root / "ci_environment.json").read_text())
+    patch_text = (
+        puzzletron_root / "patches" / environment["lmms_eval"]["compatibility_patch"]
+    ).read_text()
+    marker = "diff --git a/lmms_eval/models/simple/vllm.py b/lmms_eval/models/simple/vllm.py"
+    start = patch_text.index(marker)
+    end = patch_text.index("\ndiff --git ", start + len(marker)) + 1
+    vllm_patch = tmp_path / "vllm.patch"
+    vllm_patch.write_text(patch_text[start:end])
+
+    correct_sampling = (
+        "                    sampling_params = "
+        "SamplingParams(**self._build_sampling_params_dict(gen_kwargs))"
+    )
+    undefined_overwrite = "                sampling_params = SamplingParams(**params)"
+
+    def write_fixture(root, *, overwrite):
+        source = root / "lmms_eval/models/simple/vllm.py"
+        source.parent.mkdir(parents=True)
+        lines = ["# pinned upstream fixture"] * 522
+        lines[474] = (
+            '                    gen_kwargs["max_new_tokens"] = '
+            'self._select_max_new_tokens(gen_kwargs.get("max_new_tokens"))'
+        )
+        lines[477] = correct_sampling
+        lines[520] = overwrite
+        lines[521] = (
+            '                self._write_watchdog_heartbeat("chat_start", '
+            "batch_idx=batch_idx, batch_requests=batch_requests)"
+        )
+        source.write_text("\n".join(lines) + "\n")
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        return source
+
+    exact_checkout = tmp_path / "exact"
+    exact_checkout.mkdir()
+    exact_source = write_fixture(exact_checkout, overwrite=undefined_overwrite)
+    subprocess.run(
+        ["git", "apply", "--unidiff-zero", "--check", str(vllm_patch)],
+        cwd=exact_checkout,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "apply", "--unidiff-zero", str(vllm_patch)],
+        cwd=exact_checkout,
+        check=True,
+    )
+    patched_source = exact_source.read_text()
+    assert correct_sampling in patched_source
+    assert undefined_overwrite not in patched_source
+
+    drifted_checkout = tmp_path / "drifted"
+    drifted_checkout.mkdir()
+    write_fixture(
+        drifted_checkout,
+        overwrite="                sampling_params = SamplingParams(**other_params)",
+    )
+    rejected = subprocess.run(
+        ["git", "apply", "--unidiff-zero", "--check", str(vllm_patch)],
+        cwd=drifted_checkout,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
 
 
 def test_image_checks_native_lmms_eval_contract(project_root_path):

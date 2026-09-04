@@ -35,10 +35,26 @@ __all__ = [
 
 _PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v1"
 _PROFILE_ROOT = Path(__file__).with_name("profiles")
-PROFILE_NAMES = ("short-v1", "short-native-v1", "short-all-native-v1", "full-v1")
+PROFILE_NAMES = (
+    "short-v1",
+    "short-native-v1",
+    "short-native-v2",
+    "short-vllm-v2",
+    "smoke-native-v1",
+    "smoke-vllm-v1",
+    "short-all-native-v1",
+    "short-all-native-v2",
+    "full-v1",
+    "core3-full-native-v1",
+    "core3-full-vllm-v1",
+)
 _PROFILE_TASKS = {
     "short-v1": ("realworldqa", "mmmu_val", "mvbench"),
     "short-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "short-native-v2": ("realworldqa", "mmmu_val", "mvbench"),
+    "short-vllm-v2": ("realworldqa", "mmmu_val", "mvbench"),
+    "smoke-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "smoke-vllm-v1": ("realworldqa", "mmmu_val", "mvbench"),
     "short-all-native-v1": (
         "realworldqa",
         "mmmu_val",
@@ -49,13 +65,32 @@ _PROFILE_TASKS = {
         "mlvu_dev",
         "perceptiontest_val_mc",
     ),
+    "short-all-native-v2": (
+        "realworldqa",
+        "mmmu_val",
+        "mvbench",
+        "video_mmmu",
+        "videomme",
+        "longvideobench_val_v",
+        "mlvu_dev",
+        "perceptiontest_val_mc",
+    ),
     "full-v1": tuple(task for task in profile.VLM_BENCHMARK_TASKS if task != "mmvu_val"),
+    "core3-full-native-v1": ("realworldqa", "mmmu_val", "mvbench"),
+    "core3-full-vllm-v1": ("realworldqa", "mmmu_val", "mvbench"),
 }
 _PROFILE_SELECTIONS = {
     "short-v1": "exact-rows",
     "short-native-v1": "exact-rows",
+    "short-native-v2": "exact-rows",
+    "short-vllm-v2": "exact-rows",
+    "smoke-native-v1": "exact-rows",
+    "smoke-vllm-v1": "exact-rows",
     "short-all-native-v1": "exact-rows",
+    "short-all-native-v2": "exact-rows",
     "full-v1": "all",
+    "core3-full-native-v1": "all",
+    "core3-full-vllm-v1": "all",
 }
 SHORT_PROFILE_NAMES = tuple(
     name for name in PROFILE_NAMES if _PROFILE_SELECTIONS[name] == "exact-rows"
@@ -71,7 +106,35 @@ _PROFILE_BACKENDS = {
         "enable_thinking": False,
         "name": "qwen3_5",
     },
+    "short-native-v2": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "short-vllm-v2": {
+        "attention_config": {"flash_attn_version": 2},
+        "enable_thinking": False,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    },
+    "smoke-native-v1": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "smoke-vllm-v1": {
+        "attention_config": {"flash_attn_version": 2},
+        "enable_thinking": False,
+        "enforce_eager": True,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    },
     "short-all-native-v1": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "short-all-native-v2": {
         "attention_implementation": "sdpa",
         "enable_thinking": False,
         "name": "qwen3_5",
@@ -81,12 +144,82 @@ _PROFILE_BACKENDS = {
         "name": "vllm",
         "reasoning_parser": "qwen3",
     },
+    "core3-full-native-v1": {
+        "attention_implementation": "sdpa",
+        "enable_thinking": False,
+        "name": "qwen3_5",
+    },
+    "core3-full-vllm-v1": {
+        "enable_thinking": False,
+        "name": "vllm",
+        "reasoning_parser": "qwen3",
+    },
 }
 _PROFILE_REVISIONS = {
-    "short-v1": checkpoint.LMMS_EVAL_REVISION,
-    "short-native-v1": checkpoint.LMMS_EVAL_REVISION,
-    "short-all-native-v1": checkpoint.LMMS_EVAL_REVISION,
-    "full-v1": checkpoint.LMMS_EVAL_REVISION,
+    "short-v1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
+    "short-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "short-native-v2": checkpoint.LMMS_EVAL_REVISION,
+    "short-vllm-v2": checkpoint.LMMS_EVAL_REVISION,
+    "smoke-native-v1": checkpoint.LMMS_EVAL_REVISION,
+    "smoke-vllm-v1": checkpoint.LMMS_EVAL_REVISION,
+    "short-all-native-v1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
+    "short-all-native-v2": checkpoint.LMMS_EVAL_REVISION,
+    "full-v1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
+    "core3-full-native-v1": checkpoint.LMMS_EVAL_REVISION,
+    "core3-full-vllm-v1": checkpoint.LMMS_EVAL_REVISION,
+}
+_PROFILE_MODELS = {
+    name: {
+        "repository": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    }
+    for name in ("core3-full-native-v1", "core3-full-vllm-v1")
+}
+_PROFILE_POPULATIONS = {
+    name: {"realworldqa": 765, "mmmu_val": 900, "mvbench": 4000} for name in _PROFILE_MODELS
+}
+_MVBENCH_LEAF_POPULATIONS = {
+    "action_sequence": 200,
+    "moving_count": 200,
+    "action_prediction": 200,
+    "episodic_reasoning": 200,
+    "action_antonym": 200,
+    "action_count": 200,
+    "scene_transition": 200,
+    "object_shuffle": 200,
+    "object_existence": 200,
+    "fine_grained_pose": 200,
+    "unexpected_action": 200,
+    "moving_direction": 200,
+    "state_change": 200,
+    "object_interaction": 200,
+    "character_order": 200,
+    "action_localization": 200,
+    "counterfactual_inference": 200,
+    "fine_grained_action": 200,
+    "moving_attribute": 200,
+    "egocentric_navigation": 200,
+}
+_AUDITED_SAMPLING_PROFILES = frozenset(
+    {
+        "smoke-native-v1",
+        "smoke-vllm-v1",
+        "short-native-v2",
+        "short-vllm-v2",
+        "short-all-native-v2",
+    }
+)
+_SAMPLING_AUDIT_SCHEMA = "modelopt.vlm-sampling-audit/v1"
+_SAMPLING_GENERATOR = {"name": "systematic-midpoint", "version": 1}
+_SAMPLING_STRATA = {
+    "realworldqa": "split",
+    "mmmu_val": "subject",
+    "mvbench": "leaf_task",
+    "video_mmmu": "leaf_task",
+    "videomme": "duration+domain",
+    "longvideobench_val_v": "split",
+    "mlvu_dev": "task_type",
+    "perceptiontest_val_mc": "area+reasoning",
 }
 
 
@@ -106,21 +239,25 @@ class ProfileContract:
 
     @property
     def exact_rows(self) -> dict[str, object] | None:
-        """Return the legacy exact-row selector payload when the profile uses one."""
+        """Return the executable exact-row selector payload when the profile uses one."""
         if self.manifest["selection"] != "exact-rows":
             return None
         tasks = cast("dict[str, dict[str, object]]", self.manifest["tasks"])
-        return {
+        exact_rows: dict[str, object] = {
             "schema": "modelopt.vlm-benchmark-quick/v1",
             "lmms_eval_revision": self.manifest["lmms_eval_revision"],
             "tasks": {
                 task: {
                     "dataset_revision": entry["dataset_revision"],
                     "rows": entry["rows"],
+                    **({"selection": entry["selection"]} if "selection" in entry else {}),
                 }
                 for task, entry in tasks.items()
             },
         }
+        if "sampling" in self.manifest:
+            exact_rows["selection"] = self.manifest["sampling"]
+        return exact_rows
 
 
 def load_profile(name: str) -> ProfileContract:
@@ -143,23 +280,37 @@ def load_profile(name: str) -> ProfileContract:
     )
 
 
-def _resolve_manifest(name: str, manifest: object) -> object:
-    """Resolve one shallow profile inheritance declaration."""
+def _resolve_manifest(name: str, manifest: object, *, ancestors: tuple[str, ...] = ()) -> object:
+    """Resolve profile inheritance while rejecting cycles."""
     if not isinstance(manifest, dict) or "extends" not in manifest:
         return manifest
     base_name = manifest.get("extends")
-    if not isinstance(base_name, str) or base_name not in PROFILE_NAMES or base_name == name:
+    if (
+        not isinstance(base_name, str)
+        or base_name not in PROFILE_NAMES
+        or base_name == name
+        or base_name in ancestors
+    ):
         raise RuntimeError(f"{name} profile extends an unsupported base profile")
     base_path = _PROFILE_ROOT / f"{base_name}.json"
     try:
         base = json.loads(base_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"VLM evaluation base profile is unreadable: {base_path}") from error
-    if not isinstance(base, dict) or "extends" in base:
-        raise RuntimeError(f"{name} profile base must be a concrete profile")
+    base = _resolve_manifest(base_name, base, ancestors=(*ancestors, name))
+    if not isinstance(base, dict):
+        raise RuntimeError(f"{name} profile base must contain an object")
     overrides = {key: value for key, value in manifest.items() if key != "extends"}
     if isinstance(base.get("tasks"), dict) and isinstance(overrides.get("tasks"), dict):
-        overrides["tasks"] = {**base["tasks"], **overrides["tasks"]}
+        tasks = dict(base["tasks"])
+        for task, entry in overrides["tasks"].items():
+            base_entry = tasks.get(task)
+            tasks[task] = (
+                {**base_entry, **entry}
+                if isinstance(base_entry, dict) and isinstance(entry, dict)
+                else entry
+            )
+        overrides["tasks"] = tasks
     return {**base, **overrides}
 
 
@@ -175,6 +326,9 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
         "model_type": "qwen3_5",
     }:
         raise RuntimeError(f"{name} profile model family is unsupported")
+    expected_model = _PROFILE_MODELS.get(name)
+    if expected_model is not None and manifest.get("model") != expected_model:
+        raise RuntimeError(f"{name} profile model pin differs from the runtime policy")
     if manifest.get("backend") != _PROFILE_BACKENDS[name]:
         raise RuntimeError(f"{name} profile backend differs from the runtime policy")
     if manifest.get("preprocessing") != {
@@ -201,6 +355,7 @@ def _validate_manifest(name: str, manifest: dict[str, object]) -> None:
         raise RuntimeError(f"{name} profile tasks differ from its versioned policy")
     for task, entry in tasks.items():
         _validate_task(name, task, entry, selection=cast("str", selection))
+    _validate_sampling(name, manifest, tasks)
 
 
 def _validate_task(name: str, task: object, entry: object, *, selection: str) -> None:
@@ -218,8 +373,149 @@ def _validate_task(name: str, task: object, entry: object, *, selection: str) ->
     observed = {key: entry.get(key) for key in expected}
     if observed != expected:
         raise RuntimeError(f"{name} profile task pins differ from the runtime catalog: {task}")
+    expected_population = _PROFILE_POPULATIONS.get(name, {}).get(task)
+    if expected_population is not None and entry.get("population_rows") != expected_population:
+        raise RuntimeError(
+            f"{name} profile task population differs from its versioned policy: {task}"
+        )
+    if expected_population is not None and task == "mvbench":
+        if entry.get("leaf_populations") != _MVBENCH_LEAF_POPULATIONS:
+            raise RuntimeError(
+                f"{name} profile task leaf populations differ from its versioned policy: {task}"
+            )
     rows = entry.get("rows")
     if selection == "all" and rows is not None:
         raise RuntimeError(f"{name} full-data task must not contain exact rows: {task}")
     if selection == "exact-rows" and (not isinstance(rows, list) or not rows):
         raise RuntimeError(f"{name} exact-row task must contain rows: {task}")
+
+
+def _validate_sampling(
+    name: str,
+    manifest: dict[str, object],
+    tasks: dict[str, object],
+) -> None:
+    sampling = manifest.get("sampling")
+    if name in _AUDITED_SAMPLING_PROFILES and not isinstance(sampling, dict):
+        raise RuntimeError(f"{name} profile must contain a sampling audit")
+    if sampling is None:
+        return
+    if not isinstance(sampling, dict):
+        raise RuntimeError(f"{name} profile sampling audit must contain an object")
+    if sampling != {
+        "schema": _SAMPLING_AUDIT_SCHEMA,
+        "claim_scope": "deterministic-screening-only",
+        "generator": _SAMPLING_GENERATOR,
+    }:
+        raise RuntimeError(f"{name} profile sampling audit policy is unsupported")
+    for task, entry in tasks.items():
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"{name} profile task must contain an object: {task}")
+        _validate_task_sampling(name, task, entry)
+
+
+def _validate_task_sampling(name: str, task: str, entry: dict[str, object]) -> None:
+    selection = entry.get("selection")
+    rows = entry.get("rows")
+    if not isinstance(selection, dict) or not isinstance(rows, list):
+        raise RuntimeError(f"{name} profile task must contain an audited selection: {task}")
+    strata = selection.get("strata")
+    if (
+        selection.get("method") != "systematic-midpoint"
+        or selection.get("stratified_by") != _SAMPLING_STRATA.get(task)
+        or selection.get("index_space") != "within-stratum"
+        or not isinstance(strata, list)
+        or not strata
+        or selection.get("selected_rows") != len(rows)
+        or selection.get("population_rows")
+        != sum(stratum.get("population_rows", 0) for stratum in strata if isinstance(stratum, dict))
+        or len(strata) != sum(isinstance(stratum, dict) for stratum in strata)
+    ):
+        raise RuntimeError(f"{name} profile task sampling audit is invalid: {task}")
+    expected_counts: dict[str, tuple[int, int]] = {}
+    for stratum in strata:
+        stratum_name = stratum.get("name")
+        population_rows = stratum.get("population_rows")
+        selected_rows = stratum.get("selected_rows")
+        if (
+            not isinstance(stratum_name, str)
+            or not stratum_name
+            or not isinstance(population_rows, int)
+            or isinstance(population_rows, bool)
+            or not isinstance(selected_rows, int)
+            or isinstance(selected_rows, bool)
+            or selected_rows < 0
+            or population_rows < selected_rows
+            or stratum_name in expected_counts
+        ):
+            raise RuntimeError(f"{name} profile task sampling stratum is invalid: {task}")
+        expected_counts[stratum_name] = (population_rows, selected_rows)
+
+    actual_indices: dict[str, list[int]] = {stratum: [] for stratum in expected_counts}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError(f"{name} profile task sampling row is invalid: {task}")
+        stratum, local_index = _sampling_identity(task, row)
+        if stratum not in actual_indices:
+            raise RuntimeError(f"{name} profile task sampling stratum differs: {task}")
+        actual_indices[stratum].append(local_index)
+    for stratum, (population_rows, selected_rows) in expected_counts.items():
+        expected = [
+            ((2 * index + 1) * population_rows) // (2 * selected_rows)
+            for index in range(selected_rows)
+        ]
+        if actual_indices[stratum] != expected:
+            raise RuntimeError(f"{name} profile task rows differ from its sampling audit: {task}")
+
+    identity = hashlib.sha256(
+        json.dumps(rows, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    if selection.get("selected_row_identities_sha256") != identity:
+        raise RuntimeError(f"{name} profile task row identity fingerprint differs: {task}")
+    ordered_indices = sorted(index for indices in actual_indices.values() for index in indices)
+    quantiles = {
+        "method": "lower-order-statistic",
+        **{
+            f"p{percentile}": ordered_indices[(len(ordered_indices) - 1) * percentile // 100]
+            for percentile in (0, 25, 50, 75, 100)
+        },
+    }
+    if selection.get("selected_index_quantiles") != quantiles:
+        raise RuntimeError(f"{name} profile task index quantiles differ: {task}")
+
+
+def _sampling_identity(task: str, row: dict[str, object]) -> tuple[str, int]:
+    source_id = row.get("source_sample_id")
+    source_index = row.get("source_row_index")
+    if not isinstance(source_id, str) or not isinstance(source_index, int):
+        raise RuntimeError(f"profile sampling row identity is invalid: {task}")
+    if task == "realworldqa":
+        return "test", source_index
+    if task == "mmmu_val":
+        prefix, separator, item = source_id.rpartition("_")
+        if not separator or not item.isdigit() or not prefix.startswith("validation_"):
+            raise RuntimeError("profile sampling row identity is invalid: mmmu_val")
+        return prefix.removeprefix("validation_"), int(item) - 1
+    if task in {"mvbench", "video_mmmu"}:
+        leaf = row.get("leaf_task")
+        if not isinstance(leaf, str) or not leaf.startswith(f"{task}_"):
+            raise RuntimeError(f"profile sampling row identity is invalid: {task}")
+        return leaf.removeprefix(f"{task}_"), source_index
+    if task in {
+        "videomme",
+        "longvideobench_val_v",
+        "mlvu_dev",
+        "perceptiontest_val_mc",
+    }:
+        stratum = row.get("sampling_stratum")
+        stratum_index = row.get("source_stratum_index")
+        if (
+            not isinstance(stratum, str)
+            or not stratum
+            or not isinstance(stratum_index, int)
+            or isinstance(stratum_index, bool)
+            or stratum_index < 0
+        ):
+            raise RuntimeError(f"profile sampling row identity is invalid: {task}")
+        return stratum, stratum_index
+    raise RuntimeError(f"profile sampling is unsupported for task: {task}")

@@ -35,16 +35,17 @@
     "base_version": "0.7.2",
     "repository": "https://github.com/EvolvingLMMs-Lab/lmms-eval.git",
     "commit": "3e675904f8cba6793de12b91979b04d91754bdf3",
-    "compatibility_patch": "lmms_eval_wandb_0_29.patch",
+    "compatibility_patch": "lmms_eval_compat_3e675904.patch",
     "compatibility_patch_context_lines": 0,
     "compatibility_patch_files": [
       "lmms_eval/loggers/wandb_logger.py",
+      "lmms_eval/models/simple/vllm.py",
       "lmms_eval/tasks/emma/utils.py",
       "lmms_eval/tasks/mathvision/eval_utils.py",
       "lmms_eval/tasks/stare/utils.py",
       "pyproject.toml"
     ],
-    "compatibility_patch_sha256": "960ef2f0d5cea85ccb67e22ab28356ae935f8109876b2f65f88693795549de08",
+    "compatibility_patch_sha256": "c8cbb9614cd80c2a58c08e669fdd5e94558bf9f0bc78a740af0e086cc69faec2",
     "required_paths": [
       "models/chat/qwen3_5.py",
       "tasks/gsm8k/gsm8k.yaml",

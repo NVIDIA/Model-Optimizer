@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_PREFLIGHT_TIMEOUT_SECONDS",
     "HUGGINGFACE_CREDENTIAL_NAMES",
+    "LMMS_EVAL_LEGACY_REVISION",
+    "LMMS_EVAL_QWEN35_NATIVE_REVISION",
     "LMMS_EVAL_REVISION",
     "credential_free_environment",
     "lmms_eval_disabled_judge_environment",
@@ -54,6 +56,13 @@ CI_ENVIRONMENT = json.loads(
 )
 LMMS_EVAL_SOURCE = CI_ENVIRONMENT["lmms_eval"]
 LMMS_EVAL_REVISION = LMMS_EVAL_SOURCE["commit"]
+LMMS_EVAL_LEGACY_REVISION = "15c32bfec165df13c269ddd3cda03b2ed9137825"
+LMMS_EVAL_QWEN35_NATIVE_REVISION = "88b23e2bfa16a1edbc16e9e238ed82130b3a4f56"
+_LMMS_EVAL_REPOSITORY = LMMS_EVAL_SOURCE["repository"]
+_LMMS_EVAL_HISTORICAL_SOURCES = {
+    revision: {"repository": _LMMS_EVAL_REPOSITORY, "commit": revision}
+    for revision in (LMMS_EVAL_LEGACY_REVISION, LMMS_EVAL_QWEN35_NATIVE_REVISION)
+}
 DEFAULT_PREFLIGHT_TIMEOUT_SECONDS = 15 * 60.0
 HUGGINGFACE_CREDENTIAL_NAMES = (
     "HF_TOKEN",
@@ -151,7 +160,8 @@ def positive_float(value: str) -> float:
 
 def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> str:
     """Return the imported evaluator revision after matching its source and patch pin."""
-    revision = _imported_lmms_eval_revision()
+    source = _lmms_eval_source(expected_revision)
+    revision = _imported_lmms_eval_revision(source)
     if revision is not None:
         if revision != expected_revision:
             raise RuntimeError(
@@ -169,10 +179,10 @@ def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> st
         raise RuntimeError("installed lmms-eval revision provenance is unavailable") from error
     if isinstance(provenance, dict):
         try:
-            ci_environment.verify_installed_vcs_source("lmms-eval", LMMS_EVAL_SOURCE)
+            ci_environment.verify_installed_vcs_source("lmms-eval", source)
         except (OSError, subprocess.SubprocessError) as error:
             raise RuntimeError("installed lmms-eval source provenance is unavailable") from error
-        revision = LMMS_EVAL_REVISION
+        revision = expected_revision
     else:
         revision = None
     if revision != expected_revision:
@@ -183,7 +193,17 @@ def verify_lmms_eval_revision(expected_revision: str = LMMS_EVAL_REVISION) -> st
     return revision
 
 
-def _imported_lmms_eval_revision() -> str | None:
+def _lmms_eval_source(expected_revision: str) -> dict[str, object]:
+    """Resolve a current or immutable historical evaluator source contract."""
+    if expected_revision == LMMS_EVAL_REVISION:
+        return LMMS_EVAL_SOURCE
+    try:
+        return _LMMS_EVAL_HISTORICAL_SOURCES[expected_revision]
+    except KeyError as error:
+        raise RuntimeError(f"unsupported lmms-eval revision: {expected_revision}") from error
+
+
+def _imported_lmms_eval_revision(source: dict[str, object]) -> str | None:
     """Verify a source checkout imported directly through ``PYTHONPATH``."""
     spec = importlib.util.find_spec("lmms_eval")
     locations = tuple(spec.submodule_search_locations or ()) if spec is not None else ()
@@ -192,13 +212,13 @@ def _imported_lmms_eval_revision() -> str | None:
     checkout = Path(locations[0]).resolve().parent
     if not (checkout / ".git").exists():
         return None
-    return _verified_checkout_revision(checkout)
+    return _verified_checkout_revision(checkout, source)
 
 
-def _verified_checkout_revision(checkout: Path) -> str | None:
+def _verified_checkout_revision(checkout: Path, source: dict[str, object]) -> str | None:
     """Return the revision of one source-and-patch verified Git checkout."""
     try:
-        return ci_environment.verify_vcs_checkout(checkout, "lmms-eval", LMMS_EVAL_SOURCE)
+        return ci_environment.verify_vcs_checkout(checkout, "lmms-eval", source)
     except (OSError, subprocess.SubprocessError):
         return None
 

@@ -43,6 +43,7 @@ _MODEL_ARG_FIELDS = frozenset(
     {
         "dtype",
         "gpu_memory_utilization",
+        "attention_config",
         "chat_template",
         "max_model_len",
         "trust_remote_code",
@@ -609,6 +610,7 @@ def _result_payload(output_path: Path) -> tuple[dict[str, Any], Path]:
 
 
 def _write_streams(output_path: Path, result: _ProcessResult) -> dict[str, str]:
+    output_path.mkdir(parents=True, exist_ok=True)
     stream_paths = {}
     for stream_name, text in (("stdout", result.stdout), ("stderr", result.stderr)):
         stream_path = output_path / f"{stream_name}.txt"
@@ -769,17 +771,17 @@ def run_lmms_eval_checkpoint(
         checkpoint=str(checkpoint_path),
         output_path=output,
     )
-    command_path = _atomic_json(
-        output / "command.json",
-        {
-            "argv": argv,
-            "env_overrides": sorted(str(key) for key in dict(settings.get("env") or {})),
-            "timeout": timeout,
-        },
-    )
+    command_payload = {
+        "argv": argv,
+        "env_overrides": sorted(str(key) for key in dict(settings.get("env") or {})),
+        "timeout": timeout,
+    }
+    command_path = _atomic_json(output / "command.json", command_payload)
     try:
         result = _run_process(argv, cwd=str(output), env=env, timeout=timeout)
     except LmmsEvalTimeoutError as error:
+        if not command_path.is_file():
+            command_path = _atomic_json(output / "command.json", command_payload)
         captured = _ProcessResult(argv, -1, error.output, error.stderr)
         stream_paths = _write_streams(output, captured)
         _annotate_error(error, command_path=command_path, stream_paths=stream_paths)

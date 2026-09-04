@@ -19,9 +19,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import random
 import subprocess
 import sys
-from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType
@@ -40,6 +40,7 @@ from examples.puzzletron.evaluation.vlm import (
 )
 from examples.puzzletron.evaluation.vlm import model as vlm_model
 from examples.puzzletron.evaluation.vlm import run as evaluation
+from modelopt.torch.puzzletron.evaluation import lmms
 
 _QWEN_CONFIG = {
     "architectures": ["Qwen3_5ForConditionalGeneration"],
@@ -55,6 +56,27 @@ _QWEN_CONFIG = {
     },
 }
 _TASK_CONFIGS = {name: item.task_config for name, item in profile.VLM_BENCHMARK_DATASETS.items()}
+
+
+def _homogeneous_qwen_block_configs() -> list[dict[str, object]]:
+    block = {
+        "subblock_configs": [
+            {
+                "kind": "attention",
+                "name": "attention",
+                "no_op": False,
+                "num_kv_heads": 2,
+                "num_query_heads": 8,
+            },
+            {
+                "kind": "ffn",
+                "name": "ffn",
+                "no_op": False,
+                "intermediate_size": 3584,
+            },
+        ]
+    }
+    return [json.loads(json.dumps(block)) for _ in range(24)]
 
 
 def test_direct_launcher_does_not_shadow_standard_library_profile():
@@ -77,8 +99,7 @@ def test_direct_launcher_does_not_shadow_standard_library_profile():
     )
 
 
-def _write_checkpoint(root: Path) -> Path:
-    model = root / "model"
+def _write_checkpoint_at(model: Path) -> Path:
     model.mkdir()
     (model / "config.json").write_text(json.dumps(_QWEN_CONFIG) + "\n")
     (model / "preprocessor_config.json").write_text("{}\n")
@@ -87,6 +108,21 @@ def _write_checkpoint(root: Path) -> Path:
         "<think>\n\n</think>\n\n{% else %}<think>\n{% endif %}"
     )
     return model
+
+
+def _write_checkpoint(root: Path) -> Path:
+    return _write_checkpoint_at(root / "model")
+
+
+def _write_core3_teacher_snapshot(root: Path) -> tuple[Path, Path]:
+    hf_home = root / "hf-home"
+    snapshot = (
+        hf_home
+        / "hub/models--Qwen--Qwen3.5-0.8B/snapshots"
+        / "2fc06364715b967f1860aea9cf38778875588b17"
+    )
+    snapshot.parent.mkdir(parents=True)
+    return _write_checkpoint_at(snapshot), hf_home
 
 
 def test_no_think_template_is_local_and_requires_checkpoint_switch(tmp_path):
@@ -132,6 +168,59 @@ def test_chat_template_fingerprint_accepts_file_and_inline_content(tmp_path):
     assert evaluator._chat_template_sha256({"model_args": {"chat_template": content}}) == expected
 
 
+def test_mmmu_parser_audit_is_attached_to_normalized_result(tmp_path):
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    task_name = suites.task_name("mmmu_val")
+    result_path = attempt / "summary.json"
+    result_path.write_text(json.dumps({"sample_counts": {task_name: 2}}))
+    raw_result_path = attempt / "20260903_120000_results.json"
+    raw_result_path.write_text("{}\n")
+    sample_path = attempt / f"20260903_120000_samples_{task_name}.jsonl"
+    sample_path.write_text(
+        "\n".join(
+            json.dumps({"mmmu_acc": {"parser_status": [status]}})
+            for status in ("parsed", "fallback_random")
+        )
+        + "\n"
+    )
+    (attempt / f"20260903_110000_samples_{task_name}.jsonl").write_text("{not-json}\n")
+
+    evaluator._attach_mmmu_parser_audit(
+        {"raw_result_path": str(raw_result_path), "result_path": str(result_path)}
+    )
+
+    audit = json.loads(result_path.read_text())["mmmu_parser_audit"]
+    assert audit["sample_count"] == 2
+    assert audit["status_counts"] == {"fallback_random": 1, "parsed": 1}
+    assert audit["sample_logs"] == [
+        {
+            "path": sample_path.name,
+            "sha256": hashlib.sha256(sample_path.read_bytes()).hexdigest(),
+            "size": sample_path.stat().st_size,
+        }
+    ]
+
+
+def test_mmmu_parser_audit_rejects_unlabeled_sample(tmp_path):
+    task_name = suites.task_name("mmmu_val")
+    result_path = tmp_path / "summary.json"
+    result_path.write_text(json.dumps({"sample_counts": {task_name: 1}}))
+    raw_result_path = tmp_path / "new_results.json"
+    raw_result_path.write_text("{}\n")
+    (tmp_path / f"old_samples_{task_name}.jsonl").write_text(
+        json.dumps({"mmmu_acc": {"parser_status": ["parsed"]}}) + "\n"
+    )
+    (tmp_path / f"new_samples_{task_name}.jsonl").write_text(
+        json.dumps({"mmmu_acc": {"parsed_pred": ["A"]}}) + "\n"
+    )
+
+    with pytest.raises(RuntimeError, match="no valid parser status"):
+        evaluator._attach_mmmu_parser_audit(
+            {"raw_result_path": str(raw_result_path), "result_path": str(result_path)}
+        )
+
+
 def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
     checkpoint_path = _write_checkpoint(tmp_path)
     config_path = checkpoint_path / "config.json"
@@ -139,11 +228,18 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
     config.update(
         architectures=["AnyModel"],
         base_architecture="Qwen3_5ForConditionalGeneration",
+        block_configs=_homogeneous_qwen_block_configs(),
     )
     config_path.write_text(json.dumps(config) + "\n")
 
     vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
 
+    config.pop("block_configs")
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="cannot prove.*homogeneous"):
+        vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+    config["block_configs"] = _homogeneous_qwen_block_configs()
     config["base_architecture"] = "OtherForConditionalGeneration"
     config_path.write_text(json.dumps(config) + "\n")
     with pytest.raises(ValueError, match="AnyModel base_architecture"):
@@ -156,6 +252,35 @@ def test_checkpoint_contract_accepts_only_matching_realized_anymodel(tmp_path):
     config_path.write_text(json.dumps(config) + "\n")
     with pytest.raises(ValueError, match="AnyModel base_architecture"):
         vlm_model.verify_checkpoint(checkpoint_path, profile="VLM benchmark")
+
+
+def test_checkpoint_contract_routes_heterogeneous_anymodel_to_vllm(tmp_path):
+    checkpoint_path = _write_checkpoint(tmp_path)
+    config_path = checkpoint_path / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        architectures=["AnyModel"],
+        base_architecture="Qwen3_5ForConditionalGeneration",
+        block_configs=_homogeneous_qwen_block_configs(),
+    )
+    config["block_configs"][19]["subblock_configs"][0]["num_query_heads"] = 6
+    config["text_config"]["per_layer_config"] = {
+        "19": {"num_attention_heads": 6, "num_key_value_heads": 2}
+    }
+    config_path.write_text(json.dumps(config) + "\n")
+
+    with pytest.raises(ValueError, match="native qwen3_5 backend cannot load"):
+        vlm_model.verify_checkpoint(
+            checkpoint_path,
+            profile="VLM benchmark",
+            model_backend="qwen3_5",
+        )
+
+    vlm_model.verify_checkpoint(
+        checkpoint_path,
+        profile="VLM benchmark",
+        model_backend="vllm",
+    )
 
 
 def test_checkpoint_contract_accepts_other_positive_qwen35_geometry(tmp_path):
@@ -222,7 +347,9 @@ def _write_lmms_tasks(root: Path, tasks: tuple[str, ...]) -> Path:
 
 
 def _use_offline_fakes(monkeypatch, lmms_root: Path) -> None:
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     monkeypatch.setattr(tasks, "_lmms_eval_root", lambda: lmms_root)
+    monkeypatch.setattr(preflight.importlib.util, "find_spec", lambda _name: object())
     monkeypatch.setattr(
         checkpoint,
         "verify_lmms_eval_revision",
@@ -241,6 +368,15 @@ def _use_offline_fakes(monkeypatch, lmms_root: Path) -> None:
             "status": "passed",
         },
     )
+
+
+def _write_fake_mmmu_artifacts(result_path: Path) -> Path:
+    result_path.write_text(json.dumps({"sample_counts": {suites.task_name("mmmu_val"): 1}}) + "\n")
+    raw_result_path = result_path.parent / "run_results.json"
+    raw_result_path.write_text("{}\n")
+    sample_path = result_path.parent / f"run_samples_{suites.task_name('mmmu_val')}.jsonl"
+    sample_path.write_text(json.dumps({"mmmu_acc": {"parser_status": ["parsed"]}}) + "\n")
+    return raw_result_path
 
 
 def _full_inputs(monkeypatch, tmp_path):
@@ -298,7 +434,9 @@ def _quick_manifest(path: Path) -> Path:
     return path
 
 
-def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, tmp_path, capsys):
+def test_short_profile_materializes_pinned_tasks_and_native_qwen_backend(
+    monkeypatch, tmp_path, capsys
+):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -306,28 +444,24 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     hf_home = tmp_path / "hf-home"
     hf_home.mkdir()
     output = tmp_path / "results"
-    for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
-        monkeypatch.setenv(name, f"inherited-{name.lower()}")
     calls = []
 
     def fake_runner(checkpoint_path, *, output_root, settings):
         calls.append(
             {
                 "checkpoint": checkpoint_path,
-                "credentials": {
-                    name: os.environ.get(name) for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES
-                },
                 "output_root": output_root,
                 "settings": settings,
             }
         )
         result_path = output_root / "result.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
+        raw_result_path = _write_fake_mmmu_artifacts(result_path)
         return {
             "attempt": len(calls),
             "metrics": {"accuracy": len(calls) / 10},
             "output_root": str(output_root),
+            "raw_result_path": str(raw_result_path),
             "result_path": str(result_path),
         }
 
@@ -346,17 +480,16 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
     assert evaluation.main(argv) == 0
 
     result = json.loads(capsys.readouterr().out)
-    assert result["schema"] == "modelopt.vlm-evaluation-result/v1"
     report = result["preflight"]
-    assert report["source_tasks"] == list(source_tasks)
-    assert report["short_repetitions"] == 2
-    assert report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_REVISION
     generated = json.loads(
         (output / "task_configs/modelopt_vlm_benchmark_realworldqa.yaml").read_text()
     )
     assert generated["dataset_path"].endswith(
         profile.VLM_BENCHMARK_DATASETS["realworldqa"].revision
     )
+    assert generated["generation_kwargs"]["max_new_tokens"] == 16
+    mmmu_text = (output / "task_configs/modelopt_vlm_benchmark_mmmu_val.yaml").read_text()
+    assert '"max_new_tokens": 128' in mmmu_text
     expected_tasks = (
         "modelopt_vlm_benchmark_realworldqa",
         "modelopt_vlm_benchmark_mmmu_val",
@@ -366,36 +499,27 @@ def test_short_profile_materializes_pinned_tasks_and_vllm_backend(monkeypatch, t
         output / "short-repetition-1",
         output / "short-repetition-2",
     ]
-    assert all(not any(call["credentials"].values()) for call in calls)
     assert all(call["settings"]["tasks"] == ",".join(expected_tasks) for call in calls)
     assert [run["attempt"] for run in result["runs"]] == [1, 2]
-    for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES:
-        assert os.environ[name] == f"inherited-{name.lower()}"
     settings = calls[0]["settings"]
-    assert settings["model"] == "vllm"
-    assert settings["log_samples"] is True
-    assert settings["checkpoint_arg"] == "model"
-    assert settings["reasoning_parser"] == "qwen3"
-    chat_template = Path(settings["model_args"]["chat_template"])
-    assert chat_template.read_text().startswith("{%- set enable_thinking = false %}\n")
-    assert "topology" not in settings
-    assert settings["env"]["HF_HUB_OFFLINE"] == "1"
-    assert settings["env"]["API_TYPE"] == "openai"
-    assert settings["env"]["MODEL_VERSION"] == "modelopt-disabled-lmms-eval-judge"
-    assert settings["env"]["OPENAI_API_KEY"] == "modelopt-disabled-lmms-eval-judge"
-    assert settings["env"]["OPENAI_API_URL"] == "http://127.0.0.1:9"
-    assert report["model_backend"] == settings["model"]
-    assert report["backend_limitations"] == [
-        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
-    ]
-    assert report["sample_limit"] == settings["limit"]
-    assert report["timeout_seconds"] == settings["timeout_seconds"]
-    assert report["frame_policy"] == {
-        "reader": settings["env"]["FORCE_QWENVL_VIDEO_READER"],
-        "fps": settings["model_args"]["fps"],
-        "max_frames": settings["model_args"]["max_frame_num"],
+    assert settings["model"] == "qwen3_5"
+    assert report["backend_limitations"] == []
+    assert report["output_budget_contract"] == {
+        "mmmu_val": {
+            "adapter": "qwen3_5",
+            "effective_max_new_tokens": 128,
+            "limitation": None,
+            "requested_max_new_tokens": 128,
+            "resolution": "task_max_new_tokens_overrides_adapter_default",
+        },
+        "realworldqa": {
+            "adapter": "qwen3_5",
+            "effective_max_new_tokens": 16,
+            "limitation": None,
+            "requested_max_new_tokens": 16,
+            "resolution": "task_max_new_tokens_overrides_adapter_default",
+        },
     }
-    assert report["generation_policy"] == settings["gen_kwargs"]
 
 
 @pytest.mark.parametrize("suite", ["short", suites.TASK_PREFIX100_REPEAT2_SUITE])
@@ -412,10 +536,8 @@ def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, s
     def fake_runner(checkpoint_path, *, output_root, settings):
         calls.append(output_root)
         result_path = output_root / "attempt" / "summary.json"
-        raw_result_path = output_root / "attempt" / "samples.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
-        raw_result_path.write_text("{}\n")
+        raw_result_path = _write_fake_mmmu_artifacts(result_path)
         return {
             "metrics": {"accuracy": len(calls) / 10},
             "raw_result_path": str(raw_result_path),
@@ -472,10 +594,8 @@ def test_short_profile_reruns_stale_completed_repetitions(
     def fake_runner(checkpoint_path, *, output_root, settings):
         calls.append(output_root)
         result_path = output_root / "attempt" / "summary.json"
-        raw_result_path = output_root / "attempt" / "samples.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result_path.write_text("{}\n")
-        raw_result_path.write_text("{}\n")
+        raw_result_path = _write_fake_mmmu_artifacts(result_path)
         return {
             "metrics": {"accuracy": 0.5},
             "raw_result_path": str(raw_result_path),
@@ -500,17 +620,19 @@ def test_short_profile_reruns_stale_completed_repetitions(
     if corruption == "checkpoint":
         (model / "preprocessor_config.json").write_text('{"changed": true}\n')
     elif corruption == "artifact":
-        (output / "short-repetition-1" / "attempt" / "samples.json").unlink()
+        (output / "short-repetition-1" / "attempt" / "run_results.json").unlink()
     elif corruption == "result":
         (output / "short-repetition-1" / "attempt" / "summary.json").unlink()
     else:
+        original_backend_policy = preflight._backend_policy
 
-        def changed_chat_template(_checkpoint_path, output_directory):
-            target = output_directory / "modelopt_qwen35_no_think.jinja"
-            target.write_text("changed template\n")
-            return target
+        def changed_backend_policy(profile_contract):
+            return {
+                **original_backend_policy(profile_contract),
+                "attention_implementation": "eager",
+            }
 
-        monkeypatch.setattr(vlm_model, "no_think_chat_template", changed_chat_template)
+        monkeypatch.setattr(preflight, "_backend_policy", changed_backend_policy)
 
     evaluation.evaluate(args)
     assert len(calls) == expected_calls
@@ -544,7 +666,11 @@ def test_realworldqa_mmmu_prefix100_policy_is_explicit_and_repeated():
     policy = suites.execution_policy(suite, timeout_seconds=14400)
     assert policy["limit"] == 100
     assert policy["repetitions"] == 2
-    assert policy["generation"] == {"temperature": 0, "do_sample": False}
+    assert policy["generation"] == {
+        "enable_thinking": False,
+        "temperature": 0,
+        "do_sample": False,
+    }
     assert suites.execution_policy("full", timeout_seconds=None)["limit"] is None
     assert suites.execution_policy("full-v1", timeout_seconds=None)["limit"] is None
 
@@ -576,46 +702,137 @@ def test_deprecated_suite_alias_records_the_canonical_identity(monkeypatch, tmp_
     assert prepared.report["suite"] == suites.TASK_PREFIX100_REPEAT2_SUITE
 
 
-def test_versioned_profile_contracts_pin_selection_and_fingerprints(tmp_path):
+def test_versioned_profile_contracts_pin_backends_and_fingerprints():
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {
-        "short-v1": "3b0803c0deff0873d2c8e0963f1167dfbbf2ef7309b5eb33f089aa2048f6cf91",
-        "short-native-v1": "aca78320b188c4c6f41a7e5ec0017a0c738b98ec797e9f2f6f9f1aabce34dfa7",
-        "short-all-native-v1": "88074cec92cd6aa972cd2e48ddc6adbaa84ab26b24e36be2e3842b71317cdd7e",
-        "full-v1": "5b0849975f65e4bbbdc93d52ff2866d54968f5cc3de6d0928077e3d6ab320e6a",
+        "short-v1": "984c23ef0e7c05248895ece69c12327b3cdbb45051189ec540f7fc1ada763177",
+        "short-native-v1": "217b8ba8fd1df0002407e75f6e7d5588e3a871a6df2ad24117b66377894b2f35",
+        "short-native-v2": "d89134cdf4dfaaafe86b2fe9512bb183fa6528953fb5909e865bb961e95d4ee7",
+        "short-vllm-v2": "fc8a0a874fa2220610c50c33ee07fee4ce9e28c4032c0becdbc0059e1e1a58e8",
+        "smoke-native-v1": "734aea43cefa14776e016693a6c5ad2e32efed33fada2b3cdb856ce0cafa3271",
+        "smoke-vllm-v1": "abc0c2de8576717b50695e4f91ac239459a0f2789f45e01cddbe6d4976ead0e7",
+        "short-all-native-v1": "06b17ea010ee0cd789e49c581bcb3be4a7624c8471b4b3102bfa2922e0929e68",
+        "short-all-native-v2": "5db871b4cdd2f713161237f762619172ec7459318f1017de359faf96ff42fd36",
+        "full-v1": "29b1db6123ea3e16a9c5693e81e0f31607ff8a08e436681c66c32bf5dcc7e67a",
+        "core3-full-native-v1": (
+            "82b053bcf74d7cfe5eab2bbbb94083b79c4ac16c0fff6f5a824a5d8b1079e06c"
+        ),
+        "core3-full-vllm-v1": ("6423b6fea1d988a4f9c79572bf17e47ad1d851760a90ee775033deeb68b700ec"),
     }
 
-    short = profiles["short-v1"]
-    short_all_native = profiles["short-all-native-v1"]
-    assert {
-        task: len(entry["rows"]) for task, entry in short_all_native.manifest["tasks"].items()
-    } == {
-        "realworldqa": 64,
-        "mmmu_val": 120,
-        "mvbench": 160,
-        "video_mmmu": 72,
-        "videomme": 72,
-        "longvideobench_val_v": 68,
-        "mlvu_dev": 70,
-        "perceptiontest_val_mc": 64,
-    }
-    assert short.exact_rows is not None
+    current_short = profiles["short-native-v2"]
+    smoke = profiles["smoke-native-v1"]
+    materialized_short = profiles["short-vllm-v2"]
+    materialized_smoke = profiles["smoke-vllm-v1"]
+    assert current_short.manifest["lmms_eval_revision"] == checkpoint.LMMS_EVAL_REVISION
+    assert current_short.manifest["backend"]["name"] == "qwen3_5"
+    assert materialized_short.manifest["backend"]["name"] == "vllm"
+    assert materialized_short.exact_rows == current_short.exact_rows
+    assert materialized_smoke.manifest["backend"]["name"] == "vllm"
+    assert materialized_smoke.manifest["backend"]["enforce_eager"] is True
+    assert materialized_smoke.exact_rows == smoke.exact_rows
     assert profiles["full-v1"].exact_rows is None
-    mmmu_rows = short.manifest["tasks"]["mmmu_val"]["rows"]
-    assert Counter(row["source_row_index"] // 30 for row in mmmu_rows) == Counter(
-        dict.fromkeys(range(30), 4)
-    )
 
-    exact_rows = short.exact_rows
-    assert exact_rows is not None
-    path = tmp_path / "short-v1-rows.json"
-    path.write_text(json.dumps(exact_rows))
-    validated = suites.load_quick_manifest(path)
-    assert suites.manifest_sha256(validated)
+
+@pytest.mark.parametrize(
+    ("name", "backend"),
+    [
+        (
+            "core3-full-native-v1",
+            {
+                "attention_implementation": "sdpa",
+                "enable_thinking": False,
+                "name": "qwen3_5",
+            },
+        ),
+        (
+            "core3-full-vllm-v1",
+            {"enable_thinking": False, "name": "vllm", "reasoning_parser": "qwen3"},
+        ),
+    ],
+)
+def test_core3_full_teacher_profiles_pin_paired_population_and_runtime(name, backend):
+    contract = contracts.load_profile(name)
+
+    assert contract.manifest["model"] == {
+        "repository": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    }
+    assert contract.manifest["lmms_eval_revision"] == checkpoint.LMMS_EVAL_REVISION
+    assert contract.manifest["backend"] == backend
+    assert contract.manifest["generation"] == {"do_sample": False, "temperature": 0}
+    assert contract.manifest["seed"] == 42
+    assert contract.manifest["repetitions"] == 1
+    assert contract.manifest["batch_size"] == 1
+    assert contract.manifest["selection"] == "all"
+    assert contract.exact_rows is None
+    assert {
+        task: entry["population_rows"] for task, entry in contract.manifest["tasks"].items()
+    } == {"realworldqa": 765, "mmmu_val": 900, "mvbench": 4000}
+    assert contract.manifest["tasks"]["mvbench"]["leaf_populations"] == dict.fromkeys(
+        suites.MVBENCH_LEAF_TASKS, 200
+    )
+    assert {
+        task: entry["dataset_revision"] for task, entry in contract.manifest["tasks"].items()
+    } == {
+        task: profile.VLM_BENCHMARK_DATASETS[task].revision
+        for task in ("realworldqa", "mmmu_val", "mvbench")
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "field", "value", "message"),
+    [
+        (
+            "core3-full-native-v1",
+            "backend",
+            {"enable_thinking": False, "name": "vllm", "reasoning_parser": "qwen3"},
+            "backend differs",
+        ),
+        (
+            "core3-full-vllm-v1",
+            "model",
+            {"repository": "Qwen/Qwen3.5-0.8B", "revision": "different"},
+            "model pin differs",
+        ),
+        ("core3-full-native-v1", "population", 764, "population differs"),
+    ],
+)
+def test_core3_full_teacher_profiles_reject_contract_overrides(
+    monkeypatch, tmp_path, name, field, value, message
+):
+    for profile_name in ("core3-full-native-v1", "core3-full-vllm-v1"):
+        source = contracts._PROFILE_ROOT / f"{profile_name}.json"
+        (tmp_path / source.name).write_text(source.read_text())
+    manifest_path = tmp_path / f"{name}.json"
+    manifest = json.loads(manifest_path.read_text())
+    if field == "population":
+        manifest["tasks"]["realworldqa"]["population_rows"] = value
+    else:
+        manifest[field] = value
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(contracts, "_PROFILE_ROOT", tmp_path)
+
+    with pytest.raises(RuntimeError, match=message):
+        contracts.load_profile(name)
+
+
+def test_audited_profile_rejects_rows_that_drift_from_systematic_selection(monkeypatch, tmp_path):
+    for name in ("short-v1", "short-native-v1", "short-native-v2"):
+        source = contracts._PROFILE_ROOT / f"{name}.json"
+        (tmp_path / source.name).write_text(source.read_text())
+    manifest_path = tmp_path / "short-native-v2.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["tasks"]["realworldqa"]["rows"][0]["source_row_index"] = 6
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(contracts, "_PROFILE_ROOT", tmp_path)
+
+    with pytest.raises(RuntimeError, match="rows differ from its sampling audit"):
+        contracts.load_profile("short-native-v2")
 
 
 def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
-    contract = contracts.load_profile("short-all-native-v1")
+    contract = contracts.load_profile("short-all-native-v2")
     exact_rows = contract.exact_rows
     assert exact_rows is not None
     validated = suites.validate_exact_rows_manifest(
@@ -633,14 +850,18 @@ def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
     spec.loader.exec_module(selectors)
 
     class Documents:
-        def __init__(self, size):
+        def __init__(self, size, *, columns=None, rows=None):
             self.size = size
+            self.columns = columns or {}
+            self.rows = rows or {}
 
         def __len__(self):
             return self.size
 
-        def __getitem__(self, _index):
-            return {}
+        def __getitem__(self, index):
+            if isinstance(index, str):
+                return self.columns[index]
+            return self.rows.get(index, {})
 
         def select(self, indices):
             return list(indices)
@@ -654,8 +875,101 @@ def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
     assert (
         selectors.select_modelopt_vlm_benchmark_video_mmmu_adaptation(Documents(300)) == adaptation
     )
-    videomme = [row["source_row_index"] for row in tasks_manifest["videomme"]["rows"]]
-    assert selectors.select_modelopt_vlm_benchmark_videomme(Documents(2700)) == videomme
+    with pytest.raises(ValueError, match="source population drifted"):
+        selectors.select_modelopt_vlm_benchmark_video_mmmu_adaptation(Documents(299))
+    with pytest.raises(ValueError, match="source population drifted"):
+        selectors.select_modelopt_vlm_benchmark_realworldqa(Documents(764))
+    with pytest.raises(ValueError, match="source population drifted"):
+        selectors.select_modelopt_vlm_benchmark_mvbench_action_sequence(Documents(199))
+
+    mmmu_task = tasks_manifest["mmmu_val"]
+    mmmu_ids = [
+        f"validation_{stratum['name']}_{index + 1}"
+        for stratum in mmmu_task["selection"]["strata"]
+        for index in range(stratum["population_rows"])
+    ]
+    mmmu_rows = {
+        row["source_row_index"]: {"id": row["source_sample_id"]} for row in mmmu_task["rows"]
+    }
+    mmmu_documents = Documents(900, columns={"id": mmmu_ids}, rows=mmmu_rows)
+    assert selectors.select_modelopt_vlm_benchmark_mmmu_val(mmmu_documents) == [
+        row["source_row_index"] for row in mmmu_task["rows"]
+    ]
+    mmmu_ids[0] = mmmu_ids[30]
+    with pytest.raises(ValueError, match="source strata drifted"):
+        selectors.select_modelopt_vlm_benchmark_mmmu_val(mmmu_documents)
+
+    assert callable(selectors.select_modelopt_vlm_benchmark_videomme)
+
+
+@pytest.mark.parametrize("task", ["videomme", "mlvu_dev", "perceptiontest_val_mc"])
+@pytest.mark.parametrize(
+    ("drift", "expected_rank", "observed_strata"),
+    [
+        (None, 1, ["alpha|kind", "beta|kind", "alpha|kind", "beta|kind"]),
+        ("selected stratum", 1, ["alpha|kind", "beta|kind", "beta|kind", "alpha|kind"]),
+        ("local rank", 0, ["alpha|kind", "beta|kind", "alpha|kind", "beta|kind"]),
+    ],
+)
+def test_audited_selector_checks_selected_stratum_and_local_rank(
+    tmp_path, task, drift, expected_rank, observed_strata
+):
+    expected_stratum = "alpha" if task == "mlvu_dev" else "alpha|kind"
+    other_stratum = "beta" if task == "mlvu_dev" else "beta|kind"
+    upstream_id = "video:q" if task == "perceptiontest_val_mc" else "q"
+    manifest = {
+        "tasks": {
+            task: {
+                "rows": [
+                    {
+                        "source_row_index": 2,
+                        "source_sample_id": f"{task}:2",
+                        "sampling_stratum": expected_stratum,
+                        "source_stratum_index": expected_rank,
+                        "upstream_sample_id": upstream_id,
+                    }
+                ],
+                "selection": {
+                    "population_rows": 4,
+                    "strata": [
+                        {"name": expected_stratum, "population_rows": 2},
+                        {"name": other_stratum, "population_rows": 2},
+                    ],
+                },
+            }
+        }
+    }
+    tasks._write_quick_selection_module(tmp_path, manifest)
+    spec = importlib.util.spec_from_file_location(
+        f"sampling_position_{task}_{drift}", tmp_path / "modelopt_quick_selection.py"
+    )
+    assert spec is not None and spec.loader is not None
+    selectors = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selectors)
+
+    class Documents:
+        def __len__(self):
+            return 4
+
+        def __getitem__(self, index):
+            if isinstance(index, str):
+                if task == "mlvu_dev":
+                    return [value.split("|", 1)[0] for value in observed_strata]
+                column = 0 if index in {"duration", "area"} else 1
+                return [value.split("|", 1)[column] for value in observed_strata]
+            if task == "perceptiontest_val_mc":
+                return {"video_name": "video", "question_id": "q"}
+            return {"question_id": "q"}
+
+        def select(self, indices):
+            return list(indices)
+
+    selector = getattr(selectors, f"select_{suites.task_name(task)}")
+    if drift is None:
+        assert selector(Documents()) == [2]
+    else:
+        with pytest.raises(ValueError, match="source sampling positions drifted"):
+            selector(Documents())
 
 
 def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp_path):
@@ -681,6 +995,12 @@ def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp
     assert prepared.report["profile_fingerprint"] == contract.fingerprint
     assert prepared.report["source_tasks"] == list(contract.source_tasks)
     assert prepared.report["quick_selected_rows"] == 344
+    assert prepared.report["quick_row_identities"] == suites.manifest_row_identities(
+        prepared.quick_manifest
+    )
+    assert prepared.report["quick_task_denominators"] == suites.manifest_task_denominators(
+        prepared.quick_manifest
+    )
 
 
 def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
@@ -693,13 +1013,14 @@ def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "short-native-v1",
+            "short-all-native-v2",
             "--hf-home",
             str(hf_home),
         ]
     )
 
     prepared = preflight.prepare(args)
+    (tmp_path / "tasks").mkdir()
     settings = preflight.settings(
         args,
         tasks_root=tmp_path / "tasks",
@@ -720,6 +1041,252 @@ def test_native_profile_builds_qwen35_backend_settings(monkeypatch, tmp_path):
     }
     assert "reasoning_parser" not in settings
     assert not (tmp_path / "tasks/modelopt_qwen35_no_think.jinja").exists()
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "expected_eager"),
+    [("smoke-vllm-v1", True), ("short-vllm-v2", None)],
+)
+def test_vllm_profile_forwards_runtime_settings(
+    monkeypatch, tmp_path, profile_name, expected_eager
+):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            profile_name,
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    settings = preflight.settings(
+        args,
+        tasks_root=tasks_root,
+        configured_tasks=("modelopt_vlm_benchmark_realworldqa",),
+        prepared=prepared,
+    )
+    argv, _, _ = lmms._build_command(
+        settings,
+        checkpoint=str(model),
+        output_path=tmp_path / "lmms-results",
+    )
+    model_args = argv[argv.index("--model_args") + 1]
+
+    assert settings["model_args"].get("enforce_eager") is expected_eager
+    assert ("enforce_eager=True" in model_args) is (expected_eager is True)
+    assert settings["model_args"]["attention_config"] == {"flash_attn_version": 2}
+    assert 'attention_config={"flash_attn_version":2}' in model_args
+
+
+@pytest.mark.parametrize("name", ["core3-full-native-v1", "core3-full-vllm-v1"])
+def test_core3_full_teacher_profiles_preserve_backend_prompt_policy(monkeypatch, tmp_path, name):
+    model, hf_home = _write_core3_teacher_snapshot(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("mmmu_val",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            name,
+            "--profile-task",
+            "mmmu_val",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    settings = preflight.settings(
+        args,
+        tasks_root=tasks_root,
+        configured_tasks=("modelopt_vlm_benchmark_mmmu_val",),
+        prepared=prepared,
+    )
+
+    assert prepared.report["model_pin"] == {
+        "repository": "Qwen/Qwen3.5-0.8B",
+        "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    }
+    assert prepared.report["profile_population_rows"] == {"mmmu_val": 900}
+    assert prepared.report["output_budget_contract"]["mmmu_val"]["effective_max_new_tokens"] == 128
+    if name == "core3-full-native-v1":
+        assert settings["model"] == "qwen3_5"
+        assert prepared.report["backend_limitations"] == []
+    else:
+        assert settings["model"] == "vllm"
+        assert prepared.report["output_budget_contract"]["mmmu_val"] == {
+            "adapter": "vllm",
+            "effective_max_new_tokens": 128,
+            "limitation": (
+                "the pinned generic vLLM adapter treats its model-level max_new_tokens as a floor"
+            ),
+            "requested_max_new_tokens": 128,
+            "resolution": "max(task_max_new_tokens, model_max_new_tokens_floor=1)",
+        }
+        assert prepared.report["backend_limitations"] == [
+            "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+            "pinned generic vLLM max_new_tokens is a model-level lower bound",
+        ]
+
+
+def test_core3_full_teacher_profile_population_expectations_follow_group_shard(
+    monkeypatch, tmp_path
+):
+    model, hf_home = _write_core3_teacher_snapshot(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("mvbench",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    media = hf_home / profile.VLM_BENCHMARK_DATASETS["mvbench"].media_dir
+    media.mkdir(parents=True)
+    (media / "sample").write_bytes(b"media")
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "core3-full-native-v1",
+            "--profile-task",
+            "mvbench",
+            "--profile-task-shard",
+            "3/8",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    expected_leaves = ("episodic_reasoning", "moving_direction", "egocentric_navigation")
+
+    assert prepared.profile_task_leaves == expected_leaves
+    assert evaluator._expected_task_populations(prepared, ("modelopt_vlm_benchmark_mvbench",)) == {
+        suites.task_name("mvbench", leaf=leaf): 200 for leaf in expected_leaves
+    }
+
+
+def test_core3_full_teacher_profile_accepts_snapshot_symlink(monkeypatch, tmp_path):
+    snapshot, hf_home = _write_core3_teacher_snapshot(tmp_path)
+    checkpoint_alias = tmp_path / "teacher"
+    checkpoint_alias.symlink_to(snapshot, target_is_directory=True)
+    lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(checkpoint_alias),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "core3-full-native-v1",
+            "--profile-task",
+            "realworldqa",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+
+    assert prepared.source_tasks == ("realworldqa",)
+    assert prepared.report["model_pin"]["revision"] == snapshot.name
+
+
+@pytest.mark.parametrize("kind", ["untracked-copy", "wrong-revision"])
+def test_core3_full_teacher_profile_rejects_unpinned_checkpoint(monkeypatch, tmp_path, kind):
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+    if kind == "untracked-copy":
+        model = _write_checkpoint(tmp_path)
+    else:
+        parent = hf_home / "hub/models--Qwen--Qwen3.5-0.8B/snapshots"
+        parent.mkdir(parents=True)
+        model = _write_checkpoint_at(parent / "different")
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "core3-full-native-v1",
+            "--profile-task",
+            "realworldqa",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires the exact local Hub snapshot"):
+        preflight.prepare(args)
+
+
+def test_core3_full_teacher_profile_rejects_settings_override(monkeypatch, tmp_path):
+    model, hf_home = _write_core3_teacher_snapshot(tmp_path)
+    lmms_root = _write_lmms_tasks(tmp_path, ("realworldqa",))
+    _use_offline_fakes(monkeypatch, lmms_root)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "core3-full-native-v1",
+            "--profile-task",
+            "realworldqa",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="do not allow settings overrides"):
+        evaluator.evaluate(args, settings_overrides={"model": "vllm"})
+
+
+def test_historical_short_profile_preserves_vllm_backend(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "short-v1",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    (tmp_path / "tasks").mkdir()
+    settings = preflight.settings(
+        args,
+        tasks_root=tmp_path / "tasks",
+        configured_tasks=("modelopt_vlm_benchmark_realworldqa",),
+        prepared=prepared,
+    )
+
+    assert prepared.report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_LEGACY_REVISION
+    assert settings["model"] == "vllm"
+    assert settings["checkpoint_arg"] == "model"
+    assert settings["reasoning_parser"] == "qwen3"
+    assert settings["model_args"]["max_frame_num"] == 32
+    assert Path(settings["model_args"]["chat_template"]).exists()
 
 
 def test_versioned_profile_rejects_seed_override(monkeypatch, tmp_path):
@@ -787,6 +1354,8 @@ def test_all_row_profile_task_preserves_contract_identity(monkeypatch, tmp_path)
 
     assert prepared.source_tasks == (task,)
     assert prepared.report["quick_selected_rows"] is None
+    assert prepared.report["quick_row_identities"] is None
+    assert prepared.report["quick_task_denominators"] is None
     assert (
         prepared.report["profile_fingerprint"] == contracts.load_profile(profile_name).fingerprint
     )
@@ -801,7 +1370,7 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "short-all-native-v1",
+            "short-all-native-v2",
             "--profile-task",
             "mvbench",
             "--profile-task-shard",
@@ -821,13 +1390,40 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
     assert {row["leaf_task"] for row in manifest_rows} == {
         f"mvbench_{leaf}" for leaf in expected_leaves
     }
+    manifest_selection = prepared.quick_manifest["tasks"]["mvbench"]["selection"]
+    assert manifest_selection["population_rows"] == 600
+    assert manifest_selection["selected_rows"] == 24
+    assert [stratum["name"] for stratum in manifest_selection["strata"]] == list(expected_leaves)
+    assert manifest_selection["selected_index_quantiles"] == {
+        "method": "lower-order-statistic",
+        "p0": 12,
+        "p25": 37,
+        "p50": 87,
+        "p75": 137,
+        "p100": 187,
+    }
+    assert (
+        manifest_selection["selected_row_identities_sha256"]
+        == hashlib.sha256(
+            json.dumps(manifest_rows, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+    )
     assert prepared.report["quick_selected_rows"] == 24
+    assert prepared.report["quick_row_identities"] == suites.manifest_row_identities(
+        prepared.quick_manifest
+    )
+    assert prepared.report["quick_task_denominators"] == {
+        "mvbench": {"population_rows": 600, "selected_rows": 24}
+    }
+    assert (
+        evaluator._expected_task_populations(prepared, ("modelopt_vlm_benchmark_mvbench",)) is None
+    )
     assert prepared.report["quick_manifest_sha256"] == suites.manifest_sha256(
         prepared.quick_manifest
     )
     assert (
         prepared.report["profile_fingerprint"]
-        == contracts.load_profile("short-all-native-v1").fingerprint
+        == contracts.load_profile("short-all-native-v2").fingerprint
     )
     tasks_root, _ = tasks.prepare(
         tmp_path / "results",
@@ -839,6 +1435,51 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
     )
     group = json.loads((tasks_root / "modelopt_vlm_benchmark_mvbench.yaml").read_text())
     assert group["task"] == [f"modelopt_vlm_benchmark_mvbench_{leaf}" for leaf in expected_leaves]
+
+
+def test_smoke_profile_generates_only_manifest_backed_mvbench_leaves(monkeypatch, tmp_path):
+    model, hf_home = _full_inputs(monkeypatch, tmp_path)
+    args = evaluation._build_parser().parse_args(
+        [
+            "--checkpoint",
+            str(model),
+            "--output-dir",
+            str(tmp_path / "results"),
+            "--profile",
+            "smoke-native-v1",
+            "--hf-home",
+            str(hf_home),
+        ]
+    )
+
+    prepared = preflight.prepare(args)
+    tasks_root, configured_tasks = tasks.prepare(
+        args.output_dir,
+        suite=prepared.suite,
+        source_tasks=prepared.source_tasks,
+        profile_task_leaves=prepared.profile_task_leaves,
+        dataset_snapshots=prepared.dataset_snapshots,
+        quick_manifest=prepared.quick_manifest,
+    )
+
+    assert configured_tasks == (
+        "modelopt_vlm_benchmark_realworldqa",
+        "modelopt_vlm_benchmark_mmmu_val",
+        "modelopt_vlm_benchmark_mvbench",
+    )
+    group = json.loads((tasks_root / "modelopt_vlm_benchmark_mvbench.yaml").read_text())
+    assert group["task"] == ["modelopt_vlm_benchmark_mvbench_action_sequence"]
+    assert (tasks_root / "modelopt_vlm_benchmark_mvbench_action_sequence.yaml").is_file()
+    assert not (tasks_root / "modelopt_vlm_benchmark_mvbench_egocentric_navigation.yaml").exists()
+
+    spec = importlib.util.spec_from_file_location(
+        "smoke_selectors", tasks_root / "modelopt_quick_selection.py"
+    )
+    assert spec is not None and spec.loader is not None
+    selectors = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(selectors)
+    assert hasattr(selectors, "select_modelopt_vlm_benchmark_mvbench_action_sequence")
+    assert not hasattr(selectors, "select_modelopt_vlm_benchmark_mvbench_egocentric_navigation")
 
 
 @pytest.mark.parametrize(
@@ -947,7 +1588,17 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
             (0.4 + score_offset, 0.6 + score_offset), start=1
         ):
             result_path = tmp_path / f"run-{index}.json"
-            result_path.write_text("{}")
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "sample_counts": {"realworldqa": 100, "mmmu_val": 100},
+                        "mmmu_parser_audit": {
+                            "sample_count": 100,
+                            "status_counts": {"parsed": 90, "fallback_random": 10},
+                        },
+                    }
+                )
+            )
             runs.append(
                 {
                     "metrics": {
@@ -988,6 +1639,11 @@ def test_post_mip_prefix100_adapter_averages_repeated_bounded_tasks(
     assert summary["profile"] == post_mip.TASK_PREFIX100_REPEAT2_PROFILE
     assert summary["metrics"] == result["metrics"]
     assert summary["result_paths"] == result["run_result_paths"]
+    assert summary["sample_counts"] == {"mmmu_val": 200, "realworldqa": 200}
+    assert summary["mmmu_parser_audit"] == {
+        "sample_count": 200,
+        "status_counts": {"fallback_random": 20, "parsed": 180},
+    }
 
     refreshed = post_mip.evaluate_realworldqa_mmmu_prefix100_checkpoint(
         model,
@@ -1080,9 +1736,89 @@ def test_mmvu_guard_is_limited_to_full_suite(monkeypatch, tmp_path):
     assert "\nprocess_results: !function modelopt_mmvu_guard.process_results\n" in full_generated
 
 
+def test_mmmu_adapter_labels_parser_fallback_without_changing_prediction(monkeypatch, tmp_path):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    lmms_root = _write_lmms_tasks(tmp_path, ("mmmu_val",))
+    monkeypatch.setattr(tasks, "_lmms_eval_root", lambda: lmms_root)
+    tasks_root, _ = tasks.prepare(
+        tmp_path / "results",
+        suite="short",
+        source_tasks=("mmmu_val",),
+        dataset_snapshots={"mmmu_val": snapshot},
+        quick_manifest=None,
+    )
+
+    upstream = ModuleType("lmms_eval.tasks.mmmu.utils")
+
+    def get_multi_choice_info(options):
+        choices = [chr(ord("A") + index) for index in range(len(options))]
+        return dict(zip(choices, options, strict=True)), choices
+
+    def parse_multi_choice_response(response, all_choices, _index_to_answer):
+        return random.choice(all_choices) if response == "unparseable" else "A"
+
+    def mmmu_process_results(document, results):
+        if document["question_type"] == "multiple-choice":
+            index_to_answer, choices = get_multi_choice_info(json.loads(document["options"]))
+            parsed = [
+                parse_multi_choice_response(response, choices, index_to_answer)
+                for response in results
+            ]
+        else:
+            parsed = [""] * len(results)
+        accuracy = {"parsed_pred": parsed}
+        return {"mmmu_acc": accuracy, "mmmu_acc_pass_at_k": accuracy}
+
+    upstream.get_multi_choice_info = get_multi_choice_info
+    upstream.parse_multi_choice_response = parse_multi_choice_response
+    upstream.mmmu_process_results = mmmu_process_results
+    package_modules = {
+        "lmms_eval": ModuleType("lmms_eval"),
+        "lmms_eval.tasks": ModuleType("lmms_eval.tasks"),
+        "lmms_eval.tasks.mmmu": ModuleType("lmms_eval.tasks.mmmu"),
+        "lmms_eval.tasks.mmmu.utils": upstream,
+    }
+    package_modules["lmms_eval.tasks.mmmu"].utils = upstream
+    for name, module in package_modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    spec = importlib.util.spec_from_file_location(
+        "modelopt_mmmu_audit", tasks_root / "modelopt_mmmu_audit.py"
+    )
+    assert spec is not None and spec.loader is not None
+    audit_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit_module)
+    document = {
+        "options": json.dumps(["first", "second"]),
+        "question_type": "multiple-choice",
+    }
+
+    parsed = audit_module.process_results(document, ["(A)"])
+    random.seed(123)
+    parse_multi_choice_response("unparseable", ["A", "B"], {})
+    expected_random_state = random.getstate()
+    random.seed(123)
+    fallback = audit_module.process_results(document, ["unparseable"])
+    invalid_open = audit_module.process_results(
+        {"question_type": "open"},
+        ["unparseable"],
+    )
+
+    assert parsed["mmmu_acc"] == {
+        "parsed_pred": ["A"],
+        "parser_status": ["parsed"],
+    }
+    assert fallback["mmmu_acc"]["parsed_pred"][0] in {"A", "B"}
+    assert fallback["mmmu_acc"]["parser_status"] == ["fallback_random"]
+    assert random.getstate() == expected_random_state
+    assert invalid_open["mmmu_acc"]["parser_status"] == ["invalid_open"]
+    generated = (tasks_root / f"{suites.task_name('mmmu_val')}.yaml").read_text()
+    assert "process_results: !function modelopt_mmmu_audit.process_results\n" in generated
+
+
 def test_quick_manifest_requires_exact_pins_counts_and_leaf_balance(tmp_path):
     path = _quick_manifest(tmp_path / "quick.json")
-    assert suites.manifest_sha256(suites.load_quick_manifest(path))
+    suites.load_quick_manifest(path)
 
     manifest = json.loads(path.read_text())
     manifest["tasks"]["mmmu_val"]["rows"].pop()
@@ -1146,7 +1882,7 @@ def test_offline_preflight_scrubs_credentials_and_traverses_media(monkeypatch, t
     package.mkdir(parents=True)
     (tasks_root / "lmms_eval/__init__.py").write_text("")
     (package / "__init__.py").write_text("""import os
-class Config: task = "modelopt_vlm_benchmark_mvbench"
+class Config: task = "modelopt_vlm_benchmark_mvbench_action_sequence"
 class Task:
     config = Config()
     def has_test_docs(self): return True
@@ -1170,7 +1906,11 @@ class TaskManager:
             "HUGGING_FACE_HUB_TOKEN",
         )
         assert all(name not in os.environ for name in credential_names)
-    def load_task_or_group(self, tasks): return {Group(): {"leaf": Task()}}
+    def load_task_or_group(self, tasks):
+        first = Task()
+        if os.environ.get("FAKE_DISTINCT_DUPLICATE"):
+            return {Group(): {"first": first, "second": Task()}}
+        return {Group(): {"first": first, "repeat": first}}
 """)
     hf_home = tmp_path / "hf-home"
     hf_home.mkdir()
@@ -1184,10 +1924,34 @@ class TaskManager:
         hf_home=hf_home,
         timeout_seconds=123,
         model_name="qwen3_5",
+        expected_populations={"modelopt_vlm_benchmark_mvbench_action_sequence": 1},
     )
 
+    assert report["document_counts"] == {"modelopt_vlm_benchmark_mvbench_action_sequence": 1}
     assert report["media_documents"] == 1
+    assert report["observed_populations"] == {"modelopt_vlm_benchmark_mvbench_action_sequence": 1}
     assert report["status"] == "passed"
+
+    with pytest.raises(RuntimeError, match="configured task population mismatch"):
+        tasks.verify_offline(
+            tasks_root,
+            ("modelopt_vlm_benchmark_mvbench",),
+            hf_home=hf_home,
+            timeout_seconds=123,
+            model_name="qwen3_5",
+            expected_populations={"modelopt_vlm_benchmark_mvbench_action_sequence": 2},
+        )
+
+    monkeypatch.setenv("FAKE_DISTINCT_DUPLICATE", "1")
+    with pytest.raises(RuntimeError, match="distinct task objects share configured task name"):
+        tasks.verify_offline(
+            tasks_root,
+            ("modelopt_vlm_benchmark_mvbench",),
+            hf_home=hf_home,
+            timeout_seconds=123,
+            model_name="qwen3_5",
+            expected_populations={"modelopt_vlm_benchmark_mvbench_action_sequence": 1},
+        )
 
 
 def test_video_adapter_normalizes_supported_suffixes_and_rejects_unknown(monkeypatch, tmp_path):
@@ -1231,21 +1995,6 @@ def test_video_adapter_normalizes_supported_suffixes_and_rejects_unknown(monkeyp
         assert alias.resolve() == source
     with pytest.raises(ValueError, match="unsupported Qwen 3.5 video suffix"):
         adapter._normalize([str(unknown)])
-
-
-def test_profile_contract_pins_every_task_and_revision():
-    assert profile.VLM_BENCHMARK_TASKS == (
-        "realworldqa",
-        "mmmu_val",
-        "video_mmmu",
-        "mvbench",
-        "mmvu_val",
-        "videomme",
-        "longvideobench_val_v",
-        "mlvu_dev",
-        "perceptiontest_val_mc",
-    )
-    assert all(len(item.revision) == 40 for item in profile.VLM_BENCHMARK_DATASETS.values())
 
 
 def test_video_reader_validation_is_limited_to_video_suites(monkeypatch):
