@@ -36,6 +36,8 @@ from . import (  # isort: skip
     arctic,
     dbrx,
     deepseek,
+    deepseek_v3,
+    deepseek_v4,
     gemma,
     gemma2,
     gemma3,

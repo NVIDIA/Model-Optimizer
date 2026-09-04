@@ -481,6 +481,20 @@ EXPECTED_MOE_VARIANTS = [
         ("gate_proj", "up_proj"),
     ),
     (
+        "deepseek_v3",
+        ("DeepseekV3MoE",),
+        ("gate_proj", "down_proj", "up_proj"),
+        True,
+        ("gate_proj", "up_proj"),
+    ),
+    (
+        "deepseek_v4",
+        ("DeepseekV4SparseMoeBlock",),
+        ("gate_up_proj", "down_proj"),
+        False,
+        None,
+    ),
+    (
         "gemma4",
         ("Gemma4TextDecoderLayer",),
         ("gate_proj", "down_proj", "up_proj"),
@@ -606,7 +620,14 @@ def test_iterable_experts_matches_pre_refactor_support():
     Legacy keyed off ``type(root_model).__name__.lower()`` and supported exactly the
     substrings below; everything else raised NotImplementedError. This pins the
     refactor to that set so grouped export neither gains nor loses a model silently.
+
+    ``ADDED_AFTER_REFACTOR`` exempts specs registered later. Those are deliberate new
+    coverage, not refactor drift, so comparing them against the legacy set is
+    meaningless -- but they are still listed by name, so the exemption stays reviewable.
     """
+    # Registered after the refactor: deepseek_v3/v4 are invisible to legacy detection
+    # (DeepseekV3MoE calls its router ``gate``), so they had no legacy behavior to match.
+    added_after_refactor = {"deepseek_v3", "deepseek_v4"}
     legacy_substrings = (
         "mixtralforcausallm",
         "qwenmoeforcausallm",
@@ -621,6 +642,8 @@ def test_iterable_experts_matches_pre_refactor_support():
         "arctic": "ArcticForCausalLM",
         "dbrx": "DbrxForCausalLM",
         "deepseek": "DeepseekForCausalLM",
+        "deepseek_v3": "DeepseekV3ForCausalLM",
+        "deepseek_v4": "DeepseekV4ForCausalLM",
         "gemma4": "Gemma4ForConditionalGeneration",
         "gemma4_text": "Gemma4TextForCausalLM",
         "gpt_oss": "GptOssForCausalLM",
@@ -636,6 +659,8 @@ def test_iterable_experts_matches_pre_refactor_support():
         "root_class_names is out of sync with the registered MoE specs"
     )
     for spec in moe_specs:
+        if spec.model_type in added_after_refactor:
+            continue
         root = root_class_names[spec.model_type].lower()
         legacy_supported = any(sub in root for sub in legacy_substrings)
         spec_supported = any(v.has_iterable_experts for v in _variants(spec))
