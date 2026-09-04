@@ -15,6 +15,7 @@
 
 import copy
 import io
+import warnings
 from types import SimpleNamespace
 
 import pytest
@@ -951,20 +952,31 @@ def _test_data_parallel_moe_score_module(rank, size):
     torch.manual_seed(1234)
     model = _ScoredMoeModel()
     data_loader = [torch.randn(2, 3, 8) for _ in range(2)]
-    model, search_history = mtq.auto_quantize(
-        model,
-        constraints={"effective_bits": 12.0},
-        quantization_formats=[mtq.INT8_DEFAULT_CFG],
-        data_loader=data_loader,
-        forward_step=lambda model, batch: model(batch),
-        loss_func=lambda output, data: output.square().mean(),
-        num_calib_steps=2,
-        num_score_steps=2,
-    )
+    with warnings.catch_warnings(record=True) as caught_warnings:
+        warnings.simplefilter("always")
+        model, search_history = mtq.auto_quantize(
+            model,
+            constraints={"effective_bits": 12.0},
+            quantization_formats=[mtq.INT8_DEFAULT_CFG],
+            data_loader=data_loader,
+            forward_step=lambda model, batch: model(batch),
+            loss_func=lambda output, data: output.square().mean(),
+            num_calib_steps=2,
+            num_score_steps=2,
+        )
 
     hparam = model.layers[0].mlp.experts[0].gate_proj.get_hparam("quant_recipe")
     assert hparam.score_modules == [model.layers[0].mlp]
     assert isinstance(model.layers[0].mlp._hparams_for_scoring, list)
+
+    fallback_warnings = [
+        str(warning.message)
+        for warning in caught_warnings
+        if "no parallel_state is set for score module" in str(warning.message)
+    ]
+    assert len(fallback_warnings) == len(model.layers[0].mlp._hparams_for_scoring)
+    assert all(str(type(model.layers[0].mlp)) in message for message in fallback_warnings)
+    assert all("first quantized child" in message for message in fallback_warnings)
 
     recipe = QuantRecipe(mtq.INT8_DEFAULT_CFG)
     local_score = sum(hparam._importance_dict[recipe][m] for m in hparam.score_modules)

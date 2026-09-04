@@ -416,6 +416,7 @@ class QuantRecipeHparam(Hparam):
         # Module hashes depend on object identity, so sets can produce different orders per rank.
         self.quant_modules = list(dict.fromkeys(quant_modules or []))
         self.score_modules = list(dict.fromkeys(score_modules or self.quant_modules))
+        self._warned_parallel_state_fallbacks: set[nn.Module] = set()
 
         fixed_quantizers = (
             {
@@ -534,14 +535,30 @@ class QuantRecipeHparam(Hparam):
 
             parallel_state = getattr(score_module, "parallel_state", None)
             if parallel_state is None:
-                parallel_state = next(
+                # TODO: Prefer parallel_state owned by the score module; this temporary fallback
+                # inherits the first quantized child's state and assumes all grouped quant modules
+                # share the same parallel groups.
+                parallel_state_source = next(
                     (
-                        state
+                        (module, state)
                         for module in self.quant_modules
                         if (state := getattr(module, "parallel_state", None)) is not None
                     ),
                     None,
                 )
+                if parallel_state_source is not None:
+                    quant_module, parallel_state = parallel_state_source
+                    if (
+                        torch.distributed.is_initialized()
+                        and score_module not in self._warned_parallel_state_fallbacks
+                    ):
+                        warnings.warn(
+                            "Distributed training is initialized but no parallel_state is set for "
+                            f"score module {type(score_module)}. Using parallel_state from its first "
+                            f"quantized child {type(quant_module)}. All grouped quant modules must "
+                            "share the same parallel groups."
+                        )
+                        self._warned_parallel_state_fallbacks.add(score_module)
 
             if parallel_state is None:
                 total_score += importance.cpu().item()
