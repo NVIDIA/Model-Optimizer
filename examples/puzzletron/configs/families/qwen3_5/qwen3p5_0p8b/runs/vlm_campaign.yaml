@@ -3,6 +3,7 @@
 defaults:
   - mip_vlm_smoke
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
 # Bounded mild all-reducible-axis Qwen 3.5 0.8B VLM
@@ -33,6 +34,42 @@ width_sanity:
 
 replacement_scoring:
   eval_samples: 64
+
+vlm_campaign_aiperf:
+  endpoint_type: chat
+  input_tokens: 100
+  output_tokens: 80
+  image_batch_sizes: [1, 6, 12]
+  image_width_mean: 1280
+  image_height_mean: 720
+  concurrency: [1, 4]
+  request_count: 64
+  warmup_request_count: 32
+  repetitions: 3
+  extra_inputs: {min_tokens: 80}
+  use_server_token_count: true
+  seed: 42
+  readiness_timeout: 600
+  benchmark_timeout: 1800
+  topology:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    data_parallel_size: 1
+    prefill_context_parallel_size: 1
+    decode_context_parallel_size: 1
+    enable_expert_parallel: false
+    distributed_executor_backend: mp
+    gpu_group_size: 1
+    server_context_overhead_tokens: 16384
+    extra_vllm_args:
+      - -cc.cudagraph_mode=NONE
+      - --no-enable-flashinfer-autotune
+      - --gpu-memory-utilization
+      - "0.5"
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
 
 mip:
   runs:
@@ -88,20 +125,6 @@ mip:
         max_seconds_per_solution: 300
       homogeneous: {enabled: false}
 
-global_distillation:
-  enabled: false
-  domain: vlm
-  force_hf: false
-  teacher_force_hf: false
-  student_force_hf: false
-  freeze_policy: train_all
-  validation_enabled: false
-  objective:
-    main_ce: {weight: 1.0}
-    main_kd: {weight: 1.0}
-    mtp_ce: {weight: 1.0}
-    mtp_kd: {weight: 1.0, chunk_size: 512}
-
 post_mip:
   flows:
     candidate-evaluation:
@@ -132,15 +155,7 @@ post_mip:
           type: downstream_evaluation
           input: materialized
           failure_policy: strict
-          config: &short_v2_evaluation
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_once: true
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
-            batch_size: 1
-            timeout_seconds: 14400
+          config: ${vlm_campaign_evaluation}
 
         kd_64:
           type: global_kd
@@ -168,8 +183,7 @@ post_mip:
           type: downstream_evaluation
           input: kd_64
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         kd_128:
           type: global_kd
@@ -190,8 +204,7 @@ post_mip:
           type: downstream_evaluation
           input: kd_128
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         kd_256:
           type: global_kd
@@ -212,8 +225,7 @@ post_mip:
           type: downstream_evaluation
           input: kd_256
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         selected:
           type: filter
@@ -229,11 +241,11 @@ post_mip:
           config:
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_short_v2
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            row_manifest: profile:short-vllm-v2
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
+            profile: ${vlm_campaign_evaluation.profile}
+            row_manifest: profile:core-3_344-examples_r1-vllm
+            row_manifest_sha256: ${vlm_campaign_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_campaign_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_campaign_evaluation.reference_cache_id}
             milestones:
               - {steps: 64, kd: kd_64, evaluation: short_v2_64}
               - {steps: 128, kd: kd_128, evaluation: short_v2_128}
@@ -242,41 +254,7 @@ post_mip:
         bounded_serving:
           type: aiperf
           input: bounded_result
-          config: &post_kd_aiperf
-            endpoint_type: chat
-            input_tokens: 100
-            output_tokens: 80
-            image_batch_sizes: [1, 6, 12]
-            image_width_mean: 1280
-            image_height_mean: 720
-            concurrency: [1, 4]
-            request_count: 64
-            warmup_request_count: 32
-            repetitions: 3
-            extra_inputs: {min_tokens: 80}
-            use_server_token_count: true
-            seed: 42
-            readiness_timeout: 600
-            benchmark_timeout: 1800
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
-              server_context_overhead_tokens: 16384
-              extra_vllm_args:
-                - -cc.cudagraph_mode=NONE
-                - --no-enable-flashinfer-autotune
-                - --gpu-memory-utilization
-                - "0.5"
-                - --reasoning-parser
-                - qwen3
-                - --default-chat-template-kwargs
-                - '{"enable_thinking": false}'
+          config: ${vlm_campaign_aiperf}
 
     all-axis-sentinel:
       source:
@@ -291,7 +269,7 @@ post_mip:
           type: downstream_evaluation
           input: sentinel_materialized
           failure_policy: strict
-          config: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         sentinel_kd_64:
           type: global_kd
@@ -308,7 +286,7 @@ post_mip:
           type: downstream_evaluation
           input: sentinel_kd_64
           failure_policy: strict
-          config: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         sentinel_kd_128:
           type: global_kd
@@ -329,7 +307,7 @@ post_mip:
           type: downstream_evaluation
           input: sentinel_kd_128
           failure_policy: strict
-          config: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         sentinel_kd_256:
           type: global_kd
@@ -350,7 +328,7 @@ post_mip:
           type: downstream_evaluation
           input: sentinel_kd_256
           failure_policy: strict
-          config: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         sentinel_result:
           type: result_manifest
@@ -358,11 +336,11 @@ post_mip:
           config:
             pre_kd_source: sentinel_materialized
             pre_kd_evaluation: sentinel_pre_kd_short_v2
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            row_manifest: profile:short-vllm-v2
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
+            profile: ${vlm_campaign_evaluation.profile}
+            row_manifest: profile:core-3_344-examples_r1-vllm
+            row_manifest_sha256: ${vlm_campaign_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_campaign_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_campaign_evaluation.reference_cache_id}
             milestones:
               - {steps: 64, kd: sentinel_kd_64, evaluation: sentinel_short_v2_64}
               - {steps: 128, kd: sentinel_kd_128, evaluation: sentinel_short_v2_128}
@@ -371,7 +349,7 @@ post_mip:
         sentinel_serving:
           type: aiperf
           input: sentinel_result
-          config: *post_kd_aiperf
+          config: ${vlm_campaign_aiperf}
 
     control-learning-curve:
       source:
@@ -386,8 +364,7 @@ post_mip:
           type: downstream_evaluation
           input: control_materialized
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         control_kd_64:
           type: global_kd
@@ -415,8 +392,7 @@ post_mip:
           type: downstream_evaluation
           input: control_kd_64
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         control_kd_128:
           type: global_kd
@@ -437,8 +413,7 @@ post_mip:
           type: downstream_evaluation
           input: control_kd_128
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         control_kd_256:
           type: global_kd
@@ -459,8 +434,7 @@ post_mip:
           type: downstream_evaluation
           input: control_kd_256
           failure_policy: strict
-          config:
-            <<: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         control_result:
           type: result_manifest
@@ -468,21 +442,12 @@ post_mip:
           config:
             pre_kd_source: control_materialized
             pre_kd_evaluation: control_pre_kd_short_v2
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            row_manifest: profile:short-vllm-v2
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
+            profile: ${vlm_campaign_evaluation.profile}
+            row_manifest: profile:core-3_344-examples_r1-vllm
+            row_manifest_sha256: ${vlm_campaign_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_campaign_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_campaign_evaluation.reference_cache_id}
             milestones:
               - {steps: 64, kd: control_kd_64, evaluation: control_short_v2_64}
               - {steps: 128, kd: control_kd_128, evaluation: control_short_v2_128}
               - {steps: 256, kd: control_kd_256, evaluation: control_short_v2_256}
-
-zero_shot_evaluation:
-  enabled: false
-aiperf:
-  enabled: false
-global_distillation_sanity:
-  enabled: false
-post_distillation_evaluation:
-  enabled: false

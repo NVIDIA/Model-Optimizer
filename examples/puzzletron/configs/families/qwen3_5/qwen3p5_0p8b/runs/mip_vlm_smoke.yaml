@@ -84,6 +84,23 @@ tokenize_data:
 
 pruning:
   packed_token_cache_path:
+
+# All derived VLM runs share the same explicit, auditable distillation domain
+# and trainable groups; individual flows own only their step budgets.
+global_distillation:
+  enabled: false
+  domain: vlm
+  force_hf: false
+  teacher_force_hf: false
+  student_force_hf: false
+  freeze_policy: train_all
+  validation_enabled: false
+  objective:
+    main_ce: {weight: 1.0}
+    main_kd: {weight: 1.0}
+    mtp_ce: {weight: 1.0}
+    mtp_kd: {weight: 1.0, chunk_size: 512}
+
 sort:
   # The search is FFN-only; preserve unrelated attention and GDN ordering.
   deferred_axes:

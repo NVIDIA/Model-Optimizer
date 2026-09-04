@@ -68,15 +68,7 @@ python examples/puzzletron/orchestrate.py \
 ```
 
 Resume by rerunning that exact launch command with the same experiment,
-materialized runner, and execution config:
-
-```bash
-python examples/puzzletron/orchestrate.py \
-  --experiment "$EXPERIMENT" \
-  --runner "$RUNNER" \
-  --execution "$EXECUTION" \
-  --stage full
-```
+materialized runner, and execution config.
 
 The flow deliberately uses two candidate-evaluation samples, two
 IFEval samples, four AIPerf requests per serving candidate, and two

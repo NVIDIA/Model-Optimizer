@@ -2,6 +2,7 @@
 
 defaults:
   - mip_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
 # Extend the bounded image-text MIP smoke through evaluation, physical
@@ -16,21 +17,6 @@ data:
 prepare_dataset:
   evaluation_tasks: [realworldqa, mmmu_val, mvbench]
   evaluation_hf_home: ${oc.env:HF_HOME}
-
-# Auto-detection would select the VLM recipe from data.modality. Declare the
-# domain and trainable groups explicitly so the resolved run packet is auditable.
-global_distillation:
-  domain: vlm
-  force_hf: false
-  teacher_force_hf: false
-  student_force_hf: false
-  freeze_policy: train_all
-  validation_enabled: false
-  objective:
-    main_ce: {weight: 1.0}
-    main_kd: {weight: 1.0}
-    mtp_ce: {weight: 1.0}
-    mtp_kd: {weight: 1.0, chunk_size: 512}
 
 post_mip:
   flows:
@@ -59,19 +45,7 @@ post_mip:
           type: downstream_evaluation
           input: materialized
           failure_policy: strict
-          config: &realworldqa_smoke_config
-            profile: qwen35_vlm_core3_24row_smoke_v2
-            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
-            row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
-            reference_checkpoint: ${teacher_dir}
-            reference_once: true
-            reference_cache_id: qwen35-0p8b-smoke-v1-teacher
-            batch_size: 1
-            timeout_seconds: 3000
-            dtype: bfloat16
-            gpu_memory_utilization: 0.5
-            max_model_len: 16384
-            limit_mm_per_prompt: {image: 32}
+          config: ${vlm_full_smoke_evaluation}
         vlm_serving:
           type: aiperf
           input: checkpoint_eval
@@ -126,7 +100,7 @@ post_mip:
           type: downstream_evaluation
           input: short_vlm_kd
           failure_policy: strict
-          config: *realworldqa_smoke_config
+          config: ${vlm_full_smoke_evaluation}
         final_image_eval:
           type: evaluation
           input: post_kd_checkpoint_eval

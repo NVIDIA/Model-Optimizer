@@ -193,7 +193,7 @@ def test_reproducibility_smoke_is_bounded_unattended_and_comparison_ready(
     assert nodes["materialized"]["input"] == "retain_variants"
     assert nodes["pre_kd_smoke"]["input"] == "materialized"
     assert nodes["pre_kd_smoke"]["config"]["profile"] == "qwen35_vlm_core3_24row_smoke_v2"
-    assert nodes["result"]["config"]["row_manifest"] == "profile:smoke-vllm-v1"
+    assert nodes["result"]["config"]["row_manifest"] == ("profile:core-3_24-examples_r1-vllm")
     assert nodes["kd_2"]["input"] == "pre_kd_smoke"
     assert nodes["kd_2"]["config"]["resume"] is True
     assert nodes["kd_2"]["exposure"]["cumulative_examples"] == 2

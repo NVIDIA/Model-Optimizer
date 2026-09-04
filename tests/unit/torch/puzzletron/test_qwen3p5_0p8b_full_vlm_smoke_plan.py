@@ -128,7 +128,11 @@ def test_qwen3p5_0p8b_full_vlm_smoke_defaults_to_the_tested_dataset_snapshot(
     run_config = yaml.safe_load(RUN_PATH.read_text())
     config = _compile_plan(monkeypatch, tmp_path, dataset_revision=None).experiment_config
 
-    assert run_config["defaults"] == ["mip_vlm_smoke", "_self_"]
+    assert run_config["defaults"] == [
+        "mip_vlm_smoke",
+        "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_",
+        "_self_",
+    ]
     assert config["data"]["revision"] == "51f4f4d219315c3283950994d4eb3d7fc30aa87b"
     assert config["prepare_dataset"]["evaluation_tasks"] == [
         "realworldqa",
@@ -524,7 +528,7 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
     }
     evaluation_identity = nodes["pre_kd_short_v2"]["config"]
     assert evaluation_identity["profile"].endswith("frozen_rows_v3")
-    profile_rows = contracts.load_profile("short-vllm-v2").exact_rows
+    profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None
     assert evaluation_identity["row_manifest_sha256"] == suites.manifest_sha256(profile_rows)
     assert evaluation_identity["reference_cache_id"] == "qwen35-0p8b-short-v2-teacher"
@@ -535,7 +539,9 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         if key in evaluation_identity
     }
     assert runtime_overrides == {}
-    assert nodes["bounded_result"]["config"]["row_manifest"] == "profile:short-vllm-v2"
+    assert nodes["bounded_result"]["config"]["row_manifest"] == (
+        "profile:core-3_344-examples_r1-vllm"
+    )
     assert nodes["selected"]["input"] == "short_v2_256"
     assert nodes["selected"]["type"] == "filter"
     assert stages["post.candidate-evaluation.bounded_serving"].parents == (

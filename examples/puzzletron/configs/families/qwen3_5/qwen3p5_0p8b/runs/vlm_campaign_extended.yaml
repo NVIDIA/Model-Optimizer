@@ -43,15 +43,7 @@ post_mip:
           type: downstream_evaluation
           input: kd_512
           failure_policy: strict
-          config: &short_v2_evaluation
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_once: true
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
-            batch_size: 1
-            timeout_seconds: 14400
+          config: ${vlm_campaign_evaluation}
 
         extended_result:
           type: result_manifest
@@ -59,11 +51,11 @@ post_mip:
           config: &extended_result
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_short_v2
-            profile: qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v3
-            row_manifest: profile:short-vllm-v2
-            row_manifest_sha256: be7ed6f695fca19b11a90ecd4f400a95162ede7d421573a08d81b6b70be03536
-            reference_checkpoint: ${teacher_dir}
-            reference_cache_id: qwen35-0p8b-short-v2-teacher
+            profile: ${vlm_campaign_evaluation.profile}
+            row_manifest: profile:core-3_344-examples_r1-vllm
+            row_manifest_sha256: ${vlm_campaign_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_campaign_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_campaign_evaluation.reference_cache_id}
             milestones:
               - {steps: 64, kd: kd_64, evaluation: short_v2_64}
               - {steps: 128, kd: kd_128, evaluation: short_v2_128}
@@ -94,7 +86,7 @@ post_mip:
           type: downstream_evaluation
           input: kd_1024
           failure_policy: strict
-          config: *short_v2_evaluation
+          config: ${vlm_campaign_evaluation}
 
         final_result:
           type: result_manifest
@@ -119,38 +111,4 @@ post_mip:
         extension_serving:
           type: aiperf
           input: best
-          config:
-            endpoint_type: chat
-            input_tokens: 100
-            output_tokens: 80
-            image_batch_sizes: [1, 6, 12]
-            image_width_mean: 1280
-            image_height_mean: 720
-            concurrency: [1, 4]
-            request_count: 64
-            warmup_request_count: 32
-            repetitions: 3
-            extra_inputs: {min_tokens: 80}
-            use_server_token_count: true
-            seed: 42
-            readiness_timeout: 600
-            benchmark_timeout: 1800
-            topology:
-              tensor_parallel_size: 1
-              pipeline_parallel_size: 1
-              data_parallel_size: 1
-              prefill_context_parallel_size: 1
-              decode_context_parallel_size: 1
-              enable_expert_parallel: false
-              distributed_executor_backend: mp
-              gpu_group_size: 1
-              server_context_overhead_tokens: 16384
-              extra_vllm_args:
-                - -cc.cudagraph_mode=NONE
-                - --no-enable-flashinfer-autotune
-                - --gpu-memory-utilization
-                - "0.5"
-                - --reasoning-parser
-                - qwen3
-                - --default-chat-template-kwargs
-                - '{"enable_thinking": false}'
+          config: ${vlm_campaign_aiperf}

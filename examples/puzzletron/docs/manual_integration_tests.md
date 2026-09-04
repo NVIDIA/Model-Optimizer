@@ -10,27 +10,10 @@ KD. Each test uses one GPU and runs the full local orchestration path.
 Use a Linux amd64 host with one H100-class GPU, Docker with NVIDIA GPU support,
 network access to the model and benchmark sources, and at least 50 GiB of fast
 writable scratch space. Build the repository's pinned worker image by following
-[build the Puzzletron worker image](worker_image.md#build), then run its
-[GPU check](worker_image.md#gpu-check). The image provides `/venv`, CUDA,
-NeMo AutoModel, vLLM, AIPerf, and the pinned `lmms-eval` checkout.
-
-Start the image from the repository root. Mount the checkout and scratch space
-so pytest artifacts survive the container:
-
-```bash
-export PUZZLETRON_TEST_SCRATCH=/path/with-at-least-50GiB-free
-mkdir -p "$PUZZLETRON_TEST_SCRATCH"
-image="modelopt-puzzletron:linux-amd64-git-$(git rev-parse --short=12 HEAD)"
-
-docker run --gpus all --ipc=host --rm -it \
-  -v "$PWD:/workspace/modelopt" \
-  -v "$PUZZLETRON_TEST_SCRATCH:/scratch" \
-  -w /workspace/modelopt \
-  "$image" bash
-```
-
-Run the remaining commands inside that container. Use an exclusive GPU because
-both tests start local model-serving processes.
+[build and run the Puzzletron worker image](worker_image.md), including its GPU
+check and checkout mount. Mount the scratch space at `/scratch`, then run the
+remaining commands inside that container on an exclusive GPU. The worker-image
+guide owns the image tag, container invocation, and runtime prerequisites.
 
 ## Collect both tests
 
@@ -95,14 +78,9 @@ are needed for diagnosis.
 
 ## Troubleshoot a failure
 
-- Confirm `/venv/bin/python` is active and `torch.cuda.is_available()` is true
-  with the [worker-image GPU check](worker_image.md#gpu-check).
-- Confirm the selected scratch filesystem has enough free space and supports
-  local process execution.
-- For VLM cache errors, rerun the preparation command above. Do not point
-  `PUZZLETRON_VLM_BENCHMARK_HF_HOME` at a symlink.
-- Read the stdout and stderr tail printed by pytest, then inspect the retained
-  `--basetemp` directory. Campaign state and logs are under the test's `results`
-  directory.
-- For orchestration failures and safe resume behavior, see
-  [progress and interruption](orchestration_operations.md#progress-and-interruption).
+Read the stdout and stderr tail printed by pytest, then inspect the retained
+`--basetemp` directory; campaign state and logs are under its `results`
+directory. Use the [worker-image GPU check](worker_image.md#gpu-check) for
+runtime failures, [cache benchmark data](vlm_checkpoint_evaluation.md#cache-benchmark-data)
+for VLM cache repair, and [progress and interruption](orchestration_operations.md#progress-and-interruption)
+for orchestration recovery.

@@ -264,42 +264,15 @@ baseline.
 
 ## Evaluate a saved checkpoint separately
 
-The campaign evaluates saved checkpoints automatically and records the results
-with each candidate. To check a checkpoint outside the campaign, validate the
-environment and cached benchmark data first:
-
-```bash
-python -m examples.puzzletron.evaluation.vlm.run \
-  --checkpoint /path/to/pruned-checkpoint \
-  --output-dir /path/to/results/vlm-smoke \
-  --hf-home /path/to/huggingface-cache \
-  --suite short \
-  --preflight-only
-```
-
-If preflight succeeds, run the same command without `--preflight-only`. The
-`short` suite runs the pinned RealWorldQA and MMMU tasks. See
-[VLM checkpoint evaluation](vlm_checkpoint_evaluation.md) for other suites,
-result files, and cache preparation.
+The campaign records checkpoint evaluations with each candidate. For
+standalone preflight and evaluation commands, suites, result files, and cache
+preparation, use [VLM checkpoint evaluation](vlm_checkpoint_evaluation.md).
 
 ## Customize a campaign
 
-Tune site resources and the pinned training dataset for the intended workload.
-
-Use guided setup when you need help resolving the model, dataset, and site
-settings:
-
-```bash
-python examples/puzzletron/puzzletron_setup_v2.py \
-  --defaults examples/puzzletron/configs/setup/defaults.example.yaml
-```
-
-Select Qwen 3.5 0.8B and the Nemotron-VLM v2 image-text dataset. Guided setup
-can generate the same route with site-specific settings. Hidden width,
-attention, GDN, embedding width, and depth are available through guided
-customization. Among the tracked routes, attention and GDN reductions are
-enabled only by `vlm_campaign.yaml`; unsupported distributed and packed modes
-fail closed.
-Inspect every customized plan with `--dry-run` before launch. See
-[configuration and overrides](configuration_overrides.md) for persistent and
-temporary changes.
+Use [guided setup](setup_wizard.md) to resolve model, dataset, and site
+settings, and [configuration and overrides](configuration_overrides.md) for
+persistent or temporary changes. Among the tracked routes, attention and GDN
+reductions are enabled only by `vlm_campaign.yaml`; unsupported distributed and
+packed modes fail closed. Inspect every customized plan with `--dry-run` before
+launch.

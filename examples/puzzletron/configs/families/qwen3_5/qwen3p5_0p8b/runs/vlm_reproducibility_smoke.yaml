@@ -3,6 +3,7 @@
 defaults:
   - mip_vlm_smoke
   - /families/qwen3_5/qwen3p5_0p8b/advanced@_global_
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
 # Immutable 24-row lifecycle smoke. The isolated attention variants keep the
@@ -72,20 +73,6 @@ mip:
         max_seconds_per_solution: 60
       homogeneous: {enabled: false}
 
-global_distillation:
-  enabled: false
-  domain: vlm
-  force_hf: false
-  teacher_force_hf: false
-  student_force_hf: false
-  freeze_policy: train_all
-  validation_enabled: false
-  objective:
-    main_ce: {weight: 1.0}
-    main_kd: {weight: 1.0}
-    mtp_ce: {weight: 1.0}
-    mtp_kd: {weight: 1.0, chunk_size: 512}
-
 post_mip:
   flows:
     reproducibility-smoke:
@@ -111,15 +98,7 @@ post_mip:
           type: downstream_evaluation
           input: materialized
           failure_policy: strict
-          config: &smoke_evaluation
-            profile: qwen35_vlm_core3_24row_smoke_v2
-            evaluator_revision: ${oc.env:PUZZLETRON_SOURCE_REVISION,unpublished}
-            row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
-            reference_checkpoint: ${teacher_dir}
-            reference_once: true
-            reference_cache_id: qwen35-0p8b-smoke-v1-teacher
-            batch_size: 1
-            timeout_seconds: 3000
+          config: ${vlm_smoke_evaluation}
         kd_2:
           type: global_kd
           input: pre_kd_smoke
@@ -145,18 +124,18 @@ post_mip:
           type: downstream_evaluation
           input: kd_2
           failure_policy: strict
-          config: *smoke_evaluation
+          config: ${vlm_smoke_evaluation}
         result:
           type: result_manifest
           input: post_kd_smoke
           config:
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_smoke
-            profile: qwen35_vlm_core3_24row_smoke_v2
-            row_manifest: profile:smoke-vllm-v1
-            row_manifest_sha256: 08eb41371b2f40fdde31b45573a7276fa370ec96be7c1d95554c916d872d6cde
-            reference_checkpoint: ${teacher_dir}
-            reference_cache_id: qwen35-0p8b-smoke-v1-teacher
+            profile: ${vlm_smoke_evaluation.profile}
+            row_manifest: profile:core-3_24-examples_r1-vllm
+            row_manifest_sha256: ${vlm_smoke_evaluation.row_manifest_sha256}
+            reference_checkpoint: ${vlm_smoke_evaluation.reference_checkpoint}
+            reference_cache_id: ${vlm_smoke_evaluation.reference_cache_id}
             milestones:
               - {steps: 2, kd: kd_2, evaluation: post_kd_smoke}
         serving_mechanics:
@@ -197,8 +176,3 @@ post_mip:
                 - qwen3
                 - --default-chat-template-kwargs
                 - '{"enable_thinking": false}'
-
-zero_shot_evaluation: {enabled: false}
-aiperf: {enabled: false}
-global_distillation_sanity: {enabled: false}
-post_distillation_evaluation: {enabled: false}
