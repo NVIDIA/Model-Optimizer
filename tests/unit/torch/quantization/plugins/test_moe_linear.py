@@ -142,6 +142,49 @@ def test_module_with_3d_weight_but_other_forward_is_not_claimed():
     )
 
 
+def test_grouped_routing_module_is_not_claimed():
+    """A grouped-GEMM MoE layer has the identical shape but no scalar-index contract.
+
+    Moondream3's ``MoeFusedLinear`` carries the same 3-D weight and the same three
+    attributes, but its second argument is a per-expert token-count *tensor*. Claiming it
+    would make ``_QuantMoELinear.forward`` evaluate ``self.experts[m_sizes]`` and raise
+    ``TypeError: only integer tensors of a single element can be converted to an index``
+    on the first calibration forward.
+    """
+
+    class _MoeFusedLinear(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.num_experts = NUM_EXPERTS
+            self.in_features = HIDDEN_SIZE
+            self.out_features = MOE_INTERMEDIATE_SIZE
+            self.weight = nn.Parameter(
+                torch.randn(NUM_EXPERTS, MOE_INTERMEDIATE_SIZE, HIDDEN_SIZE) * 0.02
+            )
+
+        def forward(self, input, m_sizes):
+            return input
+
+    assert not _is_expert_indexed_moe_linear(_MoeFusedLinear())
+
+
+def test_offloaded_weights_are_refused_not_silently_corrupted():
+    """Accelerate offload leaves `weight` on meta, with the value in the module's hook.
+
+    Expanding that would copy meta storage into each expert and delete the key the hook
+    restores into, exporting a checkpoint of zeros. Conversion must refuse instead.
+    """
+    pytest.importorskip("accelerate")
+    from accelerate import cpu_offload
+
+    model = _TinyStepModel()
+    cpu_offload(model.moe.up_proj, execution_device=torch.device("cpu"))
+    assert model.moe.up_proj.weight.is_meta
+
+    with pytest.raises(NotImplementedError, match="offloaded by Accelerate"):
+        mtq.quantize(model, _moe_quant_cfg(), forward_loop=None)
+
+
 def test_registration_is_not_gated_on_model_class_name():
     """Detection is structural, so a Step-3.7-style model registers as readily as Step-3.5."""
     model = _TinyStepModel()

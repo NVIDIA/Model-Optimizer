@@ -1895,6 +1895,19 @@ class _QuantMoELinear(QuantModule):
     def _setup(self):
         from accelerate import init_empty_weights
 
+        # Accelerate's CPU/disk offload (`device_map="auto"`, `--offload_folder`) leaves
+        # `weight` as a meta tensor and keeps the real value in the module's offload hook,
+        # keyed on the original `weight` name. Expanding that would copy meta storage into
+        # every expert and then delete the key the hook restores into, silently producing a
+        # checkpoint of zeros. Refuse instead of corrupting.
+        if self.weight.is_meta or getattr(getattr(self, "_hf_hook", None), "offload", False):
+            raise NotImplementedError(
+                f"{type(self).__name__}: expert-indexed MoELinear weights cannot be quantized "
+                "while offloaded by Accelerate (the weight is a meta tensor whose value lives "
+                "in the offload hook). Load the model without CPU/disk offload — more GPUs, or "
+                "a device_map that keeps the MoE layers resident — and re-run."
+            )
+
         dtype, device = self.weight.dtype, self.weight.device
 
         with init_empty_weights():
@@ -1934,16 +1947,21 @@ def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
     which is what :func:`_fused_experts_wrapper_class` looks for, and the module is not an
     ``nn.Linear``, so neither the fused-experts path nor the plain linear path claims it.
 
-    Detection is structural rather than keyed on class names so new Step revisions (or any
-    other model shipping the same layout) are picked up without another hardcoded name.
+    Detection is structural rather than keyed on class names so new Step revisions are picked
+    up without another hardcoded name, but the shape alone is not a sufficient contract: the
+    replacement forward indexes ``self.experts[expert_id]``, so it only works for callers that
+    pass a **scalar expert index**. Grouped-GEMM MoE layers share the exact same 3-D weight and
+    attribute set while passing a per-expert token-count *tensor* instead (e.g. Moondream3's
+    ``MoeFusedLinear.forward(input, m_sizes)``, which would raise ``TypeError: only integer
+    tensors of a single element can be converted to an index`` on the first calibration
+    forward). The second parameter must therefore be named ``expert_id``, which is the
+    scalar-index contract both Step revisions declare.
     """
     weight = getattr(module, "weight", None)
     if not isinstance(weight, (nn.Parameter, Tensor)) or weight.dim() != 3:
         return False
     if not all(hasattr(module, attr) for attr in ("num_experts", "in_features", "out_features")):
         return False
-    # `_QuantMoELinear.forward` takes (x, expert_id), so only claim modules whose callers
-    # already drive them that way.
     try:
         params = list(inspect.signature(type(module).forward).parameters.values())[1:]
     except (TypeError, ValueError):
@@ -1953,7 +1971,7 @@ def _is_expert_indexed_moe_linear(module: nn.Module) -> bool:
         for p in params
         if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) and p.default is p.empty
     ]
-    return len(positional) == 2
+    return len(positional) == 2 and positional[1].name == "expert_id"
 
 
 def register_moe_linear_on_the_fly(model):
