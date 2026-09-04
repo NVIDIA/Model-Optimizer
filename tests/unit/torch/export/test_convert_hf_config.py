@@ -51,6 +51,7 @@ def test_write_hf_export_config_writes_mapped_kv_autoquant_report(tmp_path):
     layer_name = "model.layers.0.self_attn"
     model = torch.nn.Module()
     model._modelopt_kv_cache_auto_quantize_state = {
+        "best": {"recipe": {layer_name: "fp8"}},
         "layers": {layer_name: {"selected": "fp8"}},
         "search_signature": {"layers": [{"name": layer_name}]},
     }
@@ -73,11 +74,13 @@ def test_write_hf_export_config_writes_mapped_kv_autoquant_report(tmp_path):
     )
 
     report = json.loads((tmp_path / "kv_cache_auto_quantize_report.json").read_text())
+    assert report["best"]["recipe"] == {f"hub.{layer_name}": "fp8"}
     assert report["layers"] == {f"hub.{layer_name}": {"selected": "fp8"}}
     assert report["search_signature"]["layers"] == [{"name": f"hub.{layer_name}"}]
     assert model._modelopt_kv_cache_auto_quantize_state["layers"] == {
         layer_name: {"selected": "fp8"}
     }
+    assert model._modelopt_kv_cache_auto_quantize_state["best"]["recipe"] == {layer_name: "fp8"}
     assert (tmp_path / "hf_quant_config.json").is_file()
     exported_config = json.loads((tmp_path / "config.json").read_text())
     assert exported_config["quantization_config"]["kv_cache_quant_algo"] == "MIXED_PRECISION"

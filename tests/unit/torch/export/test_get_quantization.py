@@ -207,6 +207,10 @@ def test_uniform_vlm_export_ignores_disabled_vision_attention():
     assert quantization["kv_cache_quant_algo"] == "FP8"
     assert "kv_cache_quantized_layers" not in quantization
 
+    model._modelopt_kv_cache_auto_quantize_state = {}
+    with pytest.raises(NotImplementedError, match="uniform quantized-weight format"):
+        get_quant_config(model)
+
 
 @pytest.mark.parametrize(
     ("quantizer_cfg", "expected_format"),
@@ -222,7 +226,7 @@ def test_uniform_vlm_export_ignores_disabled_vision_attention():
         ),
     ],
 )
-def test_uniform_kv_only_export_retains_per_layer_mixed_envelope(quantizer_cfg, expected_format):
+def test_uniform_kv_only_export_preserves_legacy_schema(quantizer_cfg, expected_format):
     model = torch.nn.Module()
     model.attention = _FakeAttention()
     mtq.set_quantizer_by_cfg(
@@ -239,18 +243,86 @@ def test_uniform_kv_only_export_retains_per_layer_mixed_envelope(quantizer_cfg, 
 
     hf_quant_config = get_quant_config(model)
     quantization = hf_quant_config["quantization"]
+    assert quantization["quant_algo"] is None
+    assert quantization["kv_cache_quant_algo"] == expected_format
+    assert quantization["quantized_layers"] == {}
+    assert "kv_cache_quantized_layers" not in quantization
+
+    converted = convert_hf_quant_config_format(hf_quant_config)
+    assert "quant_algo" not in converted
+    assert converted["kv_cache_scheme"] == (
+        {"dynamic": False, "num_bits": 8, "type": "float"}
+        if expected_format == "FP8"
+        else expected_format
+    )
+    assert "kv_cache_quantized_layers" not in converted
+
+
+def test_uniform_kv_autoquant_export_retains_per_layer_mixed_envelope():
+    model = torch.nn.Module()
+    model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*", "enable": False},
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+    model._modelopt_kv_cache_auto_quantize_state = {}
+
+    quantization = get_quant_config(model)["quantization"]
+
     assert quantization["quant_algo"] == "MIXED_PRECISION"
     assert quantization["quantized_layers"] == {}
     assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
-    assert quantization["kv_cache_quantized_layers"] == {
-        "attention": {"quant_algo": expected_format}
-    }
+    assert quantization["kv_cache_quantized_layers"] == {"attention": {"quant_algo": "FP8"}}
 
-    converted = convert_hf_quant_config_format(hf_quant_config)
-    assert converted["quant_algo"] == "MIXED_PRECISION"
-    assert converted["quantized_layers"] == {}
-    assert converted["kv_cache_quant_algo"] == "MIXED_PRECISION"
-    assert converted["kv_cache_quantized_layers"] == {"attention": {"quant_algo": expected_format}}
+
+def test_partial_uniform_kv_with_uniform_weights_preserves_legacy_schema():
+    model = ToyModel()
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*.weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "enable": True,
+                },
+                {
+                    "quantizer_name": "*.input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "enable": True,
+                },
+            ],
+            "algorithm": "max",
+        },
+        lambda quantized_model: quantized_model(torch.randn(1, 4, 10)),
+    )
+    model.attn0 = _FakeAttention()
+    model.attn1 = _FakeAttention()
+    mtq.set_quantizer_by_cfg(
+        model,
+        [
+            {"quantizer_name": "*[kv]_bmm_quantizer", "enable": False},
+            {
+                "quantizer_name": "attn0.*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                "enable": True,
+            },
+        ],
+    )
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["quant_algo"] == "FP8"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
+    assert "kv_cache_quantized_layers" not in quantization
 
 
 def test_mixed_kv_cache_quantization_exports_per_layer_map():

@@ -362,7 +362,7 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
         assert layer.k_bmm_quantizer.num_bits == expected_bits
 
     resolved_config = mtq.get_auto_quantize_config(state, {"effective_bits": 4.5})
-    assert resolved_config["algorithm"] == "max"
+    assert resolved_config["algorithm"] is None
     assert resolved_config["quant_cfg"][0] == {"quantizer_name": "*", "enable": False}
     assert {entry["quantizer_name"] for entry in resolved_config["quant_cfg"]} == {
         "*",
@@ -385,6 +385,34 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
     )
     assert re_solved_state["best"]["constraints"]["effective_bits"] == pytest.approx(4.5)
     assert {layer["selected"] for layer in re_solved_state["layers"].values()} == {"nvfp4"}
+
+
+def test_kv_autoquant_replay_preserves_selected_calibration_algorithm():
+    candidate = _kv_config((4, 3), 8.0, algorithm="max")
+    state = {
+        "cost_model": "kv_cache",
+        "requested_constraints": {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        "candidates": [
+            {
+                "name": "fp8",
+                "k_bits": 8.0,
+                "v_bits": 8.0,
+                "config": candidate.model_dump(mode="python", exclude_none=True),
+            }
+        ],
+        "layers": {
+            "attention": {
+                "k_width": 8,
+                "v_width": 8,
+                "scores": {"fp8": 0.0},
+            }
+        },
+        "best": {"recipe": {"attention": "fp8"}},
+    }
+
+    resolved_config = mtq.get_auto_quantize_config(state)
+
+    assert resolved_config["algorithm"] == "max"
 
 
 def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quant_stub):

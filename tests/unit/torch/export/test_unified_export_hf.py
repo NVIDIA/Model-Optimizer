@@ -46,13 +46,26 @@ def test_multimodal_detection_accepts_null_architectures():
     assert not is_multimodal_model(model)
 
 
-@pytest.mark.parametrize("aliased", [False, True])
-def test_language_model_extraction_rejects_competing_or_aliased_roots(aliased):
-    """Language-model extraction must not select ambiguous roots by traversal order."""
+def test_language_model_extraction_accepts_aliased_compatibility_property():
+    """A top-level compatibility property may alias the standardized nested LM root."""
     model = torch.nn.Module()
     model.model = torch.nn.Module()
     model.model.language_model = torch.nn.Module()
-    model.language_model = model.model.language_model if aliased else torch.nn.Module()
+    model.language_model = model.model.language_model
+
+    assert get_language_model_from_vl(model) == [
+        model,
+        model.model,
+        model.model.language_model,
+    ]
+
+
+def test_language_model_extraction_rejects_competing_roots():
+    """Language-model extraction must not select distinct roots by traversal order."""
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = torch.nn.Module()
 
     with pytest.raises(ValueError, match="multiple language-model roots"):
         get_language_model_from_vl(model)

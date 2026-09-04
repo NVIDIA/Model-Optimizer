@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 
 
 def _has_large_cpu_fp8_scale(value: torch.Tensor) -> bool:
-    """Return the warning predicate without synchronizing CUDA tensors."""
+    """Check CPU scales only; GPU scales skip this optional warning to avoid host sync."""
     return value.device.type == "cpu" and bool(torch.any(value > 0.5))
 
 
@@ -1700,7 +1700,6 @@ def get_quant_config(
 
     kv_cache_formats: set[str] = set()
     kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
-    kv_cache_eligible_layers = 0
     language_model_lineage = get_language_model_from_vl(model)
     language_model_modules = (
         None
@@ -1768,7 +1767,6 @@ def get_quant_config(
             language_model_modules is None or id(module) in language_model_modules
         )
         if has_kv_quantizers and is_language_model_module:
-            kv_cache_eligible_layers += 1
             if module.k_bmm_quantizer.is_enabled and module.v_bmm_quantizer.is_enabled:
                 module_kv_quant = get_kv_cache_dtype(module)
                 if module_kv_quant != QUANTIZATION_NONE:
@@ -1786,19 +1784,24 @@ def get_quant_config(
     # Process per layer quantization config dict
     quant_config["quantization"].update(process_layer_quant_config(layer_config_dict))
 
-    all_kv_layers_quantized = (
-        kv_cache_eligible_layers > 0 and len(kv_cache_quantized_layers) == kv_cache_eligible_layers
+    is_kv_autoquant_result = any(
+        hasattr(module, "_modelopt_kv_cache_auto_quantize_state") for module in model.modules()
     )
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
-    if weight_quant_algo is None and kv_cache_quantized_layers:
-        # A standalone KV recipe still needs a top-level algorithm for ModelOpt consumers.
-        # Keep the complete layer map even when every layer selected the same KV format.
+    if is_kv_autoquant_result and kv_cache_quantized_layers:
+        if weight_quant_algo not in (None, "MIXED_PRECISION"):
+            raise NotImplementedError(
+                "Mixed-precision KV-cache export with a uniform quantized-weight format is "
+                "not supported yet. Use BF16 weights or a mixed-weight AutoQuant recipe."
+            )
+        # Keep the complete AutoQuant layer map even when every layer selected the same format.
         quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
         quant_config["quantization"].setdefault("quantized_layers", {})
         quant_config["quantization"]["kv_cache_quant_algo"] = "MIXED_PRECISION"
         quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
         quant_config["quantization"]["kv_cache_schema_version"] = 1
-    elif len(kv_cache_formats) == 1 and all_kv_layers_quantized:
+    elif len(kv_cache_formats) == 1:
+        # Preserve the pre-AutoQuant uniform KV schema, including partial coverage.
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
     elif kv_cache_quantized_layers:
         if weight_quant_algo not in (None, "MIXED_PRECISION"):

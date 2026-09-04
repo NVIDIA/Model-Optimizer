@@ -916,8 +916,13 @@ def get_kv_cache_auto_quantize_config(
     )
 
     quant_cfg: list[dict[str, Any]] = [{"quantizer_name": "*", "enable": False}]
+    needs_max_calibration = False
     for layer_name, selected in zip(layer_names, selections):
-        config = QuantizeConfig(**candidates[selected]["config"])
+        selected_config = candidates[selected]["config"]
+        # ``algorithm=None`` is omitted from the JSON-safe search state, while calibrated
+        # candidates retain their validated ``max`` algorithm.
+        needs_max_calibration |= selected_config.get("algorithm") is not None
+        config = QuantizeConfig(**selected_config)
         for entry in config.quant_cfg:
             entry_dict = _config_entry_dict(entry)
             pattern = entry_dict["quantizer_name"]
@@ -926,4 +931,4 @@ def get_kv_cache_auto_quantize_config(
                     resolved = dict(entry_dict)
                     resolved["quantizer_name"] = f"{layer_name}.{attr}"
                     quant_cfg.append(resolved)
-    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+    return {"quant_cfg": quant_cfg, "algorithm": "max" if needs_max_calibration else None}

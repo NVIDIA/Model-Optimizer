@@ -179,6 +179,57 @@ def test_kv_autoquant_kl_rejects_misaligned_attention_mask(monkeypatch):
         hf_ptq._select_unpadded_logits(torch.zeros(2, 4, 3), {"attention_mask": torch.ones(2, 3)})
 
 
+@pytest.mark.parametrize(
+    ("search_domain", "expected_shape"),
+    [("weight", (2, 4, 3)), ("kv_cache", (4, 3))],
+)
+def test_kl_padding_exclusion_is_scoped_to_kv_autoquant(monkeypatch, search_domain, expected_shape):
+    hf_ptq = _import_hf_ptq(monkeypatch)
+    inputs = {
+        "search_domain": search_domain,
+        "constraints": {"effective_bits": 8.0},
+        "quantization_formats": [],
+        "fixed_quantization_config": None,
+        "module_search_spaces": [],
+        "disabled_layers": [],
+        "kv_cache_quant_cfg": None,
+        "method": "kl_div",
+        "score_size": 1,
+    }
+    monkeypatch.setattr(
+        hf_ptq, "_mtq_inputs_from_auto_quantize_config", lambda *_args, **_kwargs: inputs
+    )
+    logits = torch.arange(2 * 4 * 3).reshape(2, 4, 3).float()
+    batch = {
+        "input_ids": torch.ones(2, 4, dtype=torch.long),
+        "attention_mask": torch.tensor([[1, 1, 0, 0], [0, 1, 1, 0]]),
+    }
+
+    class Model(torch.nn.Module):
+        def forward(self, **_kwargs):
+            return SimpleNamespace(logits=logits, loss=torch.tensor(0.0))
+
+    observed = {}
+
+    def fake_auto_quantize(search_model, **kwargs):
+        observed["shape"] = tuple(kwargs["forward_step"](search_model, batch).shape)
+        return search_model, {}
+
+    monkeypatch.setattr(hf_ptq.mtq, "auto_quantize", fake_auto_quantize)
+    args = SimpleNamespace(
+        calib_with_images=False,
+        inference_pipeline_parallel=1,
+        use_fsdp2=False,
+        batch_size=1,
+        auto_quantize_checkpoint=None,
+    )
+    model = Model()
+
+    hf_ptq.auto_quantize(args, model, [batch], SimpleNamespace(), full_model=model)
+
+    assert observed["shape"] == expected_shape
+
+
 def test_kv_autoquant_rejects_fsdp2(monkeypatch):
     hf_ptq = _import_hf_ptq(monkeypatch)
     monkeypatch.setattr(

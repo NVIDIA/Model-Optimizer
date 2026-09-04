@@ -527,7 +527,9 @@ def auto_quantize(
                 logits = full_model.lm_head(output.last_hidden_state)
             else:
                 logits = output.logits
-            return _select_unpadded_logits(logits, batch)
+            if inputs["search_domain"] == "kv_cache":
+                return _select_unpadded_logits(logits, batch)
+            return logits
 
     else:
         raise ValueError(
