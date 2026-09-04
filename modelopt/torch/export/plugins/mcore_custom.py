@@ -140,22 +140,6 @@ class GroupedGatedMLPSlicing(CustomModuleMapping):
         )
 
 
-class GroupedMLPPacking(CustomModuleMapping):
-    """A custom module mapping that packs grouped MoE experts into one stacked tensor.
-
-    No in-tree architecture uses this: quantized MoE export is per-expert because runtimes need
-    per-expert scales. Kept for out-of-tree mappings whose target checkpoints store experts packed.
-    """
-
-    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
-        """Create a custom module mapping that packs grouped experts."""
-        super().__init__(
-            func_name="grouped_mlp_packing",
-            target_name_or_prefix=target_name_or_prefix,
-            func_kwargs=func_kwargs,
-        )
-
-
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 

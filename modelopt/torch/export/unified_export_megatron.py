@@ -1003,7 +1003,6 @@ class GPTModelExporter:
                 "gated_mlp_slicing": self._gated_mlp_slicing,
                 "gated_delta_net_slicing": self._gated_delta_net_slicing,
                 "grouped_mlp_slicing": self._grouped_mlp_slicing,
-                "grouped_mlp_packing": self._grouped_mlp_packing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -1277,94 +1276,18 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
-    def _grouped_mlp_packing(self, module, prefix, parallel_config=None, is_mtp=False):
-        """Pack TEGroupedLinear experts into one ``[num_experts, out, in]`` tensor (Qwen3.5 layout).
-
-        Reuses the per-expert path for the EP gather and per-expert quantizers, then stacks by
-        global expert id and re-quantizes once with the max scale, as ``_pack_name_remapping`` does.
-        """
-        if is_mtp:
-            prefix = self._mtp_prefix(prefix)
-        marker = "\x00pack\x00"
-        saved_state_dict = self._state_dict
-        self._state_dict = OrderedDict()
-        try:
-            qformat, block_size = self._grouped_mlp_slicing(
-                module,
-                marker + "{}",
-                parallel_config=parallel_config,
-                is_mtp=False,
-                quantize=False,
-                record_quant_config=False,
-            )
-            per_expert = self._state_dict
-        finally:
-            self._state_dict = saved_state_dict
-
-        def collect(suffix):
-            found = {}
-            for key, value in per_expert.items():
-                if not key.startswith(marker) or not key.endswith(suffix):
-                    continue
-                found[int(key[len(marker) :].split(".", 1)[0])] = value
-            return [found[i] for i in sorted(found)]
-
-        weights = collect(".weight")
-        if not weights:
-            return
-        handled = (".weight", ".weight_scale", ".weight_scale_2", ".input_scale")
-        unhandled = {k.split(".", 1)[1] for k in per_expert if not k.endswith(handled)}
-        assert not unhandled, (
-            f"{prefix}: grouped-expert packing has no rule for {sorted(unhandled)}"
-        )
-        # Record against the packed prefix, as _pack_name_remapping does for the other packed path.
-        if qformat in (None, QUANTIZATION_NONE):
-            self._record_excluded_module(prefix)
-        else:
-            assert block_size is not None
-            self._record_layer_quant_config(prefix, qformat, block_size)
-        scales, scales_2 = collect(".weight_scale"), collect(".weight_scale_2")
-        input_scales = collect(".input_scale")
-
-        # Quantize once over the stack, exactly as _pack_name_remapping does.
-        merged_weight = torch.stack(weights, dim=0)
-        if not scales:
-            self._state_dict[prefix] = merged_weight
-        else:
-            if scales_2:
-                # NVFP4 keeps each expert's block scales, rescaled onto the merged global scale.
-                merged_scale, merged_scale_2 = self._merge_nvfp4_expert_scales(scales, scales_2)
-            else:
-                merged_scale, merged_scale_2 = torch.max(torch.stack(scales, dim=0), dim=0)[0], None
-            self._state_dict[prefix] = to_quantized_weight(
-                merged_weight, merged_scale, qformat, merged_scale_2, block_size
-            )
-            # Same suffixes as _pack_name_remapping so both packed paths agree.
-            self._state_dict[prefix + "_weight_scale"] = merged_scale
-            if merged_scale_2 is not None:
-                self._state_dict[prefix + "_weight_scale_2"] = merged_scale_2
-        if input_scales:
-            self._state_dict[prefix + "_input_scale"] = torch.max(
-                torch.stack(input_scales, dim=0), dim=0
-            )[0]
-
     def _grouped_mlp_slicing(
         self,
         module,
         prefix,
         parallel_config=None,
         is_mtp=False,
-        quantize=True,
-        record_quant_config=True,
         gate_proj_name=None,
         up_proj_name=None,
     ):
         """Export TEGroupedLinear weight0..weight{N-1} as one HF-style entry per expert.
 
         ``gate_proj_name`` / ``up_proj_name`` also split each expert's fused gate+up ``linear_fc1``.
-
-        ``quantize=False`` emits unquantized weights alongside the scales, which
-        ``_grouped_mlp_packing`` needs so it can quantize once over the stacked tensor.
 
         At EP>1, local ids are mapped to global via ``module.local_expert_indices``
         and per-expert state is ``all_gather_object``-ed across the EP group. All EP ranks
@@ -1505,16 +1428,8 @@ class GPTModelExporter:
                     if shard_scale is None:
                         local_expert_state[shard_prefix + "weight"] = shard_weight
                     else:
-                        local_expert_state[shard_prefix + "weight"] = (
-                            shard_weight
-                            if not quantize
-                            else to_quantized_weight(
-                                shard_weight,
-                                shard_scale,
-                                qformat,
-                                weight_scale_2_cpu,
-                                block_size,
-                            )
+                        local_expert_state[shard_prefix + "weight"] = to_quantized_weight(
+                            shard_weight, shard_scale, qformat, weight_scale_2_cpu, block_size
                         )
                         local_expert_state[shard_prefix + "weight_scale"] = shard_scale.clone()
 
@@ -1538,7 +1453,7 @@ class GPTModelExporter:
         # Record quant config for ALL global experts on every rank; otherwise the writer's
         # hf_quant_config.json would miss (EP-1)/EP of the routed experts. All experts in
         # a TEGroupedLinear layer share qformat/block_size, so local values apply globally.
-        if seen_qformat is not None and record_quant_config:
+        if seen_qformat is not None:
             assert seen_block_size is not None
             num_total_experts = num_experts * ep_size
             for global_id in range(num_total_experts):
@@ -1900,8 +1815,7 @@ class GPTModelExporter:
 
         merged_weight = torch.stack(weight_list, dim=0)
 
-        # Megatron is [num_experts, out, in]; most HF layouts want [num_experts, in, out], but
-        # Qwen3.5 keeps Megatron's orientation.
+        # Megatron is [num_experts, out, in]; most HF layouts want [num_experts, in, out].
         if transpose:
             merged_weight = merged_weight.transpose(-2, -1).contiguous()
 

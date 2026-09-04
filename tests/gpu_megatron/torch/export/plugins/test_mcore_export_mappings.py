@@ -65,7 +65,6 @@ def test_moe_export_is_per_expert(arch):
     )
     for rule in ("experts.linear_fc1", "experts.linear_fc2", "local_experts.linear_fc1"):
         if rule in mapping:
-            assert "grouped_mlp_packing" not in mapping[rule].func_name
             assert "pack_name_remapping" not in mapping[rule].func_name
 
 
