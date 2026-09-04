@@ -20,12 +20,9 @@ import warnings
 
 import torch.nn as nn
 
-from modelopt.torch.quantization.utils import fsdp2_shard_local_pack
-from modelopt.torch.utils.distributed import is_fsdp2_model
-
 from .layer_utils import get_expert_linear_names, is_quantlinear, set_expert_quantizer_amax
 from .model_config import QUANTIZATION_NONE
-from .moe_utils import _export_fused_experts, _pack_fused_experts_shard_local
+from .moe_utils import _export_fused_experts
 from .quant_utils import get_quantization_format
 from .registry import ExportContext, ExportModuleRegistry, PrepareMoEInputsRegistry
 
@@ -137,26 +134,20 @@ def _export_fused_experts_module(name: str, module: nn.Module, ctx: ExportContex
     Tied experts are packed independently and their duplicate keys are dropped by name
     in postprocess_state_dict; no per-module dedup cache is used.
     """
-    if is_fsdp2_model(ctx.model):
-        with fsdp2_shard_local_pack(ctx.model, module):
-            _pack_fused_experts_shard_local(module, ctx.dtype)
-    else:
-        _export_fused_experts(module, ctx.dtype)
+    _export_fused_experts(module, ctx.dtype)
 
 
 @ExportModuleRegistry.register(predicate=is_quantlinear)
 def _export_quant_linear(name: str, module: nn.Module, ctx: ExportContext) -> None:
     """Export a standard quantized linear layer.
 
-    ``fsdp2_shard_local_pack`` packs this rank's ``Shard(0)`` slice in place (no unshard) under FSDP2,
-    and is a no-op for non-FSDP models -- so the single-process path is unchanged.
+    The caller has already made the weight readable, so this packs it the same way for every
+    parallelism setup.
     """
     if get_quantization_format(module) == QUANTIZATION_NONE:
         return
-    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
     try:
-        with cm:
-            _export_weight(module, ctx)
+        _export_weight(module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export module '{name}' (type={type(module).__name__}): {e}"
@@ -185,11 +176,8 @@ def _export_quant_embedding(name: str, module: nn.Module, ctx: ExportContext) ->
             "The embedding will be exported as its fake-quantized float weight."
         )
         return
-    # fsdp2_shard_local_pack reshards the unsharded root embedding to Shard(0); no-op for non-FSDP.
-    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
     try:
-        with cm:
-            _export_weight(module, ctx)
+        _export_weight(module, ctx)
     except AssertionError as e:
         raise AssertionError(
             f"Failed to export embedding '{name}' (type={type(module).__name__}): {e}"
@@ -214,7 +202,5 @@ def _export_bmm_experts(name: str, module: nn.Module, ctx: ExportContext) -> Non
         modules=module,
         quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
     )
-    cm = fsdp2_shard_local_pack(ctx.model, module)  # no-op when not sharded
-    with cm:
-        for weight_name in ["gate_up_proj", "down_proj"]:
-            _export_weight(module, ctx, weight_name)
+    for weight_name in ["gate_up_proj", "down_proj"]:
+        _export_weight(module, ctx, weight_name)

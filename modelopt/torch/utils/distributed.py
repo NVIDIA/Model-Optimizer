@@ -38,13 +38,10 @@ __all__ = [
     "backend",
     "barrier",
     "fsdp2_wrap",
-    "gather_owned_units",
-    "gather_unit",
     "is_available",
     "is_fsdp2_model",
     "is_initialized",
     "is_master",
-    "materialize_cpu",
     "rank",
     "size",
 ]
@@ -253,46 +250,6 @@ def abort(exit_code: int = 1) -> None:
 def is_fsdp2_model(model) -> bool:
     """Return True if any submodule of ``model`` has been wrapped with FSDP2 ``fully_shard``."""
     return any(isinstance(m, FSDPModule) for m in model.modules())
-
-
-def materialize_cpu(v: torch.Tensor) -> torch.Tensor:
-    """Convert a gathered weight into a plain, contiguous CPU tensor."""
-    if isinstance(v, DTensor):
-        v = v.to_local()
-    v = getattr(v, "data", v)  # QTensorWrapper -> packed data; plain tensor -> itself
-    return v.detach().to("cpu").contiguous()
-
-
-def gather_unit(modules, id_to_name, is_owner):
-    """Rebuild one group's weights and hand them to the rank that owns the group.
-
-    Every rank must call it, since rebuilding needs a piece from each; only the owner keeps them.
-    """
-    unit_sd: dict[str, torch.Tensor] = {}
-    for m in modules:
-        base = id_to_name.get(id(m), "")
-        prefix = (base + ".") if base else ""
-        for name, v in m.state_dict().items():
-            full = v.full_tensor() if isinstance(v, DTensor) else v  # COLLECTIVE (all ranks)
-            if is_owner:
-                unit_sd[prefix + name] = materialize_cpu(full)
-    return unit_sd if is_owner else None
-
-
-def gather_owned_units(model, units):
-    """Rebuild the groups this rank owns, as plain CPU tensors.
-
-    Groups are dealt out round-robin, so each rank keeps roughly its share. Every rank must pass the
-    same list, since each rebuild needs all of them.
-    """
-    my_rank, world = rank(), size()
-    id_to_name = {id(m): n for n, m in model.named_modules()}
-    owned_sd: dict[str, torch.Tensor] = {}
-    for i, modules in enumerate(units):
-        owned = gather_unit(modules, id_to_name, is_owner=(i % world == my_rank))
-        if owned is not None:
-            owned_sd.update(owned)
-    return owned_sd
 
 
 def _off_dtype_params(model) -> set[torch.nn.Parameter]:

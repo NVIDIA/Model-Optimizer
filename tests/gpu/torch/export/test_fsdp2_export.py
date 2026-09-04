@@ -24,6 +24,7 @@ from _test_utils.torch.quantization.tied_modules import (
     wrap_in_parent_with_tied_keys,
 )
 from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed.tensor import DTensor
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.layer_utils import is_quantlinear
@@ -32,7 +33,11 @@ from modelopt.torch.export.unified_export_hf import (
     _export_quantized_weight,
     requantize_resmooth_fused_llm_layers,
 )
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, patch_fsdp_mp_dtypes
+from modelopt.torch.quantization.utils import (
+    fsdp2_aware_weight_update,
+    fsdp2_shard_local_pack,
+    patch_fsdp_mp_dtypes,
+)
 
 
 def _update_weight_test(rank, size):
@@ -288,3 +293,87 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
 @pytest.mark.parametrize("bias", [True, False])
 def test_fsdp2_weight_update_context_for_export_quantized_weight(dist_workers, quant_config, bias):
     dist_workers.run(partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias))
+
+
+def _gather_full_state(model):
+    """Every param and buffer as a full tensor.
+
+    ``full_tensor`` is a collective, so every rank walks the same list in the same order.
+    """
+    state = {}
+    for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
+        if tensor is None:
+            continue
+        state[name] = tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
+    return state
+
+
+def _shard_local_pack_matches_reference_test(rank, size, quant_config):
+    """Packing each rank's slice must give the same checkpoint as packing the whole weight.
+
+    This is the check that catches format-specific breakage: the quantizer's amax and scales are
+    replicated at full length while the weight is only this rank's slice, so anything that is not
+    per-tensor has to be narrowed or routed around. dim=256 keeps the model wider than a 128-wide
+    quantization block, otherwise blockwise configs collapse to one block and prove nothing.
+    """
+    with patch_fsdp_mp_dtypes():
+        model = SmallQKVModel(dim=256).to("cuda").eval()
+        reference = SmallQKVModel(dim=256).to("cuda").eval()
+        reference.load_state_dict(copy.deepcopy(model.state_dict()))
+
+        calib_data = torch.randn(1, 256, device="cuda")
+
+        def calib_fn(m):
+            return m(calib_data)
+
+        fully_shard(model)
+        torch.distributed.barrier()
+
+        mtq.quantize(model, quant_config, calib_fn)
+        mtq.quantize(reference, quant_config, calib_fn)
+        torch.distributed.barrier()
+
+        # reference: pack the whole weight, exactly as a single-process export would
+        for sub_module in reference.modules():
+            if is_quantlinear(sub_module):
+                _export_quantized_weight(sub_module, torch.float16)
+
+        # under test: pack this rank's slice in place
+        for sub_module in list(model.modules()):
+            if is_quantlinear(sub_module):
+                with fsdp2_shard_local_pack(model, sub_module):
+                    _export_quantized_weight(sub_module, torch.float16)
+
+        torch.distributed.barrier()
+
+        packed = _gather_full_state(model)
+        expected = _gather_full_state(reference)
+        assert set(packed) == set(expected), (
+            f"key mismatch: only sharded {sorted(set(packed) - set(expected))}, "
+            f"only reference {sorted(set(expected) - set(packed))}"
+        )
+        for name, tensor in packed.items():
+            assert tensor.shape == expected[name].shape, (
+                f"{name}: shard-local {tuple(tensor.shape)} vs reference "
+                f"{tuple(expected[name].shape)}"
+            )
+            assert torch.allclose(tensor.to(torch.float32), expected[name].to(torch.float32)), (
+                f"{name} differs between shard-local and whole-weight packing"
+            )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        mtq.NVFP4_DEFAULT_CFG,  # dynamic blocks -> shard-local fast path
+        mtq.FP8_DEFAULT_CFG,  # per-tensor amax
+        mtq.INT8_DEFAULT_CFG,  # per-channel amax -> must be narrowed
+        mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,  # per-channel amax
+        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,  # scale grid -> must fall back to unsharded packing
+    ],
+    ids=["nvfp4", "fp8", "int8", "fp8_pc_pt", "int4_blockwise"],
+)
+def test_fsdp2_shard_local_pack_matches_reference(dist_workers, quant_config):
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs for the weight to actually be sharded")
+    dist_workers.run(partial(_shard_local_pack_matches_reference_test, quant_config=quant_config))

@@ -442,7 +442,74 @@ def _get_fsdp2_mesh(module: nn.Module):
     return mesh_info.mesh if mesh_info is not None else None
 
 
-def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
+class _NameIndex:
+    """Refreshable ``name <-> module`` maps for one root model.
+
+    A lookup miss means the module tree changed since the last build (export handlers add per-expert
+    submodules mid-pack), so rebuild once and retry. Rebuilds happen per structural change, not per
+    module, so lookups stay amortized O(1).
+    """
+
+    def __init__(self, root_model: nn.Module):
+        self.root_model = root_model
+        self.refresh()
+
+    def refresh(self):
+        self.name_to_module = dict(self.root_model.named_modules())
+        self.module_to_name = {id(m): n for n, m in self.name_to_module.items()}
+
+    def name_of(self, module: nn.Module) -> str | None:
+        name = self.module_to_name.get(id(module))
+        if name is None:
+            self.refresh()
+            name = self.module_to_name.get(id(module))
+        return name
+
+
+# id(root_model) -> _NameIndex, populated by ``fsdp2_name_index``.
+_NAME_INDEX: dict[int, _NameIndex] = {}
+
+
+@contextmanager
+def fsdp2_name_index(root_model: nn.Module):
+    """Cache the model's name<->module maps for the block so name lookups are O(1).
+
+    The export path resolves a module's dotted name once per quantized module; rebuilding
+    ``named_modules()`` each time is O(N^2). Scoped to the block, so nothing outside it can see a
+    stale index. Re-entrant.
+    """
+    key = id(root_model)
+    outer = _NAME_INDEX.get(key)
+    _NAME_INDEX[key] = _NameIndex(root_model)
+    try:
+        yield
+    finally:
+        if outer is None:
+            _NAME_INDEX.pop(key, None)
+        else:
+            _NAME_INDEX[key] = outer
+
+
+def _cached_name_maps(root_model: nn.Module) -> tuple[dict | None, dict | None]:
+    """Return the active ``fsdp2_name_index`` maps for this model, else ``(None, None)``."""
+    index = _NAME_INDEX.get(id(root_model))
+    return (index.name_to_module, index.module_to_name) if index else (None, None)
+
+
+def _get_module_name(
+    module: nn.Module,
+    root_model: nn.Module,
+    name_to_module: dict | None = None,
+    module_to_name: dict | None = None,
+):
+    # Prefer an id->name reverse map (O(1)); the name->module scan below is O(N), which becomes
+    # O(N^2) when this is called per module in a loop (e.g. large-MoE export packing).
+    if module_to_name is None and name_to_module is None:
+        index = _NAME_INDEX.get(id(root_model))
+        if index is not None:
+            return index.name_of(module)
+    if module_to_name is not None:
+        return module_to_name.get(id(module))
     if name_to_module is None:
         name_to_module = dict(root_model.named_modules())
     target_module_name = next((name for name, m in name_to_module.items() if m is module), None)
@@ -450,7 +517,10 @@ def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: d
 
 
 def _get_enclosing_fsdp_module(
-    module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None
+    module: nn.Module,
+    root_model: nn.Module,
+    name_to_module: dict | None = None,
+    module_to_name: dict | None = None,
 ):
     """Get the enclosing FSDP module for a given module.
 
@@ -458,14 +528,15 @@ def _get_enclosing_fsdp_module(
         module: The module to find the enclosing FSDP for.
         root_model: The root model containing the module.
         name_to_module: Optional pre-computed dict mapping names to modules (for performance).
+        module_to_name: Optional pre-computed ``id(module) -> name`` reverse map (O(1) lookup).
     """
     if isinstance(module, FSDPModule):
         return module
 
+    target_module_name = _get_module_name(module, root_model, name_to_module, module_to_name)
     if name_to_module is None:
-        name_to_module = dict(root_model.named_modules())
-
-    target_module_name = _get_module_name(module, root_model, name_to_module)
+        # Read the index only after the lookup above, which may have refreshed it.
+        name_to_module = _cached_name_maps(root_model)[0] or dict(root_model.named_modules())
 
     if target_module_name is None:
         raise ValueError(f"Module {module} not found in the root model {root_model}.")
@@ -1047,208 +1118,6 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
 
 _ShardInfo = namedtuple("_ShardInfo", ["name", "old", "mesh", "placements"])
-
-
-def _get_shard_start(param):
-    """Global row offset of this rank's ``Shard(0)`` slice (0 for a non-DTensor param).
-
-    Sharding is always even here (``fsdp2_shard_local_pack`` rejects uneven), so it is just
-    ``rank * rows_per_rank``.
-    """
-    if not isinstance(param, DTensor):
-        return 0
-    world = param.device_mesh.size()
-    r = param.device_mesh.get_local_rank()
-    return r * (param.shape[0] // world)
-
-
-def _rebuild_fsdp_param_from_shard(old_fp, packed_local):
-    """Re-register a packed weight as an FSDPParam without materializing the full weight.
-
-    Built from a ``meta`` full-shape tensor so FSDP computes its size/stride fields off a plain
-    tensor -- passing a DTensor sends it down a tensor-parallel branch that a 1-D mesh cannot take.
-    Only ``_sharded_param_data`` and ``sharded_param`` then get the real packed shard.
-    """
-    from modelopt.torch.quantization.qtensor.base_qtensor import QFSDPParam, QTensorWrapper
-
-    full_shape = (old_fp._orig_size[0], *packed_local.shape[1:])
-    is_quantized_wrapper = isinstance(packed_local, QTensorWrapper)
-    param_class = QFSDPParam if is_quantized_wrapper else FSDPParam
-    mp = MixedPrecisionPolicy(
-        param_dtype=packed_local.dtype,
-        reduce_dtype=None,
-        output_dtype=None,
-        cast_forward_inputs=False,
-    )
-
-    # (a) meta full-shape skeleton -> computes sharded_size / padded_sharded_param_size / specs
-    skeleton = torch.empty(full_shape, dtype=packed_local.dtype, device="meta")
-    if is_quantized_wrapper:
-        skeleton = QTensorWrapper(skeleton, metadata={**packed_local.metadata, "shape": full_shape})
-    new_fp = param_class(
-        nn.Parameter(skeleton, requires_grad=False),
-        old_fp._module_info,
-        old_fp.mesh_info,
-        old_fp.post_forward_mesh_info,
-        old_fp.device,
-        None,
-        mp,
-        None,
-    )
-    if param_class is FSDPParam:
-        new_fp.init_dtype_attrs(mp)
-
-    # (b) overwrite the two data fields with the real packed shard (pad the 0th shard as FSDP does)
-    local = (
-        (packed_local.data if is_quantized_wrapper else packed_local).contiguous().to(old_fp.device)
-    )
-    padded = local.new_zeros(new_fp.padded_sharded_param_size)
-    padded.narrow(0, 0, new_fp.sharded_size[0]).copy_(local)
-    new_fp._sharded_param_data = padded.view(-1)
-    new_fp.sharded_param = nn.Parameter(
-        new_fp.to_sharded_dtensor(padded.narrow(0, 0, new_fp.sharded_size[0])), requires_grad=False
-    )
-    new_fp._setattr_on_modules(new_fp.sharded_param)
-    return new_fp
-
-
-def _rewrap_scale_buffers_shard0(module, captured, local_dim0):
-    """Re-wrap packed per-shard scale buffers as ``Shard(0)`` DTensors so a later gather rebuilds them.
-
-    A buffer counts as sharded iff its dim-0 matches this rank's row/expert count; per-tensor
-    scalars stay replicated.
-    """
-    info = next(iter(captured.values()))
-    mesh, placements = info.mesh, info.placements
-    for bname, buf in list(module._buffers.items()):
-        if buf is None or isinstance(buf, DTensor) or buf.dim() == 0:
-            continue
-        # A buffer whose dim-0 matches the shard row/expert count is sharded; wrap it Shard(0) so a
-        # later full_tensor() rebuilds it. Even sharding, so from_local infers the global shape.
-        if buf.shape[0] == local_dim0:
-            module._buffers[bname] = DTensor.from_local(buf.contiguous(), mesh, placements)
-
-
-def _narrow_weight_amax_to_shard(module, pname, start, local_rows, global_rows):
-    """Cut the quantizer's saved max values down to this rank's rows.
-
-    The weight has already been replaced by this rank's slice, but the saved maxes still cover the
-    whole weight, so the scales would come out the wrong size. Returns the original quantizer to put
-    back afterwards, or None if nothing needed changing.
-    """
-    attr = quantizer_attr_names(pname).weight_quantizer
-    quantizer = getattr(module, attr, None)
-    if quantizer is None:
-        return None
-    # A per-tensor max is the same on every rank, so leave it alone.
-    amax = getattr(quantizer, "_amax", None)
-    if amax is None or amax.dim() == 0:
-        return None
-    if amax.shape[0] != global_rows:
-        # Per-block maxes can arrive flattened; put the row axis back so they can be cut, the same
-        # way _export_fused_experts does. Anything else is a layout we cannot cut safely.
-        if amax.numel() % global_rows != 0:
-            return None
-        amax = amax.contiguous().reshape(global_rows, -1)
-
-    narrowed = copy.deepcopy(quantizer)
-    if hasattr(narrowed, "_amax"):
-        delattr(narrowed, "_amax")  # the amax setter refuses shape changes
-    narrowed.amax = amax[start : start + local_rows].contiguous()
-    setattr(module, attr, narrowed)
-    return quantizer
-
-
-@contextmanager
-def fsdp2_shard_local_pack(root_model, module):
-    """Pack a module's ``Shard(0)`` weights on the local shard, in place, without unsharding.
-
-    On enter each weight param is replaced by its local block (recording this rank's expert/row
-    offset in ``module._shard_local_start``) so the wrapped handler packs plain tensors; on exit the
-    packed weights and scale buffers are re-registered as sharded. No collectives, and a no-op for
-    non-FSDP models, so the same handler covers the single-process path.
-    """
-    # Key off this module's own enclosing FSDP unit rather than the root: fully_shard is often
-    # applied to the decoder layers only (fsdp2_wrap(shard_root=False)), which leaves the root a
-    # plain Module while this module is still sharded. Testing the root there would skip the
-    # to_local step and hand DTensors to a packer that expects plain tensors.
-    fsdp_module = _get_enclosing_fsdp_module(module, root_model)
-    if fsdp_module is None:
-        yield
-        return
-
-    group = fully_shard.state(fsdp_module)._fsdp_param_group
-    if group is None:
-        # FSDP module with no managed params of its own: nothing to pack shard-local, so let the
-        # handler pack in place exactly as it would for a non-FSDP module.
-        yield
-        return
-
-    # The root FSDP module keeps reshard_after_forward=False, so a prior forward (e.g. the export
-    # resmooth) can leave its own params (embed/lm_head/norm) UNSHARDED (full, non-DTensor). Reshard so
-    # every shardable param is Shard(0) and gets captured + FSDPParam-rebuilt below -- otherwise an
-    # in-place pack of an unsharded param is silently discarded when state_dict re-materializes from the
-    # (stale) FSDPParam. Idempotent: a no-op for already-sharded decoder layers.
-    if not group.is_sharded:
-        fsdp_module.reshard()
-    mapping = create_fsdp_param_mapping(group.fsdp_params, root_model)
-
-    captured = {}
-    saved_quantizers = {}
-    module._shard_local_start = {}
-    for pname, param in list(module.named_parameters(recurse=False)):
-        name = f"{_get_module_name(module, root_model)}.{pname}"
-        if name not in mapping:
-            continue
-        # A non-DTensor param that survives the reshard above is genuinely replicated (not row-sharded,
-        # e.g. shard_root=False root params): shard-local packing does not apply -> leave it for the
-        # handler to pack in place. Only Shard(0) DTensors get the shard-local path.
-        if not isinstance(param, DTensor):
-            continue
-        # A multi-dim mesh (HSDP, FSDP+TP) has to be rejected BEFORE the divisibility check below:
-        # device_mesh.size() is the product of every mesh dim, so it would inflate world and report
-        # a valid config as unevenly sharded. get_local_rank() would then raise a bare DeviceMesh
-        # error anyway. Symmetric across ranks, so neither raise can hang.
-        if param.device_mesh.ndim != 1:
-            raise NotImplementedError(
-                f"fsdp2_shard_local_pack supports only a 1-D FSDP mesh, but '{name}' is on a mesh "
-                f"with ndim={param.device_mesh.ndim} (HSDP / FSDP+TP are not handled)."
-            )
-        # Fail fast + clear on uneven sharding rather than deadlocking the gather later. Symmetric
-        # (global shape + world are identical on every rank) so this raise can't itself hang.
-        world = param.device_mesh.size()
-        if param.shape[0] % world != 0:
-            raise NotImplementedError(
-                f"fsdp2_shard_local_pack does not support uneven sharding: '{name}' has dim0="
-                f"{param.shape[0]}, not divisible by world size {world}. Use a world size that "
-                f"divides every sharded dim-0."
-            )
-        captured[pname] = _ShardInfo(name, mapping[name], param.device_mesh, param.placements)
-        start = _get_shard_start(param)
-        module._shard_local_start[pname] = start
-        local = param.to_local()
-        saved = _narrow_weight_amax_to_shard(module, pname, start, local.shape[0], param.shape[0])
-        if saved is not None:
-            saved_quantizers[pname] = saved
-        module._parameters[pname] = nn.Parameter(local, requires_grad=False)
-    try:
-        yield
-    finally:
-        local_dim0 = None
-        with no_requires_grad(), enable_fake_quant(module):
-            for pname, info in captured.items():
-                packed_local = getattr(module, pname)
-                if local_dim0 is None:
-                    local_dim0 = packed_local.shape[0]
-                mapping[info.name] = _rebuild_fsdp_param_from_shard(info.old, packed_local)
-                info.old._post_load_hook_handle.remove()
-        if captured:
-            _rewrap_scale_buffers_shard0(module, captured, local_dim0)
-            group.fsdp_params = list(mapping.values())
-        # Put the calibrated quantizers back; only the packing needed the narrowed amax.
-        for pname, quantizer in saved_quantizers.items():
-            setattr(module, quantizer_attr_names(pname).weight_quantizer, quantizer)
-        module.__dict__.pop("_shard_local_start", None)
 
 
 def update_quant_cfg_with_kv_cache_quant(

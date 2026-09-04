@@ -22,6 +22,7 @@ import warnings
 from builtins import ValueError
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,7 @@ try:
 except ImportError:
     HAS_DIFFUSERS = False
 
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
@@ -59,12 +61,14 @@ from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.qtensor.base_qtensor import QTensorWrapper
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import _cast_per_block_scale_to_fp8
-from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+from modelopt.torch.quantization.utils import (
+    fsdp2_aware_weight_update,
+    fsdp2_name_index,
+    quantizer_attr_names,
+)
 from modelopt.torch.quantization.utils.core_utils import has_accelerate_offload
 from modelopt.torch.utils.dataset_utils import _disable_use_cache
-from modelopt.torch.utils.distributed import gather_owned_units, is_fsdp2_model
-
-from .moe_utils import _split_packed_fused_experts
+from modelopt.torch.utils.distributed import is_fsdp2_model
 
 try:
     from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
@@ -94,12 +98,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
     QUANTIZATION_W4A16_NVFP4,
 )
-from .model_utils import (
-    TiedWeightMap,
-    get_export_units,
-    get_language_model_from_vl,
-    is_multimodal_model,
-)
+from .model_utils import TiedWeightMap, get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt, sanitize_hf_config_for_deployment
 from .quant_aware_conversion import (
     build_reverse_name_mapper,
@@ -411,7 +410,7 @@ def _fuse_shared_input_modules(
                             print(f"  Fused QKV group: {module_names}")
             else:
                 # Fuse all modules that have the same input (LLM models)
-                with fsdp2_aware_weight_update(model, modules):
+                with _fusion_update_context(model, modules):
                     preprocess_linear_fusion(modules)
                 fused_linears[modules[0].name] = [module.name for module in modules]
                 fused_count += 1
@@ -435,6 +434,25 @@ def _fuse_shared_input_modules(
             print("No QKV groups found to fuse.")
 
     return fused_linears
+
+
+def _fusion_writes_weights(modules: list[nn.Module]) -> bool:
+    """True if :func:`preprocess_linear_fusion` will write a weight, not just amax buffers.
+
+    It only touches weights via the ``pre_quant_scale`` resmooth branch; otherwise it unifies amax /
+    global_amax, which are quantizer buffers and so are never FSDP-sharded. Under FSDP2 that makes
+    the surrounding ``fsdp2_aware_weight_update`` (a full-unit all-gather + FSDPParam rebuild +
+    reshard) pure overhead.
+    """
+    input_quantizer = getattr(modules[0], "input_quantizer", None)
+    return input_quantizer is not None and input_quantizer.pre_quant_scale is not None
+
+
+def _fusion_update_context(model: nn.Module, modules: list[nn.Module], **kwargs):
+    """``fsdp2_aware_weight_update`` for weight-writing fusions, else a no-op context."""
+    if not _fusion_writes_weights(modules):
+        return nullcontext()
+    return fsdp2_aware_weight_update(model, modules, **kwargs)
 
 
 def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
@@ -464,7 +482,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
             # update_experts_avg_prequant_scale(module)
             grouped_experts = get_experts_list(module, model_type)
             for modules in grouped_experts:
-                with fsdp2_aware_weight_update(model, modules):
+                with _fusion_update_context(model, modules):
                     preprocess_linear_fusion(modules, resmooth_only=True)
 
     # Define the dummy forward function for LLM
@@ -543,7 +561,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                     assert new_expert_name in module_names
                     new_expert_modules.append(model.get_submodule(new_expert_name))
 
-                with fsdp2_aware_weight_update(model, new_expert_modules):
+                with _fusion_update_context(model, new_expert_modules):
                     preprocess_linear_fusion(new_expert_modules)
 
                 expert_id += 1
@@ -571,6 +589,30 @@ def _compressed_per_block_scale(
             "cutlass-swizzled, but tensorrt_llm cannot be imported to convert it for export."
         ) from e
     return cutlass_fp4_scale_to_modelopt_fp4_scale(scale, weight.metadata["shape"][-2:])
+
+
+_EMPTY_CACHE_CHECK_EVERY = 64
+_empty_cache_calls = 0
+
+
+def _maybe_empty_cache(slack_bytes: int = 4 * 1024**3) -> None:
+    """Empty the CUDA cache only when the allocator is actually holding unused memory.
+
+    This runs once per exported weight -- tens of thousands of times on a large MoE -- and
+    ``empty_cache()`` syncs the device and returns every cached block to the driver, so the next
+    allocation has to go back through ``cudaMalloc``. It is here to relieve memory pressure between
+    packs, which only helps when there is reclaimable slack; with no slack it frees nothing and only
+    costs. The allocator-stats query is cheap but not free, so only sample every Nth call -- slack
+    cannot appear between two adjacent packs.
+    """
+    global _empty_cache_calls
+    _empty_cache_calls += 1
+    if _empty_cache_calls % _EMPTY_CACHE_CHECK_EVERY:
+        return
+    if not torch.cuda.is_available():
+        return
+    if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > slack_bytes:
+        torch.cuda.empty_cache()
 
 
 def _export_quantized_weight(
@@ -814,7 +856,7 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
-    torch.cuda.empty_cache()
+    _maybe_empty_cache()
 
 
 def _dispatch_export_handler(name: str, sub_module: nn.Module, ctx: ExportContext) -> None:
@@ -932,7 +974,17 @@ def _process_quantized_modules(
         _dispatch_export_handler(name, sub_module, ctx)
 
 
-def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
+def _prepare_model_for_export(model, dtype, is_modelopt_qlora, pack_weights=True):
+    """Run the shared export setup, optionally quantizing every module's weight in place.
+
+    The body runs under ``fsdp2_name_index`` so the per-module name lookups in the FSDP2 helpers
+    are O(1) instead of a ``named_modules()`` scan each, which is O(N^2) overall.
+    """
+    with fsdp2_name_index(model):
+        return _prepare_model_for_export_impl(model, dtype, is_modelopt_qlora, pack_weights)
+
+
+def _prepare_model_for_export_impl(model, dtype, is_modelopt_qlora, pack_weights=True):
     """Run the shared export setup and quantize every module's weights in place.
 
     Both export paths call this so they cannot drift. Under FSDP2 each rank quantizes its own slice.
@@ -982,8 +1034,11 @@ def _prepare_model_for_export(model, dtype, is_modelopt_qlora):
     # Process all quantized modules and export weights
     from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
 
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
-    _reconstruct_fused_moe_linear(model)
+    # The FSDP2 streaming path packs per layer inside its own loop, once each layer has been
+    # gathered, so it skips the global pass here.
+    if pack_weights:
+        _process_quantized_modules(model, dtype, is_modelopt_qlora)
+        _reconstruct_fused_moe_linear(model)
     return dtype, tied_map, quant_config
 
 
@@ -1016,9 +1071,12 @@ def _export_transformers_checkpoint(
     dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
 
     if is_fsdp2_model(model):
-        # Each rank gathers only its owned layers to CPU (bounded memory; parallel per-rank write).
-        quantized_state_dict = gather_owned_units(model, get_export_units(model))
-        _split_packed_fused_experts(quantized_state_dict, model)
+        # Gather the whole model to CPU on rank 0, as this function's contract says. Only direct
+        # callers reach here -- export_hf_checkpoint streams FSDP2 exports instead.
+        quantized_state_dict = get_model_state_dict(
+            model,
+            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+        )
     else:
         # Non-FSDP2: assumes a replicated model (rank 0 has the full state dict).
         quantized_state_dict = model.state_dict()
@@ -1634,9 +1692,9 @@ def export_hf_checkpoint(
             if getattr(model, "hf_quantizer", None) is not None:
                 model.hf_quantizer = None
 
-            # extra_state_dict (e.g. MTP) is not part of any rank's shard, so rank 0 carries it.
+            # extra_state_dict holds tensors the model never had (e.g. MTP weights).
             export_state_dict = dict(post_state_dict)
-            if extra_state_dict and rank == 0:
+            if extra_state_dict:
                 export_state_dict.update(extra_state_dict)
 
             # transformers may have applied a load-time conversion_mapping (fused gate_up_proj,

@@ -19,7 +19,9 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from itertools import chain
 from typing import Any
 
@@ -103,6 +105,32 @@ def _resolve_checkpoint_dir(ckpt_path: str, rank: int) -> str:
     if is_initialized():
         barrier()
     return snapshot_download(ckpt_path)
+
+
+# Per-phase load timing: name -> [call count, seconds]. Populated by :func:`_load_phase`.
+_LOAD_TIMERS: dict[str, list] = {}
+
+
+@contextmanager
+def _load_phase(name: str):
+    """Add this block's wall time to the named load phase."""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        entry = _LOAD_TIMERS.setdefault(name, [0, 0.0])
+        entry[0] += 1
+        entry[1] += time.perf_counter() - t0
+
+
+def _report_load_timers(total_s: float) -> None:
+    """Print the per-phase load breakdown; the caller decides which rank reports."""
+    print(f"\n===== fsdp2 load breakdown ({total_s:.1f}s total) =====", flush=True)
+    for name, (n, secs) in sorted(_LOAD_TIMERS.items(), key=lambda kv: -kv[1][1]):
+        share = f"{100.0 * secs / total_s:5.1f}%" if total_s else "    -"
+        print(f"  {name:<34} {n:>6} calls {secs:>8.1f}s | {share}", flush=True)
+    accounted = sum(v[1] for v in _LOAD_TIMERS.values())
+    print(f"  {'UNACCOUNTED':<34} {'':>6}       {total_s - accounted:>8.1f}s\n", flush=True)
 
 
 def _materialize_meta_model(model: nn.Module, device: torch.device) -> None:
@@ -231,8 +259,12 @@ def _layers_for_rank(n_layers: int, world_size: int, r: int) -> list[int]:
 def _read_and_convert(
     resolved_path: str, weight_map: dict, keyset: set[str], plan: dict | None
 ) -> dict:
-    raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
-    return _convert_keys(plan, raw) if plan else raw
+    with _load_phase("disk read (safetensors)"):
+        raw = read_safetensors_subset(resolved_path, weight_map, lambda k: k in keyset)
+    if not plan:
+        return raw
+    with _load_phase("key conversion (HF engine)"):
+        return _convert_keys(plan, raw)
 
 
 # One decoder layer's converted weights (param-name suffix -> tensor); the outer dict is keyed
@@ -275,19 +307,24 @@ def _broadcast_load_group(
         group_state_dict = {}
         for layer_idx in layer_indices:
             group_state_dict.update(owned_layer_state_dicts[layer_idx])
-    broadcasted_state_dict = broadcast_state_dict(group_state_dict, src=source_rank, device=device)
+    with _load_phase("broadcast (network)"):
+        broadcasted_state_dict = broadcast_state_dict(
+            group_state_dict, src=source_rank, device=device
+        )
     for layer_idx in layer_indices:
         prefix = layer_prefixes[layer_idx]
         layer_state_dict = {
             k[len(prefix) :]: v for k, v in broadcasted_state_dict.items() if k.startswith(prefix)
         }
         if cpu_offload:
-            layer_state_dict = {k: v.cpu() for k, v in layer_state_dict.items()}
-        set_model_state_dict(
-            decoder_layers[layer_idx],
-            layer_state_dict,
-            options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
-        )
+            with _load_phase("cpu offload copy"):
+                layer_state_dict = {k: v.cpu() for k, v in layer_state_dict.items()}
+        with _load_phase("reshard (set_model_state_dict)"):
+            set_model_state_dict(
+                decoder_layers[layer_idx],
+                layer_state_dict,
+                options=StateDictOptions(full_state_dict=True, broadcast_from_rank0=False),
+            )
         del layer_state_dict
     del broadcasted_state_dict
     if current_rank == source_rank:
@@ -350,12 +387,18 @@ def parallel_load_and_prepare_fsdp2(
     pass ``None`` to broadcast all of a source's layers at once).
     """
     resolved_path = _resolve_checkpoint_dir(ckpt_path, rank)
-    weight_map = weight_map_for(resolved_path)
+    _load_t0 = time.perf_counter()
+    with _load_phase("weight_map (index json)"):
+        weight_map = weight_map_for(resolved_path)
 
-    model = build_meta_causal_lm(resolved_path, trust_remote_code, attn_implementation, hf_config)
+    with _load_phase("skeleton build (meta)"):
+        model = build_meta_causal_lm(
+            resolved_path, trust_remote_code, attn_implementation, hf_config
+        )
 
     # fsdp2_wrap shards each decoder layer + the root (embed/lm_head/norm sharded, not replicated).
-    decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
+    with _load_phase("fsdp2_wrap"):
+        decoder_layers = fsdp2_wrap(model, mp_policy=mp_policy, cpu_offload=cpu_offload)
     module_to_name = {m: n for n, m in model.named_modules()}
     layer_prefixes = [module_to_name[layer] + "." for layer in decoder_layers]
 
@@ -375,7 +418,8 @@ def parallel_load_and_prepare_fsdp2(
             "skipping %d checkpoint keys not present in the model (e.g. MTP head)", skipped
         )
 
-    _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
+    with _load_phase("materialize meta params"):
+        _materialize_meta_model(model, torch.device("cpu") if cpu_offload else device)
 
     owned_layer_indices = _layers_for_rank(len(decoder_layers), world_size, rank)
     owned_layer_state_dicts = _read_owned_layers(
@@ -422,4 +466,6 @@ def parallel_load_and_prepare_fsdp2(
         _promote_non_dtensor_to_gpu(model, device)
     if hasattr(model, "tie_weights"):
         model.tie_weights()
+    if rank == 0:
+        _report_load_timers(time.perf_counter() - _load_t0)
     return model

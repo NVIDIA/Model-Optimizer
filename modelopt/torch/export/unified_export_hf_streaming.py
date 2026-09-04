@@ -34,10 +34,8 @@ import torch.nn as nn
 from safetensors.torch import save_file
 
 from modelopt.torch.utils import distributed as _dist
-from modelopt.torch.utils.distributed import gather_unit
 
 from .model_utils import get_export_units
-from .moe_utils import _split_packed_fused_experts
 from .quant_aware_conversion import build_reverse_name_mapper
 from .quant_utils import _postprocess_single_tensor, get_quant_config
 from .registry import ExportContext
@@ -258,6 +256,17 @@ def _make_tensor_sink(
         writer.add(new_key, new_value.detach().contiguous().cpu())
 
     return sink
+
+
+def _copy_remote_code_files(model: nn.Module, export_dir: Path) -> None:
+    """Copy the checkpoint's custom modeling *.py files, which trust_remote_code models need."""
+    source = Path(getattr(model.config, "_name_or_path", "") or "")
+    if not source.is_dir():
+        return
+    for py_file in source.glob("*.py"):
+        destination = export_dir / py_file.name
+        if not destination.exists():
+            shutil.copy2(py_file, destination)
 
 
 def _export_transformers_checkpoint_streaming(
@@ -506,12 +515,7 @@ def _export_transformers_checkpoint_streaming(
             model.generation_config.save_pretrained(str(export_dir))
 
     # Copy custom modeling *.py files for trust_remote_code checkpoints.
-    _src_dir = Path(getattr(model.config, "_name_or_path", "") or "")
-    if _src_dir.is_dir():
-        for _py in _src_dir.glob("*.py"):
-            _dst = export_dir / _py.name
-            if not _dst.exists():
-                shutil.copy2(_py, _dst)
+    _copy_remote_code_files(model, export_dir)
 
     return None, quant_config
 
@@ -535,7 +539,11 @@ def _export_fsdp2_checkpoint_streaming(
     export_dir = Path(export_dir)
     my_rank, world = _dist.rank(), _dist.size()
 
-    dtype, tied_map, quant_config = _prepare_model_for_export(model, dtype, is_modelopt_qlora)
+    # pack_weights=False: each layer is packed below, after it has been gathered, so the packer
+    # always sees a whole weight exactly as a single-process export would.
+    dtype, tied_map, quant_config = _prepare_model_for_export(
+        model, dtype, is_modelopt_qlora, pack_weights=False
+    )
 
     kv_cache_max_bound = 448
     kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
@@ -564,20 +572,45 @@ def _export_fsdp2_checkpoint_streaming(
         is_modelopt_qlora,
     )
 
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+    from modelopt.torch.quantization.utils.core_utils import enable_weight_access_and_writeback
+
     id_to_name = {id(m): n for n, m in model.named_modules()}
+    name_to_module = dict(model.named_modules())
+    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    # This rank's packed tensors, held until every gather is done. Bounded to its own share of the
+    # model (~model_size / world), not the whole checkpoint.
+    owned: list[tuple[str, torch.Tensor]] = []
     for index, unit in enumerate(get_export_units(model)):
-        # gather_unit all-gathers the unit on every rank and hands it to the owner as plain CPU
-        # tensors. Every rank must call it for every unit; gating around it instead of inside it
-        # leaves the non-owners out of the collective and hangs the owner.
-        unit_sd = gather_unit(unit, id_to_name, is_owner=(index % world == my_rank))
-        if unit_sd is None:
-            continue
-        _split_packed_fused_experts(unit_sd, model)
-        for full_key, tensor in unit_sd.items():
-            if full_key in seen_keys:
-                continue
-            seen_keys.add(full_key)
-            _stream(full_key, tensor)
+        is_owner = index % world == my_rank
+        for module in unit:
+            base = id_to_name.get(id(module), "")
+            # Gathers the layer on every rank and leaves plain full weights, so the owner can pack
+            # it exactly as a single-process export does. Every rank must enter -- the gather is a
+            # collective, and gating around it instead of inside it would hang the owner.
+            with enable_weight_access_and_writeback(module, model, name_to_module, writeback=True):
+                if not is_owner:
+                    continue
+                for sub_name, sub_module in module.named_modules():
+                    full_name = f"{base}.{sub_name}" if sub_name else base
+                    _dispatch_export_handler(full_name, sub_module, ctx)
+                _reconstruct_fused_moe_linear(module)
+                prefix = f"{base}." if base else ""
+                for key, tensor in module.state_dict().items():
+                    full_key = prefix + key
+                    if full_key in seen_keys or tensor.is_meta:
+                        continue
+                    seen_keys.add(full_key)
+                    # Copy out inside the window: on exit the weights go back to sharded. Writing
+                    # here instead would sit between two gathers, and a gather only completes once
+                    # every rank arrives -- so the other ranks would stall on this owner.
+                    owned.append((full_key, tensor.detach().contiguous().cpu()))
+
+    # Every gather is done, so no rank waits on any other: all ranks postprocess and write their own
+    # share at the same time, and a slow writer delays nobody.
+    for full_key, tensor in owned:
+        _stream(full_key, tensor)
+    owned.clear()
 
     # Tensors the model never held (e.g. MTP weights). Rank 0 owns that slot, and they are already
     # materialized, so they skip the per-tensor postprocessing -- only the hub-name reversal applies.
@@ -613,5 +646,6 @@ def _export_fsdp2_checkpoint_streaming(
         if getattr(model, "generation_config", None) is not None:
             with contextlib.suppress(Exception):
                 model.generation_config.save_pretrained(str(export_dir))
+        _copy_remote_code_files(model, export_dir)
 
     return None, quant_config
