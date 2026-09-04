@@ -38,8 +38,23 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         }
     elif quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
         return {
-            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+            "input_activations": {
+                "dynamic": True,
+                "num_bits": 8,
+                "type": "float",
+                "strategy": "token",
+            },
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "strategy": "channel"},
+        }
+    elif quant_algo == "FP8_PB_WO":
+        return {
+            "weights": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "float",
+                "strategy": "block",
+                "block_structure": [128, 128],
+            },
         }
     elif quant_algo == "NVFP4":
         gs = group_size or 16
@@ -110,12 +125,37 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
         gs = group_size or 32
         return {
             "input_activations": {
+                "dynamic": True,
+                "num_bits": 8,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            },
+            "weights": {
                 "dynamic": False,
                 "num_bits": 8,
                 "type": "float",
                 "group_size": gs,
+                "strategy": "group",
             },
-            "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
+        }
+    elif quant_algo == "MXFP4":
+        gs = group_size or 32
+        return {
+            "input_activations": {
+                "dynamic": True,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            },
+            "weights": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+                "strategy": "group",
+            },
         }
     else:
         warnings.warn(
@@ -233,6 +273,18 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
         if lora_rank is not None:
             config_group_details["lora_rank"] = lora_rank
         new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value in {
+        "FP8_PER_CHANNEL_PER_TOKEN",
+        "FP8_PB_WO",
+        "MXFP4",
+        "MXFP8",
+        "W4A8_MXFP4_FP8",
+        "W4A8_NVFP4_FP8",
+    }:
+        group_size = original_quantization_details.get("group_size")
+        config_group_details = _quant_algo_to_group_config(quant_algo_value, group_size)
+        config_group_details["targets"] = ["Linear"]
+        new_config["config_groups"] = {"group_0": config_group_details}
     elif quant_algo_value == "MIXED_PRECISION":
         quantized_layers = original_quantization_details.get("quantized_layers", {})
 
@@ -264,6 +316,11 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
 
     if quant_algo_value:
         new_config["quant_algo"] = quant_algo_value
+
+    group_size = original_quantization_details.get("group_size")
+    if group_size is not None:
+        # ModelOpt consumers use this top-level value to size block scales.
+        new_config["group_size"] = group_size
 
     kv_cache_quant_algo = original_quantization_details.get("kv_cache_quant_algo")
     if kv_cache_quant_algo:

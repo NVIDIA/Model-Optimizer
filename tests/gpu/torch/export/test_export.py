@@ -106,6 +106,7 @@ def test_get_quantization_format(config, expected):
             {
                 "quant_algo": "MIXED_PRECISION",
                 "kv_cache_quant_algo": None,
+                "exclude_modules": ["layer8"],
                 "quantized_layers": {
                     "layer1": {"quant_algo": "NVFP4", "group_size": 16},
                     "layer3": {
