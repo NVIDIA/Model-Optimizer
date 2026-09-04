@@ -435,9 +435,7 @@ def _quick_manifest(path: Path) -> Path:
     return path
 
 
-def test_short_profile_materializes_pinned_tasks_and_native_qwen_backend(
-    monkeypatch, tmp_path, capsys
-):
+def test_short_profile_preserves_default_vllm_backend(monkeypatch, tmp_path, capsys):
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -503,24 +501,18 @@ def test_short_profile_materializes_pinned_tasks_and_native_qwen_backend(
     assert all(call["settings"]["tasks"] == ",".join(expected_tasks) for call in calls)
     assert [run["attempt"] for run in result["runs"]] == [1, 2]
     settings = calls[0]["settings"]
-    assert settings["model"] == "qwen3_5"
-    assert report["backend_limitations"] == []
-    assert report["output_budget_contract"] == {
-        "mmmu_val": {
-            "adapter": "qwen3_5",
-            "effective_max_new_tokens": 128,
-            "limitation": None,
-            "requested_max_new_tokens": 128,
-            "resolution": "task_max_new_tokens_overrides_adapter_default",
-        },
-        "realworldqa": {
-            "adapter": "qwen3_5",
-            "effective_max_new_tokens": 16,
-            "limitation": None,
-            "requested_max_new_tokens": 16,
-            "resolution": "task_max_new_tokens_overrides_adapter_default",
-        },
-    }
+    assert settings["model"] == "vllm"
+    assert report["backend_limitations"] == [
+        "generic vLLM video messages do not preserve native Qwen 3.5 timestamps",
+        "pinned generic vLLM max_new_tokens is a model-level lower bound",
+    ]
+    for task, expected_tokens in {"mmmu_val": 128, "realworldqa": 16}.items():
+        budget = report["output_budget_contract"][task]
+        assert budget["adapter"] == "vllm"
+        assert budget["requested_max_new_tokens"] == expected_tokens
+        assert budget["effective_max_new_tokens"] == expected_tokens
+        assert budget["limitation"] is not None
+        assert budget["resolution"] == "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
 
 
 @pytest.mark.parametrize("suite", ["short", suites.TASK_PREFIX100_REPEAT2_SUITE])
@@ -630,7 +622,7 @@ def test_short_profile_reruns_stale_completed_repetitions(
         def changed_backend_policy(profile_contract):
             return {
                 **original_backend_policy(profile_contract),
-                "attention_implementation": "eager",
+                "enforce_eager": True,
             }
 
         monkeypatch.setattr(preflight, "_backend_policy", changed_backend_policy)

@@ -56,9 +56,9 @@ def _backend_policy(
     """Return the selected profile's backend contract or the legacy default."""
     if profile_contract is None:
         return {
-            "attention_implementation": "sdpa",
             "enable_thinking": False,
-            "name": "qwen3_5",
+            "name": "vllm",
+            "reasoning_parser": "qwen3",
         }
     return cast("dict[str, object]", profile_contract.manifest["backend"])
 
