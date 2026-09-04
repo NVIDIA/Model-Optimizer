@@ -15,8 +15,9 @@
 
 """Per-model descriptors, one package per HF model type.
 
-Directory names are the HF ``config.model_type`` they describe; trust-remote-code
-models (``arctic``, ``deepseek``) use their remote-code ``model_type``. Each package's
+Directory names are the HF ``config.model_type`` they describe; a model whose code
+ships with the checkpoint uses its remote-code ``model_type`` and records that as
+``ModelSpec.modeling_source``. Each package's
 ``specs.py`` registers one global ``ModelSpec`` (built from the section classes in this
 package's own ``specs.py``) at import time. Importing this package registers them all.
 Consumers resolve a spec via the registry lookups (``get_spec`` / ``match_moe_block``)

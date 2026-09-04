@@ -23,11 +23,14 @@ does not exist in transformers, and a mirrored table agreed with it.
 These tests read the other side of the contract -- what transformers actually defines --
 so a renamed block class or projection is caught at the source.
 
-Structure follows the transformers repo's own convention: the assertions are shared and
-parametrized over the registry, and a model is excluded only by an explicit entry in
-``UNCHECKABLE`` with a reason (their ``utils/check_repo.py`` ignore-lists). A model that
-is neither checkable nor listed fails ``test_every_moe_model_type_is_classified``, so
-coverage cannot erode silently as models are added.
+Structure follows the transformers repo's own convention -- shared assertions
+parametrized over the registry, rather than a test module per model.
+
+Unlike transformers' ``utils/check_repo.py``, the exclusions are not a table here: a
+model that cannot be introspected is one whose code ships with the checkpoint, which
+its spec already records as ``modeling_source="remote_code"``. This file therefore
+names no models at all; the set to check, and the reason to skip one, both come from
+the registry.
 """
 
 import functools
@@ -40,15 +43,7 @@ pytest.importorskip("transformers")
 
 import torch.nn as nn
 
-from modelopt.torch.models import get_specs
-
-# Model types whose definition cannot be introspected from an installed transformers,
-# with the reason. Mirrors transformers' own IGNORE_NON_TESTED: an exclusion is an
-# explicit, reviewable line rather than a silent gap.
-UNCHECKABLE = {
-    "arctic": "trust_remote_code model; not shipped in transformers",
-    "deepseek": "trust_remote_code model; not shipped in transformers",
-}
+from modelopt.torch.models import get_spec, get_specs
 
 # Model types that have been in transformers long enough to exist in every version this
 # repo supports, so failing to resolve one means the lookup itself broke rather than the
@@ -63,6 +58,16 @@ ALWAYS_RESOLVABLE = {
     "qwen2_moe",
     "qwen3_moe",
 }
+
+
+def _is_remote_code(model_type: str) -> bool:
+    """Whether the model's classes live in checkpoint code rather than transformers.
+
+    Read off the spec rather than a table here: it is a fact about the model, and the
+    spec is where a model's facts belong.
+    """
+    spec = get_spec(model_type)
+    return spec is not None and spec.modeling_source == "remote_code"
 
 
 def _moe_variants():
@@ -121,16 +126,6 @@ def _ids(items):
 VARIANTS = _moe_variants()
 
 
-def test_excused_model_types_are_still_registered():
-    """An UNCHECKABLE entry cannot outlive the spec it excuses."""
-    registered = {mt for mt, _ in VARIANTS}
-    stale = set(UNCHECKABLE) - registered
-    assert not stale, (
-        f"UNCHECKABLE names model types with no registered MoE spec: {sorted(stale)}. "
-        f"Drop the entry."
-    )
-
-
 def test_always_resolvable_models_are_registered():
     """ALWAYS_RESOLVABLE cannot drift away from the registry."""
     registered = {mt for mt, _ in VARIANTS}
@@ -140,18 +135,22 @@ def test_always_resolvable_models_are_registered():
     )
 
 
-@pytest.mark.parametrize("model_type", sorted(UNCHECKABLE))
-def test_excuses_are_still_true(model_type):
-    """An excused model must really be absent from transformers.
+REMOTE_CODE_MODEL_TYPES = sorted({mt for mt, _ in VARIANTS if _is_remote_code(mt)})
 
-    Keeps a stale excuse from suppressing a check forever: once transformers ships a
-    model we skip today, this fires and the entry should be dropped rather than
-    silently leaving the spec unvalidated.
+
+@pytest.mark.parametrize("model_type", REMOTE_CODE_MODEL_TYPES)
+def test_remote_code_models_are_really_absent(model_type):
+    """``modeling_source="remote_code"`` must still hold for the installed transformers.
+
+    Validates the spec field itself, the same job this file does for block names and
+    projections. Models do graduate from remote code into transformers, and a field
+    left stale would silently suppress every other check for that model.
     """
     module = _modeling_module(model_type)
     assert module is None, (
-        f"{model_type!r} is excused as {UNCHECKABLE[model_type]!r}, but transformers now "
-        f"provides {module.__name__}. Remove it from UNCHECKABLE so its spec is checked."
+        f"{model_type!r} declares modeling_source='remote_code', but transformers now "
+        f"provides {module.__name__}. Set modeling_source='transformers' on its spec so "
+        f"its block names and expert projections are checked."
     )
 
 
@@ -162,8 +161,8 @@ def test_block_names_name_a_real_transformers_class(model_type, variant):
     ``block_names`` is the matching key: a name that exists nowhere silently matches
     nothing, which is how the ``GptOssMoE`` entry stayed invisible.
     """
-    if model_type in UNCHECKABLE:
-        pytest.skip(UNCHECKABLE[model_type])
+    if _is_remote_code(model_type):
+        pytest.skip(f"{model_type!r} is a trust_remote_code model; not in transformers")
     module = _modeling_module(model_type)
     if module is None:
         pytest.skip(f"no modeling module for {model_type!r} in this transformers")
@@ -189,8 +188,8 @@ def test_expert_linear_names_exist_in_transformers(model_type, variant):
     """
     if variant.expert_linear_names is None:
         pytest.skip("variant declares no expert linear names")
-    if model_type in UNCHECKABLE:
-        pytest.skip(UNCHECKABLE[model_type])
+    if _is_remote_code(model_type):
+        pytest.skip(f"{model_type!r} is a trust_remote_code model; not in transformers")
     module = _modeling_module(model_type)
     if module is None:
         pytest.skip(f"no modeling module for {model_type!r} in this transformers")

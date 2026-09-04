@@ -27,6 +27,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="deepseek",
+        modeling_source="remote_code",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(

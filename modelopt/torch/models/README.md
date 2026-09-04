@@ -39,9 +39,8 @@ Then add it to the import list in `__init__.py`. Two tables in
 them:
 
 - `EXPECTED_MOE_VARIANTS` in `test_model_specs.py` — pins the spec's values.
-- `UNCHECKABLE` in `test_specs_vs_transformers.py` — only if the model cannot be
-  introspected from transformers at all (trust-remote-code); the set of models to
-  check is read from the registry, so there is nothing to add for the normal case.
+`test_specs_vs_transformers.py` needs no edit: it reads which models to check, and
+which to skip, from the registry.
 
 The file is named for what it holds, not for who reads it: a model's spec is general
 model data, and export is only its first consumer.
@@ -55,8 +54,13 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 | `moe_spec` (`MoESpec`) | MoE architecture facts — block classes, expert projection naming | the model is dense |
 | `export_spec` (`ExportSpec`) | Per-model data of the unified HF export path | export needs nothing model-specific |
 
+`model_type` is required. `modeling_source` says whether the classes this spec names
+ship inside `transformers` (the default) or come from the checkpoint under
+`trust_remote_code=True` — set it to `"remote_code"` for the latter, which is what tells
+the test suite those classes cannot be imported and checked.
+
 `None` means "the model has nothing to say about this", which stays distinct from a
-filled-in-but-empty section. Only `model_type` is required.
+filled-in-but-empty section.
 
 ## Fields
 

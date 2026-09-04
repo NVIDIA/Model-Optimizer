@@ -33,6 +33,7 @@ never lives here. A model registers exactly one ``ModelSpec`` in its sibling
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 __all__ = [
     "ExportSpec",
@@ -167,6 +168,14 @@ class ModelSpec:
     model_type: str
     """The HF model type this spec describes (``config.model_type``, e.g.
     ``"qwen3_moe"``). Unique across the registry."""
+
+    modeling_source: Literal["transformers", "remote_code"] = "transformers"
+    """Where the model's modeling code lives: shipped inside ``transformers``, or
+    carried by the checkpoint and loaded with ``trust_remote_code=True``.
+
+    A fact about the model, not about any one subsystem: it decides whether the classes
+    named in this spec can be imported at all, so ``model_type`` is a remote-code
+    spelling rather than a transformers one, and loading the model needs the flag."""
 
     moe_spec: MoESpec | None = None
     """The model's MoE architecture facts, or ``None`` for a dense model."""

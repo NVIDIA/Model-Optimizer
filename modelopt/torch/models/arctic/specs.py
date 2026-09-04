@@ -21,6 +21,7 @@ from ..specs import ModelSpec, MoESpec, MoEVariant
 register(
     ModelSpec(
         model_type="arctic",
+        modeling_source="remote_code",
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(
