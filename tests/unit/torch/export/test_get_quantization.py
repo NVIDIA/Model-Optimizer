@@ -212,6 +212,19 @@ def test_uniform_vlm_export_ignores_disabled_vision_attention():
         get_quant_config(model)
 
 
+def test_quant_config_tolerates_ambiguous_language_model_roots():
+    model = torch.nn.Module()
+    model.model = torch.nn.Module()
+    model.model.language_model = torch.nn.Module()
+    model.language_model = torch.nn.Module()
+    model.model.language_model.attention = _FakeAttention()
+    mtq.set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+
+    quantization = get_quant_config(model)["quantization"]
+
+    assert quantization["kv_cache_quant_algo"] is None
+
+
 @pytest.mark.parametrize(
     ("quantizer_cfg", "expected_format"),
     [

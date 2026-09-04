@@ -119,6 +119,42 @@ def _kv_cache_cfg():
     )
 
 
+def test_layerwise_export_resolves_mixed_kv_cache_formats(tmp_path):
+    model = get_tiny_llama(num_hidden_layers=2).eval()
+    model.config.architectures = ["LlamaForCausalLM"]
+    mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "model.layers.0.self_attn.*[kv]_bmm_quantizer",
+                    "cfg": {"num_bits": (4, 3), "constant_amax": 1.0},
+                    "enable": True,
+                },
+                {
+                    "quantizer_name": "model.layers.1.self_attn.*[kv]_bmm_quantizer",
+                    "cfg": {
+                        "num_bits": (2, 1),
+                        "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                        "constant_amax": 1.0,
+                    },
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    model._modelopt_kv_cache_auto_quantize_state = {}
+
+    exporter = LayerwiseExporter(model, tmp_path)
+
+    assert exporter._kv_cache_format == {
+        "model.layers.0.self_attn": {"quant_algo": "FP8"},
+        "model.layers.1.self_attn": {"quant_algo": "NVFP4"},
+    }
+
+
 def _nvfp4_cfg():
     """NVFP4 with o_proj left unquantized.
 

@@ -551,6 +551,11 @@ def auto_quantize(
                 "KV-cache AutoQuant is single-process only; distributed scoring, selection, "
                 "and checkpoint writes are not synchronized."
             )
+        if is_quantized(model):
+            raise NotImplementedError(
+                "KV-cache AutoQuant requires an unquantized model; composing it after GEMM "
+                "PTQ or AutoQuantize is not supported yet."
+            )
         if method not in (None, "kl_div"):
             raise ValueError("cost_model='kv_cache' requires method='kl_div'.")
         if fixed_quantization_config is not None or module_search_spaces:

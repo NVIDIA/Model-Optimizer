@@ -15,10 +15,14 @@
 
 import json
 
+import pytest
 import torch
 
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.unified_export_hf import _write_hf_export_config
+from modelopt.torch.export.unified_export_hf import (
+    _revert_hf_quant_config_names,
+    _write_hf_export_config,
+)
 
 
 def test_convert_mixed_kv_cache_config_preserves_layer_map():
@@ -84,3 +88,27 @@ def test_write_hf_export_config_writes_mapped_kv_autoquant_report(tmp_path):
     assert (tmp_path / "hf_quant_config.json").is_file()
     exported_config = json.loads((tmp_path / "config.json").read_text())
     assert exported_config["quantization_config"]["kv_cache_quant_algo"] == "MIXED_PRECISION"
+
+
+def test_reverse_quant_config_name_mapping_is_atomic():
+    quant_config = {
+        "quantization": {
+            "exclude_modules": ["model.good"],
+            "kv_cache_quantized_layers": {"model.bad": {"quant_algo": "FP8"}},
+        }
+    }
+
+    def failing_mapper(name):
+        if name == "model.bad":
+            raise RuntimeError("unsupported mapping")
+        return f"hub.{name}"
+
+    with pytest.raises(RuntimeError, match="unsupported mapping"):
+        _revert_hf_quant_config_names(quant_config, failing_mapper)
+
+    assert quant_config == {
+        "quantization": {
+            "exclude_modules": ["model.good"],
+            "kv_cache_quantized_layers": {"model.bad": {"quant_algo": "FP8"}},
+        }
+    }

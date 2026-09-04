@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import json
 
 import pytest
@@ -20,6 +21,7 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_qwen3, get_tiny_qwen3vl
 
+import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
 from modelopt.torch.quantization import model_quant, tensor_quant
@@ -626,6 +628,37 @@ def test_public_kv_autoquant_converts_hf_attention_and_searches(tmp_path, nvfp4_
     assert all(not quantizer.is_enabled for quantizer in replay_non_kv_quantizers)
 
 
+def test_kv_autoquant_report_survives_modelopt_save_restore():
+    model = get_tiny_llama(num_hidden_layers=1)
+    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
+    candidate = (
+        _kv_config((4, 3), 8.0, algorithm=None, constant_amax=1.0).model_dump(),
+        "fp8",
+    )
+    model, state = mtq.auto_quantize(
+        model,
+        {"effective_bits": 8.0, "cost_model": "kv_cache"},
+        [candidate],
+        data,
+        lambda search_model, batch: search_model(**batch).logits,
+        num_calib_steps=1,
+        num_score_steps=1,
+    )
+    buffer = io.BytesIO()
+    mto.save(model, buffer)
+    buffer.seek(0)
+
+    restored = mto.restore(get_tiny_llama(num_hidden_layers=1), buffer)
+
+    assert restored._modelopt_kv_cache_auto_quantize_state["best"] == state["best"]
+    quantization = get_quant_config(restored)["quantization"]
+    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quantized_layers"] == {
+        "model.layers.0.self_attn": {"quant_algo": "FP8"}
+    }
+
+
 @pytest.mark.parametrize(
     ("model_factory", "expected_layer", "disabled_layers"),
     [
@@ -752,13 +785,23 @@ def test_public_kv_autoquant_rejects_distributed_execution_before_mutation(monke
     assert {name: type(module) for name, module in model.named_modules()} == original_types
 
 
-def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers(
-    monkeypatch, nvfp4_fake_quant_stub
-):
-    torch.manual_seed(123)
+def test_public_kv_autoquant_rejects_preceding_quantization_before_search():
     model = get_tiny_llama(num_hidden_layers=2)
-    data = [{"input_ids": torch.randint(0, model.config.vocab_size, (1, 8))}]
-    fixed_kv_config = {
+    model = mtq.quantize(
+        model,
+        {
+            "quant_cfg": [
+                {"quantizer_name": "*", "enable": False},
+                {
+                    "quantizer_name": "*.weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                    "enable": True,
+                },
+            ],
+            "algorithm": None,
+        },
+    )
+    candidate = {
         "quant_cfg": [
             {
                 "quantizer_name": "*[kv]_bmm_quantizer",
@@ -766,95 +809,16 @@ def test_public_kv_autoquant_preserves_fixed_layers_and_weight_quantizers(
             }
         ],
         "algorithm": None,
+        "effective_bits": 8.0,
     }
-    model = mtq.quantize(model, fixed_kv_config)
-    fixed_weight_quantizer = model.model.layers[0].self_attn.q_proj.weight_quantizer
-    fixed_weight_quantizer.enable()
-    fixed_weight_quantizer.amax = torch.tensor(1.0)
-    fixed_weight_quantizer.disable_quant()
-    fixed_weight_quantizer.disable_calib()
-    observed_fixed_states = []
-    fixed_hook = fixed_weight_quantizer.register_forward_hook(
-        lambda module, _inputs, _output: observed_fixed_states.append(
-            (module.is_enabled, module._if_quant, module._if_calib)
-        )
-    )
-    fixed_qdq_quantizer = model.model.layers[1].self_attn.q_proj.weight_quantizer
-    fixed_qdq_quantizer.enable()
-    fixed_qdq_quantizer.amax = torch.tensor(1.0)
-    observed_qdq_states = []
-    qdq_hook = fixed_qdq_quantizer.register_forward_hook(
-        lambda module, _inputs, _output: observed_qdq_states.append(
-            (module.is_enabled, module._if_quant, module._if_calib)
-        )
-    )
-    calibration_states = []
-    real_calibrate = model_quant.calibrate
 
-    def calibrate_with_state_check(*args, **kwargs):
-        calibration_states.append(
-            (fixed_weight_quantizer._if_quant, fixed_weight_quantizer._if_calib)
-        )
-        result = real_calibrate(*args, **kwargs)
-        calibration_states.append(
-            (fixed_weight_quantizer._if_quant, fixed_weight_quantizer._if_calib)
-        )
-        return result
-
-    monkeypatch.setattr(model_quant, "calibrate", calibrate_with_state_check)
-
-    try:
-        model, state = mtq.auto_quantize(
+    with pytest.raises(NotImplementedError, match="requires an unquantized model"):
+        mtq.auto_quantize(
             model,
-            {"effective_bits": 4.5, "cost_model": "kv_cache"},
-            [
-                (
-                    {
-                        "quant_cfg": [
-                            {
-                                "quantizer_name": "*[kv]_bmm_quantizer",
-                                "cfg": {
-                                    "num_bits": (2, 1),
-                                    "block_sizes": {
-                                        -1: 16,
-                                        "type": "dynamic",
-                                        "scale_bits": (4, 3),
-                                    },
-                                },
-                            },
-                        ],
-                        "algorithm": "max",
-                        "effective_bits": 4.5,
-                    },
-                    "nvfp4",
-                )
-            ],
-            data,
-            lambda search_model, batch: search_model(**batch).logits,
+            {"effective_bits": 8.0, "cost_model": "kv_cache"},
+            [candidate],
+            [],
+            lambda *_: pytest.fail("Validation must fail before search."),
             num_calib_steps=1,
             num_score_steps=1,
-            disabled_layers="model.layers.1.self_attn",
         )
-    finally:
-        fixed_hook.remove()
-        qdq_hook.remove()
-
-    assert set(state["layers"]) == {"model.layers.0.self_attn"}
-    assert observed_fixed_states
-    assert all(state == (True, False, False) for state in observed_fixed_states)
-    assert calibration_states == [(False, False), (False, False)]
-    assert model.model.layers[0].self_attn.k_bmm_quantizer.num_bits == (2, 1)
-    assert model.model.layers[0].self_attn.q_proj.weight_quantizer.is_enabled
-    assert not fixed_weight_quantizer._if_quant
-    assert not fixed_weight_quantizer._if_calib
-    assert fixed_weight_quantizer.amax.item() == pytest.approx(1.0)
-    assert observed_qdq_states
-    assert all(quantizer_state == (True, True, False) for quantizer_state in observed_qdq_states)
-    assert fixed_qdq_quantizer._if_quant
-    assert not fixed_qdq_quantizer._if_calib
-    assert fixed_qdq_quantizer.amax.item() == pytest.approx(1.0)
-    fixed_attention = model.model.layers[1].self_attn
-    assert fixed_attention.k_bmm_quantizer.is_enabled
-    assert fixed_attention.v_bmm_quantizer.is_enabled
-    assert fixed_attention.k_bmm_quantizer.num_bits == (4, 3)
-    assert fixed_attention.v_bmm_quantizer.num_bits == (4, 3)

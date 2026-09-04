@@ -1700,7 +1700,15 @@ def get_quant_config(
 
     kv_cache_formats: set[str] = set()
     kv_cache_quantized_layers: dict[str, dict[str, str]] = {}
-    language_model_lineage = get_language_model_from_vl(model)
+    try:
+        language_model_lineage = get_language_model_from_vl(model)
+    except ValueError as exc:
+        if "multiple language-model roots" not in str(exc):
+            raise
+        # Generic export predates the strict KV-search boundary. If an architecture exposes
+        # genuinely competing roots, preserve that existing export behavior by considering
+        # the full model rather than choosing one root by traversal order.
+        language_model_lineage = None
     language_model_modules = (
         None
         if language_model_lineage is None
@@ -1788,7 +1796,10 @@ def get_quant_config(
         hasattr(module, "_modelopt_kv_cache_auto_quantize_state") for module in model.modules()
     )
     weight_quant_algo = quant_config["quantization"].get("quant_algo")
-    if is_kv_autoquant_result and kv_cache_quantized_layers:
+    needs_mixed_envelope = bool(kv_cache_quantized_layers) and (
+        is_kv_autoquant_result or len(kv_cache_formats) > 1
+    )
+    if needs_mixed_envelope:
         if weight_quant_algo not in (None, "MIXED_PRECISION"):
             raise NotImplementedError(
                 "Mixed-precision KV-cache export with a uniform quantized-weight format is "
@@ -1803,17 +1814,6 @@ def get_quant_config(
     elif len(kv_cache_formats) == 1:
         # Preserve the pre-AutoQuant uniform KV schema, including partial coverage.
         quant_config["quantization"]["kv_cache_quant_algo"] = next(iter(kv_cache_formats))
-    elif kv_cache_quantized_layers:
-        if weight_quant_algo not in (None, "MIXED_PRECISION"):
-            raise NotImplementedError(
-                "Mixed-precision KV-cache export with a uniform quantized-weight format is "
-                "not supported yet. Use BF16 weights or a mixed-weight AutoQuant recipe."
-            )
-        quant_config["quantization"]["quant_algo"] = "MIXED_PRECISION"
-        quant_config["quantization"].setdefault("quantized_layers", {})
-        quant_config["quantization"]["kv_cache_quant_algo"] = "MIXED_PRECISION"
-        quant_config["quantization"]["kv_cache_quantized_layers"] = kv_cache_quantized_layers
-        quant_config["quantization"]["kv_cache_schema_version"] = 1
 
     return quant_config
 

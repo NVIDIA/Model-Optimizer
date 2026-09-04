@@ -1549,6 +1549,13 @@ def _write_hf_export_config(
         json.dump(config_data, file, indent=4)
 
 
+def _revert_hf_quant_config_names(hf_quant_config: dict, name_mapper: Callable[[str], str]) -> dict:
+    """Return a name-reverted copy, leaving the input untouched if mapping fails."""
+    mapped_quant_config = copy.deepcopy(hf_quant_config)
+    revert_quant_config_names(mapped_quant_config.get("quantization", {}), name_mapper)
+    return mapped_quant_config
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1636,8 +1643,9 @@ def export_hf_checkpoint(
             try:
                 name_mapper = build_reverse_name_mapper(model)
                 if name_mapper is not None and hf_quant_config:
-                    revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+                    hf_quant_config = _revert_hf_quant_config_names(hf_quant_config, name_mapper)
             except Exception as exc:
+                name_mapper = None
                 warnings.warn(
                     f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                     "names may not match the original HF hub checkpoint."
@@ -1669,8 +1677,9 @@ def export_hf_checkpoint(
             name_mapper = build_reverse_name_mapper(model)
             export_state_dict = revert_weight_conversion_quant_aware(model, export_state_dict)
             if name_mapper is not None and hf_quant_config:
-                revert_quant_config_names(hf_quant_config.get("quantization", {}), name_mapper)
+                hf_quant_config = _revert_hf_quant_config_names(hf_quant_config, name_mapper)
         except Exception as exc:
+            name_mapper = None
             warnings.warn(
                 f"Quant-aware reverse weight conversion skipped ({exc}); exported tensor "
                 "names may not match the original HF hub checkpoint."

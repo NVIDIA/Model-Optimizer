@@ -15,6 +15,7 @@
 
 """Quantization conversion/restore utilities."""
 
+import copy
 import fnmatch
 import re
 import warnings
@@ -58,6 +59,9 @@ __all__ = [
     "set_quantizer_by_cfg_context",
     "unregister",
 ]
+
+_KV_AUTOQUANT_STATE_ATTR = "_modelopt_kv_cache_auto_quantize_state"
+_KV_AUTOQUANT_METADATA_KEY = "kv_cache_auto_quantize_state"
 
 
 def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -> ConvertReturnType:
@@ -136,6 +140,13 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     details regarding how MCore sharded checkpoint is restored,
     see modelopt.torch.opt.plugins.mcore_dist_checkpointing.restore_sharded_modelopt_state.
     """
+    if _KV_AUTOQUANT_METADATA_KEY in metadata:
+        setattr(
+            model,
+            _KV_AUTOQUANT_STATE_ATTR,
+            copy.deepcopy(metadata[_KV_AUTOQUANT_METADATA_KEY]),
+        )
+
     if "quantizer_state" not in metadata:
         # MCore sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
         # extra_state of `QuantModule`. The quantizer_state is resumed with
@@ -196,6 +207,12 @@ def update_quantize_metadata(
 ) -> None:
     """Update the quantizer state in the metadata dict."""
     metadata["quantizer_state"] = quantizer_state(model)
+    if hasattr(model, _KV_AUTOQUANT_STATE_ATTR):
+        metadata[_KV_AUTOQUANT_METADATA_KEY] = copy.deepcopy(
+            getattr(model, _KV_AUTOQUANT_STATE_ATTR)
+        )
+    else:
+        metadata.pop(_KV_AUTOQUANT_METADATA_KEY, None)
     if shared_state_metadata := SharedWeightGlobalAmaxState.metadata(model):
         metadata["shared_quant_states"] = shared_state_metadata
     else:
