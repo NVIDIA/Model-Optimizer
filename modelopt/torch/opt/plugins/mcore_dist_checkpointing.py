@@ -181,37 +181,10 @@ def _load_extra_state_from_sharded_checkpoint(
             module, "modelopt_set_extra_state_callbacks"
         ):
             module.set_extra_state(extra_state_dict_no_prefix[key])
-
-
-def _initialize_grouped_weight_quantizer_state_for_restore(model: torch.nn.Module) -> None:
-    """Create deterministic quantizer-state placeholders for TE grouped experts."""
     for module in model.modules():
-        if not hasattr(module, "num_gemms") or not hasattr(module, "weight_quantizer"):
-            continue
-        grouped_leaves = [
-            quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
-            for quantizer in [module.weight_quantizer[idx] for idx in range(module.num_gemms)]
-        ]
-        for sibling_leaves in zip(*grouped_leaves):
-            eligible_leaves = [
-                quantizer
-                for quantizer in sibling_leaves
-                if quantizer.is_enabled and not quantizer.is_mx_format
-            ]
-            for state_name in ("amax", "global_amax"):
-                reference = next(
-                    (
-                        state
-                        for quantizer in eligible_leaves
-                        if (state := getattr(quantizer, state_name, None)) is not None
-                    ),
-                    None,
-                )
-                if reference is None:
-                    continue
-                for quantizer in eligible_leaves:
-                    if getattr(quantizer, state_name, None) is None:
-                        setattr(quantizer, state_name, torch.zeros_like(reference))
+        post_load_extra_state = getattr(module, "modelopt_post_load_extra_state", None)
+        if callable(post_load_extra_state):
+            post_load_extra_state()
 
 
 def restore_sharded_modelopt_state(
@@ -269,4 +242,3 @@ def restore_sharded_modelopt_state(
     model[0] = mto.restore_from_modelopt_state(model[0], common_modelopt_state)
 
     _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)
-    _initialize_grouped_weight_quantizer_state_for_restore(model[0])

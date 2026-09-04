@@ -65,7 +65,6 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
-    _initialize_grouped_weight_quantizer_state_for_restore,
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
@@ -73,6 +72,7 @@ from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBas
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _initialize_grouped_weight_quantizer_state,
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
@@ -1160,7 +1160,7 @@ def test_initialize_grouped_weight_quantizer_state_for_restore():
     model.num_gemms = 4
     model.weight_quantizer = torch.nn.ModuleList([target, source, disabled, mx])
 
-    _initialize_grouped_weight_quantizer_state_for_restore(model)
+    _initialize_grouped_weight_quantizer_state(model)
 
     assert torch.equal(target.amax, torch.zeros_like(source.amax))
     assert torch.equal(target.global_amax, torch.zeros_like(source.global_amax))
