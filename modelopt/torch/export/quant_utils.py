@@ -311,6 +311,26 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
     return get_scaling_factor(weight_quantizer)
 
 
+def assert_lsq_export_supported(weight_quantizer: TensorQuantizer) -> None:
+    """Raise if an LSQ quantizer uses a configuration that cannot be exported.
+
+    Only tied-amax LSQ with FP8-quantized pre and post block scales is exportable: it
+    then produces exactly the scales and packed weights of the static NVFP4 export path.
+    Any other configuration would serialize scales that do not match training.
+    """
+    if not getattr(weight_quantizer, "_lsq", False):
+        return
+    if (
+        not weight_quantizer._tied_amax
+        or not weight_quantizer._quantize_scales
+        or not weight_quantizer._quantize_pre_scale
+    ):
+        raise NotImplementedError(
+            "Dual LSQ export is not supported: only tied-amax LSQ (tied_amax=True, "
+            "quantize_scales=True, quantize_pre_scale=True) can be exported."
+        )
+
+
 def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") -> torch.Tensor:
     """Returns the secondary weight scaling factor."""
     weight_quantizer = getattr(module, quantizer_attr_names(weight_name).weight_quantizer, None)
