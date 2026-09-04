@@ -15,6 +15,7 @@
 
 """Install ModelOpt attention transforms into a loaded vLLM model."""
 
+import fnmatch
 import importlib
 from collections import Counter
 from collections.abc import Mapping
@@ -32,6 +33,7 @@ from .sparse_attn_config import load_from_checkpoint_metadata, match_sparse_conf
 __all__ = [
     "VllmAttentionInstallReport",
     "install_vllm_nvfp4_attention",
+    "install_vllm_skip_softmax_calibration",
     "install_vllm_sparse_attention_from_checkpoint",
 ]
 
@@ -112,6 +114,31 @@ def _model_config(model_runner):
     return getattr(getattr(model_runner, "vllm_config", None), "model_config", None)
 
 
+def _calibration_ignore_patterns(model_runner) -> tuple[str, ...]:
+    """Return the existing skip-softmax layer exclusions, if any."""
+    hf_config = getattr(_model_config(model_runner), "hf_config", None)
+    sparse_meta = getattr(hf_config, "sparse_attention_config", None)
+    if not isinstance(sparse_meta, dict):
+        return ()
+    groups = sparse_meta.get("config_groups")
+    if not isinstance(groups, dict):
+        return ()
+
+    patterns = []
+    for group in groups.values():
+        if not isinstance(group, dict) or group.get("algorithm") != "skip_softmax":
+            continue
+        ignore = group.get("ignore", ())
+        if isinstance(ignore, list | tuple):
+            patterns.extend(name for name in ignore if isinstance(name, str))
+    return tuple(patterns)
+
+
+def _is_calibration_ignored(name: str, patterns: tuple[str, ...]) -> bool:
+    """Match exclusions exactly as the checkpoint serving loader does."""
+    return any(fnmatch.fnmatch(name, f"*{pattern}*") for pattern in patterns)
+
+
 def _resolve_sparse_config(model_runner, sparse_cfg) -> tuple[dict | None, str | None]:
     if sparse_cfg is None:
         return None, None
@@ -155,7 +182,7 @@ def _cudagraph_mode(model_runner):
     return mode if mode is not None else CUDAGraphMode.NONE
 
 
-def _global_errors(model_runner) -> list[str]:
+def _global_errors(model_runner, *, sparse_only: bool = False) -> list[str]:
     config = getattr(model_runner, "vllm_config", None)
     if config is None:
         return ["model_runner.vllm_config is required"]
@@ -173,10 +200,16 @@ def _global_errors(model_runner) -> list[str]:
         errors.append("decode_context_parallel_size must be 1")
     if getattr(parallel, "enable_dbo", False) or getattr(parallel, "use_ubatching", False):
         errors.append("DBO/ubatching is unsupported")
-    if getattr(cache_config, "enable_prefix_caching", False):
-        errors.append("prefix caching is unsupported")
-    if getattr(config, "kv_transfer_config", None) is not None:
-        errors.append("KV transfer is unsupported")
+    if not sparse_only:
+        # Prefix caching and KV transfer break only flows that quantize the
+        # cache on write or measure per-request prefills (quantized installs,
+        # skip-softmax calibration). Sparse-only serving reads the cache
+        # unmodified and supports prefix-cache suffix attention by offsetting
+        # query positions (see the vllm_serve README limitations).
+        if getattr(cache_config, "enable_prefix_caching", False):
+            errors.append("prefix caching is unsupported")
+        if getattr(config, "kv_transfer_config", None) is not None:
+            errors.append("KV transfer is unsupported")
     if getattr(config, "speculative_config", None) is not None:
         errors.append("speculative decoding is unsupported")
     if _cudagraph_mode(model_runner).mixed_mode() == CUDAGraphMode.FULL:
@@ -246,6 +279,13 @@ def _device_capability_error(device) -> str | None:
             f"got sm_{major}{minor}"
         )
     return None
+
+
+def _skip_softmax_active(sparse_kw: dict[str, Any]) -> bool:
+    """Return whether a layer's sparse config contains skip-softmax work."""
+    return bool(sparse_kw) and (
+        "skip_softmax_threshold" in sparse_kw or "threshold_scale_factor" in sparse_kw
+    )
 
 
 def _sparse_graph_error(sparse_kw: dict[str, Any], mode) -> str | None:
@@ -347,12 +387,35 @@ def _plan_vllm_attention(
         )
 
     _require_supported_vllm()
-    errors = _global_errors(model_runner) if quantize else []
-    mode = _cudagraph_mode(model_runner) if quantize else None
+    # Engine-level checks apply to sparse-only installs too: the ModelOpt
+    # kernel path silently ignores decode context parallelism, DBO, and
+    # speculative decoding, and FULL mixed-batch graphs would capture stale
+    # per-launch thresholds (same rationale as the decode graph guard below).
+    # Sparse-only installs skip only the cache-mutation checks.
+    errors = _global_errors(model_runner, sparse_only=not quantize)
+    mode = _cudagraph_mode(model_runner)
     quant_plugin: Any = _load_quant_plugin() if quantize else None
     plans = []
     for name, module, sparse_kw in candidates:
         reasons = _layer_errors(module)
+        if _skip_softmax_active(sparse_kw):
+            # Quantized Q/K/P change the attention-score distribution the skip
+            # thresholds were calibrated on, so the calibrated sparsity contract
+            # no longer holds. This guards both installation directions: quantized
+            # installs adding skip, and sparse-only installs onto layers that
+            # already carry active attention quantizers. N:M sparse softmax has
+            # no calibrated threshold and composes with quantization.
+            active = (
+                "attention quantization is being installed"
+                if quantize
+                else _active_attention_quantization(module)
+            )
+            if active:
+                reasons.append(
+                    f"skip-softmax cannot be combined with attention quantization ({active}); "
+                    "serve skip-softmax unquantized or drop the skip_softmax group "
+                    "(N:M sparse softmax composes with quantization)"
+                )
         device = dtype = None
         if quantize:
             device, dtype = quant_plugin._get_device_dtype(module)
@@ -365,9 +428,12 @@ def _plan_vllm_attention(
                 reasons.append(f"resolved dtype {dtype} must be fp16 or bf16")
             if capability_error := _device_capability_error(device):
                 reasons.append(capability_error)
-        if quantize:
-            if graph_error := _sparse_graph_error(sparse_kw, mode):
-                reasons.append(graph_error)
+        # Calibrated decode skip-softmax replays through the decode kernel path,
+        # which a FULL decode CUDA graph would capture with a stale threshold.
+        # This holds for sparse-only installs exactly as for quantized ones, so
+        # the guard is not gated on ``quantize``.
+        if graph_error := _sparse_graph_error(sparse_kw, mode):
+            reasons.append(graph_error)
         new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
         if backend_error:
             reasons.append(backend_error)
@@ -490,6 +556,102 @@ def _apply_vllm_attention_plans(plan: _InstallPlan) -> VllmAttentionInstallRepor
                         setattr(layer.module, name, value)
             raise
     return _build_report(plan)
+
+
+def _active_attention_quantization(module) -> str | None:
+    """Describe any active attention Q/K/P/V quantization on a layer, or None."""
+    for attr in ("q_bmm_quantizer", "k_bmm_quantizer", "p_bmm_quantizer", "v_bmm_quantizer"):
+        if getattr(getattr(module, attr, None), "is_enabled", False):
+            return f"{attr} is enabled"
+    if getattr(module, "_query_quant_in_kernel", False) or getattr(
+        module, "_value_quant_in_kernel", False
+    ):
+        return "in-kernel attention quantization flags are set"
+    return None
+
+
+def _attention_quant_error(module) -> str | None:
+    """Reject calibration on layers with any active attention Q/K/P/V fakequant."""
+    if active := _active_attention_quantization(module):
+        return f"{active}; skip-softmax calibration requires unquantized attention"
+    return None
+
+
+def install_vllm_skip_softmax_calibration(model_runner) -> VllmAttentionInstallReport:
+    """Install skip-softmax calibration adapters into a loaded vLLM model.
+
+    Swaps the backend-matched ModelOpt adapter onto each attention layer that
+    is not excluded by the checkpoint's existing skip-softmax ``ignore``
+    policy and disables cascade attention, following validation-before-mutation: every
+    known compatibility error — across all layers — is collected and raised
+    before any module is changed. Calibration itself starts separately via
+    :func:`~.vllm.enable_calibration` (typically over a worker RPC), so engine
+    warmup/profiling launches after install are served natively and never
+    pollute the measurement; until then the adapters delegate every forward to
+    the backend's native implementation.
+
+    Requirements validated here: eager execution (``enforce_eager=True`` —
+    the per-request calibration loop cannot be CUDA-graph captured), fp16/bf16
+    model and KV-cache dtypes, pipeline- and data-parallel size 1, no active attention
+    Q/K/P/V fakequant, and a FlashAttention or FlashInfer backend per layer.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    model = _unwrapped_model(model_runner)
+    ignore_patterns = _calibration_ignore_patterns(model_runner)
+    candidates = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, _VLLM_ATTENTION)
+        and not _is_calibration_ignored(name, ignore_patterns)
+    ]
+
+    _require_supported_vllm()
+    errors = _global_errors(model_runner)
+    parallel = getattr(getattr(model_runner, "vllm_config", None), "parallel_config", None)
+    if getattr(parallel, "pipeline_parallel_size", 1) != 1:
+        errors.append("pipeline_parallel_size must be 1 for skip-softmax calibration")
+    if getattr(parallel, "data_parallel_size", 1) != 1:
+        errors.append(
+            "data_parallel_size must be 1 for skip-softmax calibration: data-parallel "
+            "replicas serve disjoint requests, so per-rank count records do not align"
+        )
+    if _cudagraph_mode(model_runner) != CUDAGraphMode.NONE:
+        errors.append(
+            "skip-softmax calibration requires eager execution (enforce_eager=True); "
+            "the per-request calibration loop cannot be CUDA-graph captured"
+        )
+    if not candidates:
+        errors.append("no attention layers were found after applying the checkpoint ignore policy")
+
+    plans = []
+    for name, module in candidates:
+        reasons = _layer_errors(module)
+        if quant_error := _attention_quant_error(module):
+            reasons.append(quant_error)
+        new_impl, requires_flashinfer_patch, backend_error = _select_new_impl(module)
+        if backend_error:
+            reasons.append(backend_error)
+        if reasons:
+            errors.extend(f"{name or '<root>'}: {reason}" for reason in reasons)
+            continue
+        plans.append(
+            _AttentionPlan(name, module, new_impl, {}, None, None, requires_flashinfer_patch)
+        )
+    _raise_unsupported(errors, "skip-softmax calibration")
+
+    plan = _InstallPlan(model_runner, tuple(plans), False, "SKIP_SOFTMAX_CALIBRATION")
+    # Per-request prompt lengths (same request order as the attention-metadata
+    # rows, kept aligned by vLLM's in-place batch reorder) let the adapter
+    # classify q_len == 1 rows: a decode step's KV span exceeds the prompt,
+    # while a 1-token final chunk of a chunked prefill is still inside it.
+    # The runner — not its input_batch — is attached: vLLM can rebuild
+    # input_batch after load_model (may_reinitialize_input_batch during KV
+    # cache init, e.g. hybrid Mamba/attention models), so the adapter must
+    # resolve the live object per forward.
+    for attention_plan in plans:
+        attention_plan.new_impl._calib_model_runner = model_runner
+    return _apply_vllm_attention_plans(plan)
 
 
 def install_vllm_sparse_attention_from_checkpoint(

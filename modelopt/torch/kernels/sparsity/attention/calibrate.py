@@ -22,13 +22,19 @@ sparse-attention calibration workflow in
 ``modelopt.torch.sparsity.attention_sparsity`` to fit a skip threshold.
 """
 
+import functools
 import math
 
 import torch
 import triton
 import triton.language as tl
 
-from modelopt.torch.kernels.common.attention.triton_fa import LOG2E, _apply_mask
+from modelopt.torch.kernels.common.attention.triton_fa import (
+    LOG2E,
+    _apply_mask,
+    _load_paged_k_tile,
+    _load_paged_v_tile,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +70,19 @@ def _attn_fwd_calibrate(
     HEAD_DIM: tl.constexpr,
     NUM_THRESHOLDS: tl.constexpr,
     PADDED_THRESHOLDS: tl.constexpr,  # next_power_of_2(NUM_THRESHOLDS) for tl.arange
+    Q_IS_FP32: tl.constexpr = False,  # match the serving kernel's IEEE fp32 QK dot
+    IS_PAGED: tl.constexpr = False,  # Whether K/V are read from a paged KV cache
+    K_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged K
+    V_cache=None,  # [num_blocks, page_size, num_kv_heads, head_dim] paged V
+    Block_table=None,  # [batch, max_blocks_per_seq] page table
+    stride_kc_block=0,
+    stride_kc_pos=0,
+    stride_kc_head=0,
+    stride_vc_block=0,
+    stride_vc_pos=0,
+    stride_vc_head=0,
+    PAGE_SIZE: tl.constexpr = 16,
+    max_blocks_per_seq=0,
 ):
     """Forward kernel with multi-threshold sparsity measurement.
 
@@ -126,14 +145,41 @@ def _attn_fwd_calibrate(
     for kv_start in range(0, kv_bound, BLOCK_N):
         kv_start = tl.multiple_of(kv_start, BLOCK_N)
 
-        k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
-        k = tl.load(
-            k_base + k_offs,
-            mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
-            other=0.0,
-        )
+        # Load K^T [BLOCK_D, BLOCK_N] from paged cache or contiguous K.
+        if IS_PAGED:
+            k = _load_paged_k_tile(
+                K_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_kc_block,
+                stride_kc_pos,
+                stride_kc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            )
+        else:
+            k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
+            k = tl.load(
+                k_base + k_offs,
+                mask=((kv_start + kv_pos[None, :]) < seq_len_kv) & d_mask[:, None],
+                other=0.0,
+            )
 
-        scores = tl.dot(q, k) * qk_scale
+        # Match the serving kernel's QK precision: fp32 Q uses the IEEE dot
+        # (default tl.dot is TF32 for fp32 inputs), so near-threshold scores
+        # round to the same skip decisions in calibration and serving.
+        if Q_IS_FP32:
+            scores = tl.dot(q, k.to(tl.float32), input_precision="ieee") * qk_scale
+        else:
+            scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         tile_row_max = tl.max(scores, 1)
@@ -164,12 +210,32 @@ def _attn_fwd_calibrate(
         row_sum = row_sum * correction + l_new
         acc = acc * correction[:, None]
 
-        v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-        v = tl.load(
-            v_base + v_offs,
-            mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-            other=0.0,
-        )
+        if IS_PAGED:
+            v = _load_paged_v_tile(
+                V_cache,
+                Block_table,
+                batch_idx,
+                kv_head_idx,
+                kv_start,
+                kv_pos,
+                dim_pos,
+                seq_len_kv,
+                stride_vc_block,
+                stride_vc_pos,
+                stride_vc_head,
+                PAGE_SIZE,
+                BLOCK_N,
+                BLOCK_D,
+                HEAD_DIM,
+                max_blocks_per_seq,
+            )
+        else:
+            v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+            v = tl.load(
+                v_base + v_offs,
+                mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                other=0.0,
+            )
         acc = tl.dot(p.to(v.dtype), v, acc)
         row_max = m_new
 
@@ -198,6 +264,39 @@ def _attn_fwd_calibrate(
     tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
 
 
+@functools.lru_cache(maxsize=64)
+def _log2_threshold_tensor(
+    threshold_trials: tuple[float, ...], device: torch.device
+) -> torch.Tensor:
+    """Build the log2-space threshold tensor, cached per (trials, device).
+
+    Scores already include sm_scale and LOG2E; convert lambda to log2 space
+    only. Trials are constant for a whole calibration run, and the vLLM path
+    calls :func:`attention_calibrate` once per request per layer per step, so
+    rebuilding (and re-uploading) the tensor per call would be pure waste.
+    """
+    return torch.tensor(
+        [math.log2(t) for t in threshold_trials], dtype=torch.float32, device=device
+    )
+
+
+def _validate_threshold_trials(threshold_trials) -> list[float]:
+    """Return finite skip thresholds in the kernel's open interval ``(0, 1)``."""
+    if not threshold_trials:
+        raise ValueError("threshold_trials must be a non-empty list")
+    try:
+        trials = [float(value) for value in threshold_trials]
+    except (TypeError, ValueError) as err:
+        raise ValueError("threshold_trials must contain only real numbers") from err
+    invalid = [value for value in trials if not math.isfinite(value) or not 0.0 < value < 1.0]
+    if invalid:
+        raise ValueError(
+            "threshold_trials must contain only finite values strictly between 0 and 1; "
+            f"got {invalid}"
+        )
+    return trials
+
+
 def attention_calibrate(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -212,6 +311,10 @@ def attention_calibrate(
     max_input_len_k: int | None = None,
     *,
     threshold_trials: list[float] | None = None,
+    k_cache: torch.Tensor | None = None,
+    v_cache: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    page_size: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Flash attention with multi-threshold skip-softmax sparsity measurement.
 
@@ -219,12 +322,23 @@ def attention_calibrate(
     measuring how many KV tiles would be skipped at each threshold in
     ``threshold_trials``. No autograd — forward only.
 
-    All arguments except ``threshold_trials`` match
+    All positional arguments match
     :func:`modelopt.torch.kernels.common.attention.attention`.
 
     Args:
         threshold_trials: List of threshold values to measure sparsity for.
             Each value is converted to log2-scaled space for the kernel.
+        k_cache: Logical paged K-cache view
+            ``[num_blocks, page_size, num_kv_heads, head_dim]``. Arbitrary
+            strides support both NHD and HND physical layouts. When provided,
+            K/V are read via ``block_table`` instead of from the contiguous
+            ``k``/``v`` tensors. ``k``/``v`` are then dummies whose only
+            meaningful dimension is ``shape[1] == num_kv_heads`` (used to
+            compute the GQA ratio).
+        v_cache: Paged V cache ``[num_blocks, page_size, num_kv_heads, head_dim]``.
+        block_table: Page table ``[batch, max_blocks_per_seq]`` mapping each
+            sequence's block indices to global page IDs.
+        page_size: Number of tokens per page in the KV cache.
 
     Returns:
         Tuple of ``(output, sparsity_counters)``:
@@ -234,8 +348,11 @@ def attention_calibrate(
           ``[:, 0]`` = total tile evaluations, ``[:, 1]`` = skipped tiles.
           Sparsity per threshold = ``counters[:, 1] / counters[:, 0]``.
     """
-    if threshold_trials is None or len(threshold_trials) == 0:
-        raise ValueError("threshold_trials must be a non-empty list")
+    threshold_trials = _validate_threshold_trials(threshold_trials)
+
+    is_paged = k_cache is not None
+    if is_paged and block_table is None:
+        raise ValueError("block_table is required when k_cache/v_cache are provided.")
 
     # Calibration has only been validated with uniform-length batches (current
     # diffusion + RULER paths). Varlen inputs would exercise code paths in the
@@ -281,14 +398,22 @@ def attention_calibrate(
         b_seq_len_k = b_seq_len
         b_start_loc_k = b_start_loc
 
+    if b_start_loc_k is None:
+        if not is_paged:
+            # A zeros dummy here would silently read every sequence's K/V from
+            # offset 0 — fail loudly instead (contiguous K/V needs real offsets).
+            raise ValueError(
+                "b_start_loc_k is required when b_seq_len_k is provided for "
+                "contiguous (non-paged) K/V"
+            )
+        # Paged mode: KV positions come from block_table, so the contiguous KV
+        # offsets are unused. Alias b_start_loc (same shape/dtype/device) so
+        # Triton can compile the tl.load without allocating a dummy per call.
+        b_start_loc_k = b_start_loc
+
     num_thresholds = len(threshold_trials)
 
-    # Scores already include sm_scale and LOG2E; convert lambda to log2 space only.
-    threshold_tensor = torch.tensor(
-        [math.log2(t) for t in threshold_trials],
-        dtype=torch.float32,
-        device=q.device,
-    )
+    threshold_tensor = _log2_threshold_tensor(tuple(threshold_trials), q.device)
 
     o = torch.empty_like(q)
 
@@ -303,6 +428,18 @@ def attention_calibrate(
     per_program_skipped = torch.zeros(
         num_programs * num_thresholds, dtype=torch.int32, device=q.device
     )
+
+    # Paged KV cache strides (zeros when not paged; computed here so the type
+    # narrowing of k_cache/v_cache/block_table is explicit for the kernel call).
+    if is_paged:
+        assert k_cache is not None and v_cache is not None and block_table is not None
+        kc_strides = (k_cache.stride(0), k_cache.stride(1), k_cache.stride(2))
+        vc_strides = (v_cache.stride(0), v_cache.stride(1), v_cache.stride(2))
+        max_blocks_per_seq = block_table.shape[1]
+    else:
+        kc_strides = (0, 0, 0)
+        vc_strides = (0, 0, 0)
+        max_blocks_per_seq = 0
 
     # Triton launches on torch.cuda.current_device(), which is not necessarily
     # the device the tensors live on (e.g. under accelerate device_map="auto"
@@ -338,6 +475,19 @@ def attention_calibrate(
             HEAD_DIM=HEAD_DIM,
             NUM_THRESHOLDS=num_thresholds,
             PADDED_THRESHOLDS=triton.next_power_of_2(num_thresholds),
+            Q_IS_FP32=q.dtype == torch.float32,
+            IS_PAGED=is_paged,
+            K_cache=k_cache,
+            V_cache=v_cache,
+            Block_table=block_table,
+            stride_kc_block=kc_strides[0],
+            stride_kc_pos=kc_strides[1],
+            stride_kc_head=kc_strides[2],
+            stride_vc_block=vc_strides[0],
+            stride_vc_pos=vc_strides[1],
+            stride_vc_head=vc_strides[2],
+            PAGE_SIZE=page_size,
+            max_blocks_per_seq=max_blocks_per_seq,
             num_warps=4,
             num_stages=1,
         )
