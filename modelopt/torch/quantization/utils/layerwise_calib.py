@@ -27,6 +27,7 @@ import json
 import os
 import shutil
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,7 @@ from modelopt.torch.utils.network import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from modelopt.torch.opt.searcher import ForwardLoop
 
@@ -99,6 +100,48 @@ class _SkipLayer(nn.Module):
         return LayerActivationCollector._zeros_from_meta(
             self._original._layerwise_calib.output_meta
         )
+
+
+class _ForwardOnlyLayer(nn.Module):
+    """Hide a layer from module traversal while preserving its forward execution."""
+
+    _PROXY_BLOCKLIST = _SkipLayer._PROXY_BLOCKLIST
+
+    def __init__(self, original: nn.Module):
+        super().__init__()
+        object.__setattr__(self, "_original", original)
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            if name in self._PROXY_BLOCKLIST:
+                raise
+            return getattr(object.__getattribute__(self, "_original"), name)
+
+    def forward(self, *args, **kwargs):
+        return self._original(*args, **kwargs)
+
+
+@contextmanager
+def _hide_modules_from_traversal(model: nn.Module, modules: Sequence[nn.Module]):
+    """Temporarily hide registered modules while retaining their forward behavior."""
+    target_ids = {id(module) for module in modules}
+    slots = [
+        (parent, child_name, child)
+        for parent in tuple(model.modules())
+        for child_name, child in tuple(parent._modules.items())
+        if child is not None and id(child) in target_ids
+    ]
+    proxies = {id(child): _ForwardOnlyLayer(child) for _, _, child in slots}
+
+    try:
+        for parent, child_name, child in slots:
+            parent._modules[child_name] = proxies[id(child)]
+        yield
+    finally:
+        for parent, child_name, child in slots:
+            parent._modules[child_name] = child
 
 
 class LayerActivationCollector:
