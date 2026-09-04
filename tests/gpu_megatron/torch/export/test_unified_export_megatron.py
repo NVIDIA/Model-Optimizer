@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
@@ -23,7 +24,10 @@ from unittest.mock import patch
 import pytest
 import torch
 import transformers
-from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_exported_checkpoint_matches,
+    load_safetensors_dir,
+)
 from _test_utils.torch.megatron.models import get_mcore_gpt_model, get_mcore_hybrid_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import (
@@ -247,18 +251,23 @@ def _test_unified_export_megatron(
     if rank == 0 and extra_module is None:
         # Names / shapes only: these Megatron weights are random, not loaded from model_dir.
         allow_missing = ()
+        # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
+        allow_unexpected = ("mlp.gate.expert_bias",)
         if model_type.startswith("qwen3_5_moe_vl"):
-            # The BF16 source packs routed experts; quantized export writes them per expert,
-            # as the released NVFP4 checkpoints do.
+            # The BF16 source packs routed experts; quantized export writes them per expert, as
+            # the released NVFP4 checkpoints do. Both sides of that expansion differ from the
+            # reference, so _assert_per_expert_experts_complete below carries the real coverage.
             allow_missing = ("mlp.experts.gate_up_proj", "mlp.experts.down_proj")
+            allow_unexpected += ("mlp.experts.",)
         assert_exported_checkpoint_matches(
             tmp_export_dir,
             model_dir,
             check_values=False,
             allow_missing=allow_missing,
-            # get_mcore_gpt_model always enables the MoE router bias; tiny HF configs have none.
-            allow_unexpected=("mlp.gate.expert_bias",),
+            allow_unexpected=allow_unexpected,
         )
+        if model_type.startswith("qwen3_5_moe_vl"):
+            _assert_per_expert_experts_complete(tmp_export_dir)
 
     if model_type == "qwen3vl" and rank == 0:
         # try to load the model and run a forward pass
@@ -656,6 +665,23 @@ class _FakeTEGroupedMLP:
 
     def state_dict(self):
         return dict(self._weights)
+
+
+def _assert_per_expert_experts_complete(export_dir) -> None:
+    """Every routed expert must export all three projections.
+
+    ``allow_unexpected`` waives the packed-vs-per-expert name difference wholesale, so without
+    this a rule that emitted only gate/up would pass the reference comparison.
+    """
+    pattern = re.compile(r"^(.*\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$")
+    found: dict[tuple[str, int], set[str]] = {}
+    for key in load_safetensors_dir(export_dir):
+        m = pattern.match(key)
+        if m:
+            found.setdefault((m.group(1), int(m.group(2))), set()).add(m.group(3))
+    assert found, "no per-expert routed-expert tensors in the export"
+    incomplete = {k: sorted(v) for k, v in found.items() if len(v) != 3}
+    assert not incomplete, f"experts missing projections: {sorted(incomplete.items())[:4]}"
 
 
 def _make_exporter_for_grouped_mlp() -> GPTModelExporter:

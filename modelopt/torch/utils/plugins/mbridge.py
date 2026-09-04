@@ -221,6 +221,9 @@ def load_modelopt_megatron_checkpoint(
         otherwise the modules passed in. Callers that then move the ModelOpt state need this to
         know where it landed.
     """
+    # sharded_state_dict backs the load plan too, so without this a quantized output_layer
+    # is silently restored unquantized. Applied here so no caller can forget it.
+    keep_gpt_output_layer_extra_state()
     # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
     checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
 
