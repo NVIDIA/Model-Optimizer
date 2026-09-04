@@ -49,6 +49,8 @@ from _test_utils.torch.quantization.quantize_common import (
     data_tensor_context_parallel_test_helper,
     verify_kv_cache_amax_sync,
 )
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,
@@ -66,11 +68,13 @@ from modelopt.torch.quantization.algorithms import QuantRecipe, _AutoQuantizeBas
 from modelopt.torch.quantization.nn import QuantModuleRegistry, SequentialQuantizer
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.plugins.megatron import (
+    _output_layer_extra_state_has_data,
     _output_layer_untied,
     _QuantMegatronTEGroupedLinear,
     _QuantTEMCoreRowParallelLinear,
     _resolve_output_layer_untied,
     get_mcore_layerwise_calibration_layers,
+    keep_gpt_output_layer_extra_state,
     megatron_replace_quant_module_hook,
     quant_module_get_extra_state,
 )
@@ -1925,3 +1929,105 @@ def test_output_layer_untied_not_stamped_onto_teacher_config():
 
     assert student.config.modelopt_output_layer_untied is True
     assert not hasattr(student._teacher_model.config, "modelopt_output_layer_untied")
+
+
+# Captured at import, before any test can apply the patch, so tests can start from pristine mcore.
+_PRISTINE_GPT_SHARDED_STATE_DICT = GPTModel.sharded_state_dict
+
+
+def _stock_gpt_sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+    """megatron-core's pre-fix body, which drops (and asserts on) a quantized output_layer."""
+    sharded_state_dict = super(GPTModel, self).sharded_state_dict(prefix, sharded_offsets, metadata)
+    output_layer_extra_state_key = f"{prefix}output_layer._extra_state"
+    output_extra_state = sharded_state_dict.pop(output_layer_extra_state_key, None)
+    assert not (output_extra_state and output_extra_state.data), (
+        f"Expected output layer extra state to be empty, got: {output_extra_state}"
+    )
+    return sharded_state_dict
+
+
+class TestKeepGptOutputLayerExtraState:
+    """The GPTModel.sharded_state_dict patch that lets a quantized output_layer be checkpointed."""
+
+    @pytest.fixture(autouse=True)
+    def pristine_gpt_model(self):
+        """Run against unpatched megatron-core, then restore whatever the session had."""
+        applied = GPTModel.sharded_state_dict
+        GPTModel.sharded_state_dict = _PRISTINE_GPT_SHARDED_STATE_DICT
+        keep_gpt_output_layer_extra_state.cache_clear()
+        yield
+        GPTModel.sharded_state_dict = applied
+        keep_gpt_output_layer_extra_state.cache_clear()
+
+    @staticmethod
+    def _sharded_state_dict(entries: dict) -> dict:
+        """Run GPTModel.sharded_state_dict over a canned parent state dict, no built model needed."""
+        model = GPTModel.__new__(GPTModel)
+        with patch.object(LanguageModule, "sharded_state_dict", return_value=dict(entries)):
+            return GPTModel.sharded_state_dict(model, prefix="")
+
+    def test_keeps_populated_extra_state(self):
+        """Fails if neither our patch nor megatron-core itself keeps a quantized output_layer."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict(
+            {
+                "output_layer.weight": torch.ones(4),
+                "output_layer._extra_state": SimpleNamespace(data=b"quantizer_state"),
+            }
+        )
+        assert "output_layer._extra_state" in sharded
+
+    @pytest.mark.parametrize("empty", [None, SimpleNamespace(data=None), SimpleNamespace(data=b"")])
+    def test_drops_empty_extra_state(self, empty):
+        """Upstream behaviour for the placeholder an unquantized output_layer contributes."""
+        keep_gpt_output_layer_extra_state()
+        sharded = self._sharded_state_dict({"output_layer._extra_state": empty})
+        assert "output_layer._extra_state" not in sharded
+
+    def test_patches_stock_megatron_core(self):
+        """Pins the patched path: stock mcore matches the fingerprint and stops losing the entry."""
+        GPTModel.sharded_state_dict = _stock_gpt_sharded_state_dict
+        populated = {"output_layer._extra_state": SimpleNamespace(data=b"quantizer_state")}
+        with pytest.raises(AssertionError, match="Expected output layer extra state to be empty"):
+            self._sharded_state_dict(populated)
+
+        assert keep_gpt_output_layer_extra_state()
+        assert "output_layer._extra_state" in self._sharded_state_dict(populated)
+        assert "output_layer._extra_state" not in self._sharded_state_dict(
+            {"output_layer._extra_state": SimpleNamespace(data=b"")}
+        )
+
+    def test_second_call_is_a_no_op(self):
+        """Self-disabling: re-running never stacks a second patch on top of our own."""
+        first = keep_gpt_output_layer_extra_state()
+        after_first = GPTModel.sharded_state_dict
+        keep_gpt_output_layer_extra_state.cache_clear()
+        assert keep_gpt_output_layer_extra_state() == first
+        assert GPTModel.sharded_state_dict is after_first
+
+    def test_unrecognised_upstream_is_left_alone(self):
+        """An mcore whose body we do not recognise keeps its own logic, with a warning."""
+
+        def unrecognised(self, prefix="", sharded_offsets=(), metadata=None):
+            return {"untouched": True}
+
+        GPTModel.sharded_state_dict = unrecognised
+        with pytest.warns(UserWarning, match="not the version ModelOpt patches"):
+            assert not keep_gpt_output_layer_extra_state()
+        assert GPTModel.sharded_state_dict is unrecognised
+
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            (None, False),
+            (torch.empty(0, dtype=torch.uint8), False),
+            (torch.ones(4, dtype=torch.uint8), True),
+            (SimpleNamespace(data=None), False),
+            (SimpleNamespace(data=b""), False),
+            (SimpleNamespace(data=b"quantizer_state"), True),
+            (SimpleNamespace(data=torch.empty(0, dtype=torch.uint8)), False),
+            (SimpleNamespace(data=torch.ones(4, dtype=torch.uint8)), True),
+        ],
+    )
+    def test_extra_state_has_data(self, entry, expected):
+        assert _output_layer_extra_state_has_data(entry) is expected

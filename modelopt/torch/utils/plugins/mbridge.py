@@ -14,10 +14,7 @@
 # limitations under the License.
 """Megatron-Bridge plugins for using with Model-Optimizer."""
 
-import ast
-import inspect
 import re
-import textwrap
 from functools import cache
 from typing import Any
 
@@ -46,7 +43,6 @@ from modelopt.torch.utils import print_rank_0, warn_rank_0
 __all__ = [
     "get_language_model",
     "is_vlm_config",
-    "keep_gpt_output_layer_extra_state",
     "load_mbridge_model_from_hf",
     "load_modelopt_megatron_checkpoint",
     "set_moe_expert_layout",
@@ -221,9 +217,6 @@ def load_modelopt_megatron_checkpoint(
         otherwise the modules passed in. Callers that then move the ModelOpt state need this to
         know where it landed.
     """
-    # sharded_state_dict backs the load plan too, so without this a quantized output_layer
-    # is silently restored unquantized. Applied here so no caller can forget it.
-    keep_gpt_output_layer_extra_state()
     # _load_model_weights_from_checkpoint does not resolve the latest iter_* directory, so resolve it explicitly
     checkpoint_path = _get_modelopt_checkpoint_path(megatron_path)
 
@@ -284,52 +277,3 @@ def load_modelopt_megatron_checkpoint(
             )
     _load_model_weights_from_checkpoint(checkpoint_path, model)
     return model
-
-
-# Statement kinds of the upstream GPTModel.sharded_state_dict body we patch below.
-_GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
-
-
-def _output_layer_extra_state_has_data(entry: Any) -> bool:
-    """True when a sharded state-dict entry carries a payload."""
-    data = getattr(entry, "data", entry)
-    if isinstance(data, torch.Tensor):
-        return data.numel() > 0
-    return data is not None and bool(data)
-
-
-def keep_gpt_output_layer_extra_state() -> bool:
-    """Keep ``output_layer._extra_state`` so a quantized ``lm_head`` can be checkpointed.
-
-    ``GPTModel.sharded_state_dict`` drops that entry and asserts it is empty, for compatibility
-    with GPT checkpoints that only stored the output-layer weight. ModelOpt keeps quantizer state
-    there, so saving a quantized ``output_layer`` raises and loading silently drops the quantizer.
-    Returns True when patched; a no-op once megatron-core keeps the entry itself.
-
-    TODO: remove once the fix lands upstream, expected in the nemo:26.08.01 container.
-    """
-    try:
-        src = textwrap.dedent(inspect.getsource(GPTModel.sharded_state_dict))
-    except (OSError, TypeError):
-        return False  # no source to check against; leave megatron-core alone
-    func = ast.parse(src).body[0]
-    if not isinstance(func, ast.FunctionDef):
-        return False
-    body = func.body
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        body = body[1:]  # docstring
-    if [type(stmt).__name__ for stmt in body] != _GPT_SSD_STATEMENTS:
-        return False  # upstream changed: assume fixed rather than replace unknown logic
-
-    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        sharded_state_dict = super(GPTModel, self).sharded_state_dict(
-            prefix, sharded_offsets, metadata
-        )
-        key = f"{prefix}output_layer._extra_state"
-        entry = sharded_state_dict.get(key)
-        if entry is not None and not _output_layer_extra_state_has_data(entry):
-            sharded_state_dict.pop(key)  # upstream behaviour for the empty placeholder
-        return sharded_state_dict
-
-    GPTModel.sharded_state_dict = sharded_state_dict
-    return True

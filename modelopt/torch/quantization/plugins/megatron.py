@@ -15,9 +15,13 @@
 
 """Support quantization for megatron linear layers."""
 
+import ast
+import inspect
 import re
+import textwrap
 import types
 from contextlib import contextmanager
+from functools import cache
 from typing import Any
 
 import megatron.core.parallel_state as mcore_parallel
@@ -26,6 +30,7 @@ import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import torch
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
+from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
@@ -325,6 +330,65 @@ def _output_layer_untied(config) -> bool:
         return False
 
 
+# Statement kinds of the upstream GPTModel.sharded_state_dict body patched below.
+_GPT_SSD_STATEMENTS = ["Assign", "Assign", "Assign", "Assert", "Return"]
+
+# The replacement we installed on GPTModel, so a repeat call can recognise its own work.
+_patched_gpt_sharded_state_dict = None
+
+
+def _output_layer_extra_state_has_data(entry: Any) -> bool:
+    """True when a sharded state-dict entry carries a payload."""
+    data = getattr(entry, "data", entry)
+    if isinstance(data, torch.Tensor):
+        return data.numel() > 0
+    return data is not None and bool(data)
+
+
+@cache
+def keep_gpt_output_layer_extra_state() -> bool:
+    """Keep ``output_layer._extra_state`` so a quantized ``lm_head`` can be checkpointed.
+
+    ``GPTModel.sharded_state_dict`` drops that entry and asserts it is empty, so a quantized
+    output_layer otherwise fails to save and loads back unquantized. Cached: warns at most once.
+
+    TODO: remove once megatron-core migrates GPTModel to HybridModel, expected in nemo:26.10.
+    """
+    global _patched_gpt_sharded_state_dict
+    if GPTModel.sharded_state_dict is _patched_gpt_sharded_state_dict:
+        return True
+    try:
+        src = textwrap.dedent(inspect.getsource(GPTModel.sharded_state_dict))
+    except (OSError, TypeError):
+        src = ""  # no source to check against; leave megatron-core alone
+    func = ast.parse(src).body[0] if src else None
+    body = func.body if isinstance(func, ast.FunctionDef) else []
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # docstring
+    if [type(stmt).__name__ for stmt in body] != _GPT_SSD_STATEMENTS:
+        warn_rank_0(
+            "GPTModel.sharded_state_dict is not the version ModelOpt patches; leaving it as is. "
+            "If it does not keep a populated output_layer._extra_state, saving a quantized "
+            "output_layer will fail and loading one will silently drop its quantizers."
+        )
+        return False
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        sharded_state_dict = super(GPTModel, self).sharded_state_dict(
+            prefix, sharded_offsets, metadata
+        )
+        key = f"{prefix}output_layer._extra_state"
+        if key in sharded_state_dict and not _output_layer_extra_state_has_data(
+            sharded_state_dict[key]
+        ):
+            sharded_state_dict.pop(key)  # upstream behaviour for the empty placeholder
+        return sharded_state_dict
+
+    _patched_gpt_sharded_state_dict = sharded_state_dict
+    GPTModel.sharded_state_dict = sharded_state_dict
+    return True
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -337,6 +401,9 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
        typing-matching the QuantModuleRegistry.
     3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+    # sharded_state_dict backs both save and load planning, so applying this for every
+    # Megatron model means no caller can forget it and lose a quantized output_layer.
+    keep_gpt_output_layer_extra_state()
     untied = _resolve_output_layer_untied(model)
 
     def _configure_attention_for_kv_cache_quant(module: Attention):

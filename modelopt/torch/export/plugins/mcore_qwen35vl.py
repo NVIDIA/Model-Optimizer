@@ -47,10 +47,9 @@ _qwen3_5_extra_export: dict = {
         "model.layers.{}.linear_attn.norm.", {"zero_centered_gamma": True}
     ),
     "linear_attn.out_proj": NameRemapping("model.layers.{}.linear_attn.out_proj."),
-    # One entry per expert with gate/up split, matching the released NVFP4 checkpoints: vLLM's
-    # quantized MoE loader has no parameter for a packed `experts.down_proj_weight_scale_2`.
-    "local_experts.linear_fc1": GatedMLPSlicing("model.layers.{}.mlp.experts.{}."),
-    "local_experts.linear_fc2": NameRemapping("model.layers.{}.mlp.experts.{}.down_proj."),
+    # Grouped experts export one entry per expert with gate/up split, matching the released NVFP4
+    # checkpoints: vLLM has no parameter for a packed `experts.down_proj_weight_scale_2`.
+    # ``local_experts.*`` (SequentialMLP) already does this in the Qwen3 rules.
     "experts.linear_fc1": GroupedGatedMLPSlicing("model.layers.{}.mlp.experts.{{}}"),
     "experts.linear_fc2": GroupedMLPSlicing("model.layers.{}.mlp.experts.{{}}.down_proj"),
     # MoE shared experts (routed experts + router come from the Qwen3 rules).
