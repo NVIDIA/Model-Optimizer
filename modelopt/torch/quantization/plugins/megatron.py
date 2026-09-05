@@ -110,6 +110,39 @@ def _check_nvfp4_static_tp_supported(model: torch.nn.Module) -> None:
         )
 
 
+def _initialize_grouped_weight_quantizer_state(module: torch.nn.Module) -> None:
+    """Create per-expert buffers as destinations for the subsequent checkpoint load."""
+    grouped_leaves = [
+        quantizer if isinstance(quantizer, torch.nn.Sequential) else [quantizer]
+        for quantizer in [module.weight_quantizer[idx] for idx in range(module.num_gemms)]
+    ]
+    for sibling_leaves in zip(*grouped_leaves):
+        eligible_leaves = [
+            quantizer
+            for quantizer in sibling_leaves
+            if (
+                quantizer.is_enabled
+                and not quantizer.is_mx_format
+                and not getattr(quantizer, "_dynamic", False)
+                and not getattr(quantizer, "_lsq", False)
+            )
+        ]
+        for state_name in ("_amax", "_global_amax"):
+            reference = next(
+                (
+                    state
+                    for quantizer in eligible_leaves
+                    if (state := getattr(quantizer, state_name, None)) is not None
+                ),
+                None,
+            )
+            if reference is None:
+                continue
+            for quantizer in eligible_leaves:
+                if getattr(quantizer, state_name, None) is None:
+                    quantizer.register_buffer(state_name, torch.zeros_like(reference))
+
+
 def real_quant_module_get_extra_state(self) -> dict:
     """Populating real_quantizer_state and q_tensor_state."""
     extra_state = {}
@@ -757,6 +790,9 @@ if HAS_TE:
 
     # Quantized subclasses to support TEGroupedLinear quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
+        def modelopt_post_load_extra_state(self):
+            _initialize_grouped_weight_quantizer_state(self)
+
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             # _sharded_state_dict_grouped adds _extra_state{gemm_idx} for gemm_idx:[1, num_gemms] in
             # sharded_state_dict which is same as _extra_state. The _extra_state{gemm_idx} is used for
