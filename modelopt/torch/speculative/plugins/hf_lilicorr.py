@@ -112,6 +112,22 @@ class HFLiLiCorrModel(HFDFlashModel):
                 "model's own logit gap to the ground truth, and offline mode has no "
                 "target model to read that from. Use data.mode=online."
             )
+        # The grouped convolution is OPTIONAL here (unlike DFlash2, which requires it),
+        # but the two geometry keys are all-or-nothing. Setting one alone would build a
+        # draft with no convolutions at all and report nothing, and the serving loader
+        # applies the same both-or-neither rule -- so refuse it here, where the message
+        # can say which key is missing.
+        arch_config = config.dflash_architecture_config
+        conv_keys = ("conv_kernel_size", "conv_group_size")
+        present = [name for name in conv_keys if arch_config.get(name) is not None]
+        if len(present) == 1:
+            raise ValueError(
+                f"LiLiCorr got {present[0]} without "
+                f"{next(k for k in conv_keys if k not in present)} in "
+                "dflash_architecture_config. The grouped convolution needs the tap count "
+                "and the group size together; one alone would silently build a draft "
+                "without convolutions."
+            )
         super().modify(config)
 
         weights = {name: float(getattr(config, name, -1.0)) for name in _TERM_WEIGHT_FIELDS}

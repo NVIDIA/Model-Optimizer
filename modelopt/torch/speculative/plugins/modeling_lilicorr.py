@@ -509,6 +509,70 @@ class LiLiCorrModule(DFlashModule):
         self._init_head_weights(config)
         self.lilicorr.reset_factor_heads()
 
+        # Optional: wrap every draft sublayer in DFlash2's grouped dynamic convolution,
+        # installed only when the recipe asks for it, so this module still builds the
+        # plain reranker when the two geometry keys are absent. Last in __init__ on
+        # purpose -- _init_head_weights above iterates self.lilicorr.modules(), and
+        # keeping the convolutions out of its reach is what makes the init below
+        # authoritative.
+        taps = getattr(config, "conv_kernel_size", None)
+        group_size = getattr(config, "conv_group_size", None)
+        if taps is not None and group_size is not None:
+            self._install_sublayer_convs(config, int(taps), int(group_size))
+
+    def _install_sublayer_convs(self, config, taps: int, group_size: int) -> None:
+        """Replace each backbone layer's no-op sublayer wrappers with grouped convs.
+
+        Reuses ``DFlash2``'s :class:`DFlashGroupedConv` and the no-op sublayer seam
+        ``DFlashDecoderLayer`` already exposes, so the convolution itself is shared code
+        rather than a second implementation of the same arithmetic.
+
+        The initialization is the one deliberate difference. DFlash2 draws
+        ``kernel_projection`` from ``normal_(0, initializer_range)``, so its convolution
+        is not the identity at step 0. Here it is zero by default, and since
+        ``base_kernel`` is identity at tap 0 the whole wrapper is then an *exact*
+        identity at init: ``prepare`` emits a zero dynamic kernel, ``coefficients ==
+        base``, and the convolution returns its input unchanged. That makes the
+        difference between a conv and a non-conv run attributable to the convolutions
+        rather than to a perturbed starting point.
+
+        ``conv_projection_init_std`` is a separate key from ``initializer_range`` on
+        purpose: the latter also seeds the reranker, so overloading it would couple two
+        unrelated initializations.
+
+        The import is deferred to here rather than taken at module scope because
+        ``modeling_dflash2`` is the only part of LiLiCorr that needs DFlash2 at all.
+        Importing it eagerly would make the whole plugin -- including the plain
+        reranker, which shares no code with DFlash2 -- unimportable wherever DFlash2 is
+        absent. Deferring it keeps that cost on the one recipe that asks for it.
+        """
+        try:
+            from .modeling_dflash2 import DFlashGroupedConv
+        except ImportError as exc:
+            raise ImportError(
+                "LiLiCorr's optional sublayer convolutions reuse DFlash2's "
+                "DFlashGroupedConv, which is not available in this installation. Remove "
+                "conv_kernel_size and conv_group_size from dflash_architecture_config to "
+                "train the plain LiLiCorr reranker, or install a version of ModelOpt that "
+                "provides the DFlash2 draft variant."
+            ) from exc
+
+        std = float(getattr(config, "conv_projection_init_std", 0.0))
+        for layer in self.layers:
+            for wrapper_name in ("attention_conv", "mlp_conv"):
+                conv = DFlashGroupedConv(
+                    hidden_size=config.hidden_size,
+                    block_size=self.block_size,
+                    taps=taps,
+                    group_size=group_size,
+                )
+                with torch.no_grad():
+                    if std > 0.0:
+                        conv.kernel_projection.weight.normal_(mean=0.0, std=std)
+                    else:
+                        conv.kernel_projection.weight.zero_()
+                setattr(layer, wrapper_name, conv)
+
     def _init_head_weights(self, config):
         """Initialize the head's Linear layers to the draft's own convention."""
         std = getattr(config, "initializer_range", 0.02)

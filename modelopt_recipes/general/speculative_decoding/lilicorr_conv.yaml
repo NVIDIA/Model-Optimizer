@@ -1,0 +1,175 @@
+# LiLiCorr + grouped sublayer convolutions.
+#
+# REQUIRES THE DFLASH2 DRAFT VARIANT. This recipe is the one part of LiLiCorr that does
+# not stand alone: the convolution class is imported from the DFlash2 plugin rather than
+# copied, so that the two variants cannot drift apart arithmetically. Until DFlash2 is
+# available, this recipe raises at model build with a message naming the two keys to
+# remove; `lilicorr.yaml` has no such dependency and trains today.
+#
+# This is `lilicorr.yaml` with DFlash2's grouped dynamic depthwise convolution wrapped
+# around every draft sublayer. The convolution is shared code -- `DFlashGroupedConv` from
+# the DFlash2 plugin, installed on the no-op sublayer seam `DFlashDecoderLayer` already
+# exposes -- so this variant composes two existing pieces rather than reimplementing
+# either. It is a standalone recipe because recipes do not compose; keep the two files in
+# sync when editing shared fields.
+#
+# THE INIT IS THE ONE DELIBERATE DIFFERENCE FROM DFlash2. `conv_projection_init_std: 0.0`
+# zeroes `kernel_projection`, and `base_kernel` is identity at tap 0, so the wrapper is an
+# EXACT identity at step 0: a run from this recipe begins as the plain reranker and any
+# difference is attributable to the convolutions rather than to a perturbed start. DFlash2
+# draws the same projection from `normal_(0, initializer_range)` and is therefore not the
+# identity at init. Do not "align" the two -- they answer different questions.
+#
+# MEMORY. The convolutions add ~42M trainable parameters (20 tensors for a 5-layer draft),
+# and the activations they hold are the binding constraint. At an 8B target, combined with
+# fp32 master weights for the draft, this is the memory worst case and may need
+# `training.gradient_checkpointing: true` to fit on 80 GiB; at a 4B target it fits without. Gradient checkpointing is
+# mathematically neutral -- same objective, same data order, same resulting model -- but it
+# trades step time for memory, so a run using it is not step-time-comparable with one that
+# does not.
+#
+# Override fields via an OmegaConf dotlist.
+metadata:
+  recipe_type: speculative_dflash
+  description: >-
+    LiLiCorr + grouped sublayer convolutions (DFlash backbone + candidate-lattice
+    reranker + DFlash2 sublayer convolutions).
+
+# maps to ModelArguments (main.py)
+model:
+  model_name_or_path:
+  trust_remote_code: false
+  use_fake_base_for_offline: false
+
+# maps to DataArguments (main.py)
+data:
+  # Online only: the distractor penalty weights each candidate by the target
+  # model's own logit gap, so there has to be a target model in the process.
+  mode: online
+  data_path:
+  # Jinja chat template with {% generation %} tags for answer_only_loss.
+  chat_template:
+
+# maps to TrainingArguments (main.py)
+training:
+  # --- commonly modified ---
+  output_dir:
+  num_train_epochs: 6
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 6.0e-4
+  warmup_ratio: 0.04
+  training_seq_len: 3072
+  logging_steps: 50
+  save_steps: 1000
+  seed: 42
+  cp_size: 1
+  dp_shard_size: 1
+  disable_tqdm: true
+  # Keep off: eval runs the DFlash backbone only (the reranker is not applied in
+  # pseudo_speculative_generate), so AR here would report the backbone alone and
+  # understate the trained model. Compare via export + a serving benchmark.
+  estimate_ar: false
+  ar_validate_steps: 0
+  answer_only_loss: true
+
+  # --- rarely modified ---
+  do_eval: false
+  # Cosine, unlike the sibling recipes' linear: the published variants were trained
+  # under a linear warmup into a cosine decay (specforge's CosineAnnealingWarmupLR),
+  # and the schedule is part of the recipe those numbers came from.
+  lr_scheduler_type: cosine
+  save_strategy: steps
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  dataloader_drop_last: true
+  bf16: true
+  tf32: true
+  remove_unused_columns: false
+  ddp_timeout: 1800
+  report_to: tensorboard
+
+# maps to DFlashConfig (modelopt/torch/speculative/config.py).
+dflash:
+  dflash_block_size: 16
+  dflash_num_anchors: 512
+  dflash_use_torch_compile: false
+  # The reranker's terms are added to the plain weighted cross-entropy. Turning KD
+  # on would replace that base term and change the objective the published
+  # checkpoints were trained under.
+  dflash_self_logit_distillation: false
+  # Static exponential position decay, gamma=7 for block_size=16: early in-block
+  # slots gate acceptance, so they carry more weight. Not 'dpace' — the published
+  # variants were trained on the static decay.
+  dflash_loss_objective: decay
+  dflash_loss_decay_factor: 7.0
+  # Qwen3 has no native mask token; 151669 is an unused id used by the reference.
+  dflash_mask_token_id: 151669
+
+  # Objective composition. Absolute weights, validated all-or-nothing.
+  # `base`   (this file): w_ce 0.25,  w_margin 0.0
+  # `margin`            : w_ce 0.125, w_margin 0.125
+  # Both keep w_pen 0.25, so the head's total weight is 0.50 either way and the
+  # variants differ only in how the cross-entropy block is split.
+  # fp32 master weights for the draft. Compute stays bf16 under autocast; this keeps the
+  # master copy -- and therefore AdamW's moments -- in fp32, which a bf16 second moment
+  # cannot represent the updates of. The published results for this recipe were trained
+  # with this on; turning it off changes the optimizer's arithmetic, not just its memory.
+  dflash_fp32_master_weights: true
+
+  dflash_lilicorr_w_ce: 0.25
+  dflash_lilicorr_w_margin: 0.0
+  dflash_lilicorr_w_pen: 0.25
+  # Hinge width, in units of the log-potential. Unused while w_margin is 0.
+  dflash_lilicorr_margin: 2.0
+
+  dflash_architecture_config:
+    num_hidden_layers: 5
+    # Draft attention/MLP dims — set explicitly (the draft is an independent
+    # Qwen3 model and does NOT inherit these from the base). GQA: 8 KV heads.
+    num_attention_heads: 32
+    num_key_value_heads: 8
+    head_dim: 128
+    intermediate_size: 12288
+    projector_type: lilicorr
+
+    # Grouped dynamic depthwise convolution around every sublayer, the same geometry
+    # DFlash2 publishes. conv_kernel_size is the tap count (2 = each position also sees
+    # its predecessor) and must not exceed the block size; conv_group_size must divide
+    # hidden_size. The two are all-or-nothing -- one alone is rejected rather than
+    # silently building a draft without convolutions.
+    conv_kernel_size: 2
+    conv_group_size: 16
+    # Zero => exact identity at init; see the note in the header before changing it.
+    # Separate from `initializer_range`, which also seeds the reranker.
+    conv_projection_init_std: 0.0
+
+    # Reranker geometry. Every field is required, never defaulted:
+    # candidate_topk sets the lattice width and the shape of rank_embedding, and
+    # logit_scale/vector_eps change the score without changing any tensor shape —
+    # so a guessed value builds a head that loads cleanly and scores a different
+    # function. K is otherwise free; the method works at any k.
+    # dflash_init_checkpoint restores weights only and reads geometry from here, so
+    # warm-starting reproduces a head only if every field matches the one the
+    # checkpoint was trained with. lilicorr_logit_scale and lilicorr_vector_eps are
+    # the two a mistake would not be caught on, having no effect on any shape.
+    lilicorr_candidate_topk: 8
+    lilicorr_hidden_size: 1024
+    lilicorr_factor_dim: 1024
+    lilicorr_num_layers: 2
+    lilicorr_num_heads: 8
+    lilicorr_mlp_ratio: 2.0
+    # The factors are cosines, so this temperature sets their usable range.
+    lilicorr_logit_scale: 8.0
+    lilicorr_vector_eps: 1.0e-4
+
+# `data.chat_template` is supplied per run; use the shared
+# tools/launcher/examples/Qwen/Qwen3-8B/chat_template_train.jinja, as the other
+# speculative recipes do, so variants stay comparable to each other.
+#
+# It differs slightly from the mask the published checkpoints were trained under: the
+# reference leaves the empty `<think>` preamble out of the assistant span and supervises
+# `<|im_end|>`, where the shared template does the opposite. The token ids are identical
+# either way, so this is 6 tokens of supervision per record (4 preamble, 2 end-of-turn)
+# and nothing else. Noted because it is invisible in the data, not because it is
+# expected to matter at this scale.

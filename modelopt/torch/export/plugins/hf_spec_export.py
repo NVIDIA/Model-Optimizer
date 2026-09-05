@@ -558,6 +558,22 @@ class LiLiCorrExporter(DFlashExporter):
                 "lilicorr_logit_scale": head.logit_scale,
             }
         )
+
+        # A conv-bearing draft carries 20 extra tensors (2 per sublayer wrapper, 2
+        # wrappers per layer), and they ride out on the inherited `dflash_module.`
+        # stripping. But the serving loader builds the wrappers from GEOMETRY, not from
+        # the tensors: with these two keys absent it defaults both to 0, builds no
+        # convolution modules, and then drops all 20 tensors in silence, so the draft
+        # serves as its conv-free parent and reports a believable acceptance length.
+        # Read off the built modules for the same reason as the head fields above.
+        conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
+        if getattr(conv, "taps", None):
+            config["dflash_config"].update(
+                {
+                    "conv_kernel_size": conv.taps,
+                    "conv_group_size": conv.group_size,
+                }
+            )
         return config
 
 
