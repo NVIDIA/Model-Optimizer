@@ -368,8 +368,9 @@ if __name__ == "__main__":
         required=False,
         default=None,
         help=(
-            "DFlash block size (num_speculative_tokens). Use instead of --draft_length "
-            "for DFLASH: block_size = draft_length + 1."
+            "Draft block size for DFlash and DSpark. To draft N tokens "
+            "(num_speculative_tokens=N), use --block_size N+1 for DFlash and "
+            "--block_size N for DSpark."
         ),
     )
     parser.add_argument(

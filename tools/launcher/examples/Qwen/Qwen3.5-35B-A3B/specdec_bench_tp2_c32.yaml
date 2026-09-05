@@ -90,7 +90,7 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DSPARK
       - --draft_model_dir <<global_vars.draft_model>>
-      - --draft_length 7
+      - --block_size 7
       - --max_seq_len 16384
       - --tp_size 2
       - --ep_size 1
@@ -121,7 +121,7 @@ pipeline:
       - --engine VLLM
       - --speculative_algorithm DSPARK
       - --draft_model_dir <<global_vars.draft_model>>
-      - --draft_length 7
+      - --block_size 7
       - --max_seq_len 16384
       - --tp_size 2
       - --ep_size 1

@@ -129,14 +129,7 @@ class VLLMModel(Model):
             specdec = {
                 "method": "dspark",
                 "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_steps", 7),
-            }
-        elif kwargs.get("speculative_algorithm") == "DSPARK":
-            specdec = {
-                "method": "dspark",
-                "model": kwargs.get("draft_model_dir"),
-                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens", 7),
-                "draft_sample_method": kwargs.get("draft_sample_method", "greedy"),
+                "num_speculative_tokens": kwargs.get("speculative_num_draft_tokens") or 7,
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
