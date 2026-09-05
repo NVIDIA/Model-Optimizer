@@ -147,16 +147,25 @@ modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
 modelopt_recipes = ["**/*.yml", "**/*.yaml"]
 
 [tool.setuptools.exclude-package-data]
-# huggingface/models is a backward-compat symlink to ../models. The recursive
-# package-data glob above follows it, so drop the aliased copies here to avoid
-# shipping every checkpoint recipe twice; setuptools' exclude glob is non-recursive,
-# hence the explicit org/model/task depths. MANIFEST.in prunes the symlink dir entry
-# itself (build_py can't copy a symlink-to-dir). Old huggingface/models/... --recipe
-# paths keep working via the loader alias in modelopt/recipe/loader.py.
+# The recipe library keeps two backward-compat symlinks: the top-level
+# ``huggingface`` -> ``model_type`` rename alias, and the nested
+# ``model_type/models`` -> ``../models`` alias. The recursive package-data glob above
+# follows both, so drop the aliased copies here to avoid shipping every recipe twice;
+# setuptools' exclude glob is non-recursive, hence the explicit per-depth entries.
+# MANIFEST.in prunes the symlink dir entries themselves (build_py can't copy a
+# symlink-to-dir). Old huggingface/... --recipe paths keep working via the loader
+# alias in modelopt/recipe/loader.py.
 modelopt_recipes = [
-    "huggingface/models",
+    "huggingface",
+    "model_type/models",
+    # Architecture recipes duplicated via ``huggingface`` -> ``model_type``.
+    "huggingface/*/*/*.yaml", "huggingface/*/*/*.yml",
+    # Checkpoint mirrors duplicated via ``huggingface/models`` and
+    # ``model_type/models`` (both resolve to the real top-level ``models/`` tier).
     "huggingface/models/*/*/*/*.yaml", "huggingface/models/*/*/*/*.yml",
     "huggingface/models/*/*/*/*/*.yaml", "huggingface/models/*/*/*/*/*.yml",
+    "model_type/models/*/*/*/*.yaml", "model_type/models/*/*/*/*.yml",
+    "model_type/models/*/*/*/*/*.yaml", "model_type/models/*/*/*/*/*.yml",
 ]
 
 [tool.uv]

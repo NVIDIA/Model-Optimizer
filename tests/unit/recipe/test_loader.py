@@ -157,14 +157,40 @@ def test_load_recipe_builtin_description():
     assert len(recipe.description) > 0
 
 
+def test_load_recipe_huggingface_arch_backward_compat_alias():
+    """Old ``huggingface/<model_type>/...`` recipe paths resolve to the renamed
+    ``model_type/`` tier.
+
+    ``huggingface/`` was renamed to ``model_type/``. A source checkout keeps a
+    ``huggingface`` -> ``model_type`` symlink, but symlinks don't survive into built
+    wheels, so the loader rewrites the prefix directly. This guards that saved
+    ``--recipe huggingface/<model_type>/...`` paths keep working for pip-installed
+    users, not just source checkouts.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("model_type/*/ptq/*.yaml"))
+    new_path = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
+    old_path = "huggingface/" + new_path[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
+
+    assert str(_resolve_recipe_path(old_path)) == str(_resolve_recipe_path(new_path))
+    recipe = load_recipe(old_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
 def test_load_recipe_huggingface_models_backward_compat_alias():
     """Old ``huggingface/models/<org>/<model_id>/...`` recipe paths resolve to the
     top-level ``models/`` tier.
 
-    The restructure keeps a ``huggingface/models`` -> ``../models`` source symlink, but
-    symlinks don't survive into built wheels, so the loader rewrites the prefix directly.
-    This guards that saved ``--recipe huggingface/models/...`` paths keep working for
-    pip-installed users, not just source checkouts.
+    The ``huggingface/models/`` prefix is more specific than the ``huggingface/`` ->
+    ``model_type/`` rename and must win: checkpoint mirrors moved all the way out to
+    the top-level ``models/`` tier. A source checkout keeps the
+    ``huggingface`` -> ``model_type`` -> ``models`` symlink chain, but symlinks don't
+    survive into built wheels, so the loader rewrites the prefix directly. This guards
+    that saved ``--recipe huggingface/models/...`` paths keep working for pip-installed
+    users, not just source checkouts.
     """
     from modelopt.recipe.loader import _resolve_recipe_path
 
@@ -177,6 +203,75 @@ def test_load_recipe_huggingface_models_backward_compat_alias():
     recipe = load_recipe(old_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def test_load_recipe_model_type_models_alias_resolves_like_wheel():
+    """``model_type/models/<org>/<model_id>/...`` resolves to the top-level ``models/`` tier.
+
+    ``model_type/models`` is a source-only ``../models`` symlink that packaging prunes, so
+    without the loader alias the path would resolve in a checkout but 404 from a built wheel.
+    The alias rewrites the prefix to ``models/`` so both behave identically.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("models/*/*/ptq/*.yaml"))
+    canonical = str(sample.relative_to(root).with_suffix(""))  # models/<org>/<model>/ptq/<file>
+    aliased = "model_type/" + canonical  # model_type/models/<org>/<model>/ptq/<file>
+
+    assert str(_resolve_recipe_path(aliased)) == str(_resolve_recipe_path(canonical))
+    recipe = load_recipe(aliased)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert isinstance(recipe, ModelOptPTQRecipe)
+
+
+def test_load_recipe_local_huggingface_tree_not_shadowed_by_alias(tmp_path, monkeypatch):
+    """A user's own local ``huggingface/`` recipe tree still loads by its natural name.
+
+    The deprecated-tier alias rewrites ``huggingface/`` -> ``model_type/`` for built-in
+    lookups only; the filesystem fallback must still probe the path exactly as given, so a
+    relative ``huggingface/<name>/...`` on disk is not shadowed by the rewrite. The name is
+    deliberately not a shipped ``model_type`` so no built-in candidate wins first.
+    """
+    from modelopt.recipe.loader import _resolve_recipe_path
+
+    local = tmp_path / "huggingface" / "my_custom_arch" / "ptq"
+    local.mkdir(parents=True)
+    recipe_file = local / "custom.yaml"
+    recipe_file.write_text(
+        "metadata:\n  recipe_type: ptq\nquantize:\n  quant_cfg: {}\n  algorithm: max\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_recipe_path("huggingface/my_custom_arch/ptq/custom")
+    assert Path(resolved).resolve() == recipe_file.resolve()
+
+
+def test_import_resolution_honors_huggingface_alias():
+    """``$import`` resolution rewrites deprecated tier prefixes just like ``load_recipe``.
+
+    ``$import`` paths go through ``config_loader._resolve_config_path`` (not the recipe-path
+    alias), so a custom recipe that imports a shipped snippet by its old ``huggingface/...``
+    path must still resolve from a wheel where the ``huggingface`` symlink is gone.
+    """
+    from modelopt.torch.opt.config_loader import _alias_builtin_recipe_prefix, _resolve_config_path
+
+    # Prefix-rewrite mapping: architecture rename plus both checkpoint-mirror aliases.
+    assert _alias_builtin_recipe_prefix("huggingface/qwen3_vl/ptq/x") == "model_type/qwen3_vl/ptq/x"
+    assert (
+        _alias_builtin_recipe_prefix("huggingface/models/nvidia/m/ptq/x") == "models/nvidia/m/ptq/x"
+    )
+    assert (
+        _alias_builtin_recipe_prefix("model_type/models/nvidia/m/ptq/x") == "models/nvidia/m/ptq/x"
+    )
+    assert _alias_builtin_recipe_prefix("general/ptq/x") == "general/ptq/x"  # untouched
+
+    root = Path(str(files("modelopt_recipes")))
+    sample = next(root.glob("model_type/*/ptq/*.yaml"))
+    canonical = str(sample.relative_to(root).with_suffix(""))  # model_type/<arch>/ptq/<file>
+    old = "huggingface/" + canonical[len("model_type/") :]  # huggingface/<arch>/ptq/<file>
+
+    assert str(_resolve_config_path(old)) == str(_resolve_config_path(canonical))
 
 
 def _all_shipped_ptq_recipe_paths():
@@ -198,7 +293,7 @@ def _all_shipped_ptq_recipe_paths():
 
 
 # Discovered from disk (not hardcoded) so the smoke tests cover every shipped PTQ
-# recipe — general/, huggingface/<model_type>/, and models/<org>/<model_id>/ — and
+# recipe — general/, model_type/<model_type>/, and models/<org>/<model_id>/ — and
 # never drift as recipes are added, moved, or removed.
 _BUILTIN_PTQ_RECIPES = _all_shipped_ptq_recipe_paths()
 
@@ -1886,10 +1981,10 @@ def test_load_recipe_autoquantize_builtin_active_moe():
 def test_load_recipe_autoquantize_module_search_spaces():
     """Qwen recipe separates its fixed PTQ baseline from explicit search spaces."""
     recipe = load_recipe(
-        "huggingface/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
+        "model_type/qwen3_6_moe/auto_quantize/w4a16_nvfp4_fp8_module_spaces_at_6p0bits-active_moe"
     )
     aq = recipe.auto_quantize
-    model_ptq = load_recipe("huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
+    model_ptq = load_recipe("model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast")
     assert recipe.quantize is not None
     assert recipe.quantize == model_ptq.quantize
     assert aq.candidate_formats == []

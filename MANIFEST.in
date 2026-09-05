@@ -1,2 +1,9 @@
-exclude modelopt_recipes/huggingface/models
-prune modelopt_recipes/huggingface/models
+# Backward-compat symlinks in the recipe library (huggingface -> model_type and the
+# nested model_type/models -> ../models). Walking them would ship the recipe library
+# multiple times; the sdist ships each recipe once from its real path. Old
+# huggingface/... --recipe paths keep working via the loader alias in
+# modelopt/recipe/loader.py.
+exclude modelopt_recipes/huggingface
+prune modelopt_recipes/huggingface
+exclude modelopt_recipes/model_type/models
+prune modelopt_recipes/model_type/models

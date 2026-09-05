@@ -201,7 +201,7 @@ python hf_ptq.py \
   --export_path <quantized_ckpt_path>
 ```
 
-Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/huggingface/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/huggingface/README.md`](../../modelopt_recipes/huggingface/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
+Built-in recipes are located in `modelopt_recipes/general/ptq/` for model-agnostic recipes and in `modelopt_recipes/model_type/<model_type>/ptq/` for recipes tuned to a specific Hugging Face `model_type` (see [`modelopt_recipes/model_type/README.md`](../../modelopt_recipes/model_type/README.md)). You can also provide a path to your own custom YAML recipe file or directory. See the [recipe documentation](https://nvidia.github.io/Model-Optimizer) for details on the YAML schema and available recipes.
 
 > *When `--recipe` is specified, `--qformat` is ignored. KV cache handling depends on the recipe type: a **PTQ** recipe bakes KV cache into its config and ignores `--kv_cache_qformat`; an **AutoQuantize** recipe falls back to `--kv_cache_qformat` unless it sets an explicit `kv_cache` field.*
 
@@ -287,7 +287,7 @@ Use the recipe directory matching the checkpoint's `model_type`: `qwen3_vl` or `
 # Vision encoder only: FP8 vision Linears and merger, BF16 LLM and KV cache.
 python hf_ptq.py \
   --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
-  --recipe huggingface/qwen3_vl/ptq/fp8_vision-kv_none \
+  --recipe model_type/qwen3_vl/ptq/fp8_vision-kv_none \
   --calib_with_images \
   --calib_size 512 \
   --skip_generate \
@@ -296,7 +296,7 @@ python hf_ptq.py \
 # Joint vision encoder + language model FP8 with FP8 KV-cache cast.
 python hf_ptq.py \
   --pyt_ckpt_path <Qwen3-VL-or-Qwen3.5-checkpoint> \
-  --recipe huggingface/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast \
+  --recipe model_type/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast \
   --calib_with_images \
   --calib_size 512 \
   --skip_generate \
@@ -410,7 +410,7 @@ search-disabled layers, and cost-excluded layers — see
 [`AutoQuantizeConfig`](../../modelopt/recipe/config.py). Shipped recipes live in
 [`modelopt_recipes/general/auto_quantize/`](../../modelopt_recipes/general/auto_quantize); model-specific
 recipes (carrying architecture-specific disabled layers — e.g. VL vision towers) live under
-`modelopt_recipes/huggingface/<model>/auto_quantize/`.
+`modelopt_recipes/model_type/<model>/auto_quantize/`.
 
 [Script](./scripts/huggingface_example.sh)
 
@@ -469,7 +469,7 @@ not actually searched.
 
 The fixed baseline may also reuse a model-specific PTQ configuration. For example, the Qwen3.6 MoE
 AutoQuantize recipe imports the same model-specific `quant_cfg` used by
-`huggingface/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`, reproduces that recipe's `quantize`
+`model_type/qwen3_5_moe/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast`, reproduces that recipe's `quantize`
 section, and lists only shared experts, attention, and `lm_head` under `module_search_spaces`. A
 loader test asserts that the inherited fixed baseline remains equal to the original PTQ recipe while
 leaving the original recipe unchanged.

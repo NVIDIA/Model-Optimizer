@@ -61,7 +61,7 @@ class _MiniMaxModel(nn.Module):
 def test_mxfp8_nvfp4_experts_recipe_quantizer_precedence():
     model = _MiniMaxModel()
     register_fused_experts_on_the_fly(model)
-    recipe = load_recipe("huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts")
+    recipe = load_recipe("model_type/minimax_m3_vl/ptq/mxfp8_nvfp4_experts")
     config = recipe.quantize.model_dump()
     assert config["algorithm"]["layerwise"]["enable"] is True
     config["algorithm"] = None

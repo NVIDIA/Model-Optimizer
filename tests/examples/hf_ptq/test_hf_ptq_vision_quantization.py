@@ -33,7 +33,7 @@ def hf_ptq(monkeypatch):
     ("recipe", "extracts_language_model"),
     [
         (None, True),
-        ("huggingface/qwen3_vl/ptq/fp8_vision-kv_none", False),
+        ("model_type/qwen3_vl/ptq/fp8_vision-kv_none", False),
     ],
 )
 def test_image_calibration_model_target_follows_recipe(
@@ -149,10 +149,10 @@ def test_image_calibration_uses_full_vlm_forward(hf_ptq, monkeypatch):
 @pytest.mark.parametrize(
     "recipe",
     [
-        "huggingface/qwen3_vl/ptq/fp8_vision-kv_none",
-        "huggingface/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast",
-        "huggingface/qwen3_5/ptq/fp8_vision-kv_none",
-        "huggingface/qwen3_5/ptq/fp8_vision_lm-kv_fp8_cast",
+        "model_type/qwen3_vl/ptq/fp8_vision-kv_none",
+        "model_type/qwen3_vl/ptq/fp8_vision_lm-kv_fp8_cast",
+        "model_type/qwen3_5/ptq/fp8_vision-kv_none",
+        "model_type/qwen3_5/ptq/fp8_vision_lm-kv_fp8_cast",
     ],
 )
 def test_vision_recipe_requires_image_calibration(hf_ptq, recipe):

@@ -68,7 +68,7 @@ from modelopt.recipe import load_recipe
 from modelopt.torch.quantization.utils import export_torch_mode
 
 # 1. Quantize the eager PyTorch model with a Model Optimizer PTQ recipe.
-recipe = load_recipe("huggingface/vit/ptq/fp8")
+recipe = load_recipe("model_type/vit/ptq/fp8")
 mtq.quantize(model, recipe.quantize.model_dump(), forward_loop=calibrate)
 
 # 2. Compile the quantized (Q/DQ) graph with Torch-TensorRT.
@@ -138,7 +138,7 @@ This is the recipe the CLI selects by default when `--model_id` points at a HF V
 
 | `--recipe` value | Calibration | What it quantizes |
 | :---: | :---: | :--- |
-| `huggingface/vit/ptq/fp8` (default) | `max` | Per-tensor FP8 (E4M3) on every weight + input quantizer matched by the `*weight_quantizer` / `*input_quantizer` globs — encoder Linears, the patch-embed `nn.Conv2d` projection, and the `classifier` head — plus FP8 on the attention Q/K/V BMMs and softmax. All output quantizers disabled. |
+| `model_type/vit/ptq/fp8` (default) | `max` | Per-tensor FP8 (E4M3) on every weight + input quantizer matched by the `*weight_quantizer` / `*input_quantizer` globs — encoder Linears, the patch-embed `nn.Conv2d` projection, and the `classifier` head — plus FP8 on the attention Q/K/V BMMs and softmax. All output quantizers disabled. |
 
 </div>
 
@@ -153,7 +153,7 @@ This is the recipe the CLI selects by default when `--model_id` points at a HF V
 | Flag | Default | Description |
 | :---: | :---: | :--- |
 | `--model_id` | `google/vit-large-patch16-224` | HuggingFace model id of the ViT classifier to quantize. |
-| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
+| `--recipe` | `model_type/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
 | `--calib_samples` | `1024` | Number of tiny-imagenet samples to use for calibration. |
 | `--batch_size` | `128` | Batch size for calibration / TRT compile. |
 | `--save_dir` | `./modelopt_quantized` | Directory the quantized Model Optimizer state-dict (FP16 weights + Q/DQ metadata) is always saved to, as `vit_modelopt_state.pt` — re-usable across runs without recalibration. |
@@ -182,7 +182,7 @@ python torch_tensorrt_ptq.py --layer_info_path ./vit_fp8_layers.txt
 | Flag | Default | Description |
 | :---: | :---: | :--- |
 | `--model_id` | `google/vit-large-patch16-224` | HuggingFace model id of the ViT classifier to quantize and score. |
-| `--recipe` | `huggingface/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
+| `--recipe` | `model_type/vit/ptq/fp8` | Recipe path (relative to `modelopt_recipes/` or an absolute YAML). |
 | `--calib_samples` | `1024` | Number of tiny-imagenet samples to use for calibration. |
 | `--batch_size` | `128` | Calibration / compile / eval batch size. The Torch-TRT engine is dynamic (`min=1`, `opt=max(--batch_size, 2)`, `max=1024`) and handles any batch including the trailing partial batch. |
 | `--eval_data_size` | full 50k | Number of ImageNet validation images to score. |
@@ -199,7 +199,7 @@ python torch_tensorrt_ptq.py --layer_info_path ./vit_fp8_layers.txt
 
 ```bash
 python torch_tensorrt_accuracy.py \
-    --recipe huggingface/vit/ptq/fp8 \
+    --recipe model_type/vit/ptq/fp8 \
     --batch_size 128 \
     --baseline \
     --eval_data_size 5000 \
@@ -215,7 +215,7 @@ python torch_tensorrt_accuracy.py \
 
 ## Custom Recipes
 
-Use `--recipe <path>` to plug in a different recipe — either a path relative to `modelopt_recipes/` (resolved against the built-in recipe library) or an absolute filesystem path to a YAML file. The recipe is loaded via `modelopt.recipe.load_recipe`, must declare `metadata.recipe_type: ptq` and a `quantize:` section, and its `quantize` config is passed straight to `mtq.quantize`. See the existing [`modelopt_recipes/huggingface/vit/ptq/*.yaml`](../../modelopt_recipes/huggingface/vit/ptq/) for the patterns used here.
+Use `--recipe <path>` to plug in a different recipe — either a path relative to `modelopt_recipes/` (resolved against the built-in recipe library) or an absolute filesystem path to a YAML file. The recipe is loaded via `modelopt.recipe.load_recipe`, must declare `metadata.recipe_type: ptq` and a `quantize:` section, and its `quantize` config is passed straight to `mtq.quantize`. See the existing [`modelopt_recipes/model_type/vit/ptq/*.yaml`](../../modelopt_recipes/model_type/vit/ptq/) for the patterns used here.
 
 ### Resuming From a Saved Checkpoint
 

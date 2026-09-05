@@ -4,7 +4,7 @@ This doc walks through the **PTQ quantization schemes** in two parts: the
 model-agnostic recipes under [`general/ptq/`](general/ptq/) (the recommended
 starting point for any model), and then the
 [model-specific recipes](#model-specific-recipes) — per-`model_type` folders
-under `huggingface/` plus the checkpoint-mirror `models/<org>/<checkpoint>/`
+under `model_type/` plus the checkpoint-mirror `models/<org>/<checkpoint>/`
 tier — comparing each to its general baseline and explaining why it deviates.
 
 ---
@@ -237,9 +237,13 @@ The general recipes above are **model-agnostic**: they select layers by wildcard
 (`*mlp*`, `*self_attn*`, `*[kv]_bmm_quantizer`) and lean on the shared
 `default_disabled_quantizers` exclusions, so the same file works on any
 architecture whose module names follow the usual conventions. A recipe only
-earns a place under `huggingface/<model_type>/` or
+earns a place under `model_type/<model_type>/` or
 `models/<org>/<checkpoint>/` when a model has to **deviate** from
 that baseline. The deviations come in four kinds:
+
+> ℹ️ `model_type/` was previously named `huggingface/`; old
+> `huggingface/<model_type>/...` `--recipe` paths still resolve for backward
+> compatibility, but use `model_type/` going forward.
 
 | Kind | What changes vs. the general recipe | Examples |
 |------|-------------------------------------|----------|
@@ -267,7 +271,7 @@ and FP8 KV-cache-cast units. Both keep patch embedding and vision-attention BMM 
 precision. The shared visual snippet lives under `qwen3_vl`; thin wrappers remain discoverable
 under each exact Hugging Face `model_type`.
 
-`huggingface/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast` (and its MoE twin,
+`model_type/qwen3_5/ptq/w4a16_nvfp4-fp8_attn-kv_fp8_cast` (and its MoE twin,
 which shares the same `quant_cfg` snippet) is a **mixed scheme no single general
 body covers**: NVFP4 **W4A16** on MLP / expert projection weights and `lm_head`,
 **FP8** on self-attention *and* the large linear-attention projections

@@ -520,13 +520,20 @@ Model-specific recipes
 ----------------------
 
 Model-specific recipes come in two tiers: architecture recipes keyed by a
-Hugging Face ``model_type`` under ``huggingface/<model_type>/<task>/``, and
+Hugging Face ``model_type`` under ``model_type/<model_type>/<task>/``, and
 checkpoint mirrors keyed by a model-hub path under
 ``models/<org>/<model_id>/<task>/``. See
-`modelopt_recipes/huggingface/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/huggingface/README.md>`_
+`modelopt_recipes/model_type/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/model_type/README.md>`_
 and
 `modelopt_recipes/models/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/README.md>`_
 for the layout conventions and recipe-lookup order.
+
+.. note::
+
+   ``model_type/`` was previously named ``huggingface/``. Old
+   ``huggingface/<model_type>/...`` recipe paths still resolve for backward
+   compatibility, but ``model_type/`` is the canonical location — prefer it in
+   new ``--recipe`` flags and ``load_recipe`` calls.
 
 .. list-table::
    :header-rows: 1
@@ -536,7 +543,7 @@ for the layout conventions and recipe-lookup order.
      - Description
    * - ``models/stepfun-ai/Step-3.5-Flash/ptq/nvfp4-mlp-only``
      - NVFP4 MLP-only for Step 3.5 Flash MoE model
-   * - ``huggingface/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
+   * - ``model_type/minimax_m3_vl/ptq/mxfp8_nvfp4_experts``
      - MXFP8 language-model base with MSE-calibrated NVFP4 routed experts for MiniMax-M3
 
 
@@ -689,8 +696,8 @@ The ``modelopt_recipes/`` package is organized as follows:
    |       +-- nvfp4_omlp_only-kv_fp8_cast.yaml
    |       +-- nvfp4_omlp_only-kv_fp8.yaml
    |       +-- nvfp4_weight_only-kv_fp8_cast.yaml
-   +-- huggingface/                # Architecture-specific recipes (by model_type)
-   |   +-- <model_type>/           # see modelopt_recipes/huggingface/README.md
+   +-- model_type/                # Architecture-specific recipes (by model_type)
+   |   +-- <model_type>/           # see modelopt_recipes/model_type/README.md
    |       +-- <task>/
    |           +-- <recipe>.yaml
    +-- models/                     # Checkpoint-specific recipes (by model-hub path)
