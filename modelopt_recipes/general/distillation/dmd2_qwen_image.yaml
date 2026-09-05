@@ -63,7 +63,8 @@ sample_t_cfg:
   p_std: 1.0
   # Exact ``torch.linspace(max_t=0.999, 0.0, 5).tolist()`` — the inference
   # pipeline's default schedule when no t_list is passed (see
-  # ``inference_dmd2_qwen_image.py:259``). Stride = 0.999 / 4 = 0.249975, so
+  # ``examples/diffusers/fastgen/dmd2/inference_qwen_image.py:259``). Stride = 0.999 / 4 =
+  # 0.249975, so
   # the four training timesteps drawn from ``t_list[:-1]`` exactly match the
   # four inference sample points. The previous values
   # ``[0.999, 0.75, 0.5, 0.25, 0.0]`` looked like a uniform 0.25 stride but

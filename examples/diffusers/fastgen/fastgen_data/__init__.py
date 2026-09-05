@@ -13,39 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Self-contained DMD2 dataloaders for the fastgen example.
+"""Self-contained shared dataloaders for the FastGen diffusion examples.
 
-The DMD2 data path builds on stock ``nemo_automodel`` (@ e42584e3, Apache-2.0) where it is
-model-agnostic and reimplements the rest, so the published example does not depend on local
-*modifications* to AutoModel:
+The data path builds on stock ``nemo_automodel>=0.4.0,<0.6`` where it is model-agnostic and
+implements the example-owned batch contract locally, so the published example does not depend on
+AutoModel source modifications:
 
-* ``collate_fns.py`` — the collate fn + dataloader builder. It reuses the upstream
-  ``SequentialBucketSampler`` but builds the DMD2 batch itself (``image_latents`` /
-  ``text_embeddings`` / ``text_embeddings_mask`` + the optional broadcast negative-prompt
-  embedding) directly from the vendored dataset's per-item output. It deliberately does **not**
-  call upstream ``collate_fn_production``, which stacks model-specific token keys
+* ``collate_fns.py`` — the collate functions + dataloader builder. It reuses the upstream
+  ``SequentialBucketSampler`` and emits either the ordinary latent-conditioned batch or a
+  prompt-only batch for data-free PDD, including the optional broadcast negative-prompt
+  embedding. It deliberately does **not** call upstream ``collate_fn_production``, which stacks
+  model-specific token keys
   (``clip_tokens`` / ``t5_tokens``) that the Qwen-Image cache does not produce.
 * ``text_to_image_dataset.py`` — a faithful vendored copy of the upstream dataset reader (built
   on the upstream ``BaseMultiresolutionDataset``); its change emits ``prompt_embeds_mask``
   interleaved with cache loading, so it is carried verbatim rather than wrapped.
 
 The training configs reference these via ``_target_: fastgen_data.build_*`` once
-``dmd2_finetune.py`` has put this directory on ``sys.path`` (source-checkout flow).
+``dmd2/finetune.py`` has put the FastGen directory on ``sys.path`` (source-checkout flow).
 """
 
-# Runtime soft-guard: the data path imports UNPATCHED upstream helpers
+import re
+
+# Runtime soft-guard: the data path imports unmodified upstream helpers
 # (``nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}``).
 # Convert a missing-helper ImportError into an actionable message naming the supported range.
 try:
     from .collate_fns import (
         build_text_to_image_multiresolution_dataloader,
+        collate_fn_text_prompts,
         collate_fn_text_to_image,
     )
-    from .text_to_image_dataset import TextToImageDataset
+    from .resume import rebuild_stateful_dataloader
 except ImportError as exc:  # pragma: no cover - environment guard
     raise ImportError(
         "fastgen_data could not import its dependencies. It requires a stock "
-        "nemo_automodel>=0.4.0,<1.0 install (it imports the unpatched upstream helpers "
+        "nemo_automodel>=0.4.0,<0.6 install (it imports the unmodified upstream helpers "
         "nemo_automodel.components.datasets.diffusion.{sampler,base_dataset}). "
         "Install the example dependencies with:\n"
         "    pip install -r examples/diffusers/fastgen/requirements.txt\n"
@@ -53,9 +56,10 @@ except ImportError as exc:  # pragma: no cover - environment guard
     ) from exc
 
 __all__ = [
-    "TextToImageDataset",
     "build_text_to_image_multiresolution_dataloader",
+    "collate_fn_text_prompts",
     "collate_fn_text_to_image",
+    "rebuild_stateful_dataloader",
 ]
 
 
@@ -72,17 +76,12 @@ def _warn_if_unsupported_upstream() -> None:
         import nemo_automodel
 
         raw = str(getattr(nemo_automodel, "__version__", "") or "")
-        nums = []
-        for tok in raw.split(".")[:3]:
-            digits = "".join(ch for ch in tok if ch.isdigit())
-            nums.append(int(digits) if digits else 0)
-        while len(nums) < 3:
-            nums.append(0)
-        version = tuple(nums[:3])
-        if not ((0, 4, 0) <= version < (1, 0, 0)):
+        match = re.match(r"^(\d+)\.(\d+)\.(\d+)", raw)
+        version = tuple(int(part) for part in match.groups()) if match else ()
+        if not ((0, 4, 0) <= version < (0, 6, 0)):
             logging.getLogger(__name__).warning(
                 "fastgen_data: installed nemo_automodel %s is outside the tested range "
-                "(>=0.4.0,<1.0). The vendored data/preprocessing code imports unpatched upstream "
+                "(>=0.4.0,<0.6). The vendored data/preprocessing code imports unmodified upstream "
                 "helpers (sampler, base_dataset, multi_tier_bucketing); if imports "
                 "fail or behavior drifts, pin nemo_automodel to the supported range.",
                 raw or "<unknown>",

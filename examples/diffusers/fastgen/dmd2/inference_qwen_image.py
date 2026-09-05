@@ -43,7 +43,7 @@ Math is bit-aligned with the training-time ``_build_student_input`` in
 
 Usage::
 
-    from inference_dmd2_qwen_image import QwenImageDMDInferencePipeline
+    from dmd2.inference_qwen_image import QwenImageDMDInferencePipeline
     import torch
 
     pipe = QwenImageDMDInferencePipeline.from_pretrained(

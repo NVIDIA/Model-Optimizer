@@ -6,6 +6,10 @@ Changelog
 
 **New Features**
 
+*Misc*
+
+- Add Parallel Decoding Distillation (PDD) to ``modelopt.torch.fastgen`` with Qwen-Image training, distributed-checkpoint export, and PDD-2/4/8 inference. AutoModel remains an unmodified pinned runtime dependency.
+
 **Backward Breaking Changes**
 
 **Deprecations**

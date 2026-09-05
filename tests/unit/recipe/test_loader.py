@@ -35,6 +35,7 @@ from modelopt.recipe.config import (
     RecipeType,
 )
 from modelopt.recipe.loader import _apply_dotlist, load_config, load_recipe
+from modelopt.torch.fastgen import PDDConfig, load_pdd_config
 from modelopt.torch.opt.config_loader import _load_raw_config, _schema_type
 from modelopt.torch.quantization.config import QuantizerAttributeConfig, normalize_quant_cfg_list
 from modelopt.torch.quantization.mode import CalibrateModeRegistry, get_modelike_from_algo_cfg
@@ -72,6 +73,18 @@ metadata:
   recipe_type: unknown_type
 quantize: {}
 """
+
+
+def test_load_pdd_config_builtin_recipe():
+    """The public PDD loader resolves and validates its built-in recipe."""
+    config = load_pdd_config("general/distillation/pdd_qwen_image")
+
+    assert isinstance(config, PDDConfig)
+    assert config.guidance_scale == 4.0
+    assert config.grid_max_t == 0.999
+    assert "grid_max_t" in config.model_fields_set
+    assert config.inference_blocks == (32, 32, 32, 32)
+
 
 QUANTIZER_ATTRIBUTE_SCHEMA = (
     "# modelopt-schema: modelopt.torch.quantization.config.QuantizerAttributeConfig\n"
