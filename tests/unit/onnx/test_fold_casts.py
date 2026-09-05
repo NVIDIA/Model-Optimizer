@@ -19,7 +19,12 @@ import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.utils import fold_dq_fp32_to_fp16_casts, fold_q_fp16_to_fp32_casts
+from modelopt.onnx.utils import (
+    change_casts_to_fp16,
+    fold_dq_fp32_to_fp16_casts,
+    fold_q_fp16_to_fp32_casts,
+    get_cast_to_type,
+)
 
 
 def _dq_cast_model(opset):
@@ -69,6 +74,69 @@ def _cast_q_model(opset):
         ),
         opset_imports=[helper.make_opsetid("", opset)],
     )
+
+
+def test_change_casts_to_fp16_retargets_only_allowed_sources_and_fanout():
+    nodes = [
+        helper.make_node("Cast", ["x"], ["matmul_in"], "matmul_cast", to=TensorProto.FLOAT),
+        helper.make_node("MatMul", ["matmul_in", "weight"], ["matmul_out"], "matmul"),
+        helper.make_node("Cast", ["x"], ["unsqueeze_in"], "unsqueeze_cast", to=TensorProto.FLOAT),
+        helper.make_node("Unsqueeze", ["unsqueeze_in", "axes"], ["unsqueeze_out"], "unsqueeze"),
+        helper.make_node("Cast", ["mask"], ["mask_float"], "mask_cast", to=TensorProto.FLOAT),
+        helper.make_node("ReduceSum", ["mask_float"], ["mask_sum"], "mask_sum"),
+        helper.make_node("Mul", ["mask_float", "half"], ["masked"], "mask_mul"),
+        helper.make_node("Cast", ["x"], ["mixed"], "mixed_cast", to=TensorProto.FLOAT),
+        helper.make_node("Mul", ["mixed", "half"], ["mixed_mul"], "mixed_mul"),
+        helper.make_node("Div", ["mixed", "float"], ["mixed_div"], "mixed_div"),
+        helper.make_node("Cast", ["x"], ["div_in"], "div_cast", to=TensorProto.FLOAT),
+        helper.make_node("Div", ["div_in", "float"], ["div_out"], "div"),
+    ]
+    model = helper.make_model(
+        helper.make_graph(
+            nodes,
+            "g",
+            [
+                helper.make_tensor_value_info("x", TensorProto.FLOAT16, [1, 1]),
+                helper.make_tensor_value_info("mask", TensorProto.INT64, [1, 1]),
+            ],
+            [],
+            initializer=[
+                numpy_helper.from_array(np.ones((1, 1), dtype=np.float16), "weight"),
+                numpy_helper.from_array(np.array([0], dtype=np.int64), "axes"),
+                numpy_helper.from_array(np.array(1, dtype=np.float16), "half"),
+                numpy_helper.from_array(np.array(1, dtype=np.float32), "float"),
+            ],
+        )
+    )
+
+    target_ops = ["MatMul", "Unsqueeze", "ReduceSum", "Mul"]
+    change_casts_to_fp16(model, target_ops, source_types=set())
+    assert all(
+        get_cast_to_type(node) == TensorProto.FLOAT
+        for node in model.graph.node
+        if node.op_type == "Cast"
+    )
+
+    change_casts_to_fp16(model, target_ops)
+    mask_cast = next(node for node in model.graph.node if node.name == "mask_cast")
+    assert get_cast_to_type(mask_cast) == TensorProto.FLOAT
+
+    change_casts_to_fp16(
+        model,
+        target_ops,
+        source_types={TensorProto.FLOAT16, TensorProto.INT64},
+    )
+    cast_types = {
+        node.name: get_cast_to_type(node) for node in model.graph.node if node.op_type == "Cast"
+    }
+
+    assert cast_types == {
+        "matmul_cast": TensorProto.FLOAT16,
+        "unsqueeze_cast": TensorProto.FLOAT16,
+        "mask_cast": TensorProto.FLOAT16,
+        "mixed_cast": TensorProto.FLOAT,
+        "div_cast": TensorProto.FLOAT,
+    }
 
 
 @pytest.mark.parametrize(

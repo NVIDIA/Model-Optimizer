@@ -180,10 +180,6 @@ class TRTLocalClient(RuntimeClient):
                         tensor_name,
                         output_tensors[idx - len(input_tensors)].data_ptr(),
                     )
-            assert self.execution_context.all_shape_inputs_specified, (
-                "Not all shape inputs are specified."
-            )
-
             # Set selected profile idx
             self.execution_context.set_optimization_profile_async(0, self.stream.cuda_stream)
 

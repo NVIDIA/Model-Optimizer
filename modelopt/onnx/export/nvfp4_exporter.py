@@ -105,7 +105,7 @@ def _replace_fp4qdq_with_2dq(
         if initializer.name not in initializer_indices:
             graph.initializer.append(initializer)
 
-    def _add_input_value_info(graph, tensor_proto):
+    def _add_initializer_value_info(graph, tensor_proto):
         assert tensor_proto.name not in graph_inputs, (
             f"{tensor_proto.name} already in graph inputs."
         )
@@ -116,7 +116,7 @@ def _replace_fp4qdq_with_2dq(
         value_info = onnx.helper.make_tensor_value_info(
             tensor_proto.name, tensor_proto.data_type, tensor_proto.dims
         )
-        graph.input.append(value_info)
+        graph.value_info.append(value_info)
 
     # Remove the original node from the graph
     graph.node.remove(node)
@@ -148,9 +148,9 @@ def _replace_fp4qdq_with_2dq(
     )
 
     # Add ValueInfo for the initializers if not present
-    _add_input_value_info(graph, w_f4_proto)
-    _add_input_value_info(graph, sw_f32_per_tensor_proto)
-    _add_input_value_info(graph, sw_f8_per_block_proto)
+    _add_initializer_value_info(graph, w_f4_proto)
+    _add_initializer_value_info(graph, sw_f32_per_tensor_proto)
+    _add_initializer_value_info(graph, sw_f8_per_block_proto)
 
     # Add the initializers to the graph
     _add_initializer(w_f4_proto)

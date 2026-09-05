@@ -64,7 +64,7 @@ jobs:
 
           # nvcr.io/nvidia/tensorrt:26.05-py3 ships cuDNN 9.22 with no preinstalled torch, and
           # torch 2.14 pins cuDNN 9.24: mixing them fails with CUDNN_SUBLIBRARY_LOADING_FAILED.
-          if [[ "${{ inputs.docker_image }}" == *"/tensorrt:"* ]]; then
+          if [[ "${{ inputs.docker_image }}" == *"/tensorrt:26.05-"* ]]; then
             echo "torch<2.14" > /tmp/pip-constraints.txt
             export PIP_CONSTRAINT=/tmp/pip-constraints.txt
           fi
@@ -79,6 +79,22 @@ jobs:
           fi
 
           find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
+
+          if [[ "${{ inputs.example }}" == "torch_onnx" ]]; then
+            # Prefer the CUDA libraries bundled with PyPI torch to avoid mixing cuDNN sublibraries.
+            torch_lib_path=$(python - <<'PY'
+          from pathlib import Path
+
+          import torch
+
+          root = Path(torch.__file__).resolve().parent.parent / "nvidia"
+          paths = sorted(str(path) for path in root.glob("*/lib") if path.is_dir())
+          assert paths
+          print(":".join(paths))
+          PY
+            )
+            echo "LD_LIBRARY_PATH=${torch_lib_path}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
       - name: Run tests
         id: run_tests
         continue-on-error: ${{ inputs.allow_failure }}

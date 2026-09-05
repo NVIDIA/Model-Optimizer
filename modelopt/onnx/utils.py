@@ -21,6 +21,7 @@ import os
 import tempfile
 import uuid
 from collections import defaultdict
+from collections.abc import Collection
 from typing import Any
 
 import numpy as np
@@ -126,6 +127,21 @@ def get_node_names(model: onnx.ModelProto) -> list[str]:
         List of node names of the model.
     """
     return [node.name for node in model.graph.node]
+
+
+def has_node_op_type(graph: onnx.GraphProto, op_type: str) -> bool:
+    """Return whether a graph or any nested subgraph contains an operator type."""
+    for node in graph.node:
+        if node.op_type == op_type:
+            return True
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                if has_node_op_type(attr.g, op_type):
+                    return True
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                if any(has_node_op_type(subgraph, op_type) for subgraph in attr.graphs):
+                    return True
+    return False
 
 
 def _get_tensor_shape(tensor: onnx.ValueInfoProto) -> list[int]:
@@ -1859,18 +1875,25 @@ def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) ->
     return onnx_model
 
 
-def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> onnx.ModelProto:
-    """Change FP16-to-FP32 Cast nodes whose entire fanout feeds target ops to cast to FP16 instead.
+def change_casts_to_fp16(
+    model: onnx.ModelProto,
+    target_op_types: list[str],
+    source_types: Collection[int] | None = None,
+) -> onnx.ModelProto:
+    """Retarget eligible Cast nodes whose entire fanout feeds target ops to FP16.
 
     Args:
         model: The ONNX model to modify.
         target_op_types: List of op types to check for. Cast nodes feeding exclusively into
             these will be changed from FP32 to FP16.
+        source_types: Source element types eligible for retargeting. Defaults to FP16.
 
     Returns:
         The modified ONNX model with Cast nodes updated.
     """
     type_map = _build_tensor_type_map(model)
+    if source_types is None:
+        source_types = {onnx.TensorProto.FLOAT16}
 
     # Build a map of tensor name -> consumer nodes
     tensor_to_consumers: dict[str, list[onnx.NodeProto]] = {}
@@ -1879,17 +1902,16 @@ def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> 
             if inp:
                 tensor_to_consumers.setdefault(inp, []).append(node)
 
-    # Find Cast nodes that feed into target ops and change FP16->FP32 to FP16->FP16
+    # Find Cast nodes that feed into target ops and change their destination to FP16
     for node in model.graph.node:
         if node.op_type != "Cast":
             continue
 
-        # Only retarget FP16->FP32 casts; leave other casts (e.g. FP64->FP32) alone
         cast_to = get_cast_to_type(node)
         if cast_to != onnx.TensorProto.FLOAT:
             continue
         source_type = type_map.get(node.input[0])
-        if source_type != onnx.TensorProto.FLOAT16:
+        if source_type not in source_types:
             continue
 
         # Only change when ALL consumers are target ops to avoid breaking non-target branches

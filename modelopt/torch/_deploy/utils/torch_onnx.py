@@ -35,6 +35,7 @@ from onnxconverter_common import convert_float_to_float16
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
 from modelopt.onnx.autocast.convert import convert_to_f16
+from modelopt.onnx.autocast.graphsanitizer import GraphSanitizer
 from modelopt.onnx.export import (
     FP8QuantExporter,
     INT4QuantExporter,
@@ -52,9 +53,12 @@ from modelopt.onnx.utils import (
     fold_qdq_scale_fp16_to_fp32_casts,
     get_input_names,
     get_input_shapes,
+    get_min_opset_for_precisions,
     get_node_names,
     get_output_names,
     get_output_shapes,
+    get_qdq_precisions,
+    has_node_op_type,
     infer_shapes,
     remove_node_training_mode,
     remove_redundant_casts,
@@ -347,14 +351,21 @@ def is_int4_quantized(model: nn.Module) -> bool:
     return False
 
 
+def _is_enabled_fp4_quantizer(quantizer: Any) -> bool:
+    block_sizes = getattr(quantizer, "block_sizes", None)
+    return bool(
+        getattr(quantizer, "is_enabled", False)
+        and block_sizes
+        and block_sizes.get("scale_bits", None) == (4, 3)
+    )
+
+
 def is_fp4_quantized(model: nn.Module) -> bool:
     """Check if the model is quantized in NVFP4 mode."""
     for _, module in model.named_modules():
-        if (
-            hasattr(module, "input_quantizer")
-            and module.input_quantizer.block_sizes
-            and module.input_quantizer.block_sizes.get("scale_bits", None) == (4, 3)
-        ):
+        input_is_fp4 = _is_enabled_fp4_quantizer(getattr(module, "input_quantizer", None))
+        weight_is_fp4 = _is_enabled_fp4_quantizer(getattr(module, "weight_quantizer", None))
+        if input_is_fp4 or weight_is_fp4:
             return True
     return False
 
@@ -635,8 +646,10 @@ def get_onnx_bytes_and_metadata(
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
     if weights_dtype in ["fp16", "bf16"]:
+        has_dynamic_fp4 = has_node_op_type(onnx_opt_graph.graph, "TRT_FP4DynamicQuantize")
         if (
-            is_int4_quantized(model)
+            has_dynamic_fp4
+            or is_int4_quantized(model)
             or is_mxfp8_quantized(model)
             or is_fp8_quantized(model)
             or is_int8_quantized(model)
@@ -651,12 +664,37 @@ def get_onnx_bytes_and_metadata(
             )
             # Change FP32 cast nodes feeding into Concat/Add to FP16
             op_list = ["Concat", "Add", "Sqrt", "LayerNormalization", "Clip", "Mul", "Exp"]
-            onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, op_list)
+            source_types = None
+            if has_dynamic_fp4:
+                op_list.extend(["Pow", "ReduceSum", "MatMul", "Unsqueeze"])
+                source_types = {
+                    onnx.TensorProto.BOOL,
+                    onnx.TensorProto.INT8,
+                    onnx.TensorProto.INT16,
+                    onnx.TensorProto.INT32,
+                    onnx.TensorProto.INT64,
+                    onnx.TensorProto.UINT8,
+                    onnx.TensorProto.UINT16,
+                    onnx.TensorProto.UINT32,
+                    onnx.TensorProto.UINT64,
+                    onnx.TensorProto.FLOAT16,
+                }
+            onnx_opt_graph = change_casts_to_fp16(
+                onnx_opt_graph, op_list, source_types=source_types
+            )
             # Remove Cast(FP32->FP16) nodes after DQ by setting DQ output to FP16 directly
             onnx_opt_graph = fold_dq_fp32_to_fp16_casts(onnx_opt_graph)
             # Remove Cast(FP16->FP32) feeding Q/DQ scales so DQ stays FP16 for downstream
             # MatMul/Add layers under strongly-typed TRT parsing.
             onnx_opt_graph = fold_qdq_scale_fp16_to_fp32_casts(onnx_opt_graph)
+            if has_dynamic_fp4:
+                qdq_precisions = get_qdq_precisions(onnx_opt_graph)
+                qdq_precisions.add("float4_e2m1fn")
+                min_opset = get_min_opset_for_precisions(qdq_precisions)
+                sanitizer = GraphSanitizer(onnx_opt_graph, min_opset=min_opset)
+                sanitizer.find_custom_nodes()
+                sanitizer.convert_opset()
+                onnx_opt_graph = sanitizer.model
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
