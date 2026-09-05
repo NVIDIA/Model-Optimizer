@@ -97,6 +97,12 @@ dflash:
   # `margin`            : w_ce 0.125, w_margin 0.125
   # Both keep w_pen 0.25, so the head's total weight is 0.50 either way and the
   # variants differ only in how the cross-entropy block is split.
+  # fp32 master weights for the draft. Compute stays bf16 under autocast; this keeps the
+  # master copy -- and therefore AdamW's moments -- in fp32, which a bf16 second moment
+  # cannot represent the updates of. The published results for this recipe were trained
+  # with this on; turning it off changes the optimizer's arithmetic, not just its memory.
+  dflash_fp32_master_weights: true
+
   dflash_lilicorr_w_ce: 0.25
   dflash_lilicorr_w_margin: 0.0
   dflash_lilicorr_w_pen: 0.25
