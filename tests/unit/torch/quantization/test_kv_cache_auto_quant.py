@@ -25,6 +25,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import get_kv_cache_dtype, get_quant_config
 from modelopt.torch.quantization import model_quant, tensor_quant
+from modelopt.torch.quantization.calib import MaxCalibrator
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.kv_cache_auto_quant import (
     _candidate_quantizers,
@@ -119,6 +120,22 @@ def test_kv_candidate_rejects_structural_or_unscoped_algorithms(algorithm):
     config = _kv_config((4, 3), 8.0).model_copy(update={"algorithm": algorithm})
 
     with pytest.raises(ValueError, match="only non-structural calibration algorithms"):
+        _validate_kv_only_config(config)
+
+
+def test_kv_candidate_rejects_non_json_calibrator():
+    config = QuantizeConfig(
+        quant_cfg=[
+            {
+                "quantizer_name": "*[kv]_bmm_quantizer",
+                "cfg": {"num_bits": (4, 3), "calibrator": MaxCalibrator},
+            }
+        ],
+        algorithm="max",
+        effective_bits=8.0,
+    )
+
+    with pytest.raises(ValueError, match="string calibrators"):
         _validate_kv_only_config(config)
 
 
@@ -332,6 +349,7 @@ def test_kv_autoquant_scores_and_applies_one_format_per_layer(tmp_path, nvfp4_fa
 
     assert state["best"]["constraints"]["effective_bits"] == pytest.approx(6.25)
     assert state["best"]["is_satisfied"]
+    json.dumps(model._modelopt_kv_cache_auto_quantize_state)
     assert model.training
     assert {layer["selected"] for layer in state["layers"].values()} == {
         "fp8",
@@ -439,8 +457,8 @@ def test_kv_autoquant_honors_ordered_qualified_override_and_cost(nvfp4_fake_quan
         assert layer.k_bmm_quantizer.num_bits == (4, 3)
         assert layer.v_bmm_quantizer.num_bits == (2, 1)
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] == "MIXED_PRECISION"
-    assert exported["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert exported["quant_algo"] is None
+    assert exported["kv_cache_quant_algo"] == "FP8_K_NVFP4_V"
     assert {layer["quant_algo"] for layer in exported["kv_cache_quantized_layers"].values()} == {
         "FP8_K_NVFP4_V"
     }
@@ -652,8 +670,8 @@ def test_kv_autoquant_report_survives_modelopt_save_restore():
 
     assert restored._modelopt_kv_cache_auto_quantize_state["best"] == state["best"]
     quantization = get_quant_config(restored)["quantization"]
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
-    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
+    assert quantization["kv_cache_quant_algo"] == "FP8"
     assert quantization["kv_cache_quantized_layers"] == {
         "model.layers.0.self_attn": {"quant_algo": "FP8"}
     }
@@ -693,9 +711,9 @@ def test_public_kv_autoquant_selects_qwen_causal_attention_only(
     report = model._modelopt_kv_cache_auto_quantize_state
     assert json.loads(json.dumps(report))["layers"][expected_layer]["selected"] == "fp8"
     exported = get_quant_config(model)["quantization"]
-    assert exported["quant_algo"] == "MIXED_PRECISION"
+    assert exported["quant_algo"] is None
     assert exported["quantized_layers"] == {}
-    assert exported["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert exported["kv_cache_quant_algo"] == "FP8"
     assert set(exported["kv_cache_quantized_layers"]) == {expected_layer}
 
 

@@ -37,7 +37,7 @@ from ._auto_quantize_cost import (
     get_auto_quantize_cost_model,
     normalize_auto_quantize_constraints,
 )
-from .config import QuantizeConfig
+from .config import QuantizeConfig, QuantizerAttributeConfig
 from .conversion import set_quantizer_by_cfg
 from .nn import TensorQuantizer
 
@@ -95,6 +95,16 @@ def _validate_candidate_patterns(config: QuantizeConfig) -> None:
     for entry in config.quant_cfg:
         if entry.parent_class is not None:
             raise ValueError("KV-cache AutoQuant candidates do not support parent_class filters.")
+        quantizer_configs = entry.cfg if isinstance(entry.cfg, list) else [entry.cfg]
+        if any(
+            isinstance(quantizer_config, QuantizerAttributeConfig)
+            and not isinstance(quantizer_config.calibrator, str)
+            for quantizer_config in quantizer_configs
+        ):
+            raise ValueError(
+                "KV-cache AutoQuant candidates require string calibrators so search state "
+                "remains JSON-safe and replayable."
+            )
         matches = {name for name in probe_names if fnmatch.fnmatch(name, entry.quantizer_name)}
         if not matches:
             raise ValueError(
@@ -700,6 +710,8 @@ class AutoQuantizeKVSearcher(BaseSearcher):
                 "effective_bits": config.effective_bits,
                 "k_bits": _candidate_kv_bits(config)[0],
                 "v_bits": _candidate_kv_bits(config)[1],
+                # Preserve integer block-size keys for replay. Callable calibrators are rejected,
+                # so this Python-mode representation is still safe for the exported JSON report.
                 "config": config.model_dump(mode="python", exclude_none=True),
             }
             for name, config in self._candidates

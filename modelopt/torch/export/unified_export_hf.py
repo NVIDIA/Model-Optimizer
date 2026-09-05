@@ -1529,7 +1529,8 @@ def _write_hf_export_config(
                     kv_autoquant_report["best"]["recipe"] = {
                         name_mapper(name): value for name, value in best_recipe.items()
                     }
-                signature_layers = kv_autoquant_report.get("search_signature", {}).get("layers", [])
+                signature = kv_autoquant_report.get("search_signature") or {}
+                signature_layers = signature.get("layers", [])
                 for layer in signature_layers:
                     layer["name"] = name_mapper(layer["name"])
             with open(f"{export_dir}/kv_cache_auto_quantize_report.json", "w") as file:

@@ -605,14 +605,12 @@ def auto_quantize(
             num_calib_steps,
             num_score_steps,
         )
-        converted_for_search = not is_quantized(model)
-        conversion_snapshot = _snapshot_model_structure(model) if converted_for_search else []
+        conversion_snapshot = _snapshot_model_structure(model)
         is_training = model.training
         searcher = AutoQuantizeKVSearcher()
         try:
-            if converted_for_search:
-                model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
-                set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
+            model = apply_mode(model, mode="auto_quantize", registry=QuantizeModeRegistry)
+            set_quantizer_by_cfg(model, [{"quantizer_name": "*", "enable": False}])
             search_config = {
                 "quantization_formats": processed_kv_formats,
                 "data_loader": data_loader,
@@ -632,8 +630,7 @@ def auto_quantize(
         except Exception:
             searcher.restore_original_quantizers()
             model.train(is_training)
-            if converted_for_search:
-                _restore_model_structure(conversion_snapshot)
+            _restore_model_structure(conversion_snapshot)
             raise
 
     method = method or "gradient"

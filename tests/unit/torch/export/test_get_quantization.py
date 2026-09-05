@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import fnmatch
+from typing import cast
 
 import pytest
 import torch
@@ -37,6 +38,7 @@ from modelopt.torch.export.model_config import (
     QUANTIZATION_W4A8_AWQ,
 )
 from modelopt.torch.export.quant_utils import (
+    _has_large_fp8_scale,
     get_kv_cache_scaling_factor,
     get_quant_config,
     postprocess_state_dict,
@@ -73,6 +75,16 @@ def test_get_kv_cache_scaling_factor_can_disable_fp8_clamping():
 
     assert all(torch.equal(scale, torch.tensor([1.0])) for scale in clamped_scales)
     assert all(torch.equal(scale, torch.tensor([0.5])) for scale in unclamped_scales)
+
+
+def test_large_fp8_scale_check_is_device_agnostic():
+    class CudaLikeScale:
+        device = torch.device("cuda")
+
+        def __gt__(self, _threshold):
+            return torch.tensor([True])
+
+    assert _has_large_fp8_scale(cast("torch.Tensor", CudaLikeScale()))
 
 
 @pytest.mark.parametrize("clamp_kv_cache_scales", [True, False])
@@ -271,7 +283,7 @@ def test_uniform_kv_only_export_preserves_legacy_schema(quantizer_cfg, expected_
     assert "kv_cache_quantized_layers" not in converted
 
 
-def test_uniform_kv_autoquant_export_retains_per_layer_mixed_envelope():
+def test_uniform_kv_autoquant_export_retains_legacy_scheme_and_layer_map():
     model = torch.nn.Module()
     model.attention = _FakeAttention()
     mtq.set_quantizer_by_cfg(
@@ -289,10 +301,20 @@ def test_uniform_kv_autoquant_export_retains_per_layer_mixed_envelope():
 
     quantization = get_quant_config(model)["quantization"]
 
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
     assert quantization["quantized_layers"] == {}
-    assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
+    assert quantization["kv_cache_quant_algo"] == "FP8"
     assert quantization["kv_cache_quantized_layers"] == {"attention": {"quant_algo": "FP8"}}
+
+    converted = convert_hf_quant_config_format({"quantization": quantization})
+    assert "quant_algo" not in converted
+    assert "config_groups" not in converted
+    assert converted["kv_cache_scheme"] == {
+        "dynamic": False,
+        "num_bits": 8,
+        "type": "float",
+    }
+    assert converted["kv_cache_quantized_layers"] == {"attention": {"quant_algo": "FP8"}}
 
 
 def test_partial_uniform_kv_with_uniform_weights_preserves_legacy_schema():
@@ -390,7 +412,7 @@ def test_mixed_kv_cache_quantization_exports_per_layer_map():
     )
 
     quantization = get_quant_config(model)["quantization"]
-    assert quantization["quant_algo"] == "MIXED_PRECISION"
+    assert quantization["quant_algo"] is None
     assert quantization["kv_cache_quant_algo"] == "MIXED_PRECISION"
     assert quantization["quantized_layers"] == {}
     assert quantization["kv_cache_quantized_layers"] == {

@@ -503,6 +503,11 @@ formats in `kv_cache_quantized_layers` and writes
 the JSON-safe sensitivity report to `kv_cache_auto_quantize_report.json`;
 `--auto_quantize_checkpoint` stores the resumable raw search state.
 
+KV sensitivity scoring runs one reference forward plus one forward per eligible-layer candidate
+for every scoring step. Choose the recipe's `auto_quantize.score_size` with the number of eligible
+layers and candidates in mind. Peak scoring memory also grows with the number of selected tokens
+times the model vocabulary because reference and candidate log probabilities are computed in FP32.
+
 > [!NOTE]
 > Layer-wise KV checkpoints require the companion
 > [vLLM mixed-KV metadata consumer](https://github.com/vllm-project/vllm/pull/52813) or a later
