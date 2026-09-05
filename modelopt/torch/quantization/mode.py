@@ -31,11 +31,13 @@ from modelopt.torch.opt.mode import (
 )
 from modelopt.torch.opt.searcher import ForwardLoop
 
+from .algo_cfg import compile_algo_cfg, derive_handoff, describe_plan, plan_hash, stage_predicate
 from .compress import compress_convert, compress_restore, update_compress_metadata
 from .config import (
     AWQClipCalibConfig,
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
+    CalibrationPlanConfig,
     CompressConfig,
     GPTQCalibConfig,
     LocalHessianCalibConfig,
@@ -71,6 +73,7 @@ from .model_calib import (
     smoothquant,
     svdquant,
 )
+from .utils import print_rank_0
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -174,7 +177,7 @@ class RealQuantizeModeDescriptor(ModeDescriptor):
     def next_modes(self) -> set[str] | None:
         """Real quantization should be the last mode in the chain."""
         # TODO: update this to support QLoRA
-        return {"max_calibrate", "eagle"}
+        return {"max_calibrate", "calibration_plan", "eagle"}
 
     @property
     def config_class(self) -> type[ModeloptBaseConfig]:
@@ -218,6 +221,7 @@ def wrapped_calib_func(
     forward_loop: ForwardLoop | None = None,
     func: Callable | None = None,
     supports_layerwise: bool = True,
+    should_process: Callable[[str], bool] | None = None,
 ) -> ConvertReturnType:
     """Wrap the calibration function to be compatible with the ModelOpt convert entrypoint.
 
@@ -237,6 +241,11 @@ def wrapped_calib_func(
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
+
+    # The scoping write-mask (see `algo_cfg.stage_predicate`). `None` means "whole model",
+    # which is exactly today's behaviour, so it is not forwarded in that case.
+    if should_process is not None:
+        kwargs["should_process"] = should_process
 
     moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
     if moe_calib_experts_ratio is not None:
@@ -556,6 +565,93 @@ class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQCalibConfig
 
     _calib_func = gptq
+
+
+def calibration_plan_convert(
+    model: ModelLikeModule,
+    config: CalibrationPlanConfig,
+    forward_loop: ForwardLoop | None = None,
+) -> ConvertReturnType:
+    """Run a compiled calibration plan and record it as a single mode.
+
+    Compile (pure) then execute (effectful):
+
+    1. :func:`compile_algo_cfg <modelopt.torch.quantization.algo_cfg.compile_algo_cfg>` lowers
+       ``algo_cfg`` + ``algorithm`` into one ordered stage list and validates it against the
+       model structure.
+    2. Each stage runs in order through the same :func:`wrapped_calib_func` the whole-model
+       algorithms use, with a ``should_process`` write-mask built from the stage's scope and
+       any handoff kwargs implied by what earlier stages produced.
+
+    Stages are serial in this phase — each runs its own forward.  Batching independent
+    stages onto a shared forward is a later optimization the declared capabilities already
+    carry enough information for (``shareable_forward``).
+    """
+    plan = compile_algo_cfg(
+        {"algo_cfg": config.algo_cfg, "algorithm": config.algorithm},
+        model,
+        strict=config.strict,
+    )
+    print_rank_0(
+        f"calibration_plan: {len(plan)} stage(s), hash {plan_hash(plan)}\n"
+        + describe_plan(plan, model)
+    )
+
+    for i, stage in enumerate(plan):
+        if stage.algo is None:
+            continue
+        descriptor = CalibrateModeRegistry[
+            BaseCalibrateModeDescriptor._get_mode_name(stage.algo, check=True)
+        ]
+        # A derived handoff only takes effect if the algorithm exposes a knob for it:
+        # `derive_handoff` reports what state earlier stages already produced, but most
+        # algorithms have no way to act on that and would reject the extra kwarg.
+        handoff = {
+            key: value
+            for key, value in derive_handoff(model, plan, i).items()
+            if key in descriptor.config_class.model_fields
+        }
+        stage_config = descriptor.config_class(**{**stage.cfg, **handoff})
+        wrapped_calib_func(
+            model,
+            stage_config,
+            forward_loop,
+            func=type(descriptor)._calib_func,
+            supports_layerwise=type(descriptor)._supports_layerwise,
+            should_process=stage_predicate(model, stage),
+        )
+
+    metadata = {}
+    update_quantize_metadata(model, config, metadata)
+    return model, metadata
+
+
+@CalibrateModeRegistry.register_mode
+class CalibrationPlanModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for a compiled, scoped calibration plan.
+
+    One mode covers an arbitrary number of stages: recording one mode per stage would
+    bloat the saved state (``auto_quantize`` would emit hundreds).  Restore needs nothing
+    algorithm-specific — the generic quantizer-state snapshot already captures amax,
+    pre_quant_scale, num_bits and friends.
+    """
+
+    _calib_func = None
+
+    @property
+    def name(self) -> str:
+        """Returns the value (str representation) of the mode."""
+        return "calibration_plan"
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return CalibrationPlanConfig
+
+    @property
+    def convert(self) -> ConvertEntrypoint:
+        """The mode's entrypoint for converting a model."""
+        return calibration_plan_convert
 
 
 @CalibrateModeRegistry.register_mode
