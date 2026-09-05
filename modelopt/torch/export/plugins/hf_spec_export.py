@@ -31,17 +31,25 @@ ALL_SPEC_MODES = ["eagle", "dflash"]
 
 
 def _get_rope_theta(config, default=None):
-    """Get RoPE theta from either legacy or Transformers 5 config fields."""
-    rope_theta = getattr(config, "rope_theta", None)
-    if rope_theta is not None:
-        return rope_theta
+    """Get RoPE theta from either legacy or Transformers 5 config fields.
 
+    ``rope_parameters`` is checked FIRST. A config can carry both fields with
+    different values: Transformers 5 stores the real base under
+    ``rope_parameters`` while the class default (10000.0 for Qwen3) may still be
+    visible as a top-level ``rope_theta``. Reading ``rope_theta`` first silently
+    exports a draft whose RoPE base is 100x off the target's, which breaks
+    serving because DFlash injects the target's KV into every draft layer.
+    """
     # Transformers 5 stores this under rope_parameters (and exposes the same
     # data through rope_scaling for backwards compatibility).
     for attr in ("rope_parameters", "rope_scaling"):
         rope_config = getattr(config, attr, None)
         if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
             return rope_config["rope_theta"]
+
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
 
     return default
 
@@ -517,6 +525,63 @@ class DominoExporter(DFlashExporter):
                 "emb_dim": emb_dim,
             }
         )
+        return config
+
+
+class LiLiCorrExporter(DFlashExporter):
+    """Draft model exporter for LiLiCorr (DFlash backbone + candidate-lattice reranker).
+
+    Same z-lab-compatible format as DFlash, plus the reranker weights (``lilicorr.*``,
+    already captured by the inherited ``dflash_module.`` stripping) and the config fields
+    the serving loader rebuilds the head from.
+
+    ``architectures`` is the serving router: a checkpoint that declares
+    ``DFlashDraftModel`` loads as plain DFlash and silently ignores the head, which reads
+    as a small believable acceptance delta rather than as an error. Every geometry field
+    is emitted for the same reason — ``lilicorr_logit_scale`` and ``lilicorr_vector_eps``
+    change the score without changing any tensor shape, so a serving default guessed in
+    their absence would build a head that loads cleanly and scores a different function.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the LiLiCorr head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+        head = self.model.dflash_module.lilicorr
+
+        config["architectures"] = ["LiLiCorrDraftModel"]
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "lilicorr"),
+                "lilicorr_enabled": True,
+                # Read off the built head rather than the config dict, so the exported
+                # geometry is the geometry of the weights in the same directory.
+                "lilicorr_candidate_topk": head.candidate_topk,
+                "lilicorr_hidden_size": head.hidden_size,
+                "lilicorr_num_layers": len(head.layers),
+                "lilicorr_num_heads": head.num_heads,
+                "lilicorr_mlp_ratio": head.mlp_ratio,
+                "lilicorr_factor_dim": head.factor_dim,
+                "lilicorr_vector_eps": head.vector_eps,
+                "lilicorr_logit_scale": head.logit_scale,
+            }
+        )
+
+        # A conv-bearing draft carries 20 extra tensors (2 per sublayer wrapper, 2
+        # wrappers per layer), and they ride out on the inherited `dflash_module.`
+        # stripping. But the serving loader builds the wrappers from GEOMETRY, not from
+        # the tensors: with these two keys absent it defaults both to 0, builds no
+        # convolution modules, and then drops all 20 tensors in silence, so the draft
+        # serves as its conv-free parent and reports a believable acceptance length.
+        # Read off the built modules for the same reason as the head fields above.
+        conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
+        if getattr(conv, "taps", None):
+            config["dflash_config"].update(
+                {
+                    "conv_kernel_size": conv.taps,
+                    "conv_group_size": conv.group_size,
+                }
+            )
         return config
 
 

@@ -388,6 +388,8 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
+        self.dflash_fp32_master_weights = getattr(config, "dflash_fp32_master_weights", False)
+
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
         # auto-populated from rope_theta. DFlash draft uses Qwen3 components.
@@ -420,10 +422,21 @@ class HFDFlashModel(DFlashModel):
         # overwrite any user value and warn. (rope_scaling is intentionally NOT inherited:
         # DFlash uses standard Qwen3 RotaryEmbedding; the long-context YaRN scaling is
         # added only at export via dflash_export_rope_scaling.)
+        # A config can carry BOTH a top-level rope_theta and a rope_parameters dict
+        # with different values: Transformers 5 keeps the real base in
+        # rope_parameters while the class default (10000.0 for Qwen3) stays visible
+        # as rope_theta. rope_parameters wins, otherwise the draft trains against a
+        # RoPE base 100x off the target's.
+        base_rope_params = getattr(base_config, "rope_parameters", None)
+        if not isinstance(base_rope_params, dict):
+            base_rope_params = {}
         for attr in ("rope_theta", "rope_type", "rope_interleaved"):
-            if not hasattr(base_config, attr):
+            if attr in base_rope_params:
+                base_val = base_rope_params[attr]
+            elif hasattr(base_config, attr):
+                base_val = getattr(base_config, attr)
+            else:
                 continue
-            base_val = getattr(base_config, attr)
             user_val = getattr(self.dflash_config, attr, None)
             if user_val is not None and user_val != base_val:
                 logger.warning(
@@ -435,6 +448,12 @@ class HFDFlashModel(DFlashModel):
                     base_val,
                 )
             setattr(self.dflash_config, attr, base_val)
+            # Qwen3Config populates rope_parameters at construction, so a later
+            # setattr on the flat field alone would leave the dict — which is what
+            # the rotary module reads — holding the stale value.
+            draft_rope_params = getattr(self.dflash_config, "rope_parameters", None)
+            if isinstance(draft_rope_params, dict) and attr in draft_rope_params:
+                draft_rope_params[attr] = base_val
 
         self.dflash_config.head_dim = getattr(
             self.dflash_config,
@@ -509,6 +528,49 @@ class HFDFlashModel(DFlashModel):
             base_device = next(self._base_model.layers[-1].parameters()).device
         if base_device.type != "meta":
             self.dflash_module.to(self._base_model.dtype).to(base_device)
+            if self.dflash_fp32_master_weights:
+                # Deliberately AFTER the base-dtype match, which is also what moves the
+                # module to the right device: this stays a pure dtype change on top of it.
+                #
+                # And necessarily BEFORE the Trainer builds the optimizer, because AdamW
+                # allocates its moments with `zeros_like(p)`. A cast afterwards would fix
+                # the parameters and leave the moments in bf16 -- the half that cannot
+                # represent its own updates. See the field's description.
+                #
+                # Only the draft is promoted. The frozen base keeps its dtype: it has no
+                # trainable parameters and no optimizer state, so upcasting it would double
+                # its memory for nothing and change the hidden states the draft is trained
+                # against.
+                trainable = {p.dtype for p in self.dflash_module.parameters() if p.requires_grad}
+                if trainable == {torch.float32}:
+                    logger.info("DFlash draft is already fp32; fp32 master weights are a no-op.")
+                else:
+                    self.dflash_module.float()
+                    # Logged, not assumed: "requested" and "happened" are different claims,
+                    # and the optimizer dtype this decides is not visible until step 1.
+                    logger.info(
+                        "DFlash draft promoted to fp32 master weights (was %s); Adam moments "
+                        "will follow. Frozen base left at %s.",
+                        ", ".join(sorted(str(d) for d in trainable)),
+                        self._base_model.dtype,
+                    )
+            # Build the rotary embedding NOW rather than on the draft's first forward.
+            #
+            # `_maybe_init_rotary_emb` creates the non-persistent `inv_freq` buffer lazily,
+            # and the DFlash forward has a degenerate early return above that call: a rank
+            # whose batch has no valid anchor returns a dummy loss without running the draft
+            # at all. That rank ends the step with one fewer buffer than the ranks that did
+            # run it, and DDP's `broadcast_buffers` then coalesces buffer lists of different
+            # flattened sizes across ranks -- which does not raise, it hangs. It is
+            # rank-count probabilistic (it needs some rank to draw an all-masked sample in
+            # the same step), so small runs pass and large ones hang after a few steps.
+            #
+            # Building it here makes every rank's buffer list identical for the whole run,
+            # independent of which samples it draws. Numerically inert: `inv_freq` is a pure
+            # function of the config, and being non-persistent it is absent from the state
+            # dict either way. Kept inside the non-meta guard so the meta-device case the
+            # laziness exists for still defers, exactly as before.
+            self.dflash_module._maybe_init_rotary_emb(device=base_device)
 
         # Delete base model layers for offline training (save memory)
         if self.dflash_offline:
@@ -762,7 +824,14 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _compute_loss(
-        self, logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits=None
+        self,
+        logits,
+        input_ids,
+        anchor_positions,
+        block_keep_mask,
+        loss_mask,
+        base_logits=None,
+        draft_hidden=None,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
@@ -773,6 +842,8 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
+            draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
+                Unused here; passed for variants whose head consumes them.
 
         Returns:
             (loss, accuracy) tuple.
@@ -1044,14 +1115,31 @@ class HFDFlashModel(DFlashModel):
 
         # 6. Compute loss and accuracy
         logits = self._base_model_lm_head(hidden)
-        loss, accuracy = self._compute_loss(
-            logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            base_outputs.logits if self.dflash_self_logit_distillation else None,
-        )
+        # Published on the instance rather than added to _compute_loss's signature.
+        # _compute_loss is an override point that every draft variant already
+        # specialises, so widening its parameter list here would break each of them at
+        # once, for the sake of two tensors that only one variant reads. Set
+        # immediately before the call and valid only for its duration.
+        #
+        # target_logits is populated unconditionally, and it is free: base_outputs.logits
+        # is computed either way. A variant whose loss needs the target's distribution
+        # outside the KD term cannot recover it once the argument below has narrowed to
+        # the self-logit-distillation switch.
+        self._dflash_loss_target_hidden = target_hidden
+        self._dflash_loss_target_logits = base_outputs.logits
+        try:
+            loss, accuracy = self._compute_loss(
+                logits,
+                input_ids,
+                anchor_positions,
+                block_keep_mask,
+                loss_mask,
+                base_outputs.logits if self.dflash_self_logit_distillation else None,
+                draft_hidden=hidden,
+            )
+        finally:
+            self._dflash_loss_target_hidden = None
+            self._dflash_loss_target_logits = None
 
         return ModelOutput(
             loss=loss,
