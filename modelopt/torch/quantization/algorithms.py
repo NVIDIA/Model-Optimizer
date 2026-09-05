@@ -23,7 +23,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from typing import Any
 
 import regex as re
@@ -413,8 +413,10 @@ class QuantRecipeHparam(Hparam):
         self.allow_no_quant = allow_no_quant
         self.is_fixed = fixed_recipe is not None
 
-        self.quant_modules = list(set(quant_modules or []))
-        self.score_modules = list(set(score_modules or self.quant_modules))
+        # Module hashes depend on object identity, so sets can produce different orders per rank.
+        self.quant_modules = list(dict.fromkeys(quant_modules or []))
+        self.score_modules = list(dict.fromkeys(score_modules or self.quant_modules))
+        self._warned_parallel_state_fallbacks: set[nn.Module] = set()
 
         fixed_quantizers = (
             {
@@ -467,11 +469,11 @@ class QuantRecipeHparam(Hparam):
             quant_recipe: dict.fromkeys(self.score_modules) for quant_recipe in self.choices
         }
 
-        # Attach this hparam to each score_module's set of hparams it scores
+        # Registration order follows the rank-stable runtime-group construction order.
         for score_module in self.score_modules:
             if not hasattr(score_module, "_hparams_for_scoring"):
-                score_module._hparams_for_scoring = set()
-            score_module._hparams_for_scoring.add(self)
+                score_module._hparams_for_scoring = []
+            score_module._hparams_for_scoring.append(self)
 
     @property
     def active(self) -> HPType:
@@ -532,6 +534,31 @@ class QuantRecipeHparam(Hparam):
                 continue
 
             parallel_state = getattr(score_module, "parallel_state", None)
+            if parallel_state is None:
+                # TODO: Prefer parallel_state owned by the score module; this temporary fallback
+                # inherits the first quantized child's state and assumes all grouped quant modules
+                # share the same parallel groups.
+                parallel_state_source = next(
+                    (
+                        (module, state)
+                        for module in self.quant_modules
+                        if (state := getattr(module, "parallel_state", None)) is not None
+                    ),
+                    None,
+                )
+                if parallel_state_source is not None:
+                    quant_module, parallel_state = parallel_state_source
+                    if (
+                        torch.distributed.is_initialized()
+                        and score_module not in self._warned_parallel_state_fallbacks
+                    ):
+                        warnings.warn(
+                            "Distributed training is initialized but no parallel_state is set for "
+                            f"score module {type(score_module)}. Using parallel_state from its first "
+                            f"quantized child {type(quant_module)}. All grouped quant modules must "
+                            "share the same parallel groups."
+                        )
+                        self._warned_parallel_state_fallbacks.add(score_module)
 
             if parallel_state is None:
                 total_score += importance.cpu().item()
@@ -1438,7 +1465,222 @@ def _add_auto_quantize_score(grad_output, output_diff, score_tensor):
     score_tensor += _get_auto_quantize_score(grad_output, output_diff)
 
 
-class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
+class _AutoQuantizeBackwardScoringSession(ABC):
+    """Manage temporary model state used by activation-backward scoring."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        score_modules: Sequence[nn.Module],
+        is_param_grad_enabled: Callable,
+        verbose: bool = False,
+    ) -> None:
+        self.model = model
+        self.score_modules = tuple(score_modules)
+        self.is_param_grad_enabled = is_param_grad_enabled
+        self.verbose = verbose
+        self._stack = ExitStack()
+        self._original_forwards: dict[nn.Module, Callable] = {}
+        self._output_grad_hook_handles: set[Any] = set()
+        self._grad_accumulators: list[Any] = []
+
+    def __enter__(self):
+        """Install scoring hooks and parameter settings."""
+        try:
+            hparams = list(
+                dict.fromkeys(
+                    hparam
+                    for module in self.score_modules
+                    for hparam in module._hparams_for_scoring
+                )
+            )
+            for hparam in hparams:
+                self._stack.callback(setattr, hparam, "active", hparam.active)
+
+            def patched_forward(module, *args, **kwargs):
+                return self.forward(module, *args, **kwargs)
+
+            for module in self.score_modules:
+                original_forward = module.forward
+                self._original_forwards[module] = original_forward
+                had_instance_forward = "forward" in module.__dict__
+                instance_forward = module.__dict__.get("forward")
+                module.forward = types.MethodType(patched_forward, module)
+                if had_instance_forward:
+                    self._stack.callback(setattr, module, "forward", instance_forward)
+                else:
+                    self._stack.callback(module.__dict__.pop, "forward", None)
+
+            for name, param in self.model.named_parameters():
+                requires_grad = param.requires_grad
+                enable_grad = self.is_param_grad_enabled(name, self.model)
+                param.requires_grad = enable_grad
+                self._stack.callback(setattr, param, "requires_grad", requires_grad)
+                if not enable_grad:
+                    continue
+                if self.verbose:
+                    print_rank_0(f"AutoQuantize: Enabling gradient for param {name}.")
+                accumulator, hook = create_param_grad_clear_hook(param)
+                self._grad_accumulators.append(accumulator)
+                self._stack.callback(hook.remove)
+        except Exception:
+            self._stack.close()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Restore all model state changed for scoring."""
+        self._clear_output_grad_hooks()
+        self._stack.close()
+        self._original_forwards.clear()
+        self._grad_accumulators.clear()
+
+    def original_forward(self, module: nn.Module) -> Callable:
+        """Return the forward method saved before scoring."""
+        return self._original_forwards[module]
+
+    def _clear_output_grad_hooks(self) -> None:
+        """Remove output hooks whose backward pass has not run."""
+        for handle in self._output_grad_hook_handles:
+            handle.remove()
+        self._output_grad_hook_handles.clear()
+
+    def _register_output_grad_hook(self, output: torch.Tensor, hook: Callable) -> None:
+        """Attach an invocation-specific output-gradient hook for this session."""
+
+        def run_once(grad):
+            try:
+                return hook(grad)
+            finally:
+                handle.remove()
+                self._output_grad_hook_handles.discard(handle)
+
+        handle = output.register_hook(run_once)
+        self._output_grad_hook_handles.add(handle)
+
+    @abstractmethod
+    def forward(self, module: nn.Module, *args, **kwargs):
+        """Run a score module forward pass and collect method-specific state."""
+
+
+class _AutoQuantizeGradientScoringSession(_AutoQuantizeBackwardScoringSession):
+    """Collect gradient-based scores while candidate recipes are replayed."""
+
+    def forward(self, module: nn.Module, *args, **kwargs):
+        """Run the reference forward and cache each recipe's output perturbation."""
+        no_quant_recipe = QuantRecipe(quant_cfg=None)
+        for hparam in module._hparams_for_scoring:
+            if hparam.is_configurable:
+                hparam.active = no_quant_recipe
+
+        output = self.original_forward(module)(*args, **kwargs)
+
+        # Checkpointed modules recompute with gradients enabled during backward.
+        base_output = output[0] if isinstance(output, tuple) else output
+        if not torch.is_grad_enabled() or not base_output.requires_grad:
+            return output
+
+        output_diffs = {hparam: {} for hparam in module._hparams_for_scoring}
+        with torch.no_grad():
+            for hparam in module._hparams_for_scoring:
+                if not hparam.is_configurable:
+                    continue
+                for recipe in hparam.choices:
+                    if recipe == no_quant_recipe:
+                        continue
+                    hparam.active = recipe
+                    replay = self.original_forward(module)(*args, **kwargs)
+                    output_diff = (
+                        replay[0] - output[0] if isinstance(replay, tuple) else replay - output
+                    )
+                    output_diffs[hparam][recipe] = output_diff.detach()
+                hparam.active = no_quant_recipe
+
+        self._register_output_grad_hook(
+            base_output,
+            lambda grad_output: self._accumulate_scores(module, output_diffs, grad_output),
+        )
+        return output
+
+    def _accumulate_scores(self, module, invocation_diffs, grad_output) -> None:
+        """Accumulate scores for the invocation that produced ``grad_output``."""
+        for hparam, output_diffs in invocation_diffs.items():
+            for recipe, output_diff in output_diffs.items():
+                importance = hparam._importance_dict[recipe][module]
+                if importance is None:
+                    hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
+                        grad_output, output_diff
+                    )
+                else:
+                    _add_auto_quantize_score(grad_output, output_diff, importance)
+
+
+class _AutoQuantizeBackwardScoringSearcher(_AutoQuantizeBaseSearcher):
+    """Share orchestration used by activation-backward scoring methods."""
+
+    score_module_rules = [
+        # Score MoE projections together at their enclosing MLP or mixer output.
+        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",
+        r"^(.*?)\.(\d+\.(w1|w2|w3))$",
+        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",
+    ]
+
+    _custom_support: list[tuple[Callable, Callable, Callable]] = []
+
+    @classmethod
+    def register_custom_support(
+        cls,
+        is_supported_checker: Callable,
+        grad_ckpt_context: Callable,
+        is_param_grad_enabled: Callable,
+    ) -> None:
+        """Register optional hooks for memory-efficient backward scoring.
+
+        `is_supported_checker` selects models that use these hooks.
+        `grad_ckpt_context` enables their gradient-checkpointing context, and
+        `is_param_grad_enabled` selects the minimum parameters needed to propagate
+        activation gradients.
+        """
+        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
+
+    def _configurable_score_modules(self) -> list[nn.Module]:
+        return [
+            module
+            for module in self.model.modules()
+            if hasattr(module, "_hparams_for_scoring")
+            and any(hparam.is_configurable for hparam in module._hparams_for_scoring)
+        ]
+
+    @abstractmethod
+    def _estimate_auto_quantize_scores(self, is_param_grad_enabled: Callable) -> None:
+        """Estimate scores while activation gradients are enabled."""
+
+    def estimate_sensitivity_scores(self) -> None:
+        """Run backward scoring with the first matching model-specific support hook."""
+        self.model.eval()
+
+        def default_is_param_grad_enabled(_name, _model):
+            return True
+
+        grad_checkpointing_context = None
+        is_param_grad_enabled = default_is_param_grad_enabled
+        for is_supported, context_candidate, grad_candidate in self._custom_support:
+            if is_supported(self.model):
+                grad_checkpointing_context = context_candidate
+                is_param_grad_enabled = grad_candidate
+                break
+
+        context = (
+            grad_checkpointing_context(self.model)
+            if grad_checkpointing_context is not None
+            else nullcontext()
+        )
+        with context:
+            self._estimate_auto_quantize_scores(is_param_grad_enabled)
+
+
+class AutoQuantizeGradientSearcher(_AutoQuantizeBackwardScoringSearcher):
     """A searcher for AutoQuantize algorithm that uses gradient based score estimation.
 
     In AutoQuantize, we search for the best per-layer quantization configuration that minimizes the sum of per-layer
@@ -1472,17 +1714,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     method_name = "gradient"
 
-    score_module_rules = [
-        # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
-        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
-        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
-        r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
-        r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
-    ]
-
-    # See `register_custom_support` for details
-    _custom_support: list[tuple[Callable, Callable, Callable]] = []
-
     @property
     def default_search_config(self):
         """Get the default config for the searcher."""
@@ -1511,30 +1742,6 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
         return config
 
-    @classmethod
-    def register_custom_support(
-        cls,
-        is_supported_checker: Callable,
-        grad_ckpt_context: Callable,
-        is_param_grad_enabled: Callable,
-    ) -> None:
-        """(Optional) Register custom support for `AutoQuantize` score estimation.
-
-        This custom support is used to enable memory/compute efficient backward gradient propagation. This involves:
-
-        - `grad_ckpt_context`: backward pass with gradient checkpointing enabled
-        - `is_param_grad_enabled`: AutoQuantize only needs activation gradients to be computed (not weight
-          gradients). `is_param_grad_enabled` is used to select which parameters should have gradients enabled,
-          limiting gradient computation to only what's needed for activation gradients. For LLMs, to trigger all
-          activation gradient computation, just enabling the embedding layer weight gradient is sufficient. This will
-          enable gradient computation for all the activation gradients downstream.
-
-        If the `is_supported_checker(model)` returns True, the `grad_ckpt_context(model)` will be
-        used to enable gradient checkpointing and `is_param_grad_enabled(pname, model)`
-        will be used to select which parameters have gradients enabled to minimize gradient computation.
-        """
-        cls._custom_support.append((is_supported_checker, grad_ckpt_context, is_param_grad_enabled))
-
     def _get_default_forward_backward_step(self):
         def forward_backward_step(model, data):
             output = self.config["forward_step"](model, data)
@@ -1552,142 +1759,34 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     @torch.enable_grad()
     def _estimate_auto_quantize_scores(self, is_param_grad_enabled):
-        # TODO: remove the no-quant recipe
-        def auto_quantize_score_estimate_forward(module, input, *args, **kwargs):
-            for hparam in module._hparams_for_scoring:
-                if hparam.is_configurable:
-                    hparam.active = QuantRecipe(quant_cfg=None)
+        score_modules = self._configurable_score_modules()
+        with _AutoQuantizeGradientScoringSession(
+            self.model,
+            score_modules,
+            is_param_grad_enabled,
+            verbose=self.config.get("verbose", False),
+        ) as scoring_session:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                report_memory("AutoQuantize: starting score estimation, ")
 
-            output = module._forward_original(input, *args, **kwargs)
+            def score_step(model, data):
+                try:
+                    return self.config["forward_backward_step"](model, data)
+                finally:
+                    scoring_session._clear_output_grad_hooks()
 
-            # If gradient checkpointing is enabled, gradient will not be enabled in the global forward pass.
-            # With gradient checkpointing, gradients are computed in the local forward pass during backward pass
-
-            # Lets compute the output_diff and save it in memory only if gradient is enabled to be memory efficient
-            if not torch.is_grad_enabled():
-                return output
-
-            module.output_diff_dict = {hparam: {} for hparam in module._hparams_for_scoring}
-            with torch.no_grad():
-                for hparam in module._hparams_for_scoring:
-                    if not hparam.is_configurable:
-                        continue
-                    for recipe in hparam.choices:
-                        if recipe == QuantRecipe(quant_cfg=None):
-                            continue
-                        hparam.active = recipe
-                        output_diff = module._forward_original(input, *args, **kwargs)
-
-                        if isinstance(output_diff, tuple):
-                            output_diff = output_diff[0] - output[0]
-                        else:
-                            output_diff -= output
-                        module.output_diff_dict[hparam][recipe] = output_diff.detach()
-
-                    # Disable the configurable hparam now that we have computed the diff
-                    hparam.active = QuantRecipe(quant_cfg=None)
-
-            return output
-
-        def backward_hook(module, grad_input, grad_output):
-            for hparam, output_diff_dict in module.output_diff_dict.items():
-                for recipe, output_diff in output_diff_dict.items():
-                    if hparam._importance_dict[recipe][module] is None:
-                        hparam._importance_dict[recipe][module] = _get_auto_quantize_score(
-                            grad_output[0], output_diff
-                        )
-                    else:
-                        _add_auto_quantize_score(
-                            grad_output[0], output_diff, hparam._importance_dict[recipe][module]
-                        )
-
-        def setup_params_for_score_estimation(name, param, params_metadata, enable_grad=True):
-            # Let us delete the gradient as soon as they are computed to save memory
-            params_metadata[name] = {"requires_grad": param.requires_grad}
-            param.requires_grad = enable_grad
-            if not enable_grad:
-                return
-            if self.config.get("verbose", False):
-                print_rank_0(f"AutoQuantize: Enabling gradient for param {name}.")
-            accum_grad, handle = create_param_grad_clear_hook(param)
-            params_metadata[name]["accum_grad"] = accum_grad  # We need to keep the accum_grad alive
-            params_metadata[name]["handle"] = handle
-
-        def setup_module_for_score_estimation(module):
-            module._forward_original = module.forward
-            module.forward = types.MethodType(auto_quantize_score_estimate_forward, module)
-            module._backward_hook_handle = module.register_full_backward_hook(backward_hook)
-
-        def cleanup_module_after_score_estimation(module):
-            module.forward = module._forward_original
-            del module._forward_original
-
-            module._backward_hook_handle.remove()
-
-        def cleanup_params_after_score_estimation(name, param, params_metadata):
-            param.requires_grad = params_metadata[name]["requires_grad"]
-            handle = params_metadata[name].get("handle", None)
-            if handle is not None:
-                handle.remove()
-
-        score_modules = set()
-        for name, module in self.model.named_modules():
-            if (
-                hasattr(module, "_hparams_for_scoring")
-                and any(hparam.is_configurable for hparam in module._hparams_for_scoring)
-                and module not in score_modules
-            ):
-                # Monkey patch the forward methods to cache (Q(Y) - Y)
-                setup_module_for_score_estimation(module)
-                score_modules.add(module)
-
-        params_metadata = {}
-        for name, param in self.model.named_parameters():
-            setup_params_for_score_estimation(
-                name, param, params_metadata, is_param_grad_enabled(name, self.model)
+            self._run_func(
+                score_step,
+                num_iters=self.config["num_score_steps"],
+                desc="Estimating auto_quantize scores",
             )
 
+            if torch.cuda.is_available():
+                report_memory("AutoQuantize: After score estimation")
+
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-            report_memory("AutoQuantize: starting score estimation, ")
-
-        self._run_func(
-            self.config["forward_backward_step"],
-            num_iters=self.config["num_score_steps"],
-            desc="Estimating auto_quantize scores",
-        )
-
-        if torch.cuda.is_available():
-            report_memory("AutoQuantize: After score estimation")
-
-        for module in score_modules:
-            cleanup_module_after_score_estimation(module)
-
-        for name, param in self.model.named_parameters():
-            cleanup_params_after_score_estimation(name, param, params_metadata)
-
-        # Delete the params_metadata
-        del params_metadata
-        gc.collect()
-
-    def estimate_sensitivity_scores(self) -> None:
-        """Estimate sensitivity scores using hessian approximation."""
-        self.model.eval()
-
-        def _default_is_param_grad_enabled(pname, model):
-            return True
-
-        grad_checkpointing_ctxt = None
-        is_param_grad_enabled = _default_is_param_grad_enabled
-        for is_supported_checker, ctxt_candidate, grad_enabled_candidate in self._custom_support:
-            if is_supported_checker(self.model):
-                grad_checkpointing_ctxt = ctxt_candidate
-                is_param_grad_enabled = grad_enabled_candidate
-                break
-
-        with grad_checkpointing_ctxt(self.model) if grad_checkpointing_ctxt else nullcontext():
-            self._estimate_auto_quantize_scores(is_param_grad_enabled)
 
     def run_search_with_stats(self, max_weight_size, verbose=False):
         """Linear Programming Solve for gradient based auto_quantize.
