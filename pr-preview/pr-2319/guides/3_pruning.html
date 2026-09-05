@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Pruning - Model Optimizer 0.0.1.dev1+g2fef43f58</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Distillation" href="4_distillation.html" /><link rel="prev" title="Saving &amp; Restoring" href="2_save_load.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="Pruning"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../reference/1_modelopt_api.html">modelopt API</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.precision_utils.html">precision_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/generated/modelopt.torch.html">torch</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.layerwise_export.html">layerwise_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.shard_cast_utils.html">shard_cast_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.html">puzzletron</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.build_library_and_stats.html">build_library_and_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.entrypoint.html">entrypoint</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.puzzletron_nas_plugin.html">puzzletron_nas_plugin</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.sewing_kit.html">sewing_kit</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/generated/modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#pruning-and-subnet-search">Pruning and subnet search</a><ul>
+<li><a class="reference internal" href="#prerequisites">Prerequisites</a></li>
+<li><a class="reference internal" href="#perform-pruning">Perform pruning</a></li>
+<li><a class="reference internal" href="#storing-the-pruned-model">Storing the pruned model</a></li>
+<li><a class="reference internal" href="#customizing-pruning-config">Customizing pruning config</a></li>
+<li><a class="reference internal" href="#profiling-the-search-space-and-choosing-constraints">Profiling the search space and choosing constraints</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#fine-tuning">Fine-tuning</a><ul>
+<li><a class="reference internal" href="#id1">Prerequisites</a></li>
+<li><a class="reference internal" href="#load-the-pruned-model">Load the pruned model</a></li>
+<li><a class="reference internal" href="#run-fine-tuning">Run fine-tuning</a></li>
+<li><a class="reference internal" href="#deploy">Deploy</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#pruning-concepts">Pruning Concepts</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Pruning</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="pruning">
+<h1>Pruning<a class="headerlink" href="#pruning" title="Link to this heading">#</a></h1>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>Checkout <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge" rel="noopener noreferrer" target="_blank">Megatron-Bridge Minitron Pruning &amp; Distillation</a> and
+<a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb" rel="noopener noreferrer" target="_blank">ResNet20 on CIFAR-10 Notebook</a>
+for an end-to-end example of pruning.</p>
+</div>
+<p>ModelOpt provides three main pruning methods (aka <code class="docutils literal notranslate"><span class="pre">mode</span></code>) - Minitron, Puzzletron, and FastNAS - via a unified API
+<a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune</span></code></a>. Given a model,
+these methods finds the subnet which meets the given deployment constraints (e.g. FLOPs, parameters)
+from your provided base model with little to no accuracy degradation (depending on how aggressive is the pruning).
+These pruning methods support pruning the convolutional and linear layers, and
+attention heads of the model. More details on these pruning modes is as follows:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">mcore_minitron</span></code>: A pruning method developed by NVIDIA Research for pruning GPT, Mamba and Hybrid
+Transformer Mamba models (including MoE, and the language model of vision-language models) in NVIDIA
+Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
+the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
+mamba heads and head dimension, MoE experts, and number of layers of the model.
+Checkout more details of the algorithm in the <a class="reference external" href="https://arxiv.org/abs/2408.11796" rel="noopener noreferrer" target="_blank">paper</a>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">puzzletron</span></code>: An advanced LLM/VLM pruning method by NVIDIA using Mixed Integer Programming (MIP) based NAS search algorithm.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fastnas</span></code>: A pruning method recommended for Computer Vision models. Given a pretrained model,
+FastNAS finds the subnet which maximizes the score function while meeting the given constraints.</p></li>
+</ol>
+<p>Follow the steps described below to obtain the optimal model satisfying your
+requirements using <a class="reference internal" href="../reference/generated/modelopt.torch.prune.html#module-modelopt.torch.prune" title="modelopt.torch.prune"><code class="xref py py-mod docutils literal notranslate"><span class="pre">mtp</span></code></a>:</p>
+<ol class="arabic simple">
+<li><p><strong>Pruning</strong>: Prune the model using our provided <a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune</span></code></a>
+API and get an optimal subnet describing the pruned network architecture.</p></li>
+<li><p><strong>Fine-tuning</strong>: Fine-tune the resulting subnet to recover the accuracy.</p></li>
+</ol>
+<p><em>To find out more about the concepts behind NAS and pruning, please refer to</em>
+<a class="reference internal" href="7_nas.html#nas-concepts"><span class="std std-ref">NAS concepts</span></a>.</p>
+<section id="pruning-and-subnet-search">
+<span id="pruning-search"></span><h2>Pruning and subnet search<a class="headerlink" href="#pruning-and-subnet-search" title="Link to this heading">#</a></h2>
+<p>The first step in pruning is to perform a search over potential subnet architectures for your pretrained model,
+i.e., prune the network, to find the best subnet satisfying your deployment constraints.</p>
+<section id="prerequisites">
+<h3>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h3>
+<ol class="arabic simple">
+<li><p>To perform pruning (<a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a>) on a trained
+model, you need to set up data loaders, provide search <code class="docutils literal notranslate"><span class="pre">constraints</span></code> and a <code class="docutils literal notranslate"><span class="pre">dummy_input</span></code> (to measure
+your deployment constraints).</p></li>
+<li><p>You can provide one search constraint for either <code class="docutils literal notranslate"><span class="pre">flops</span></code> or <code class="docutils literal notranslate"><span class="pre">params</span></code> by
+specifying an upper bound in terms of absolute number (<code class="docutils literal notranslate"><span class="pre">3e-6</span></code>) or a percentage (<code class="docutils literal notranslate"><span class="pre">&quot;60%&quot;</span></code>).</p></li>
+<li><p>You should also specify the pruning algorithm (<code class="docutils literal notranslate"><span class="pre">mode</span></code>), you would like to use. Depending on the
+mode, you will need to provide additional <code class="docutils literal notranslate"><span class="pre">config</span></code> parameters like <code class="docutils literal notranslate"><span class="pre">score_func</span></code> (<code class="docutils literal notranslate"><span class="pre">fastnas</span></code> mode),
+<code class="docutils literal notranslate"><span class="pre">data_loader</span></code>, <code class="docutils literal notranslate"><span class="pre">checkpoint</span></code>, etc. The most common score function
+is the validation accuracy of the model and is used to rank the sub-nets sampled from the search space.</p></li>
+<li><p>Please see the API reference of <a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a> for more details.</p></li>
+</ol>
+<p>Below we show an example using <a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html#modelopt.torch.prune.fastnas.FastNASModeDescriptor" title="modelopt.torch.prune.fastnas.FastNASModeDescriptor"><code class="xref py py-class docutils literal notranslate"><span class="pre">&quot;fastnas&quot;</span></code></a>.
+For Minitron pruning, please refer to the <a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#getting-started" rel="noopener noreferrer" target="_blank">example snippet</a> in the pruning readme.</p>
+</section>
+<section id="perform-pruning">
+<h3>Perform pruning<a class="headerlink" href="#perform-pruning" title="Link to this heading">#</a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.prune</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtp</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># User-defined model</span>
+</span><span data-line="5"><span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Load pretrained weights here</span>
+</span><span data-line="8"><span class="n">model</span><span class="o">.</span><span class="n">load_state_dict</span><span class="p">(</span><span class="n">pretrained_weights</span><span class="p">)</span>
+</span><span data-line="9">
+</span><span data-line="10">
+</span><span data-line="11"><span class="c1"># Wrap your original validation function to only take the model as input.</span>
+</span><span data-line="12"><span class="c1"># This function acts as the score function to rank models.</span>
+</span><span data-line="13"><span class="k">def</span><span class="w"> </span><span class="nf">score_func</span><span class="p">(</span><span class="n">model</span><span class="p">):</span>
+</span><span data-line="14">    <span class="k">return</span> <span class="n">validate</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">val_loader</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span>
+</span><span data-line="15">
+</span><span data-line="16">
+</span><span data-line="17"><span class="c1"># Define a dummy input with similar shape as that of your input data</span>
+</span><span data-line="18"><span class="n">dummy_input</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">224</span><span class="p">,</span> <span class="mi">244</span><span class="p">)</span>
+</span><span data-line="19">
+</span><span data-line="20"><span class="c1"># Prune to a model with less than or equal to 60% of original FLOPs</span>
+</span><span data-line="21"><span class="n">prune_constraints</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"flops"</span><span class="p">:</span> <span class="s2">"60%"</span><span class="p">}</span>
+</span><span data-line="22">
+</span><span data-line="23"><span class="c1"># prune_res (dict) contains state_dict / stats of the pruner/searcher.</span>
+</span><span data-line="24"><span class="n">pruned_model</span><span class="p">,</span> <span class="n">prune_res</span> <span class="o">=</span> <span class="n">mtp</span><span class="o">.</span><span class="n">prune</span><span class="p">(</span>
+</span><span data-line="25">    <span class="n">model</span><span class="o">=</span><span class="n">model</span><span class="p">,</span>
+</span><span data-line="26">    <span class="n">mode</span><span class="o">=</span><span class="s2">"fastnas"</span><span class="p">,</span>
+</span><span data-line="27">    <span class="n">constraints</span><span class="o">=</span><span class="n">prune_constraints</span><span class="p">,</span>
+</span><span data-line="28">    <span class="n">dummy_input</span><span class="o">=</span><span class="n">dummy_input</span><span class="p">,</span>
+</span><span data-line="29">    <span class="n">config</span><span class="o">=</span><span class="p">{</span>
+</span><span data-line="30">        <span class="s2">"data_loader"</span><span class="p">:</span> <span class="n">train_loader</span><span class="p">,</span>  <span class="c1"># training data is used for calibrating BN layers</span>
+</span><span data-line="31">        <span class="s2">"score_func"</span><span class="p">:</span> <span class="n">score_func</span><span class="p">,</span>  <span class="c1"># validation score is used to rank the subnets</span>
+</span><span data-line="32">        <span class="c1"># checkpoint to store the search state and resume or re-run the search with different constraint</span>
+</span><span data-line="33">        <span class="s2">"checkpoint"</span><span class="p">:</span> <span class="s2">"modelopt_fastnas_search_checkpoint.pth"</span><span class="p">,</span>
+</span><span data-line="34">    <span class="p">},</span>
+</span><span data-line="35"><span class="p">)</span>
+</span></pre></div>
+</div>
+<p>Note that during pruning we first convert the model into a search space containing different
+possible network configurations and an optimal configuration is then searched for.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>If the runtime of the score function is longer than a few minutes, consider subsampling the
+dataset used in the score function. A PyTorch dataset can be subsampled using
+<a class="reference external" href="https://pytorch.org/docs/stable/data.html#torch.utils.data.Subset" rel="noopener noreferrer" target="_blank">torch.utils.data.Subset</a>
+as following:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">subset_dataset</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">utils</span><span class="o">.</span><span class="n">data</span><span class="o">.</span><span class="n">Subset</span><span class="p">(</span><span class="n">dataset</span><span class="p">,</span> <span class="n">indices</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Pruning will modify the model in-place.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a> supports distributed data parallelism
+via <code class="docutils literal notranslate"><span class="pre">DistributedDataParallel</span></code> in PyTorch.</p>
+<p>Currently, the API does not support pruning pytorch Fully Sharded Data Parallel (FSDP) models
+so you would need to run pruning on a CPU and then finetune using FSDP.</p>
+</div>
+</section>
+<section id="storing-the-pruned-model">
+<h3>Storing the pruned model<a class="headerlink" href="#storing-the-pruned-model" title="Link to this heading">#</a></h3>
+<p>To store the pruned model for future use you can use
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">pruned_model</span><span class="p">,</span> <span class="s2">"modelopt_pruned_model.pth"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Please see <a class="reference internal" href="2_save_load.html#save-restore"><span class="std std-ref">saving and restoring of ModelOpt-modified models</span></a> to learn
+about all the available options for saving and restoring.</p>
+</div>
+</section>
+<section id="customizing-pruning-config">
+<h3>Customizing pruning config<a class="headerlink" href="#customizing-pruning-config" title="Link to this heading">#</a></h3>
+<p>In the above example, we have used the default mode config for <code class="docutils literal notranslate"><span class="pre">mtp.prune()</span></code>. You can see it using
+<a class="reference internal" href="../reference/generated/modelopt.torch.prune.fastnas.html#modelopt.torch.prune.fastnas.FastNASConfig" title="modelopt.torch.prune.fastnas.FastNASConfig"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.fastnas.FastNASConfig()</span></code></a>.
+You can also specify custom mode configs to have a different search space. See
+<a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a> documentation for more information. An
+example config is shown below:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.prune</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mtp</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="c1"># config to restrict the search space to have a Conv2d out channels as multiple of 64</span>
+</span><span data-line="4"><span class="n">ss_config</span> <span class="o">=</span> <span class="n">mtp</span><span class="o">.</span><span class="n">fastnas</span><span class="o">.</span><span class="n">FastNASConfig</span><span class="p">()</span>
+</span><span data-line="5"><span class="n">ss_config</span><span class="p">[</span><span class="s2">"nn.Conv2d"</span><span class="p">][</span><span class="s2">"*"</span><span class="p">][</span><span class="s2">"channel_divisor"</span><span class="p">]</span> <span class="o">=</span> <span class="mi">64</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># run pruning as shown above</span>
+</span><span data-line="8"><span class="n">mtp</span><span class="o">.</span><span class="n">prune</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="p">[(</span><span class="s2">"fastnas"</span><span class="p">,</span> <span class="n">ss_config</span><span class="p">)],</span> <span class="o">...</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="profiling-the-search-space-and-choosing-constraints">
+<span id="fastnas-profile"></span><h3>Profiling the search space and choosing constraints<a class="headerlink" href="#profiling-the-search-space-and-choosing-constraints" title="Link to this heading">#</a></h3>
+<p>The search space describes the candidates of potential pruned subnets. You can obtain information
+about the overall statistics of the search space in <a class="reference internal" href="../reference/generated/modelopt.torch.prune.pruning.html#modelopt.torch.prune.pruning.prune" title="modelopt.torch.prune.pruning.prune"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mtp.prune()</span></code></a> API.
+Following info will be printed before the pruning process is started:</p>
+<div class="highlight-none notranslate"><div class="highlight"><pre><span></span><span data-line="1">    Profiling the following subnets from the given model: ('min', 'centroid', 'max').
+</span><span data-line="2">--------------------------------------------------------------------------------
+</span><span data-line="3">
+</span><span data-line="4">                            Profiling Results
+</span><span data-line="5">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+</span><span data-line="6">┃ Constraint   ┃ min          ┃ centroid     ┃ max          ┃ max/min ratio ┃
+</span><span data-line="7">┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+</span><span data-line="8">│ flops        │ 548.68M      │ 2.56G        │ 9.18G        │ 16.73         │
+</span><span data-line="9">│ params       │ 2.70M        │ 9.75M        │ 25.50M       │ 9.43          │
+</span><span data-line="10">└──────────────┴──────────────┴──────────────┴──────────────┴───────────────┘
+</span><span data-line="11">
+</span><span data-line="12">            Constraints Evaluation
+</span><span data-line="13">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
+</span><span data-line="14">┃              ┃              ┃ Satisfiable  ┃
+</span><span data-line="15">┃ Constraint   ┃ Upper Bound  ┃ Upper Bound  ┃
+</span><span data-line="16">┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
+</span><span data-line="17">│ flops        │ 5.50G        │ True         │
+</span><span data-line="18">└──────────────┴──────────────┴──────────────┘
+</span><span data-line="19">
+</span><span data-line="20">
+</span><span data-line="21">Search Space Summary:
+</span><span data-line="22">----------------------------------------------------------------------------------------------------
+</span><span data-line="23">* conv1.out_channels                                                               [32, 64]
+</span><span data-line="24">  conv1.in_channels                                                                [3]
+</span><span data-line="25">  bn1.num_features                                                                 [32, 64]
+</span><span data-line="26">* layer1.0.conv1.out_channels                                                      [32, 64]
+</span><span data-line="27">  layer1.0.conv1.in_channels                                                       [32, 64]
+</span><span data-line="28">  layer1.0.bn1.num_features                                                        [32, 64]
+</span><span data-line="29">* layer1.0.conv2.out_channels                                                      [32, 64]
+</span><span data-line="30">  ...
+</span><span data-line="31">  ...
+</span><span data-line="32">  ...
+</span><span data-line="33">* layer4.2.conv1.out_channels                                                      [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="34">  layer4.2.conv1.in_channels                                                       [2048]
+</span><span data-line="35">  layer4.2.bn1.num_features                                                        [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="36">* layer4.2.conv2.out_channels                                                      [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="37">  layer4.2.conv2.in_channels                                                       [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="38">  layer4.2.bn2.num_features                                                        [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="39">  layer4.2.conv3.out_channels                                                      [2048]
+</span><span data-line="40">  layer4.2.conv3.in_channels                                                       [32, 64, 96, 128, ..., 416, 448, 480, 512]
+</span><span data-line="41">----------------------------------------------------------------------------------------------------
+</span><span data-line="42">Number of configurable hparams: 36
+</span><span data-line="43">Total size of the search space: 2.48e+28
+</span><span data-line="44">Note: all constraints can be satisfied within the search space!
+</span></pre></div>
+</div>
+<p>The profiling results will help you understand the search space and come up with a potential search
+constraint that you can iterate on.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>Generally a search space with max/min ratio above 3 is a good search space with many layers prunable.
+The higher the max/min ratio, the more prunable the model is (potentially making FastNAS slower but better).</p>
+<p>A good starting point for your search constraints is the centroid of the search space. If you are using flops/params
+constraints, we highly recommend you first obtain a pruned model and measure its latency on your target deployment
+before you finetune the pruned model. Depending on the latency, you can adjust the constraints accordingly.
+Once you have a model that is within your latency constraints, you can fine-tune it to recover the accuracy.
+If you are unable to recover the accuracy (perhaps because of too aggressive pruning), you can try increasing
+the constraints and repeat the process.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If the constraint cannot be satisfied within the search space, the pruning will be interrupted
+and an error will be raised.</p>
+</div>
+</section>
+</section>
+<section id="fine-tuning">
+<span id="pruning-fine-tuning"></span><h2>Fine-tuning<a class="headerlink" href="#fine-tuning" title="Link to this heading">#</a></h2>
+<p>The final step of architecture search is to fine-tune the pruned model on your dataset. This way
+you can ensure to obtain the best possible performance for your pruned model.</p>
+<section id="id1">
+<h3>Prerequisites<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
+<ol class="arabic simple">
+<li><p>To perform fine-tuning you need a pruned subnet as explained in the previous section.</p></li>
+<li><p>You can reuse your existing training pipeline. We recommend running fine-tuning with your
+original training schedule:</p>
+<ul class="simple">
+<li><p>1x training epochs (or 1x downstream task fine-tuning),</p></li>
+<li><p>same or smaller (0.5x-1x) learning rate.</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<section id="load-the-pruned-model">
+<h3>Load the pruned model<a class="headerlink" href="#load-the-pruned-model" title="Link to this heading">#</a></h3>
+<p>You can simply restore your pruned model (weights and architecture) using
+<a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore" title="modelopt.torch.opt.conversion.restore"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.restore()</span></code></a>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Build original model</span>
+</span><span data-line="5"><span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="c1"># Restore the pruned architecture and weights</span>
+</span><span data-line="8"><span class="n">pruned_model</span> <span class="o">=</span> <span class="n">mto</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">"modelopt_pruned_model.pth"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="run-fine-tuning">
+<h3>Run fine-tuning<a class="headerlink" href="#run-fine-tuning" title="Link to this heading">#</a></h3>
+<p>Now, please go ahead and fine-tune the pruned subnet using your standard training pipeline with
+the pre-configured hyperparameters. A usually good fine-tuning schedule is
+to repeat the pre-training schedule with 0.5x-1x initial learning rate.</p>
+<p>Do not forget to save the model using <a class="reference internal" href="../reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.save" title="modelopt.torch.opt.conversion.save"><code class="xref py py-meth docutils literal notranslate"><span class="pre">mto.save()</span></code></a>.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">train</span><span class="p">(</span><span class="n">pruned_model</span><span class="p">)</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">mto</span><span class="o">.</span><span class="n">save</span><span class="p">(</span><span class="n">pruned_model</span><span class="p">,</span> <span class="s2">"modelopt_pruned_finetuned_model.pth"</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="deploy">
+<h3>Deploy<a class="headerlink" href="#deploy" title="Link to this heading">#</a></h3>
+<p>The pruned and finetuned model is now ready for downstream tasks like deployment. The model you
+have in hand now should be the best neural network meeting your deployment-aware search constraint.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">modelopt.torch.opt</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">mto</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">torchvision.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">resnet50</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="c1"># Build original model</span>
+</span><span data-line="5"><span class="n">model</span> <span class="o">=</span> <span class="n">resnet50</span><span class="p">()</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="n">model</span> <span class="o">=</span> <span class="n">mto</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="s2">"modelopt_pruned_finetuned_model.pth"</span><span class="p">)</span>
+</span><span data-line="8">
+</span><span data-line="9"><span class="c1"># Continue with downstream tasks like deployment (e.g. TensorRT or TensorRT-LLM)</span>
+</span><span data-line="10"><span class="o">...</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="pruning-concepts">
+<span id="id2"></span><h2>Pruning Concepts<a class="headerlink" href="#pruning-concepts" title="Link to this heading">#</a></h2>
+<p>Pruning is the process of removing redundant components from a neural network for a given task.
+Conceptually, pruning is similar to NAS, but has less computational overhead compared to NAS at the
+cost of potentially finding a less optimal architecture compared to NAS. Most APIs are based on the
+corresponding NAS APIs but are adapted to reflect the simpler workflow.</p>
+<p>Specifically, for pruning we do not specifically train the search space and all its subnets.
+Instead, a pre-trained checkpoint is used to approximate the search space. Therefore, we can skip
+the (potentially expensive) search space training step and directly
+<a class="reference internal" href="7_nas.html#search-space-search-selection"><span class="std std-ref">search</span></a> for a subnet architecture before fine-tuning the
+resulting subnet.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>If you want to learn more about the concept behind NAS and pruning, take a look at
+<a class="reference internal" href="7_nas.html#nas-concepts"><span class="std std-ref">NAS Concepts</span></a> including a more detailed comparison between NAS and pruning.</p>
+</div>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="2_save_load.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Saving &amp; Restoring</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="4_distillation.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Distillation</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../_static/shibuya.js?v=50760d75"></script>
+      <script src="../_static/announcements.js?v=d94b986f"></script></body>
+</html>

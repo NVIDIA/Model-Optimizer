@@ -1,0 +1,348 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>trt_utils &mdash; Model Optimizer 0.0.1.dev1+g9bb546c0a</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=e59714d7" />
+      <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+      <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+      <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+      <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+      <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=7a224f4b" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" />
+    <link rel="next" title="utils" href="modelopt.onnx.utils.html" />
+    <link rel="prev" title="modelopt.onnx.quantization.quantize" href="modelopt.onnx.quantization.quantize.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            Model Optimizer
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">trt_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.get_custom_layers"><code class="docutils literal notranslate"><span class="pre">get_custom_layers()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.infer_types_shapes"><code class="docutils literal notranslate"><span class="pre">infer_types_shapes()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.infer_types_shapes_tensorrt"><code class="docutils literal notranslate"><span class="pre">infer_types_shapes_tensorrt()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag"><code class="docutils literal notranslate"><span class="pre">interpret_trt_plugins_precision_flag()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.load_onnx_model"><code class="docutils literal notranslate"><span class="pre">load_onnx_model()</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#modelopt.onnx.trt_utils.set_trt_plugin_domain"><code class="docutils literal notranslate"><span class="pre">set_trt_plugin_domain()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.torch.html">torch</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">Model Optimizer</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content style-external-links">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../1_modelopt_api.html">modelopt API</a></li>
+          <li class="breadcrumb-item"><a href="modelopt.onnx.html">onnx</a></li>
+      <li class="breadcrumb-item active">trt_utils</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../_sources/reference/generated/modelopt.onnx.trt_utils.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="trt-utils">
+<h1>trt_utils<a class="headerlink" href="#trt-utils" title="Link to this heading"></a></h1>
+<p id="module-modelopt.onnx.trt_utils">This module contains TensorRT utils.</p>
+<p class="rubric">Functions</p>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.get_custom_layers" title="modelopt.onnx.trt_utils.get_custom_layers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">get_custom_layers</span></code></a></p></td>
+<td><p>Gets custom layers in ONNX model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.infer_types_shapes" title="modelopt.onnx.trt_utils.infer_types_shapes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">infer_types_shapes</span></code></a></p></td>
+<td><p>Updates tensor shapes in ONNX graph.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.infer_types_shapes_tensorrt" title="modelopt.onnx.trt_utils.infer_types_shapes_tensorrt"><code class="xref py py-obj docutils literal notranslate"><span class="pre">infer_types_shapes_tensorrt</span></code></a></p></td>
+<td><p>Update tensor types and shapes from TensorRT inference data.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag" title="modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag"><code class="xref py py-obj docutils literal notranslate"><span class="pre">interpret_trt_plugins_precision_flag</span></code></a></p></td>
+<td><p>Convert custom ops precision flag to dictionaries with custom op and I/O indices to be cast/quantized.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.load_onnx_model" title="modelopt.onnx.trt_utils.load_onnx_model"><code class="xref py py-obj docutils literal notranslate"><span class="pre">load_onnx_model</span></code></a></p></td>
+<td><p>Load ONNX model.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.onnx.trt_utils.set_trt_plugin_domain" title="modelopt.onnx.trt_utils.set_trt_plugin_domain"><code class="xref py py-obj docutils literal notranslate"><span class="pre">set_trt_plugin_domain</span></code></a></p></td>
+<td><p>Set TensorRT plugin domain info in the graph.</p></td>
+</tr>
+</tbody>
+</table>
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.get_custom_layers">
+<span class="sig-name descname"><span class="pre">get_custom_layers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strongly_typed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.get_custom_layers" title="Link to this definition"></a></dt>
+<dd><p>Gets custom layers in ONNX model.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em><em> | </em><em>ModelProto</em>) – Path or ModelProto of the input ONNX model.</p></li>
+<li><p><strong>trt_plugins</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – list with paths to custom TensorRT plugins.</p></li>
+<li><p><strong>strongly_typed</strong> (<em>bool</em>) – Boolean indicating whether to run TensorRT inference in stronglyTyped mode or not.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of custom layers.
+Dictionary containing tensors information: {‘tensor_name’: {‘shape’: tensor.shape, ‘dtype’: tensor.dtype}}</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>list</em>[<em>str</em>], <em>dict</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.infer_types_shapes">
+<span class="sig-name descname"><span class="pre">infer_types_shapes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">all_tensor_info</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.infer_types_shapes" title="Link to this definition"></a></dt>
+<dd><p>Updates tensor shapes in ONNX graph.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – ONNX model.</p></li>
+<li><p><strong>all_tensor_info</strong> (<em>dict</em>) – Dictionary containing tensors information.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>ONNX model with inferred types and shapes.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ModelProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.infer_types_shapes_tensorrt">
+<span class="sig-name descname"><span class="pre">infer_types_shapes_tensorrt</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">all_tensor_info</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">{}</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">strongly_typed</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.infer_types_shapes_tensorrt" title="Link to this definition"></a></dt>
+<dd><p>Update tensor types and shapes from TensorRT inference data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – ONNX model to infer types and shapes.</p></li>
+<li><p><strong>trt_plugins</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – list of TensorRT plugin library paths in .so format (compiled shared library).</p></li>
+<li><p><strong>all_tensor_info</strong> (<em>dict</em>) – dictionary with tensor data from TensorRT run.</p></li>
+<li><p><strong>strongly_typed</strong> (<em>bool</em>) – boolean indicating if the TensorRT run should be stronglyTyped or not.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>ONNX model with inferred types and shapes.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ModelProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag">
+<span class="sig-name descname"><span class="pre">interpret_trt_plugins_precision_flag</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins_precision</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">quantize_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'int8'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.interpret_trt_plugins_precision_flag" title="Link to this definition"></a></dt>
+<dd><p>Convert custom ops precision flag to dictionaries with custom op and I/O indices to be cast/quantized.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_model</strong> (<em>ModelProto</em>) – ONNX model to detect with nodes need to be cast/quantized.</p></li>
+<li><p><strong>trt_plugins_precision</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – List indicating the precision for each custom op.</p></li>
+<li><p><strong>quantize_mode</strong> (<em>str</em>) – String indicating the quantization mode.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Dictionary with custom ops to cast containing the I/O indices to cast.
+Dictionary with custom ops to quantize containing the I/O indices to quantize.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>dict</em>, <em>dict</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.load_onnx_model">
+<span class="sig-name descname"><span class="pre">load_onnx_model</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">onnx_path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">trt_plugins</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">override_shapes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_external_data_format</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">intermediate_generated_files</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.load_onnx_model" title="Link to this definition"></a></dt>
+<dd><p>Load ONNX model. If ‘tensorrt’ is installed, check if the model has custom ops and ensure it’s supported by ORT.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>onnx_path</strong> (<em>str</em>) – Path to the input ONNX model.</p></li>
+<li><p><strong>trt_plugins</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List with paths to custom TensorRT plugins.</p></li>
+<li><p><strong>override_shapes</strong> (<em>str</em><em> | </em><em>None</em>) – Override model input shapes with static shapes.</p></li>
+<li><p><strong>use_external_data_format</strong> (<em>bool</em>) – If True, separate data path will be used to store the weights of the quantized model.</p></li>
+<li><p><strong>intermediate_generated_files</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>None</em>) – List of paths of intermediate ONNX files, generated during quantization.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Loaded ONNX model supported by ORT.
+Boolean indicating whether the model has custom ops or not.
+List of custom ops in the ONNX model.
+Path to new intermediary ONNX model.
+Boolean indicating whether we should use external data format for the intermediate and quantized models.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>tuple</em>[<em>ModelProto</em>, <em>bool</em>, <em>list</em>[<em>str</em>], <em>str</em>, <em>bool</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.onnx.trt_utils.set_trt_plugin_domain">
+<span class="sig-name descname"><span class="pre">set_trt_plugin_domain</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">model</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">custom_ops</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.onnx.trt_utils.set_trt_plugin_domain" title="Link to this definition"></a></dt>
+<dd><p>Set TensorRT plugin domain info in the graph.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>model</strong> (<em>ModelProto</em>) – ONNX model to set custom op domain.</p></li>
+<li><p><strong>custom_ops</strong> (<em>list</em><em>[</em><em>str</em><em>]</em>) – list of custom ops.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>ONNX model with domain set in custom ops.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>onnx.ModelProto</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="modelopt.onnx.quantization.quantize.html" class="btn btn-neutral float-left" title="modelopt.onnx.quantization.quantize" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="modelopt.onnx.utils.html" class="btn btn-neutral float-right" title="utils" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2023-2025, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

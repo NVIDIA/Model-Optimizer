@@ -1,0 +1,1241 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="green" data-content_root="../../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>capabilities - Model Optimizer 0.0.1.dev1+g5e39d4ca1</title><link rel="index" title="Index" href="../../genindex.html" /><link rel="search" title="Search" href="../../search.html" /><link rel="next" title="converter" href="modelopt.torch.puzzletron.anymodel.converter.html" /><link rel="prev" title="automodel" href="modelopt.torch.puzzletron.anymodel.automodel.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../../_static/shibuya.css?v=2ceb65ce" />
+    <link rel="stylesheet" type="text/css" href="../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../_static/tabs.css?v=4c969af8" />
+    <link rel="stylesheet" type="text/css" href="../../_static/togglebutton.css?v=9c3e77be" />
+    <link rel="stylesheet" type="text/css" href="../../_static/autodoc_pydantic.css" />
+    <link media="print" rel="stylesheet" type="text/css" href="../../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../../_static/custom.css?v=948f803c" />
+    <link rel="stylesheet" type="text/css" href="../../_static/announcements.css?v=3c458a87" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    
+  <meta property="og:type" content="website"/><meta property="og:title" content="capabilities"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../../index.html">
+      
+      
+      <strong>Model Optimizer</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials"></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="1"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Announcements</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../index.html">Announcements</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/1_overview.html">Overview</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../getting_started/2_installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/_installation_for_Linux.html">Installation for Linux</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../getting_started/windows/_installation_for_Windows.html">Installation for Windows</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_standalone.html">Install ModelOpt-Windows as a Standalone Toolkit</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../getting_started/windows/_installation_with_olive.html">Install ModelOpt-Windows with Olive</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/hf_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - PyTorch to ONNX</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows" rel="noopener noreferrer" target="_blank">Quick Start: PTQ - Windows</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat" rel="noopener noreferrer" target="_blank">Quick Start: QAT</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning" rel="noopener noreferrer" target="_blank">Quick Start: Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_distill" rel="noopener noreferrer" target="_blank">Quick Start: Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/speculative_decoding" rel="noopener noreferrer" target="_blank">Quick Start: Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference external" href="https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity" rel="noopener noreferrer" target="_blank">Quick Start: Sparsity</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/0_support_matrix.html">Support Matrix</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/10_recipes.html">Recipes</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/11_config_system.html">ModelOpt Config System</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/1_quantization.html">Quantization</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_basic_quantization.html">Basic Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_choosing_quant_methods.html">Best practices to choose the right quantization methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_pytorch_quantization.html">PyTorch Quantization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_quant_cfg.html">Quantization Configuration (quant_cfg)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_customized_model_quantization.html">Guides to quantize a customized model from Hugging Face for TensorRT-LLM deployment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_compress_quantized_models.html">Compress quantized models</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/_onnx_quantization.html">ONNX Quantization - Linux (Beta)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../guides/windows_guides/_ONNX_PTQ_guide.html">ONNX Quantization - Windows</a></li>
+</ul>
+</li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/2_save_load.html">Saving &amp; Restoring</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/3_pruning.html">Pruning</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/4_distillation.html">Distillation</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/5_speculative_decoding.html">Speculative Decoding</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/6_sparsity.html">Sparsity</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/7_nas.html">NAS</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/8_autocast.html">AutoCast (ONNX)</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../guides/9_autotune.html">Autotune (ONNX)</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Deployment</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/1_tensorrt_llm.html">TensorRT-LLM</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/2_onnxruntime.html">Onnxruntime</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../deployment/3_unified_hf.html">Unified HuggingFace Checkpoint</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../examples/0_all_examples.html">All GitHub Examples</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 _expand"><a class="reference internal" href="../0_changelog.html">Changelog</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../1_modelopt_api.html">modelopt API</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="modelopt.deploy.html">deploy</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.deploy.llm.html">llm</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.deploy.llm.generate.html">generate</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="modelopt.onnx.html">onnx</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.autocast.html">autocast</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.graphsanitizer.html">graphsanitizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.logging_config.html">logging_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.nodeclassifier.html">nodeclassifier</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.precisionconverter.html">precisionconverter</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.referencerunner.html">referencerunner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.autocast.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.export.html">export</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.graph_surgery.html">graph_surgery</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.llm_export_utils.html">llm_export_utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.export_utils.html">export_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.quantization_utils.html">quantization_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.llm_export_utils.surgeon_utils.html">surgeon_utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.logging_config.html">logging_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.op_types.html">op_types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.autotune.html">autotune</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.calib_utils.html">calib_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.fp8.html">fp8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.graph_utils.html">graph_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.gs_patching.html">gs_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int4.html">int4</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.int8.html">int8</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.operators.html">operators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_patching.html">ort_patching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.ort_utils.html">ort_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.partitioning.html">partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.qdq_utils.html">qdq_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.onnx.quantization.quantize.html">modelopt.onnx.quantization.quantize</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.trt_utils.html">trt_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.onnx.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l2 current"><a class="reference internal" href="modelopt.torch.html">torch</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.distill.html">distill</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.distillation_model.html">distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.layerwise_distillation_model.html">layerwise_distillation_model</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.loss_balancers.html">loss_balancers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.distill.registry.html">registry</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.export.html">export</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.convert_hf_config.html">convert_hf_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.diffusers_utils.html">diffusers_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.distribute.html">distribute</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_config_map.html">hf_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.hf_export_handlers.html">hf_export_handlers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.layer_utils.html">layer_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.mcore_config_map.html">mcore_config_map</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config.html">model_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_export.html">model_config_export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_config_utils.html">model_config_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.model_utils.html">model_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.moe_utils.html">moe_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.postprocess.html">postprocess</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_aware_conversion.html">quant_aware_conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.quant_utils.html">quant_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_type.html">tensorrt_llm_type</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.tensorrt_llm_utils.html">tensorrt_llm_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.transformer_engine.html">transformer_engine</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf.html">unified_export_hf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_hf_streaming.html">unified_export_hf_streaming</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.export.unified_export_megatron.html">unified_export_megatron</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.fastgen.html">fastgen</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.discriminators.html">discriminators</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.ema.html">ema</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.factory.html">factory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.flow_matching.html">flow_matching</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.loader.html">loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.losses.html">losses</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.methods.html">methods</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.pipeline.html">pipeline</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.fastgen.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.kernels.html">kernels</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.common.html">common</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.quantization.html">quantization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.kernels.sparsity.html">sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.nas.html">nas</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.autonas.html">autonas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.hparams.html">hparams</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.patch.html">patch</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.registry.html">registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.traced_hp.html">traced_hp</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.nas.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.opt.html">opt</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.config_loader.html">config_loader</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.dynamic.html">dynamic</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.hparam.html">hparam</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.searcher.html">searcher</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.opt.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.peft.html">peft</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.convert.html">convert</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.custom.html">custom</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.lora.html">lora</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.peft.mode.html">mode</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.prune.html">prune</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.fastnas.html">fastnas</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.importance_hooks.html">importance_hooks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.prune.pruning.html">pruning</a></li>
+</ul>
+</li>
+<li class="toctree-l3 current"><a class="reference internal" href="modelopt.torch.puzzletron.html">puzzletron</a><ul class="current">
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.activation_scoring.html">activation_scoring</a></li>
+<li class="toctree-l4 current"><a class="reference internal" href="modelopt.torch.puzzletron.anymodel.html">anymodel</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_coverage.html">artifact_coverage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import.html">artifact_import</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_import_contract.html">artifact_import_contract</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.artifact_inventory.html">artifact_inventory</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.benchmarks.html">benchmarks</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.block_config.html">block_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.campaigns.html">campaigns</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.candidates.html">candidates</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.checkpoint_transactions.html">checkpoint_transactions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.dataset.html">dataset</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.depth.html">depth</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.diagnostics.html">diagnostics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distillation.html">distillation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.distributed_eval.html">distributed_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.evaluation.html">evaluation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.execution_record.html">execution_record</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.export.html">export</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.granularity.html">granularity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.identity.html">identity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.manifest.html">manifest</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.mip.html">mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.orchestration.html">orchestration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pipeline_config.html">pipeline_config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.post_mip.html">post_mip</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.pruning.html">pruning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.replacement_library.html">replacement_library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.rpc_eval.html">rpc_eval</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.sampling.html">sampling</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scenarios.html">scenarios</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring.html">scoring</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.scoring_parent.html">scoring_parent</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.search_space.html">search_space</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.security_policy.html">security_policy</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.solution_registry.html">solution_registry</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stage_runner.html">stage_runner</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.stages.html">stages</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.subblock_stats.html">subblock_stats</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.tools.html">tools</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.puzzletron.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.quantization.html">quantization</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.algorithms.html">algorithms</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.backends.html">backends</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.calib.html">calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.compress.html">modelopt.torch.quantization.compress</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.conversion.html">conversion</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.export_onnx.html">export_onnx</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.extensions.html">extensions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_calib.html">model_calib</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.model_quant.html">model_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.nn.html">nn</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.qtensor.html">qtensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.tensor_quant.html">tensor_quant</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.quantization.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.sparsity.html">sparsity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.attention_sparsity.html">attention_sparsity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.sparsity.weight_sparsity.html">weight_sparsity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.speculative.html">speculative</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.config.html">config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.dflash.html">dflash</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.eagle.html">eagle</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.medusa.html">medusa</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.mode.html">mode</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.speculative_decoding.html">speculative_decoding</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.speculative.utils.html">utils</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.trace.html">trace</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.analyzer.html">analyzer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.modules.html">modules</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.symbols.html">symbols</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.trace.tracer.html">tracer</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="modelopt.torch.utils.html">utils</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.cpp_extension.html">cpp_extension</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.dataset_utils.html">dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.distributed.html">distributed</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.graph.html">graph</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.import_utils.html">import_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.list.html">list</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.logging.html">logging</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.loss_mask.html">loss_mask</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.memory_monitor.html">memory_monitor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.mlflow.html">mlflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.nemotron_vlm_dataset_utils.html">nemotron_vlm_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.network.html">network</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.perf.html">perf</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.plugins.html">plugins</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.random.html">random</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.regex.html">regex</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.robust_json.html">robust_json</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.serialization.html">serialization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.speech_dataset_utils.html">speech_dataset_utils</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.tensor.html">tensor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="modelopt.torch.utils.vlm_dataset_utils.html">vlm_dataset_utils</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Support</span></p>
+<ul>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/1_contact.html">Contact us</a></li>
+<li class="toctree-l1 _expand"><a class="reference internal" href="../../support/2_faqs.html">FAQs</a></li>
+</ul>
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.axis_id"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.axis_id</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.constraints"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.constraints</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.field"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.field</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.force_hf"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.force_hf</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.magnitude_fallback"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.magnitude_fallback</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.materialize_impl"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.materialize_impl</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.native_automodel_required"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.native_automodel_required</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.runtime_slice_impl"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.runtime_slice_impl</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.score_hooks"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.score_hooks</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sort_impl"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.sort_impl</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sortable"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.sortable</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.subblock_kind"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.subblock_kind</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.values"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.values</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.variant_only"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.variant_only</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.vllm_export"><code class="docutils literal notranslate"><span class="pre">AxisCapabilities.vllm_export</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.CapabilityValidationError"><code class="docutils literal notranslate"><span class="pre">CapabilityValidationError</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.anymodel_arch_info_required"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.anymodel_arch_info_required</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.hf"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.hf</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.mamba_cache"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.mamba_cache</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.no_op"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.no_op</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.per_layer_config"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.per_layer_config</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.vllm"><code class="docutils literal notranslate"><span class="pre">ExportCapabilities.vllm</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.__init__"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.expected_size"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.expected_size</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.observation_module"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.observation_module</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.output_field"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.output_field</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.scored_dim"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.scored_dim</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.tensor_selector"><code class="docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec.tensor_selector</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.cp"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.cp</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.ep"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.ep</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.fsdp"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.fsdp</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.invalid_combinations"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.invalid_combinations</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.pp"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.pp</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.sequence_parallel"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.sequence_parallel</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.tp"><code class="docutils literal notranslate"><span class="pre">ParallelCapabilities.tp</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.axes"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.axes</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_name"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.descriptor_name</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_version"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.descriptor_version</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.export"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.export</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.force_hf_supported"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.force_hf_supported</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.model_family"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.model_family</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.native_automodel_supported"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.native_automodel_supported</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.notes"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.notes</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.parallelism"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.parallelism</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.stages"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.stages</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.subblocks"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.subblocks</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.to_dict"><code class="docutils literal notranslate"><span class="pre">PuzzletronCapabilities.to_dict()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities"><code class="docutils literal notranslate"><span class="pre">StageCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.activation"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.activation</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.aiperf"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.aiperf</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.bypass"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.bypass</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.convert"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.convert</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.evaluation"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.evaluation</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.global_kd"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.global_kd</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.library"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.library</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.materialize"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.materialize</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.mip"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.mip</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.rpc"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.rpc</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.scoring"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.scoring</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.sort"><code class="docutils literal notranslate"><span class="pre">StageCapabilities.sort</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities</span></code></a><ul>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.__init__"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.bypass"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.bypass</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.config_class"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.config_class</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.kind"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.kind</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.names"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.names</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.no_op"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.no_op</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.replacement"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.replacement</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.tensor_bindings"><code class="docutils literal notranslate"><span class="pre">SubblockCapabilities.tensor_bindings</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.default_capabilities"><code class="docutils literal notranslate"><span class="pre">default_capabilities()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.resolve_score_method"><code class="docutils literal notranslate"><span class="pre">resolve_score_method()</span></code></a></li>
+<li><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.validate_capabilities"><code class="docutils literal notranslate"><span class="pre">validate_capabilities()</span></code></a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../../index.html"><span itemprop="name">Model Optimizer</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../1_modelopt_api.html"><span itemprop="name">modelopt API</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="2" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.html"><span itemprop="name">torch</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="3" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.puzzletron.html"><span itemprop="name">puzzletron</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="4" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="modelopt.torch.puzzletron.anymodel.html"><span itemprop="name">anymodel</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="5" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">capabilities</strong>
+        <meta itemprop="position" content="6" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  <article class="yue dark-code" role="main">
+          <section id="capabilities">
+<h1>capabilities<a class="headerlink" href="#capabilities" title="Link to this heading">#</a></h1>
+<span class="target" id="module-modelopt.torch.puzzletron.anymodel.capabilities"></span><p class="rubric">Classes</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ParallelCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SubblockCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AxisCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec" title="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">MagnitudeFallbackSpec</span></code></a></p></td>
+<td><p>Descriptor-owned observation contract for the generic <code class="docutils literal notranslate"><span class="pre">|activation|</span></code> metric.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">StageCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ExportCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PuzzletronCapabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p class="rubric">Functions</p>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.default_capabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.default_capabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">default_capabilities</span></code></a></p></td>
+<td><p>Conservative capability declaration for current HF-backed descriptors.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.validate_capabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.validate_capabilities"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_capabilities</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.resolve_score_method" title="modelopt.torch.puzzletron.anymodel.capabilities.resolve_score_method"><code class="xref py py-obj docutils literal notranslate"><span class="pre">resolve_score_method</span></code></a></p></td>
+<td><p>Choose the specialized metric first, then an explicit generic fallback.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">AxisCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">axis_id</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subblock_kind</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">field</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sortable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">variant_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">score_hooks</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sort_impl</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">materialize_impl</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runtime_slice_impl</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vllm_export</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">force_hf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">native_automodel_required</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">values</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">constraints</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">magnitude_fallback</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>axis_id</strong> (<em>str</em>)</p></li>
+<li><p><strong>subblock_kind</strong> (<em>str</em>)</p></li>
+<li><p><strong>field</strong> (<em>str</em>)</p></li>
+<li><p><strong>sortable</strong> (<em>bool</em>)</p></li>
+<li><p><strong>variant_only</strong> (<em>bool</em>)</p></li>
+<li><p><strong>score_hooks</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>sort_impl</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>materialize_impl</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>runtime_slice_impl</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>vllm_export</strong> (<em>bool</em>)</p></li>
+<li><p><strong>force_hf</strong> (<em>bool</em>)</p></li>
+<li><p><strong>native_automodel_required</strong> (<em>bool</em>)</p></li>
+<li><p><strong>values</strong> (<em>tuple</em><em>[</em><em>Any</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>constraints</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>magnitude_fallback</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec" title="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec"><em>MagnitudeFallbackSpec</em></a><em> | </em><em>None</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.axis_id">
+<span class="sig-name descname"><span class="pre">axis_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.axis_id" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.constraints">
+<span class="sig-name descname"><span class="pre">constraints</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.constraints" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.field">
+<span class="sig-name descname"><span class="pre">field</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.field" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.force_hf">
+<span class="sig-name descname"><span class="pre">force_hf</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.force_hf" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.magnitude_fallback">
+<span class="sig-name descname"><span class="pre">magnitude_fallback</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec" title="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec"><span class="pre">MagnitudeFallbackSpec</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.magnitude_fallback" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.materialize_impl">
+<span class="sig-name descname"><span class="pre">materialize_impl</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.materialize_impl" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.native_automodel_required">
+<span class="sig-name descname"><span class="pre">native_automodel_required</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.native_automodel_required" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.runtime_slice_impl">
+<span class="sig-name descname"><span class="pre">runtime_slice_impl</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.runtime_slice_impl" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.score_hooks">
+<span class="sig-name descname"><span class="pre">score_hooks</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.score_hooks" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sort_impl">
+<span class="sig-name descname"><span class="pre">sort_impl</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><span class="pre">None</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sort_impl" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sortable">
+<span class="sig-name descname"><span class="pre">sortable</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.sortable" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.subblock_kind">
+<span class="sig-name descname"><span class="pre">subblock_kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.subblock_kind" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.values">
+<span class="sig-name descname"><span class="pre">values</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.values" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.variant_only">
+<span class="sig-name descname"><span class="pre">variant_only</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.variant_only" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.vllm_export">
+<span class="sig-name descname"><span class="pre">vllm_export</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities.vllm_export" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py exception">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.CapabilityValidationError">
+<span class="property"><span class="k"><span class="pre">exception</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">CapabilityValidationError</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.CapabilityValidationError" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ValueError</span></code></p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ExportCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">hf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vllm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">per_layer_config</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_op</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mamba_cache</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">anymodel_arch_info_required</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>hf</strong> (<em>bool</em>)</p></li>
+<li><p><strong>vllm</strong> (<em>bool</em>)</p></li>
+<li><p><strong>per_layer_config</strong> (<em>bool</em>)</p></li>
+<li><p><strong>no_op</strong> (<em>bool</em>)</p></li>
+<li><p><strong>mamba_cache</strong> (<em>bool</em>)</p></li>
+<li><p><strong>anymodel_arch_info_required</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.anymodel_arch_info_required">
+<span class="sig-name descname"><span class="pre">anymodel_arch_info_required</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.anymodel_arch_info_required" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.hf">
+<span class="sig-name descname"><span class="pre">hf</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.hf" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.mamba_cache">
+<span class="sig-name descname"><span class="pre">mamba_cache</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.mamba_cache" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.no_op">
+<span class="sig-name descname"><span class="pre">no_op</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.no_op" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.per_layer_config">
+<span class="sig-name descname"><span class="pre">per_layer_config</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.per_layer_config" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.vllm">
+<span class="sig-name descname"><span class="pre">vllm</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities.vllm" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">MagnitudeFallbackSpec</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Descriptor-owned observation contract for the generic <code class="docutils literal notranslate"><span class="pre">|activation|</span></code> metric.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">observation_module</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_selector</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scored_dim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_field</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expected_size</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>observation_module</strong> (<em>str</em>)</p></li>
+<li><p><strong>tensor_selector</strong> (<em>str</em>)</p></li>
+<li><p><strong>scored_dim</strong> (<em>int</em>)</p></li>
+<li><p><strong>output_field</strong> (<em>str</em>)</p></li>
+<li><p><strong>expected_size</strong> (<em>int</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.expected_size">
+<span class="sig-name descname"><span class="pre">expected_size</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.expected_size" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.observation_module">
+<span class="sig-name descname"><span class="pre">observation_module</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.observation_module" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.output_field">
+<span class="sig-name descname"><span class="pre">output_field</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.output_field" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.scored_dim">
+<span class="sig-name descname"><span class="pre">scored_dim</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">int</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.scored_dim" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.tensor_selector">
+<span class="sig-name descname"><span class="pre">tensor_selector</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.MagnitudeFallbackSpec.tensor_selector" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">ParallelCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fsdp</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ep</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sequence_parallel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">invalid_combinations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>tp</strong> (<em>bool</em>)</p></li>
+<li><p><strong>pp</strong> (<em>bool</em>)</p></li>
+<li><p><strong>cp</strong> (<em>bool</em>)</p></li>
+<li><p><strong>fsdp</strong> (<em>bool</em>)</p></li>
+<li><p><strong>ep</strong> (<em>bool</em>)</p></li>
+<li><p><strong>sequence_parallel</strong> (<em>bool</em>)</p></li>
+<li><p><strong>invalid_combinations</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.cp">
+<span class="sig-name descname"><span class="pre">cp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.cp" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.ep">
+<span class="sig-name descname"><span class="pre">ep</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.ep" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.fsdp">
+<span class="sig-name descname"><span class="pre">fsdp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.fsdp" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.invalid_combinations">
+<span class="sig-name descname"><span class="pre">invalid_combinations</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.invalid_combinations" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.pp">
+<span class="sig-name descname"><span class="pre">pp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.pp" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.sequence_parallel">
+<span class="sig-name descname"><span class="pre">sequence_parallel</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.sequence_parallel" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.tp">
+<span class="sig-name descname"><span class="pre">tp</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities.tp" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">PuzzletronCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">descriptor_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">descriptor_version</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_family</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">force_hf_supported</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">native_automodel_supported</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">parallelism</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subblocks</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">axes</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">stages</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">export</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">notes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>descriptor_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>descriptor_version</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_family</strong> (<em>str</em>)</p></li>
+<li><p><strong>force_hf_supported</strong> (<em>bool</em>)</p></li>
+<li><p><strong>native_automodel_supported</strong> (<em>bool</em>)</p></li>
+<li><p><strong>parallelism</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities"><em>ParallelCapabilities</em></a>)</p></li>
+<li><p><strong>subblocks</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities"><em>SubblockCapabilities</em></a><em>]</em>)</p></li>
+<li><p><strong>axes</strong> (<em>dict</em><em>[</em><em>str</em><em>, </em><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities"><em>AxisCapabilities</em></a><em>]</em>)</p></li>
+<li><p><strong>stages</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities"><em>StageCapabilities</em></a>)</p></li>
+<li><p><strong>export</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities"><em>ExportCapabilities</em></a>)</p></li>
+<li><p><strong>notes</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.axes">
+<span class="sig-name descname"><span class="pre">axes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities"><span class="pre">AxisCapabilities</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.axes" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_name">
+<span class="sig-name descname"><span class="pre">descriptor_name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_name" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_version">
+<span class="sig-name descname"><span class="pre">descriptor_version</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.descriptor_version" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.export">
+<span class="sig-name descname"><span class="pre">export</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ExportCapabilities"><span class="pre">ExportCapabilities</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.export" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.force_hf_supported">
+<span class="sig-name descname"><span class="pre">force_hf_supported</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.force_hf_supported" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.model_family">
+<span class="sig-name descname"><span class="pre">model_family</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.model_family" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.native_automodel_supported">
+<span class="sig-name descname"><span class="pre">native_automodel_supported</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.native_automodel_supported" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.notes">
+<span class="sig-name descname"><span class="pre">notes</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.notes" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.parallelism">
+<span class="sig-name descname"><span class="pre">parallelism</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.ParallelCapabilities"><span class="pre">ParallelCapabilities</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.parallelism" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.stages">
+<span class="sig-name descname"><span class="pre">stages</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities"><span class="pre">StageCapabilities</span></a></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.stages" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.subblocks">
+<span class="sig-name descname"><span class="pre">subblocks</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">dict</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities"><span class="pre">SubblockCapabilities</span></a><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.subblocks" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.to_dict">
+<span class="sig-name descname"><span class="pre">to_dict</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities.to_dict" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><em>dict</em>[<em>str</em>, <em>Any</em>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">StageCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">convert</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">activation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sort</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bypass</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">library</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scoring</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rpc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mip</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">materialize</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_kd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aiperf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">evaluation</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>convert</strong> (<em>bool</em>)</p></li>
+<li><p><strong>activation</strong> (<em>bool</em>)</p></li>
+<li><p><strong>sort</strong> (<em>bool</em>)</p></li>
+<li><p><strong>bypass</strong> (<em>bool</em>)</p></li>
+<li><p><strong>library</strong> (<em>bool</em>)</p></li>
+<li><p><strong>scoring</strong> (<em>bool</em>)</p></li>
+<li><p><strong>rpc</strong> (<em>bool</em>)</p></li>
+<li><p><strong>mip</strong> (<em>bool</em>)</p></li>
+<li><p><strong>materialize</strong> (<em>bool</em>)</p></li>
+<li><p><strong>global_kd</strong> (<em>bool</em>)</p></li>
+<li><p><strong>aiperf</strong> (<em>bool</em>)</p></li>
+<li><p><strong>evaluation</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.activation">
+<span class="sig-name descname"><span class="pre">activation</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.activation" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.aiperf">
+<span class="sig-name descname"><span class="pre">aiperf</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.aiperf" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.bypass">
+<span class="sig-name descname"><span class="pre">bypass</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.bypass" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.convert">
+<span class="sig-name descname"><span class="pre">convert</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.convert" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.evaluation">
+<span class="sig-name descname"><span class="pre">evaluation</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.evaluation" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.global_kd">
+<span class="sig-name descname"><span class="pre">global_kd</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.global_kd" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.library">
+<span class="sig-name descname"><span class="pre">library</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.library" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.materialize">
+<span class="sig-name descname"><span class="pre">materialize</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.materialize" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.mip">
+<span class="sig-name descname"><span class="pre">mip</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.mip" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.rpc">
+<span class="sig-name descname"><span class="pre">rpc</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.rpc" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.scoring">
+<span class="sig-name descname"><span class="pre">scoring</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.scoring" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.sort">
+<span class="sig-name descname"><span class="pre">sort</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.StageCapabilities.sort" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">SubblockCapabilities</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities" title="Link to this definition">#</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">kind</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">config_class</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">names</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_op</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">replacement</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bypass</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tensor_bindings</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.__init__" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>kind</strong> (<em>str</em>)</p></li>
+<li><p><strong>config_class</strong> (<em>str</em>)</p></li>
+<li><p><strong>names</strong> (<em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>no_op</strong> (<em>bool</em>)</p></li>
+<li><p><strong>replacement</strong> (<em>bool</em>)</p></li>
+<li><p><strong>bypass</strong> (<em>bool</em>)</p></li>
+<li><p><strong>tensor_bindings</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.bypass">
+<span class="sig-name descname"><span class="pre">bypass</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.bypass" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.config_class">
+<span class="sig-name descname"><span class="pre">config_class</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.config_class" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.kind">
+<span class="sig-name descname"><span class="pre">kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">str</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.kind" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.names">
+<span class="sig-name descname"><span class="pre">names</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">tuple</span><span class="p"><span class="pre">[</span></span><span class="pre">str</span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="p"><span class="pre">...</span></span><span class="p"><span class="pre">]</span></span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.names" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.no_op">
+<span class="sig-name descname"><span class="pre">no_op</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.no_op" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.replacement">
+<span class="sig-name descname"><span class="pre">replacement</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.replacement" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.tensor_bindings">
+<span class="sig-name descname"><span class="pre">tensor_bindings</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">bool</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.SubblockCapabilities.tensor_bindings" title="Link to this definition">#</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.default_capabilities">
+<span class="sig-name descname"><span class="pre">default_capabilities</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">descriptor_name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model_family</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">native_automodel_supported</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.default_capabilities" title="Link to this definition">#</a></dt>
+<dd><p>Conservative capability declaration for current HF-backed descriptors.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>descriptor_name</strong> (<em>str</em>)</p></li>
+<li><p><strong>model_family</strong> (<em>str</em><em> | </em><em>None</em>)</p></li>
+<li><p><strong>native_automodel_supported</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities"><em>PuzzletronCapabilities</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.resolve_score_method">
+<span class="sig-name descname"><span class="pre">resolve_score_method</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">axis</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.resolve_score_method" title="Link to this definition">#</a></dt>
+<dd><p>Choose the specialized metric first, then an explicit generic fallback.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>axis</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.AxisCapabilities"><em>AxisCapabilities</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>str</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="modelopt.torch.puzzletron.anymodel.capabilities.validate_capabilities">
+<span class="sig-name descname"><span class="pre">validate_capabilities</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">capabilities</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">enabled_axes</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">()</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">force_hf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ep</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">require_vllm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">require_complete_pipeline</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#modelopt.torch.puzzletron.anymodel.capabilities.validate_capabilities" title="Link to this definition">#</a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>capabilities</strong> (<a class="reference internal" href="#modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities" title="modelopt.torch.puzzletron.anymodel.capabilities.PuzzletronCapabilities"><em>PuzzletronCapabilities</em></a>)</p></li>
+<li><p><strong>enabled_axes</strong> (<em>list</em><em>[</em><em>str</em><em>] </em><em>| </em><em>tuple</em><em>[</em><em>str</em><em>, </em><em>...</em><em>]</em>)</p></li>
+<li><p><strong>force_hf</strong> (<em>bool</em>)</p></li>
+<li><p><strong>ep</strong> (<em>int</em>)</p></li>
+<li><p><strong>require_vllm</strong> (<em>bool</em>)</p></li>
+<li><p><strong>require_complete_pipeline</strong> (<em>bool</em>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><em>None</em></p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="modelopt.torch.puzzletron.anymodel.automodel.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">automodel</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="modelopt.torch.puzzletron.anymodel.converter.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">converter</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2023-2025, NVIDIA Corporation</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials"></div>
+    </div>
+  </div>
+</footer>
+      <script src="../../_static/documentation_options.js?v=5929fcd5"></script>
+      <script src="../../_static/doctools.js?v=fd6eb6e6"></script>
+      <script src="../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+      <script src="../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../_static/copybutton.js?v=20d3d275"></script>
+      <script src="../../_static/tabs.js?v=3ee01567"></script>
+      <script>let toggleHintShow = 'Click to show';</script>
+      <script>let toggleHintHide = 'Click to hide';</script>
+      <script>let toggleOpenOnPrint = 'true';</script>
+      <script src="../../_static/togglebutton.js?v=b8b12719"></script>
+      <script>var togglebuttonSelector = '.toggle, .admonition.dropdown';</script>
+      <script src="../../_static/shibuya.js?v=50760d75"></script>
+      <script src="../../_static/announcements.js?v=d94b986f"></script></body>
+</html>
