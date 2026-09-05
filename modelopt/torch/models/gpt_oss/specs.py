@@ -29,6 +29,7 @@ register(
                     # legacy name this data was migrated from.
                     block_names=("GptOssMLP", "GptOssMoE"),
                     expert_linear_names=("gate_up_proj", "down_proj"),
+                    fused_expert_names=True,
                 ),
             ),
         ),

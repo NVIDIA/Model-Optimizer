@@ -976,28 +976,64 @@ def _build_stacked_linear(experts: nn.Module, module_name, linear_type, num_expe
     return config
 
 
+def _fused_expert_linear_names(module: nn.Module) -> list[str] | None:
+    """Projection names of a fused expert container, or None when it is not one.
+
+    A fused container is a single module holding 3-D per-expert parameters, marked by
+    the quantizer lists ``_QuantFusedExperts`` installs. Deliberately not the same test
+    as the iterability check in ``get_experts_list``: that one asks "can I index
+    ``experts[i]``", which is also false for an *unquantized* fused container, while
+    this one asks "is this the quantized fused layout whose parameters name the
+    projections". ``_first_proj_attr`` lets a layout override the gated default, e.g.
+    NemotronH's non-gated ``up_proj``.
+    """
+    experts = getattr(module, "experts", None)
+    if experts is None:
+        return None
+    first_proj_attr = getattr(experts, "_first_proj_attr", "gate_up_proj")
+    if hasattr(experts, f"{first_proj_attr}_weight_quantizers"):
+        return [first_proj_attr, "down_proj"]
+    return None
+
+
 def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[str]:
     """Get the list of linear names for the experts.
 
-    Fused-expert layouts are detected structurally first; otherwise the names come
-    from the model's own spec (``MoESpec.expert_linear_names_for``). Raises
-    NotImplementedError when nothing resolves, so a new MoE model fails loudly
+    The model's own spec always wins where it has an answer for this module's layout.
+    That qualifier matters: a variant's names describe one layout, and the same model
+    type materializes per-expert on transformers 4 and fused on 5, so naming from the
+    wrong layout would be wrong rather than merely generic. The structural fallbacks
+    below run only where the spec declines.
+
+    Raises NotImplementedError when nothing resolves, so a new MoE model fails loudly
     instead of silently inheriting another model's naming.
 
     Args:
         module: the MoE block.
         model_type: the model's HF model type (``model.config.model_type``).
     """
-    # Structural detection: after _export_fused_experts, fused expert modules
-    # have per-expert submodules with gate_proj/up_proj/down_proj.
-    # Also handles models that originally used this naming (Qwen, DeepSeek, etc.).
-    if hasattr(module, "experts"):
-        first_proj_attr = getattr(module.experts, "_first_proj_attr", "gate_up_proj")
-        if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
-            return [first_proj_attr, "down_proj"]
-
     spec = get_spec(model_type) if model_type else None
     moe_spec = spec.moe_spec if spec is not None else None
+    fused_names = _fused_expert_linear_names(module)
+
+    # The model's own spec wins wherever it describes the layout this module actually
+    # has. Passing the observed layout is what makes that safe: a spec that only
+    # describes the per-expert form declines for a fused container rather than handing
+    # back naming that does not apply there.
+    if moe_spec is not None:
+        names = moe_spec.expert_linear_names_for(module, fused=fused_names is not None)
+        if names is not None:
+            return list(names)
+
+    # No per-model answer for this layout. A fused container still names its projections
+    # after its own parameters, which is what keeps every fused MoE family in
+    # transformers 5 exporting without a spec of its own.
+    if fused_names is not None:
+        return fused_names
+
+    # Last resort: the spec's naming for its other layout, which is what this returned
+    # before layouts were distinguished. Kept so a spec-described model that has not
+    # been quantized into its fused form still resolves.
     if moe_spec is not None:
         names = moe_spec.expert_linear_names_for(module)
         if names is not None:

@@ -97,6 +97,16 @@ class MoEVariant:
     fused layouts (DBRX, GptOss) and for layouts not yet validated on the grouped
     export path."""
 
+    fused_expert_names: bool = False
+    """True when ``expert_linear_names`` name a fused container's own 3-D parameters
+    (``gate_up_proj``/``down_proj``) rather than per-expert sub-modules.
+
+    Separate from ``has_iterable_experts``, which says whether ``get_experts_list`` may
+    group the experts: ``qwen3_5_moe`` declares per-expert naming with grouping off,
+    while ``gpt_oss`` declares fused naming. Consumers need the distinction because the
+    same model type materializes both ways across transformers releases, and naming
+    that describes the wrong layout does not apply."""
+
     gate_up_pair: tuple[str, str] | None = None
     """The (gate, up) pair among ``expert_linear_names`` that serving engines fuse
     into a single ``gate_up_proj``, e.g. ``("gate_proj", "up_proj")`` or
@@ -141,22 +151,31 @@ class MoESpec(SpecSection):
                 return variant
         return None
 
-    def expert_linear_names_for(self, module) -> tuple[str, ...] | None:
+    def expert_linear_names_for(self, module, fused: bool | None = None) -> tuple[str, ...] | None:
         """Resolve ``module``'s expert linear names within this model.
 
-        When every variant agrees on one naming, the module's class is irrelevant
-        (a spec can provide naming without the block class being known); with
-        several namings, the module's class picks the variant.
+        When every candidate variant agrees on one naming, the module's class is
+        irrelevant (a spec can provide naming without the block class being known);
+        with several namings, the module's class picks the variant.
+
+        ``fused`` is the layout the caller observed on the module. Passing it restricts
+        the answer to variants whose names describe that layout, so a spec that only
+        describes the per-expert form declines for a fused container instead of
+        returning names that do not apply there. ``None`` considers every variant.
         """
-        namings = {
-            variant.expert_linear_names
+        candidates = [
+            variant
             for variant in self.moe_variants
             if variant.expert_linear_names is not None
-        }
+            and (fused is None or variant.fused_expert_names == fused)
+        ]
+        namings = {variant.expert_linear_names for variant in candidates}
         if len(namings) == 1:
             return next(iter(namings))
         variant = self.match_moe_variant(module)
-        return variant.expert_linear_names if variant is not None else None
+        if variant is None or variant not in candidates:
+            return None
+        return variant.expert_linear_names
 
 
 @dataclass(kw_only=True)

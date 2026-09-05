@@ -121,6 +121,63 @@ def test_get_experts_list_groups_by_spec_linear_names():
     assert groups[1][2] is module.experts[2].down_proj
 
 
+def _fused_block(block_cls_name, first_proj_attr="gate_up_proj"):
+    """A quantized fused-experts block: one container, 3-D params, quantizer lists."""
+    experts = nn.Module()
+    experts._first_proj_attr = first_proj_attr
+    setattr(experts, f"{first_proj_attr}_weight_quantizers", nn.ModuleList())
+    block = type(block_cls_name, (nn.Module,), {})()
+    nn.Module.__init__(block)
+    block.experts = experts
+    return block
+
+
+def test_spec_fused_naming_outranks_the_structural_default():
+    """Where a spec describes the layout in hand, it wins over the structural default.
+
+    The structural fallback reads the container's own ``_first_proj_attr``, so a module
+    claiming ``up_proj`` would resolve to ``["up_proj", "down_proj"]`` on its own. gpt_oss
+    declares fused naming in its spec, and per-model data outranks the generic rule.
+    """
+    block = _fused_block("GptOssMLP", first_proj_attr="up_proj")
+    assert get_expert_linear_names(block, "gpt_oss") == ["gate_up_proj", "down_proj"]
+
+    # Same module, no spec to consult: the structural default applies.
+    assert get_expert_linear_names(_fused_block("SomeMoE", "up_proj"), "unregistered") == [
+        "up_proj",
+        "down_proj",
+    ]
+
+
+def test_spec_declines_when_its_naming_describes_another_layout():
+    """A spec must not answer with naming that does not apply to this module.
+
+    Mixtral's variants describe per-expert ``w1``/``w2``/``w3``; on transformers 5 the
+    same block holds a fused container instead. Returning the per-expert naming there
+    would be wrong, not merely generic, so the spec declines and the structural rule
+    resolves it.
+    """
+    assert get_expert_linear_names(_fused_block("MixtralSparseMoeBlock"), "mixtral") == [
+        "gate_up_proj",
+        "down_proj",
+    ]
+
+
+def test_fused_expert_names_flag_is_exhaustive():
+    """Fails when a variant starts or stops describing fused naming without review."""
+    declared = {
+        (spec.model_type, variant.block_names)
+        for spec in get_specs()
+        if spec.moe_spec is not None
+        for variant in spec.moe_spec.moe_variants
+        if variant.fused_expert_names
+    }
+    assert declared == {
+        ("gpt_oss", ("GptOssMLP", "GptOssMoE")),
+        ("deepseek_v4", ("DeepseekV4SparseMoeBlock",)),
+    }
+
+
 def test_get_experts_list_skips_fused_expert_containers():
     """A fused experts container has nothing to group, and must not crash trying.
 

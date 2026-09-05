@@ -30,6 +30,7 @@ register(
                 MoEVariant(
                     block_names=("DeepseekV4SparseMoeBlock",),
                     expert_linear_names=("gate_up_proj", "down_proj"),
+                    fused_expert_names=True,
                 ),
             ),
         ),
