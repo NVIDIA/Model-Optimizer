@@ -117,6 +117,72 @@ class SpeculativeDecodingExporter(ABC):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
 
+    def write_speculation_profile(
+        self,
+        export_dir: Path | str,
+        speculation_profile: Path | str | None = None,
+    ):
+        """Attach a ``speculation_profile.json`` describing this draft's acceptance.
+
+        Deployment consumers otherwise have to guess how good a draft is -- dynamo's
+        simulator, for instance, models every draft model in existence with one
+        hardcoded acceptance vector. Shipping the measurement next to the weights is
+        what stops the guessing.
+
+        This method deliberately only *transports* a profile; it does not build one.
+        Acceptance is measured by a benchmark harness (``examples/specdec_bench``),
+        which commonly runs in an engine container without modelopt installed -- the
+        MiniMax-M2.7 DFlash measurement ran under ``vllm/vllm-openai:nightly``, where
+        ``modelopt_version`` resolved to ``null``. So the producer cannot import from
+        here, and this side stays a carrier: it validates that the file is JSON
+        carrying a ``schema_version`` and copies it in.
+
+        For the same reason the version is recorded rather than checked against a
+        constant. Producers own the schema; pinning an expected version here would
+        create two sources of truth that drift.
+
+        With no profile supplied, an unmeasured stub is written so consumers can
+        distinguish "not measured" from "predates the schema" -- absent then means a
+        genuinely old checkpoint rather than an ambiguous one.
+        """
+        export_dir = Path(export_dir)
+        target = export_dir / "speculation_profile.json"
+
+        if speculation_profile is not None:
+            source = Path(speculation_profile)
+            if not source.is_file():
+                raise FileNotFoundError(f"--speculation_profile not found: {source}")
+            with open(source) as f:
+                profile = json.load(f)
+            if not isinstance(profile, dict) or "schema_version" not in profile:
+                raise ValueError(
+                    f"{source} is not a speculation profile: expected a JSON object with a "
+                    "'schema_version' field. Generate one with examples/specdec_bench."
+                )
+        else:
+            profile = {
+                "schema_version": None,
+                "measured": False,
+                "method": self._profile_method(),
+                "note": (
+                    "No acceptance measurement was supplied at export time. Produce one with "
+                    "examples/specdec_bench and re-export with --speculation_profile, or build "
+                    "it from an existing acceptance_rate.json."
+                ),
+            }
+
+        with open(target, "w") as f:
+            json.dump(profile, f, indent=2)
+
+    def _profile_method(self):
+        """Best-effort speculation method name for the stub profile."""
+        for attr in ("eagle_config", "dflash_config", "config"):
+            cfg = getattr(self.model, attr, None)
+            method = getattr(cfg, "speculative_decoding_method", None) if cfg else None
+            if method:
+                return str(method)
+        return type(self).__name__.replace("Exporter", "").lower() or None
+
 
 class EagleExporter(SpeculativeDecodingExporter):
     """Draft model exporter for Eagle."""
