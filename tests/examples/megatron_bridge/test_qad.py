@@ -14,11 +14,15 @@
 # limitations under the License.
 """End-to-end test for Quantization Aware Distillation (QAD): quantize + distill + export."""
 
+import json
 from pathlib import Path
 
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.export.unified_checkpoint import assert_exported_checkpoint_matches
+from _test_utils.torch.export.unified_checkpoint import (
+    assert_exported_checkpoint_matches,
+    assert_per_expert_experts_complete,
+)
 from _test_utils.torch.megatron.modelopt_state import (
     assert_has_modelopt_state,
     assert_no_quantizers_matching,
@@ -124,11 +128,20 @@ def test_qad(tmp_path: Path, num_gpus, create_student):
     run_example_command(export_cmd, example_path="megatron_bridge", setup_free_port=True)
     assert (hf_export_path / "config.json").exists()
     assert (hf_export_path / "hf_quant_config.json").exists()
+    # A quantized export writes routed experts one per expert while the BF16 reference packs
+    # them, so both sides of that expansion differ from the reference.
+    text_config = json.loads((hf_model_path / "config.json").read_text())
+    is_moe = bool(text_config.get("text_config", text_config).get("num_experts"))
     # QAD trains the student, so language-model weights drift from the reference; the vision
     # tower is never trained and must still come through byte for byte.
     assert_exported_checkpoint_matches(
         hf_export_path,
         hf_model_path,
         check_values=False,
+        allow_missing=("mlp.experts.gate_up_proj", "mlp.experts.down_proj") if is_moe else (),
+        allow_unexpected=("mlp.experts.",) if is_moe else (),
         bit_exact_prefixes=("model.visual.",) if is_vlm else (),
     )
+    if is_moe:
+        # allow_unexpected waives the expert names wholesale; this re-tightens it.
+        assert_per_expert_experts_complete(hf_export_path)
