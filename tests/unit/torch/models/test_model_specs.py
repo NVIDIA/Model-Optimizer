@@ -157,6 +157,31 @@ def test_get_experts_list_skips_fused_expert_containers():
     assert get_experts_list(MixtralSparseMoeBlockFused(), "mixtral") == []
 
 
+def test_get_experts_list_still_rejects_unsupported_non_iterable_layouts():
+    """Non-iterable is not by itself a reason to skip grouping.
+
+    DBRX's experts container is not iterable either, but its per-expert linears exist
+    under ``experts.mlp`` -- grouping is possible, just not by this function, and its
+    spec says so. Skipping it would silently drop AWQ/SVDQuant resmoothing instead of
+    reporting an unsupported layout, so the fused shortcut is scoped to specs that
+    claim iterable experts.
+    """
+
+    class DbrxExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = nn.Module()  # per-expert linears hang off here, not off self
+
+    class DbrxFFN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = DbrxExperts()
+
+    assert not hasattr(DbrxFFN().experts, "__iter__")
+    with pytest.raises(NotImplementedError):
+        get_experts_list(DbrxFFN(), "dbrx")
+
+
 def test_get_experts_list_rejects_non_iterable_layouts():
     # DBRX matches a spec but is not an iterable-experts layout; grouped export
     # must keep rejecting it (legacy behavior).

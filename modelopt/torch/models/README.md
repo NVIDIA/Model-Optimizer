@@ -14,8 +14,7 @@ from . import specs
 and `<model_type>/specs.py`:
 
 ```python
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(

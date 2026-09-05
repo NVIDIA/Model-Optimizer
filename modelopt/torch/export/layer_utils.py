@@ -95,17 +95,6 @@ def get_experts_list(
     """
     experts_list = []
 
-    # A fused/stacked experts container holds 3-D parameters instead of per-expert
-    # sub-modules, so it has no per-expert linears to group and the fused export path
-    # handles it. Decided from the module rather than the spec: the same model type
-    # materializes both ways across transformers releases -- Mixtral and DeepSeek-V3
-    # are iterable on transformers 4 and fused on 5 -- so a spec cannot answer it.
-    # Narrow on purpose: a block with no experts at all is an unknown shape and still
-    # falls through to the loud failure below.
-    experts = getattr(module, "experts", None)
-    if experts is not None and not hasattr(experts, "__iter__"):
-        return experts_list
-
     # Only layouts with iterable per-expert sub-modules are supported here;
     # stacked/fused layouts (DBRX, GptOss, ...) are handled by other paths.
     variant = match_moe_block(module, model_type)
@@ -113,6 +102,16 @@ def get_experts_list(
         raise NotImplementedError(
             f"MoE block {type(module).__name__!r} (model type: {model_type!r}) not supported"
         )
+
+    # The spec says this model's experts are iterable, but the installed transformers
+    # may have fused them: transformers 5 replaced several expert ModuleLists with a
+    # single module holding 3-D parameters (Mixtral, DeepSeek-V3). A fused container has
+    # no per-expert linears to group and the fused export path handles it, so grouping
+    # is empty rather than an error. Checked after the spec, not before, so a layout the
+    # spec calls unsupported (DBRX, whose per-expert linears live under experts.mlp)
+    # keeps failing loudly instead of silently skipping resmoothing.
+    if not hasattr(getattr(module, "experts", None), "__iter__"):
+        return experts_list
     linear_names = get_expert_linear_names(module, model_type)
 
     # Common logic for all supported model types
