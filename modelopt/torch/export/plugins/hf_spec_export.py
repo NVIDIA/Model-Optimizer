@@ -31,17 +31,25 @@ ALL_SPEC_MODES = ["eagle", "dflash"]
 
 
 def _get_rope_theta(config, default=None):
-    """Get RoPE theta from either legacy or Transformers 5 config fields."""
-    rope_theta = getattr(config, "rope_theta", None)
-    if rope_theta is not None:
-        return rope_theta
+    """Get RoPE theta from either legacy or Transformers 5 config fields.
 
+    ``rope_parameters`` is checked FIRST. A config can carry both fields with
+    different values: Transformers 5 stores the real base under
+    ``rope_parameters`` while the class default (10000.0 for Qwen3) may still be
+    visible as a top-level ``rope_theta``. Reading ``rope_theta`` first silently
+    exports a draft whose RoPE base is 100x off the target's, which breaks
+    serving because DFlash injects the target's KV into every draft layer.
+    """
     # Transformers 5 stores this under rope_parameters (and exposes the same
     # data through rope_scaling for backwards compatibility).
     for attr in ("rope_parameters", "rope_scaling"):
         rope_config = getattr(config, attr, None)
         if isinstance(rope_config, dict) and rope_config.get("rope_theta") is not None:
             return rope_config["rope_theta"]
+
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
 
     return default
 
