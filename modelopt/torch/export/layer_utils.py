@@ -28,6 +28,7 @@ try:
 except Exception:
     warn("Cannot find transformers package. Hugginface modules cannot be exported.")
 
+from modelopt.torch.models import get_spec, hf_model_type, list_all_possible, match_moe_block
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import import_plugin
 
@@ -83,35 +84,36 @@ with import_plugin("megatron", verbose=False):
 
 def get_experts_list(
     module: torch.nn.Module,
-    model_type: str,
+    model_type: str | None,
 ):
     """Returns list of grouped experts by linear name for given module.
 
     Args:
         module: MoE block (e.g. MixtralSparseMoeBlock, NemotronHMOE).
-        model_type: `type(root_model).__name__.lower()` (may change after ModelOpt quantize).
+        model_type: the model's HF model type (``model.config.model_type``), used to
+            resolve the model's own spec.
     """
     experts_list = []
 
-    # Define linear layer names for different model types
-    if "mixtralforcausallm" in model_type:
-        linear_names = ["w1", "w2", "w3"]
-    elif any(
-        qwen_variant in model_type
-        for qwen_variant in [
-            "qwenmoeforcausallm",
-            "qwen2moeforcausallm",
-            "qwen3moeforcausallm",
-            "qwen3nextforcausallm",
-        ]
-    ):
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    elif "nemotronhforcausallm" in model_type:
-        linear_names = ["up_proj", "down_proj"]
-    elif "gemma4" in model_type:
-        linear_names = ["gate_proj", "down_proj", "up_proj"]
-    else:
-        raise NotImplementedError(f" {model_type} not supported")
+    # A fused/stacked experts container holds 3-D parameters instead of per-expert
+    # sub-modules, so it has no per-expert linears to group and the fused export path
+    # handles it. Decided from the module rather than the spec: the same model type
+    # materializes both ways across transformers releases -- Mixtral and DeepSeek-V3
+    # are iterable on transformers 4 and fused on 5 -- so a spec cannot answer it.
+    # Narrow on purpose: a block with no experts at all is an unknown shape and still
+    # falls through to the loud failure below.
+    experts = getattr(module, "experts", None)
+    if experts is not None and not hasattr(experts, "__iter__"):
+        return experts_list
+
+    # Only layouts with iterable per-expert sub-modules are supported here;
+    # stacked/fused layouts (DBRX, GptOss, ...) are handled by other paths.
+    variant = match_moe_block(module, model_type)
+    if variant is None or not variant.has_iterable_experts:
+        raise NotImplementedError(
+            f"MoE block {type(module).__name__!r} (model type: {model_type!r}) not supported"
+        )
+    linear_names = get_expert_linear_names(module, model_type)
 
     # Common logic for all supported model types
     experts_list.extend(
@@ -305,16 +307,23 @@ def is_mlp(module: nn.Module) -> bool:
     return any(key in type(module).__name__.upper() for key in ("MLP", "T5DENSE"))
 
 
-def is_moe(module: nn.Module) -> bool:
-    """Returns whether the module is an MOE layer."""
+def is_moe(module: nn.Module, model_type: str | None = None) -> bool:
+    """Returns whether the module is an MOE layer.
+
+    ``model_type`` (``model.config.model_type``) scopes the registry lookup to the
+    model's own spec.
+
+    The model's own spec is consulted first: per-model data always takes precedence
+    over the generic name and structural fallbacks.
+    """
+    # Per-model data (modelopt/torch/models/*), which also covers non-standard names.
+    if match_moe_block(module, model_type) is not None:
+        return True
+    # Generic fallback: the common MoE block naming conventions.
     name = type(module).__name__.lower()
-    # Auto-detect common MoE patterns
     if name.endswith("sparsemoeblock") or "moelayer" in name:
         return True
-    # Explicit matches for non-standard naming
-    if any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn", "nemotronhmoe"]):
-        return True
-    # Structural detection: modules with router + experts (e.g. Gemma4TextDecoderLayer)
+    # Structural fallback: modules with router + experts (e.g. Gemma4TextDecoderLayer)
     return (
         hasattr(module, "router")
         and hasattr(module, "experts")
@@ -968,17 +977,18 @@ def _build_stacked_linear(experts: nn.Module, module_name, linear_type, num_expe
     return config
 
 
-def get_expert_linear_names(module: nn.Module) -> list[str]:
-    """Get the list of linear names for the experts."""
+def get_expert_linear_names(module: nn.Module, model_type: str | None) -> list[str]:
+    """Get the list of linear names for the experts.
 
-    def module_match_name_list(module, name_list):
-        """Check if the module name matches any of the names in the list.
+    Fused-expert layouts are detected structurally first; otherwise the names come
+    from the model's own spec (``MoESpec.expert_linear_names_for``). Raises
+    NotImplementedError when nothing resolves, so a new MoE model fails loudly
+    instead of silently inheriting another model's naming.
 
-        e.g. module_match_name_list(QuantQwen3MoeSparseMoeBlock, ['Qwen3MoeSparseMoeBlock']) -> True
-
-        """
-        return any(name.lower() in type(module).__name__.lower() for name in name_list)
-
+    Args:
+        module: the MoE block.
+        model_type: the model's HF model type (``model.config.model_type``).
+    """
     # Structural detection: after _export_fused_experts, fused expert modules
     # have per-expert submodules with gate_proj/up_proj/down_proj.
     # Also handles models that originally used this naming (Qwen, DeepSeek, etc.).
@@ -987,38 +997,18 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         if hasattr(module.experts, f"{first_proj_attr}_weight_quantizers"):
             return [first_proj_attr, "down_proj"]
 
-    if module_match_name_list(
-        module,
-        [
-            "Qwen2MoeSparseMoeBlock",
-            "Qwen3MoeSparseMoeBlock",
-            "Qwen3NextSparseMoeBlock",
-            "Qwen3_5MoeSparseMoeBlock",
-            "DeepseekMoE",
-        ],
-    ):
-        return ["gate_proj", "down_proj", "up_proj"]
-    elif module_match_name_list(module, ["MixtralSparseMoeBlock"]):
-        # Old-style Mixtral (iterable experts) uses w1/w2/w3.
-        # Fused Mixtral (transformers 5.0+) is already handled by the
-        # structural first-projection quantizer check above.
-        return ["w1", "w2", "w3"]
-    elif module_match_name_list(module, ["MixtralMoeSparseMoeBlock"]):
-        # Older transformers naming for Mixtral
-        return ["linear_fc1", "linear_fc2"]
-    elif module_match_name_list(module, ["DBRXMoeSparseMoeBlock"]):
-        return ["w1_linear", "w2_linear", "v1_linear"]
-    elif module_match_name_list(module, ["GptOssMoE"]):
-        return ["gate_up_proj", "down_proj"]
-    elif module_match_name_list(module, ["NemotronHMOE"]):
-        # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
-        return ["up_proj", "down_proj"]
-    elif module_match_name_list(module, ["Gemma4TextDecoderLayer"]):
-        # Gemma4 MoE experts are unfused into per-expert nn.Linear layers
-        return ["gate_proj", "down_proj", "up_proj"]
-    else:
-        # assuming w1, w2, w3 by default
-        return ["w1", "w2", "w3"]
+    spec = get_spec(model_type) if model_type else None
+    moe_spec = spec.moe_spec if spec is not None else None
+    if moe_spec is not None:
+        names = moe_spec.expert_linear_names_for(module)
+        if names is not None:
+            return list(names)
+
+    raise NotImplementedError(
+        f"Cannot resolve expert linear names for MoE block {type(module).__name__!r} "
+        f"(model type: {model_type!r}). Register a ModelSpec with moe_variants for "
+        "this model under modelopt/torch/models/."
+    )
 
 
 def set_expert_quantizer_amax(
@@ -1186,12 +1176,7 @@ def set_expert_quantizer_amax(
     return uncalibrated_modules
 
 
-# Gate/up naming pairs for standard (unfused) MoE architectures.
-# Fused variants (gate_up_proj, linear_fc1) already share a single quantizer and need no sync.
-_GATE_UP_PAIRS = [("gate_proj", "up_proj"), ("w1", "w3")]
-
-
-def sync_moe_gate_up_amax(model: nn.Module) -> int:
+def sync_moe_gate_up_amax(model: nn.Module, model_type: str | None = None) -> int:
     """Take element-wise max of gate and up weight quantizer amaxes per expert.
 
     Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
@@ -1204,17 +1189,39 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
     (e.g. Qwen MoE, DeepSeek). Models with already-fused gate_up_proj
     (e.g. Llama4, GptOss) are unaffected.
 
+    ``model_type`` is the root model's HF model type; callers passing a sub-tree
+    (layerwise export passes one decoder layer) must supply it, since it cannot be
+    resolved from a decoder layer.
+
     Returns:
         Number of expert gate/up pairs whose amaxes were synced.
     """
+    if model_type is None:
+        model_type = hf_model_type(model)
     synced = 0
     for _, sub_module in model.named_modules():
-        if not (is_moe(sub_module) and hasattr(sub_module, "experts")):
+        if not (is_moe(sub_module, model_type) and hasattr(sub_module, "experts")):
             continue
         if not hasattr(sub_module.experts, "__iter__"):
             continue
+        # The model's own spec gives the exact pair, and a variant that declares no
+        # pair (non-gated or already-fused experts) needs no sync at all.
+        #
+        # Blocks of unregistered families still reach this loop: quantization admits
+        # MoE blocks structurally (see _is_sparse_sequaential_moe_block), so models
+        # like Olmoe/Jamba/MiniMax get here without a ModelSpec. Those fall back to
+        # every declared gate/up naming, which is what this function did before the
+        # registry existed. Skipping them instead would silently leave the two halves
+        # of the fused gate_up_proj on inconsistent weight_scale_2 -- exactly the
+        # corruption this function exists to prevent.
+        variant = match_moe_block(sub_module, model_type)
+        if variant is not None and variant.gate_up_pair is None:
+            continue
+        candidate_pairs = (
+            (variant.gate_up_pair,) if variant is not None else list_all_possible("gate_up_pairs")
+        )
         for expert in sub_module.experts:
-            for gate_name, up_name in _GATE_UP_PAIRS:
+            for gate_name, up_name in candidate_pairs:
                 gate_linear = getattr(expert, gate_name, None)
                 up_linear = getattr(expert, up_name, None)
                 if gate_linear is None or up_linear is None:

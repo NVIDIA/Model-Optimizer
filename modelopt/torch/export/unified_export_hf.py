@@ -32,6 +32,8 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type
+
 from .diffusers_utils import build_layerwise_quant_metadata, pad_nvfp4_weights, swizzle_nvfp4_scales
 
 try:
@@ -434,6 +436,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
     model_type = type(model).__name__.lower()
+    model_hf_type = hf_model_type(model)
     module_names = set()
 
     # NVFP4 SVDQuant does not need pre-quant scale fusion (either into previous linear or layernorm) because
@@ -449,12 +452,12 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         module_names.add(name)
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and (
+        if is_moe(module, model_hf_type) and (
             quantization_format is not QUANTIZATION_NONE
             and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
-            grouped_experts = get_experts_list(module, model_type)
+            grouped_experts = get_experts_list(module, model_hf_type)
             for modules in grouped_experts:
                 with fsdp2_aware_weight_update(model, modules):
                     preprocess_linear_fusion(modules, resmooth_only=True)
@@ -843,15 +846,26 @@ def _prepare_moe_inputs(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool,
+    model_type: str | None = None,
 ) -> None:
     """Handle input quantizers of experts that are not calibrated.
 
     Each MoE block is dispatched by its experts container to the matching preparation
     handler.
+
+    ``model_type`` is the root model's HF model type. Callers that pass a sub-tree
+    rather than the root model (layerwise export passes one decoder layer) must supply
+    it, since a decoder layer carries no reliable ``config.model_type`` of its own and
+    the expert-naming lookup would otherwise fail to resolve.
     """
-    prepare_ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    prepare_ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=model_type if model_type is not None else hf_model_type(model),
+    )
     for name, sub_module in model.named_modules():
-        if is_moe(sub_module) and hasattr(sub_module, "experts"):
+        if is_moe(sub_module, prepare_ctx.model_type) and hasattr(sub_module, "experts"):
             handler = PrepareMoEInputsRegistry.match(sub_module.experts)
             if handler is None:
                 # Unsupported MoE model structure
@@ -911,7 +925,12 @@ def _process_quantized_modules(
             If True, modules with base_layer attribute are skipped.
     """
     # No per-module dedup cache: tied duplicates are dropped by name in postprocess_state_dict.
-    ctx = ExportContext(model=model, dtype=dtype, is_modelopt_qlora=is_modelopt_qlora)
+    ctx = ExportContext(
+        model=model,
+        dtype=dtype,
+        is_modelopt_qlora=is_modelopt_qlora,
+        model_type=hf_model_type(model),
+    )
     fsdp_module_to_reshard = None
 
     for name, sub_module in model.named_modules():

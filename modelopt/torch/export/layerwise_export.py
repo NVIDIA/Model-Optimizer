@@ -25,6 +25,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from modelopt.torch.models import hf_model_type
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.utils.core_utils import (
     enable_weight_access_and_writeback,
@@ -167,9 +168,10 @@ class LayerwiseExporter:
         # Splits regroup tensors across the whole state dict; no per-layer pass reverses that.
         _assert_no_split_rules(model)
 
+        model_type = hf_model_type(model)
         for _, sub_module in model.named_modules():
             if (
-                is_moe(sub_module)
+                is_moe(sub_module, model_type)
                 and hasattr(sub_module, "experts")
                 and PrepareMoEInputsRegistry.match(sub_module.experts) is None
             ):
@@ -193,7 +195,9 @@ class LayerwiseExporter:
             if idx is not None:
                 self._layer_names[idx] = name
 
-        self._ctx = ExportContext(model=model, dtype=_resolve_export_dtype(model, dtype))
+        self._ctx = ExportContext(
+            model=model, dtype=_resolve_export_dtype(model, dtype), model_type=model_type
+        )
 
         self._export_dir = Path(export_dir)
         self._export_dir.mkdir(parents=True, exist_ok=True)
@@ -244,7 +248,9 @@ class LayerwiseExporter:
 
         # Order matters at both seams: scales derive from amax, so they must be final
         # before packing, and the restack consumes packed per-expert tensors.
-        _prepare_moe_inputs(layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora)
+        _prepare_moe_inputs(
+            layer_module, self._ctx.dtype, self._ctx.is_modelopt_qlora, self._ctx.model_type
+        )
         self._unify_shared_quantization_params(layer_module, layer_inputs)
 
         for sub_name, sub_mod in layer_module.named_modules():
@@ -271,7 +277,7 @@ class LayerwiseExporter:
         # FP8-attention/NVFP4-expert layer would report fp8 and skip fusing entirely.
         if _module_formats(layer_module) - FUSION_FREE_FORMATS:
             self._fuse_shared_input_scales(layer_module, layer_inputs)
-        sync_moe_gate_up_amax(layer_module)
+        sync_moe_gate_up_amax(layer_module, self._ctx.model_type)
 
     def _fuse_shared_input_scales(self, layer_module: nn.Module, layer_inputs: list | None) -> None:
         """Rediscover the groups that share an input, on real activations, and fuse them."""
