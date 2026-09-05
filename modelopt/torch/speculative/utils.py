@@ -410,6 +410,13 @@ class AcceptanceRateValidation:
             prompt: text prompt (alternative to input_ids)
             input_ids: tokenized input
             steps: number of draft tokens per step
+
+        Returns:
+            ``(input_ids, ar, length_histogram)`` where ``length_histogram`` maps
+            acceptance length (tokens emitted in one step, including the target's
+            bonus token) to how often it occurred. The histogram is what a
+            per-position acceptance profile is built from; ``ar`` alone cannot
+            express the shape.
         """
         if input_ids is None:
             input_ids = self.tokenize(prompt)
@@ -421,6 +428,12 @@ class AcceptanceRateValidation:
         max_len = isl + osl
         total_accepted = 0
         cnt = 0
+        # Per-step acceptance-length histogram: {tokens emitted in a step: count}.
+        # The loop below already breaks on first rejection, so it is measuring the
+        # longest-prefix distribution -- summing it into a mean throws that away, and
+        # the mean alone cannot say *where* acceptance falls off. Consumers index by
+        # draft position (see modelopt/torch/export speculation_profile transport).
+        length_histogram: dict[int, int] = {}
 
         while input_ids.shape[1] < max_len:
             cnt += 1
@@ -435,6 +448,7 @@ class AcceptanceRateValidation:
 
             if draft_tokens is None or input_ids.shape[1] >= max_len:
                 total_accepted += 1  # base token
+                length_histogram[1] = length_histogram.get(1, 0) + 1
                 continue
 
             # Build candidate sequence with draft tokens appended
@@ -467,9 +481,12 @@ class AcceptanceRateValidation:
                     break
 
             total_accepted += 1 + accepted  # base token + accepted drafts
+            # Length counts the target's bonus token, matching how specdec_bench and
+            # the model cards define acceptance length.
+            length_histogram[1 + accepted] = length_histogram.get(1 + accepted, 0) + 1
 
         ar = total_accepted / cnt if cnt > 0 else 0.0
-        return input_ids, ar
+        return input_ids, ar, dict(sorted(length_histogram.items()))
 
 
 @contextlib.contextmanager
