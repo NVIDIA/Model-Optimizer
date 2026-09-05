@@ -57,11 +57,15 @@ def validate_ar(
         device: Device to run on.
 
     Returns:
-        List of (category, ar) tuples.
+        ``(results, length_histogram)`` -- a list of ``(category, ar)`` tuples and the
+        pooled per-step acceptance-length histogram across all samples. The histogram
+        is what a per-position ``speculation_profile.json`` is built from; the scalar
+        ARs alone cannot express where acceptance falls off.
     """
     validator = HFARValidation(model, tokenizer)
     num_samples = min(num_samples, len(ds))
     results = []
+    length_histogram: dict[int, int] = {}
     failures = 0
     for i in tqdm(range(num_samples), desc="Validating AR"):
         prompt = ds[i]["prompt"][0]
@@ -76,14 +80,76 @@ def validate_ar(
             input_ids = input_ids.to(device)
 
         try:
-            _, ar = validator.validate_online(osl, input_ids=input_ids, steps=steps)
+            _, ar, hist = validator.validate_online(osl, input_ids=input_ids, steps=steps)
             results.append((category, ar))
+            for length, count in hist.items():
+                length_histogram[length] = length_histogram.get(length, 0) + count
         except Exception as e:
             failures += 1
             print(f"  WARNING: sample {i} ({category}) failed: {e}")
     if failures:
         print(f"WARNING: {failures}/{num_samples} samples failed during AR validation")
-    return results
+    return results, dict(sorted(length_histogram.items()))
+
+
+def _write_speculation_profile(
+    path, length_histogram, num_speculative_tokens, per_request_mean, osl, num_samples
+):
+    """Emit the same speculation_profile.json schema specdec_bench produces.
+
+    Two producers, one schema: this one runs inside the training loop with no serving
+    engine, so acceptance can be tracked as a checkpoint trains; specdec_bench measures
+    the deployed engine. Consumers should not care which produced a profile.
+
+    The conversion is reimplemented here rather than imported. specdec_bench's copy is
+    deliberately importable without modelopt (it runs in engine containers where
+    modelopt is absent -- the MiniMax-M2.7 DFlash run recorded modelopt_version: null),
+    and importing *into* modelopt from examples/ is not possible either. The shared
+    piece is small and pinned by tests on both sides; if a third producer appears, that
+    is the point to extract it properly.
+    """
+    import json
+
+    total = sum(length_histogram.values())
+    if total == 0:
+        # Every sample failed, or osl was too small to produce a single decode step.
+        # Writing measured=true here would advertise a draft that accepts nothing,
+        # which is indistinguishable from a genuinely terrible draft.
+        print("  WARNING: no decode steps observed; skipping speculation profile")
+        return
+    # Marginal[i] = P(at least i+1 drafts accepted). Acceptance length counts the
+    # target's bonus token, so draft position i corresponds to length i+2.
+    marginal, conditional = [], []
+    for i in range(num_speculative_tokens):
+        at_least = sum(c for length, c in length_histogram.items() if length >= i + 2)
+        prev = sum(c for length, c in length_histogram.items() if length >= i + 1)
+        marginal.append(at_least / total if total else 0.0)
+        conditional.append(at_least / prev if prev else 0.0)
+    # Per-step mean, matching what the vectors describe -- not the per-request mean,
+    # which weights a short request the same as a long one.
+    per_step_mean = (
+        sum(length * c for length, c in length_histogram.items()) / total if total else 0.0
+    )
+
+    profile = {
+        "schema_version": "1.0",
+        "measured": True,
+        "producer": "ar_validate",
+        "num_speculative_tokens": num_speculative_tokens,
+        "conditional_accept_rates": [round(x, 6) for x in conditional],
+        "marginal_accept_rates": [round(x, 6) for x in marginal],
+        "mean_accept_length": round(per_step_mean, 6),
+        "mean_accept_length_per_request": round(per_request_mean, 6),
+        "acceptance_length_histogram": length_histogram,
+        "measurement_conditions": {
+            "dataset": "mt_bench",
+            "osl": osl,
+            "num_samples": num_samples,
+            "validation": "online (ground truth recomputed after each accepted token)",
+        },
+    }
+    with open(path, "w") as f:
+        json.dump(profile, f, indent=2)
 
 
 def main():
@@ -94,6 +160,16 @@ def main():
     parser.add_argument("--osl", type=int, default=32, help="Output sequence length")
     parser.add_argument("--num_samples", type=int, default=80, help="Number of samples")
     parser.add_argument("--per_category", action="store_true", help="Report per-category AR")
+    parser.add_argument(
+        "--output_json",
+        type=str,
+        default=None,
+        help=(
+            "Write a speculation_profile.json here. Without it this script is "
+            "print-only, so nothing downstream -- CI regression gating, the export "
+            "step, a deployment -- can consume what it measured."
+        ),
+    )
     parser.add_argument(
         "--ar_lower_bound",
         type=float,
@@ -113,7 +189,7 @@ def main():
     model = accelerator.prepare(model)
 
     ds = load_dataset("HuggingFaceH4/mt_bench_prompts")["train"]
-    results = validate_ar(
+    results, length_histogram = validate_ar(
         model,
         tokenizer,
         ds,
@@ -139,6 +215,19 @@ def main():
         print(f"  {'ALL':>12}: {avg_ar:.4f}")
         print(f"  Samples: {len(results)}")
 
+        if args.output_json:
+            _write_speculation_profile(
+                args.output_json,
+                length_histogram,
+                num_speculative_tokens=args.steps,
+                per_request_mean=avg_ar,
+                osl=args.osl,
+                num_samples=len(results),
+            )
+            print(f"  Wrote speculation profile to {args.output_json}")
+
+        # Bound check last: an out-of-bounds AR is still worth having on disk, and
+        # raising first would discard the measurement that explains the failure.
         if args.ar_lower_bound and avg_ar < args.ar_lower_bound:
             raise ValueError(f"AR {avg_ar:.4f} is below lower bound {args.ar_lower_bound}.")
 
