@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import json
+import tempfile
 from contextlib import nullcontext
 
 import numpy as np
@@ -24,6 +26,7 @@ import torch
 import torch.nn as nn
 from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
 
+import modelopt.torch.quantization as mtq
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
 from modelopt.torch._deploy.utils import (
     OnnxBytes,
@@ -55,6 +58,57 @@ _DYNAMO_REPRESENTATIVE_MODELS = {
 deploy_benchmark_dynamo = {
     k: v for k, v in deploy_benchmark_dynamo.items() if k in _DYNAMO_REPRESENTATIVE_MODELS
 }
+
+
+def _make_fp8_model(source_dtype, kind="fp8"):
+    if kind == "format":
+        model = nn.Sequential(*(nn.Linear(128, 128, bias=False) for _ in range(2)))
+        sample_input = torch.ones(1, 128, dtype=source_dtype)
+        config = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+        config["quant_cfg"].extend(
+            [
+                {
+                    "quantizer_name": "1.weight_quantizer",
+                    "cfg": {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                },
+                {"quantizer_name": "1.input_quantizer", "enable": False},
+            ]
+        )
+    else:
+        model = nn.Sequential(
+            nn.Conv2d(1, 1, 1, bias=False),
+            nn.Flatten(),
+            nn.Linear(4, 4, bias=False),
+        )
+        sample_input = torch.ones(1, 1, 2, 2, dtype=source_dtype)
+        config = mtq.FP8_DEFAULT_CFG
+    model = model.eval().to(source_dtype)
+    if kind != "format":
+        model.register_buffer("unused_fp32_buffer", torch.ones(1))
+        if kind == "parameters":
+            model.register_parameter("unused_fp32_parameter", nn.Parameter(torch.ones(1)))
+    quantized_model = mtq.quantize(
+        model,
+        config,
+        forward_loop=lambda quantized_model: quantized_model(sample_input),
+    )
+    if kind != "format":
+        # Keep calibration nonzero while exercising Conv scale underflow during export.
+        with torch.no_grad():
+            quantized_model[0].weight.fill_(1e-38 if source_dtype == torch.bfloat16 else 1.0)
+    return quantized_model, sample_input
+
+
+def _export_fp8_model(source_dtype, weights_dtype):
+    model, sample_input = _make_fp8_model(source_dtype)
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
+        model,
+        (sample_input,),
+        weights_dtype=weights_dtype,
+        onnx_opset=23,
+    )
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    return onnx.load_model_from_string(onnx_bytes_obj.get_onnx_model_file_bytes())
 
 
 @pytest.mark.parametrize(
@@ -155,6 +209,66 @@ def test_onnx_export_and_inputs(model: BaseDeployModel):
             torch.allclose(ot, torch.from_numpy(oo).to(ot))
             for ot, oo in zip(out_torch_flat, out_ort2_flat)
         )
+
+
+@pytest.mark.parametrize(
+    ("source_dtype", "weights_dtype", "expected_onnx_dtype"),
+    [
+        (torch.bfloat16, "bf16", onnx.TensorProto.BFLOAT16),
+        (torch.float32, "fp16", onnx.TensorProto.FLOAT16),
+    ],
+)
+def test_fp8_export_with_supported_weights_dtype(source_dtype, weights_dtype, expected_onnx_dtype):
+    exported_model = _export_fp8_model(source_dtype, weights_dtype)
+
+    onnx.checker.check_model(exported_model, full_check=True)
+    assert {"TRT_FP8QuantizeLinear", "TRT_FP8DequantizeLinear"}.isdisjoint(
+        node.op_type for node in exported_model.graph.node
+    )
+    initializer_by_name = {
+        initializer.name: initializer for initializer in exported_model.graph.initializer
+    }
+    fp8_weight_dq_nodes = [
+        node
+        for node in exported_model.graph.node
+        if node.op_type == "DequantizeLinear"
+        and node.input[0] in initializer_by_name
+        and initializer_by_name[node.input[0]].data_type == onnx.TensorProto.FLOAT8E4M3FN
+    ]
+    assert len(fp8_weight_dq_nodes) == 2
+    for node in fp8_weight_dq_nodes:
+        assert initializer_by_name[node.input[1]].data_type == expected_onnx_dtype
+        assert {0x7F, 0xFF}.isdisjoint(initializer_by_name[node.input[0]].raw_data)
+    graph_io = [*exported_model.graph.input, *exported_model.graph.output]
+    assert all(value.type.tensor_type.elem_type == expected_onnx_dtype for value in graph_io)
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_dtype", "weights_dtype", "error_type", "error"),
+    [
+        ("fp8", torch.float32, "bf16", AssertionError, "torch.float32"),
+        ("fp8", torch.bfloat16, "fp16", ValueError, "torch.bfloat16"),
+        ("parameters", torch.bfloat16, "bf16", AssertionError, "torch.bfloat16, torch.float32"),
+        ("format", torch.bfloat16, "bf16", AssertionError, "torch.bfloat16"),
+    ],
+    ids=["fp32-to-bf16", "bf16-to-fp16", "mixed-parameters", "mixed-format"],
+)
+def test_fp8_export_rejects_unsupported_dtype_conversion(
+    kind, source_dtype, weights_dtype, error_type, error, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    model, sample_input = _make_fp8_model(source_dtype, kind)
+    with pytest.raises(
+        error_type,
+        match=rf"Converting .* to {weights_dtype.upper()}.*source parameter dtypes: {error}",
+    ):
+        get_onnx_bytes_and_metadata(
+            model,
+            (sample_input,),
+            weights_dtype=weights_dtype,
+            onnx_opset=23,
+        )
+    assert not any(tmp_path.iterdir())
 
 
 class SingleArgModel(nn.Module):
