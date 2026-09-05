@@ -280,6 +280,61 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_lilicorr_w_ce: float = ModeloptField(
+        default=-1.0,
+        description=(
+            "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
+            "per-slot conditional. The objective is "
+            "loss = dflash_loss + w_ce*CE + w_margin*hinge + w_pen*penalty. The weights are "
+            "absolute — there is no outer multiplier scaling the three terms as a group — so "
+            "each is the coefficient with which its term enters the total, and "
+            "`loss == origin_loss + lilicorr_loss` holds exactly. Both halves and all three "
+            "weights are reported in the `lilicorr_metrics` dict the model attaches to its "
+            "forward output, so a consumer of those metrics can check the identity per step "
+            "and read which composition produced a checkpoint. The three weights are validated "
+            "all-or-nothing (a negative value means unset): a config that sets some but not "
+            "others is rejected rather than inheriting a default composition. Shipped "
+            "variants: 0.25 ('base') and 0.125 ('margin'). "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_margin: float = ModeloptField(
+        default=-1.0,
+        description=(
+            "LiLiCorr only: absolute weight of the per-slot max-margin (hinge) term, which "
+            "pushes the ground-truth candidate's node potential above the best competing "
+            "candidate by dflash_lilicorr_margin. 0 disables the term (the 'base' variant); "
+            "the 'margin' variant splits the cross-entropy weight convexly into 0.125/0.125. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_margin: float = ModeloptField(
+        default=-1.0,
+        description=(
+            "LiLiCorr only: hinge width for the max-margin term, in units of the log-potential "
+            "(itself bounded by lilicorr_logit_scale). Required when "
+            "dflash_lilicorr_w_margin > 0 and unused otherwise; the shipped 'margin' variant "
+            "uses 2.0. Not one of the three term weights, so it is exempt from their "
+            "all-or-nothing validation. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
+    dflash_lilicorr_w_pen: float = ModeloptField(
+        default=-1.0,
+        description=(
+            "LiLiCorr only: absolute weight of the target-weighted distractor penalty, the "
+            "reranker's expected target-rejection over its own candidate distribution. Each "
+            "competing candidate is weighted by the target model's logit gap to the ground "
+            "truth, so candidates the target finds plausible are penalized lightly and "
+            "confident wrong ones hard. Requires the target's logits, hence online training "
+            "(dflash_offline=False). Both shipped variants use 0.25. "
+            "Ignored unless dflash_architecture_config.projector_type == 'lilicorr'."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_dpace_alpha(self) -> "DFlashConfig":
         # Validate at construction regardless of the active objective, so a bad alpha

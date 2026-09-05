@@ -762,7 +762,14 @@ class HFDFlashModel(DFlashModel):
         return attn_mask
 
     def _compute_loss(
-        self, logits, input_ids, anchor_positions, block_keep_mask, loss_mask, base_logits=None
+        self,
+        logits,
+        input_ids,
+        anchor_positions,
+        block_keep_mask,
+        loss_mask,
+        base_logits=None,
+        draft_hidden=None,
     ):
         """Compute weighted cross-entropy (or KD) loss and accuracy.
 
@@ -773,6 +780,8 @@ class HFDFlashModel(DFlashModel):
             block_keep_mask: Valid block mask [B, N].
             loss_mask: Token-level loss mask [B, seq_len].
             base_logits: Base model logits for KD loss [B, seq_len, vocab], or None for CE.
+            draft_hidden: Draft hidden states [B, N*block_size, H] behind ``logits``.
+                Unused here; passed for variants whose head consumes them.
 
         Returns:
             (loss, accuracy) tuple.
@@ -1044,14 +1053,31 @@ class HFDFlashModel(DFlashModel):
 
         # 6. Compute loss and accuracy
         logits = self._base_model_lm_head(hidden)
-        loss, accuracy = self._compute_loss(
-            logits,
-            input_ids,
-            anchor_positions,
-            block_keep_mask,
-            loss_mask,
-            base_outputs.logits if self.dflash_self_logit_distillation else None,
-        )
+        # Published on the instance rather than added to _compute_loss's signature.
+        # _compute_loss is an override point that every draft variant already
+        # specialises, so widening its parameter list here would break each of them at
+        # once, for the sake of two tensors that only one variant reads. Set
+        # immediately before the call and valid only for its duration.
+        #
+        # target_logits is populated unconditionally, and it is free: base_outputs.logits
+        # is computed either way. A variant whose loss needs the target's distribution
+        # outside the KD term cannot recover it once the argument below has narrowed to
+        # the self-logit-distillation switch.
+        self._dflash_loss_target_hidden = target_hidden
+        self._dflash_loss_target_logits = base_outputs.logits
+        try:
+            loss, accuracy = self._compute_loss(
+                logits,
+                input_ids,
+                anchor_positions,
+                block_keep_mask,
+                loss_mask,
+                base_outputs.logits if self.dflash_self_logit_distillation else None,
+                draft_hidden=hidden,
+            )
+        finally:
+            self._dflash_loss_target_hidden = None
+            self._dflash_loss_target_logits = None
 
         return ModelOutput(
             loss=loss,

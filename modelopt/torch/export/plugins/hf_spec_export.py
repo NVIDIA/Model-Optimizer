@@ -520,6 +520,47 @@ class DominoExporter(DFlashExporter):
         return config
 
 
+class LiLiCorrExporter(DFlashExporter):
+    """Draft model exporter for LiLiCorr (DFlash backbone + candidate-lattice reranker).
+
+    Same z-lab-compatible format as DFlash, plus the reranker weights (``lilicorr.*``,
+    already captured by the inherited ``dflash_module.`` stripping) and the config fields
+    the serving loader rebuilds the head from.
+
+    ``architectures`` is the serving router: a checkpoint that declares
+    ``DFlashDraftModel`` loads as plain DFlash and silently ignores the head, which reads
+    as a small believable acceptance delta rather than as an error. Every geometry field
+    is emitted for the same reason — ``lilicorr_logit_scale`` and ``lilicorr_vector_eps``
+    change the score without changing any tensor shape, so a serving default guessed in
+    their absence would build a head that loads cleanly and scores a different function.
+    """
+
+    def _export_config(self):
+        """Extend the DFlash config with the LiLiCorr head fields."""
+        config = super()._export_config()
+        draft_config = self.model.dflash_config
+        head = self.model.dflash_module.lilicorr
+
+        config["architectures"] = ["LiLiCorrDraftModel"]
+        config["dflash_config"].update(
+            {
+                "projector_type": getattr(draft_config, "projector_type", "lilicorr"),
+                "lilicorr_enabled": True,
+                # Read off the built head rather than the config dict, so the exported
+                # geometry is the geometry of the weights in the same directory.
+                "lilicorr_candidate_topk": head.candidate_topk,
+                "lilicorr_hidden_size": head.hidden_size,
+                "lilicorr_num_layers": len(head.layers),
+                "lilicorr_num_heads": head.num_heads,
+                "lilicorr_mlp_ratio": head.mlp_ratio,
+                "lilicorr_factor_dim": head.factor_dim,
+                "lilicorr_vector_eps": head.vector_eps,
+                "lilicorr_logit_scale": head.logit_scale,
+            }
+        )
+        return config
+
+
 class DSparkExporter(DFlashExporter):
     """Draft model exporter for DSpark (DFlash backbone + sequential Markov head).
 
