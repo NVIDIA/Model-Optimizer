@@ -280,6 +280,24 @@ class DFlashConfig(ModeloptBaseConfig):
         ),
     )
 
+    dflash_fp32_master_weights: bool = ModeloptField(
+        default=False,
+        description=(
+            "Keep the draft's parameters in fp32 while training under bf16 autocast, i.e. "
+            "classic mixed precision with fp32 master weights. Matmuls still run in bf16, "
+            "so the cost is memory (about 12 bytes per parameter for the weight plus Adam's "
+            "two moments, instead of 6), not speed.\n\n"
+            "The parameter dtype decides the OPTIMIZER's dtype, because AdamW allocates its "
+            "moments with `zeros_like(p)`, and that is where bf16 hurts most. Adam's second "
+            "moment `v` is a running average of the squared gradient. At beta2=0.999 a "
+            "single step can change `v` by at most 0.1%, but the smallest change bf16 can "
+            "represent near `v` is about 0.4%. Every DECREASE therefore rounds back to the "
+            "same number, `v` can only grow, and since the update is divided by `sqrt(v)` "
+            "the effective step size only shrinks -- from step 1, at any learning rate.\n\n"
+            "Applies to every projector_type. Off by default because of the memory cost."
+        ),
+    )
+
     dflash_lilicorr_w_ce: float = ModeloptField(
         default=-1.0,
         description=(

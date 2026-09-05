@@ -388,6 +388,8 @@ class HFDFlashModel(DFlashModel):
         """Initialize DFlash draft module."""
         super().modify(config)
 
+        self.dflash_fp32_master_weights = getattr(config, "dflash_fp32_master_weights", False)
+
         base_config = self._base_llm_config
         # Use Qwen3Config (not generic PretrainedConfig) so rope_parameters is
         # auto-populated from rope_theta. DFlash draft uses Qwen3 components.
@@ -509,6 +511,49 @@ class HFDFlashModel(DFlashModel):
             base_device = next(self._base_model.layers[-1].parameters()).device
         if base_device.type != "meta":
             self.dflash_module.to(self._base_model.dtype).to(base_device)
+            if self.dflash_fp32_master_weights:
+                # Deliberately AFTER the base-dtype match, which is also what moves the
+                # module to the right device: this stays a pure dtype change on top of it.
+                #
+                # And necessarily BEFORE the Trainer builds the optimizer, because AdamW
+                # allocates its moments with `zeros_like(p)`. A cast afterwards would fix
+                # the parameters and leave the moments in bf16 -- the half that cannot
+                # represent its own updates. See the field's description.
+                #
+                # Only the draft is promoted. The frozen base keeps its dtype: it has no
+                # trainable parameters and no optimizer state, so upcasting it would double
+                # its memory for nothing and change the hidden states the draft is trained
+                # against.
+                trainable = {p.dtype for p in self.dflash_module.parameters() if p.requires_grad}
+                if trainable == {torch.float32}:
+                    logger.info("DFlash draft is already fp32; fp32 master weights are a no-op.")
+                else:
+                    self.dflash_module.float()
+                    # Logged, not assumed: "requested" and "happened" are different claims,
+                    # and the optimizer dtype this decides is not visible until step 1.
+                    logger.info(
+                        "DFlash draft promoted to fp32 master weights (was %s); Adam moments "
+                        "will follow. Frozen base left at %s.",
+                        ", ".join(sorted(str(d) for d in trainable)),
+                        self._base_model.dtype,
+                    )
+            # Build the rotary embedding NOW rather than on the draft's first forward.
+            #
+            # `_maybe_init_rotary_emb` creates the non-persistent `inv_freq` buffer lazily,
+            # and the DFlash forward has a degenerate early return above that call: a rank
+            # whose batch has no valid anchor returns a dummy loss without running the draft
+            # at all. That rank ends the step with one fewer buffer than the ranks that did
+            # run it, and DDP's `broadcast_buffers` then coalesces buffer lists of different
+            # flattened sizes across ranks -- which does not raise, it hangs. It is
+            # rank-count probabilistic (it needs some rank to draw an all-masked sample in
+            # the same step), so small runs pass and large ones hang after a few steps.
+            #
+            # Building it here makes every rank's buffer list identical for the whole run,
+            # independent of which samples it draws. Numerically inert: `inv_freq` is a pure
+            # function of the config, and being non-persistent it is absent from the state
+            # dict either way. Kept inside the non-meta guard so the meta-device case the
+            # laziness exists for still defers, exactly as before.
+            self.dflash_module._maybe_init_rotary_emb(device=base_device)
 
         # Delete base model layers for offline training (save memory)
         if self.dflash_offline:

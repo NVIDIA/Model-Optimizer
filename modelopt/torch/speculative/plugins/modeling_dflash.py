@@ -41,10 +41,12 @@ Draft model components use Qwen3 (MLP, RMSNorm, RotaryEmbedding) from
 The draft architecture is independent of the target model.
 """
 
+import functools
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from torch import nn
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP as _MLP_CLS  # noqa: N814
@@ -372,6 +374,23 @@ class DFlashModule(nn.Module):
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
 
+        # Activation checkpointing for the DRAFT, which is the only trainable part of a
+        # DFlash setup. `PreTrainedModel._set_gradient_checkpointing` walks `self.modules()`
+        # and flips this attribute on every module that declares it, so declaring it here is
+        # what makes `training.gradient_checkpointing` reach the draft at all: without it the
+        # flag lands only on the frozen target, which runs under `no_grad` and stores no
+        # activations, and so appears enabled while saving nothing.
+        #
+        # The default func is NON-REENTRANT on purpose. HuggingFace's own default is
+        # `use_reentrant=True`, which loses track of unused parameters and can hang under
+        # `ddp_find_unused_parameters=True`. A caller who goes through
+        # `gradient_checkpointing_enable` overwrites this with their own kwargs, so pass
+        # `gradient_checkpointing_kwargs={"use_reentrant": False}` there.
+        self.gradient_checkpointing = False
+        self._gradient_checkpointing_func = functools.partial(
+            torch.utils.checkpoint.checkpoint, use_reentrant=False
+        )
+
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's
         # automatic _init_weights walk doesn't reach these new layers.
@@ -404,6 +423,18 @@ class DFlashModule(nn.Module):
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in self.layers:
-            hidden_states = layer(hidden_states, target_hidden, position_embeddings, attention_mask)
+            if self.gradient_checkpointing and self.training:
+                # `layer.__call__`, not `layer.forward`, so module hooks still run.
+                hidden_states = self._gradient_checkpointing_func(
+                    layer.__call__,
+                    hidden_states,
+                    target_hidden,
+                    position_embeddings,
+                    attention_mask,
+                )
+            else:
+                hidden_states = layer(
+                    hidden_states, target_hidden, position_embeddings, attention_mask
+                )
 
         return self.norm(hidden_states)

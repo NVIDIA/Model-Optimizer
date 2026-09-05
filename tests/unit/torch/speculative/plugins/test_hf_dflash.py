@@ -484,29 +484,45 @@ class TestDFlashSaveRestore:
 
 
 class TestDFlashLazyRotaryEmb:
-    """Test lazy rotary embedding initialization (matching EAGLE3 pattern).
+    """Rotary embedding creation: eager on a real device, still lazy on meta.
 
-    rotary_emb is not created in __init__ — it's lazily initialized on first
-    forward call to avoid meta-tensor issues during from_pretrained restore.
+    The laziness exists for one reason — ``__init__`` runs on the meta device during
+    ``from_pretrained`` restore, and building ``inv_freq`` there produces a meta buffer.
+    That reason only applies on meta, and deferring everywhere else costs a correctness
+    property under DDP: ``inv_freq`` is non-persistent, so a rank whose batch has no
+    valid anchor returns before running the draft and ends the step one buffer short.
+    ``broadcast_buffers`` then coalesces mismatched buffer lists across ranks and hangs
+    rather than raising, which single-node runs never reproduce.
+
+    So the buffer is built during ``modify()`` when the base model is on a real device,
+    and still deferred when it is on meta.
     """
 
-    def test_rotary_emb_not_created_in_init(self):
-        """rotary_emb should not exist after convert (before forward)."""
+    def test_rotary_emb_created_during_convert_on_a_real_device(self):
+        """On a real device the buffer exists after convert, before any forward."""
         model = get_tiny_llama(num_hidden_layers=4)
+        config = get_dflash_config()
+        mtsp.convert(model, [("dflash", config)])
+        assert hasattr(model.dflash_module, "rotary_emb")
+        assert not any(b.is_meta for b in model.dflash_module.rotary_emb.buffers())
+
+    def test_rotary_emb_deferred_on_meta(self):
+        """On meta the buffer is still deferred, which is what the laziness is for."""
+        model = get_tiny_llama(num_hidden_layers=4).to("meta")
         config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
         assert not hasattr(model.dflash_module, "rotary_emb")
 
-    def test_rotary_emb_created_on_forward(self):
-        """rotary_emb should be created on first forward call."""
+    def test_rotary_emb_init_is_idempotent(self):
+        """A later _maybe_init_rotary_emb must not replace an existing buffer."""
         model = get_tiny_llama(num_hidden_layers=4)
         config = get_dflash_config()
         mtsp.convert(model, [("dflash", config)])
 
         dflash_mod = model.dflash_module
-        # Call _maybe_init_rotary_emb directly
+        first = dflash_mod.rotary_emb
         dflash_mod._maybe_init_rotary_emb(device="cpu")
-        assert hasattr(dflash_mod, "rotary_emb")
+        assert dflash_mod.rotary_emb is first
         assert not any(b.is_meta for b in dflash_mod.rotary_emb.buffers())
 
 
