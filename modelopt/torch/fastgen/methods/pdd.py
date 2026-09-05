@@ -517,6 +517,7 @@ class PDDPipeline:
         self,
         state: torch.Tensor,
         *,
+        grid: torch.Tensor,
         condition: Any = None,
         negative_condition: Any = None,
         model_kwargs: Mapping[str, Any] | None = None,
@@ -531,7 +532,6 @@ class PDDPipeline:
         kwargs = self._model_kwargs(model_kwargs)
         state_fp32 = state.to(torch.float32)
         batch_size = state.shape[0]
-        grid = self.time_grid(state.device)
         time_n = grid[n]
         broadcast_shape = (batch_size,) + (1,) * (state.ndim - 1)
 
@@ -687,6 +687,7 @@ class PDDPipeline:
         state = add_noise(data.to(torch.float32), noise_fp32, grid[n])
         loss, metrics, _ = self._compute_loss_from_state(
             state,
+            grid=grid,
             condition=condition,
             negative_condition=negative_condition,
             model_kwargs=model_kwargs,
@@ -712,6 +713,7 @@ class PDDPipeline:
         if type(collect_metrics) is not bool:
             raise TypeError("collect_metrics must be a bool.")
         self._validate_state(state, name="state")
+        grid = self.time_grid(state.device)
         n, k = self._resolve_indices(
             batch_size=state.shape[0],
             device=state.device,
@@ -721,6 +723,7 @@ class PDDPipeline:
         )
         loss, metrics, next_state = self._compute_loss_from_state(
             state,
+            grid=grid,
             condition=condition,
             negative_condition=negative_condition,
             model_kwargs=model_kwargs,

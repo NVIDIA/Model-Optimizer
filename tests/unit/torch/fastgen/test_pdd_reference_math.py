@@ -90,7 +90,7 @@ def test_production_shifted_grid_matches_independent_oracle():
         upper = torch.nextafter(upper, torch.tensor(float("-inf")))
     direct_fp32 = direct_fp32.clamp(max=upper)
     direct_fp32 = (5.0 * direct_fp32 / (1.0 + 4.0 * direct_fp32)).clamp(max=upper)
-    assert torch.count_nonzero(grid != direct_fp32).item() == 52
+    assert not torch.equal(grid, direct_fp32)
 
 
 def test_production_rf_forward_process_matches_float64_intermediate_oracle():

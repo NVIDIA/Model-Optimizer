@@ -80,6 +80,11 @@ def test_pdd_config_accepts_inference_partition_outside_training_block_support()
     assert config.inference_blocks == (1, 127)
 
 
+def test_pdd_config_rejects_float32_grid_collisions():
+    with pytest.raises(ValueError, match="strictly decreasing float32 timestep grid"):
+        PDDConfig(grid_size=1024, inference_blocks=[256] * 4)
+
+
 @pytest.mark.parametrize(
     "overrides", [{"teacher_integrator": "heun"}, {"teacher_integrator": "rk4"}]
 )

@@ -32,6 +32,8 @@ from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
+from .flow_matching import make_shifted_flow_grid
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -312,6 +314,17 @@ class PDDConfig(ModeloptBaseConfig):
                 f"inference_blocks must sum to grid_size={self.grid_size}, got "
                 f"{sum(self.inference_blocks)}."
             )
+        try:
+            make_shifted_flow_grid(
+                self.grid_size,
+                self.flow_shift,
+                max_t=self.grid_max_t,
+            )
+        except RuntimeError as error:
+            raise ValueError(
+                "grid_size, grid_max_t, and flow_shift must produce a strictly decreasing "
+                "float32 timestep grid."
+            ) from error
         return self
 
     @classmethod
