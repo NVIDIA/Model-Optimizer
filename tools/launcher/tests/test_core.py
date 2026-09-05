@@ -38,6 +38,12 @@ from core import (
     SandboxTask2,
     SandboxTask3,
     SandboxTask4,
+    SandboxTask5,
+    SandboxTask6,
+    SandboxTask7,
+    SandboxTask8,
+    SandboxTask9,
+    SandboxTask10,
     create_task_from_yaml,
     get_default_env,
     register_factory,
@@ -75,8 +81,8 @@ class TestSandboxPipeline:
 
     def test_task_slots_collected(self):
         t0 = SandboxTask0(script="a.sh")
-        t1 = SandboxTask1(script="b.sh")
-        pipeline = SandboxPipeline(task_0=t0, task_1=t1)
+        t10 = SandboxTask10(script="b.sh")
+        pipeline = SandboxPipeline(task_0=t0, task_10=t10)
         assert len(pipeline.tasks) == 2
         assert pipeline.tasks[0].script == "a.sh"
         assert pipeline.tasks[1].script == "b.sh"
@@ -195,6 +201,12 @@ class TestSetSlurmConfigType:
             SandboxTask2,
             SandboxTask3,
             SandboxTask4,
+            SandboxTask5,
+            SandboxTask6,
+            SandboxTask7,
+            SandboxTask8,
+            SandboxTask9,
+            SandboxTask10,
         ):
             assert task_cls.__annotations__["slurm_config"] is MockSlurmConfig
             assert task_cls.__dataclass_fields__["slurm_config"].type is MockSlurmConfig
@@ -223,6 +235,16 @@ class TestGetDefaultEnv:
         assert slurm_env["TRITON_CACHE_DIR"] == "/modelopt/triton-cache"
         assert slurm_env["HF_HOME"] == "/modelopt/hf-cache"
         assert local_env["HF_HOME"] == "/modelopt/hf-cache"
+
+    def test_serve_nodes_forwarded_to_slurm(self, monkeypatch):
+        monkeypatch.setenv("SERVE_NODES", "8")
+        slurm_env, _ = get_default_env()
+        assert slurm_env["SERVE_NODES"] == "8"
+
+    def test_serve_nodes_omitted_when_unset(self, monkeypatch):
+        monkeypatch.delenv("SERVE_NODES", raising=False)
+        slurm_env, _ = get_default_env()
+        assert "SERVE_NODES" not in slurm_env
 
 
 class TestReportVersions:

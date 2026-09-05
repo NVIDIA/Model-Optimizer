@@ -103,6 +103,15 @@ def _tvd_per_token(final_logits, teacher_logits, chunk_size=1024):
     return torch.cat(outs, dim=0)
 
 
+@torch.no_grad()
+def _accuracy_counts(logits, target_ids, eval_mask):
+    """Return correct/valid token counts for each draft position."""
+    keep = eval_mask > 0.5
+    correct = ((logits.argmax(dim=-1) == target_ids) & keep).sum(dim=(0, 1), dtype=torch.float32)
+    valid = keep.sum(dim=(0, 1), dtype=torch.float32)
+    return correct, valid
+
+
 @DSparkDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
 class HFDSparkModel(HFDFlashModel):
     """DFlash model with the DSpark sequential (Markov) + confidence head.
@@ -208,6 +217,7 @@ class HFDSparkModel(HFDFlashModel):
         )
         weight_mask = weight_mask * orig_loss_mask
 
+        accuracy_correct, accuracy_valid = _accuracy_counts(final_logits, target_ids, weight_mask)
         binary_eval_mask = weight_mask.view(-1)
 
         # Exponential position decay (exp(-k/gamma); position 0 gets weight 1).
@@ -235,7 +245,7 @@ class HFDSparkModel(HFDFlashModel):
         if valid_count <= 1.0:
             loss = flat_final.sum() * 0.0
             metrics = {"ce_loss": 0.0, "l1_loss": 0.0, "confidence_loss": 0.0, "base_accuracy": 0.0}
-            return loss, 0.0, metrics
+            return loss, accuracy_correct, accuracy_valid, metrics
 
         # Term 1: cross-entropy on the corrected (final) logits.
         ce_per_token = F.cross_entropy(flat_final, flat_targets, reduction="none")
@@ -264,9 +274,6 @@ class HFDSparkModel(HFDFlashModel):
         with torch.no_grad():
             eval_count = binary_eval_mask.sum() + 1e-6
             keep = binary_eval_mask > 0.5
-            accuracy = (
-                ((flat_final.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
-            ).item()
             base_accuracy = (
                 ((flat_base.argmax(dim=-1) == flat_targets) & keep).sum().float() / eval_count
             ).item()
@@ -276,7 +283,7 @@ class HFDSparkModel(HFDFlashModel):
                 "confidence_loss": float(confidence_loss.detach().item()),
                 "base_accuracy": base_accuracy,
             }
-        return loss, accuracy, metrics
+        return loss, accuracy_correct, accuracy_valid, metrics
 
     def forward(
         self,
@@ -373,7 +380,13 @@ class HFDSparkModel(HFDFlashModel):
         if n_blocks == 0 or not block_keep_mask.any():
             # Zero loss that still flows through all draft params for DDP sync.
             dummy = sum(p.sum() for p in self.dflash_module.parameters()) * 0.0
-            return ModelOutput(loss=dummy, logits=None, train_acc=[[0.0]])
+            zeros = torch.zeros(block_size, device=device)
+            return ModelOutput(
+                loss=dummy,
+                logits=None,
+                train_acc_correct=zeros,
+                train_acc_valid=zeros,
+            )
 
         # 4. Build draft inputs (inherited helpers).
         noise_embedding = self._build_noise_embedding(
@@ -403,7 +416,7 @@ class HFDSparkModel(HFDFlashModel):
         final_logits, confidence_logits = self._apply_markov_head(
             hidden, backbone_logits, input_ids, anchor_positions, n_blocks
         )
-        loss, accuracy, metrics = self._compute_dspark_loss(
+        loss, accuracy_correct, accuracy_valid, metrics = self._compute_dspark_loss(
             backbone_logits,
             final_logits,
             confidence_logits,
@@ -414,7 +427,13 @@ class HFDSparkModel(HFDFlashModel):
             target_model_logits,
         )
 
-        return ModelOutput(loss=loss, logits=None, train_acc=[[accuracy]], dspark_metrics=metrics)
+        return ModelOutput(
+            loss=loss,
+            logits=None,
+            train_acc_correct=accuracy_correct,
+            train_acc_valid=accuracy_valid,
+            dspark_metrics=metrics,
+        )
 
     @torch.no_grad()
     def pseudo_speculative_generate(self, input_ids, steps=1):

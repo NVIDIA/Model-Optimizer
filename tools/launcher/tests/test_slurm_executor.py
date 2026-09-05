@@ -425,7 +425,7 @@ class TestControlMasterSSHTunnel:
 
     @patch("core.run.SlurmExecutor")
     @patch("core.run.SSHTunnel")
-    def test_requeue_sets_param_and_bumps_retries(self, mock_tunnel, mock_executor):
+    def test_additional_params_and_requeue(self, mock_tunnel, mock_executor):
         mock_tunnel.return_value = MagicMock()
         executor = mock_executor.return_value
         executor.retries = 0
@@ -445,6 +445,8 @@ class TestControlMasterSSHTunnel:
             ntasks_per_node=1,
             gpus_per_node=1,
             array=None,
+            dependency="singleton",
+            additional_parameters={"signal": "USR1@60"},
         )
 
         build_slurm_executor(
@@ -457,6 +459,10 @@ class TestControlMasterSSHTunnel:
             packager=MagicMock(),
         )
 
+        assert mock_executor.call_args.kwargs["additional_parameters"] == {
+            "signal": "USR1@60",
+            "dependency": "singleton",
+        }
         # requeue=True flags the additional parameter and bumps retries above 0 so
         # nemo-run's sbatch wrapper actually issues `scontrol requeue` on preemption.
         assert executor.additional_parameters["requeue"] is True

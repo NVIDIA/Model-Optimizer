@@ -506,6 +506,40 @@ def _fast_tokenizer_with_template(template: str, seq: int = 8) -> MagicMock:
 _CONV = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
+def test_pretokenized_entry_preserves_mask_and_truncates_in_lockstep():
+    ds = StreamingDataset(
+        [{"conversation_id": "trace", "token_ids": [1, 2, 3, 4], "loss_mask": [0, 1, 0, 1]}],
+        tokenizer=MagicMock(),
+        config=StreamingConfig(answer_only_loss=True, max_seq_len=3),
+    )
+
+    sample = ds._tokenize_entry(ds.entries[0])
+
+    assert sample["cid"] == "trace"
+    assert sample["token_ids"] == [1, 2, 3]
+    assert sample["loss_mask"].tolist() == [0, 1, 0]
+    ds.tokenizer.apply_chat_template.assert_not_called()
+
+
+def test_pretokenized_entry_rejects_misaligned_mask():
+    ds = StreamingDataset(
+        [{"conversation_id": "trace", "token_ids": [1, 2], "loss_mask": [1]}],
+        tokenizer=MagicMock(),
+        config=StreamingConfig(answer_only_loss=True),
+    )
+
+    with pytest.raises(ValueError, match="lengths must match"):
+        ds._tokenize_entry(ds.entries[0])
+
+
+def test_pretokenized_entry_requires_answer_only_loss():
+    entry = {"conversation_id": "trace", "token_ids": [1], "loss_mask": [1]}
+    ds = StreamingDataset([entry], tokenizer=MagicMock())
+
+    with pytest.raises(ValueError, match="answer_only_loss=True"):
+        ds._tokenize_entry(entry)
+
+
 def test_answer_only_loss_rejects_template_without_generation_tags():
     """A fast tokenizer whose template lacks {% generation %} tags fails loudly.
 

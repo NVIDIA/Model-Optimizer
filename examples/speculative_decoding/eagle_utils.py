@@ -53,6 +53,17 @@ except (ImportError, AttributeError):
 __all__ = ["EagleOfflineDataCollator", "OfflineSupervisedDataset"]
 
 
+def _aggregate_accuracy_counts(counts):
+    """Compute per-position and total accuracy across microbatches and distributed ranks."""
+    counts = torch.stack(counts).sum(dim=0)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(counts, op=torch.distributed.ReduceOp.SUM)
+    correct, valid = counts
+    per_position_acc = correct / valid.clamp_min(1.0)
+    total_acc = correct.sum() / valid.sum().clamp_min(1.0)
+    return per_position_acc.unsqueeze(0).cpu().numpy(), total_acc.item()
+
+
 def make_speculative_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
@@ -216,11 +227,16 @@ class EagleTrainerWithAccLog(Trainer):
         """Override compute_loss to save train accs and per-component losses in trainer state."""
         if not hasattr(self.state, "training_accs"):
             self.state.training_accs = []
+        if not hasattr(self.state, "training_acc_counts"):
+            self.state.training_acc_counts = []
         if not hasattr(self.state, "component_losses"):
             self.state.component_losses = {"eagle": [], "preservation": []}
         kwargs.pop("num_items_in_batch", None)
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
-        if hasattr(outputs, "train_acc") and any(outputs.train_acc):
+        if hasattr(outputs, "train_acc_correct"):
+            counts = torch.stack((outputs.train_acc_correct, outputs.train_acc_valid)).detach()
+            self.state.training_acc_counts.append(counts)
+        elif hasattr(outputs, "train_acc") and any(outputs.train_acc):
             self.state.training_accs.append(outputs.train_acc)
         # Track per-component losses
         for key, attr in [
@@ -371,37 +387,57 @@ class EagleTrainingPlot(TrainerCallback):
         self.estimate_ar = estimate_ar
 
     def on_log(self, args, state, control, **kwargs):
-        """Log training acc and estimate AR during log step."""
-        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
+        """Log training accuracy and optionally estimate acceptance length."""
+        # Normalize current raw-count metrics and legacy accuracy metrics to
+        # [parallel branch, draft position].
+        accuracy_counts = getattr(state, "training_acc_counts", [])
+        legacy_accs = getattr(state, "training_accs", [])
+        if accuracy_counts:
+            per_position_acc, total_acc = _aggregate_accuracy_counts(accuracy_counts)
+        elif legacy_accs:
+            per_position_acc = np.mean(legacy_accs, axis=0)
+            total_acc = None
+        else:
             return control
-        average_acc = np.mean(state.training_accs, axis=0)
-        # Always print accuracy to console
+
+        # Print one accuracy summary for the completed logging window.
         try:
-            acc_str = ", ".join(f"{a:.4f}" for a in np.array(average_acc).flatten())
-            print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
+            acc_str = ", ".join(f"{a:.4f}" for a in np.array(per_position_acc).flatten())
+            if total_acc is not None:
+                print_rank_0(
+                    f"Step {state.global_step} Training Acc: "
+                    f"total={total_acc:.4f}, per-position=[{acc_str}]"
+                )
+            else:
+                print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
         except Exception:
-            print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
-        # Log accuracy to HF Trainer's logs dict (picked up by TensorBoard)
-        logs = kwargs.get("logs") or {}
-        for i, draft_acc in enumerate(average_acc):
+            print_rank_0(f"Step {state.global_step} Training Acc: {per_position_acc}")
+
+        # Publish total and per-position metrics through the Trainer log dict.
+        logs = kwargs.get("logs")
+        if logs is None:
+            logs = {}
+        if total_acc is not None:
+            logs["train_acc/total"] = total_acc
+        for i, draft_acc in enumerate(per_position_acc):
             for j, step_acc in enumerate(draft_acc):
                 logs[f"train_acc/parallel_{i}_step_{j}"] = float(step_acc)
+
         if self.estimate_ar:
-            # Calculate mean training AR since last log
-            # NOTE: This is only an estimate of the real AR.
+            # Estimate acceptance length from conditional per-position accuracies.
             est_ar = 1
             acc_cumprod = 1
-            for step_acc in average_acc[0]:
+            for step_acc in per_position_acc[0]:
                 acc_cumprod *= step_acc
                 est_ar += acc_cumprod
-            # Parallel draft tokens only used after all eagle tokens
-            for draft_acc in average_acc[1:]:
+            # Parallel branches contribute only after all sequential EAGLE tokens are accepted.
+            for draft_acc in per_position_acc[1:]:
                 acc_cumprod *= draft_acc[-1]
                 est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
             logs["estimated_training_ar"] = est_ar
 
-        # log to wandb
+        # Forward the same logging window to W&B when enabled.
         if wandb is not None and wandb.run is not None and is_master():
             if logs:
                 wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
@@ -412,8 +448,9 @@ class EagleTrainingPlot(TrainerCallback):
                     if vals:
                         wandb.log({f"{key}_loss": np.mean(vals)}, step=state.global_step)
 
-        # reset training_accs and component_losses
+        # Start a fresh accumulation window after logging.
         state.training_accs = []
+        state.training_acc_counts = []
         if hasattr(state, "component_losses"):
             state.component_losses = {"eagle": [], "preservation": []}
         return control

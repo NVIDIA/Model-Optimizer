@@ -67,6 +67,12 @@ def test_fakebase_local_happy_path(fake_checkpoint):
     assert model.embed_tokens.weight.shape == torch.Size([_VOCAB_SIZE, _HIDDEN_SIZE])
 
 
+def test_fakebase_reads_transformers5_rope_theta(fake_checkpoint, fake_config):
+    fake_config.rope_parameters = {"rope_theta": 10_000_000}
+    model = FakeBaseModel.from_source(str(fake_checkpoint))
+    assert model.config.rope_theta == 10_000_000
+
+
 def test_fakebase_missing_index_raises(tmp_path, fake_config):
     with pytest.raises(FileNotFoundError, match="safetensors"):
         FakeBaseModel.from_source(str(tmp_path))
