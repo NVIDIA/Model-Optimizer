@@ -1,4 +1,5 @@
 docker
+.git
 examples/**/.git
 examples/**/saved_models*
 **/experimental
