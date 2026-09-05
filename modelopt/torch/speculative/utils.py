@@ -18,6 +18,7 @@
 import contextlib
 import copy
 import importlib.util
+import json
 import os
 import sys
 import warnings
@@ -34,6 +35,11 @@ from transformers.cache_utils import DynamicCache
 
 KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
 KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
+
+
+# Attributes under which a checkpoint may nest its text-tower config. Mirrors
+# modelopt.torch.speculative.plugins.modeling_fakebase._VLM_CONFIG_ATTRS.
+NESTED_CONFIG_ATTRS = ["text_config", "llm_config"]
 
 
 REMOVE_THINK_CHAT_TEMPLATE = (
@@ -584,6 +590,39 @@ def enable_cp_ttt_patch(cp_size: int = 1):
             modelopt.torch.speculative.plugins.hf_eagle.ENABLE_CP_TTT_PATCH = False
 
 
+CONFIG_OVERRIDES_HELP = (
+    "JSON object of config fields to override on the model config and its text_config before "
+    "instantiation, e.g. '{\"num_hidden_layers\": 36}'. Needed for checkpoints whose nested "
+    "text_config dims don't propagate to the parent config."
+)
+
+
+def parse_config_overrides(raw: str | None) -> dict | None:
+    """Parse a ``--config_overrides`` CLI value into a dict, or ``None`` if not supplied.
+
+    Rejects malformed JSON and non-object payloads here, with an actionable message, rather than
+    letting them surface later as a raw ``JSONDecodeError`` or an ``AttributeError`` from deep
+    inside model loading.
+    """
+    if not raw:
+        return None
+    try:
+        # Reject the JSON5-ish constants Python's json accepts by default: NaN/Infinity
+        # would sail through as floats and land on a config field as a dimension.
+        def _reject(const):
+            raise ValueError(f"--config_overrides contains non-finite value {const!r}")
+
+        parsed = json.loads(raw, parse_constant=_reject)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"--config_overrides is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"--config_overrides must be a JSON object mapping field names to values, got "
+            f"{type(parsed).__name__}: {raw!r}"
+        )
+    return parsed
+
+
 def load_vlm_or_llm(
     model_name_or_path: str,
     use_fake_base: bool = False,
@@ -591,6 +630,7 @@ def load_vlm_or_llm(
     dtype: str | torch.dtype | None = None,
     device_map: str | None = None,
     trust_remote_code: bool = False,
+    config_overrides: dict | None = None,
 ):
     """Load a VLM or LLM. Returns the model.
 
@@ -605,26 +645,84 @@ def load_vlm_or_llm(
         dtype: dtype to use when loading the model.
         device_map: Device map passed to ``from_pretrained``.
         trust_remote_code: Whether to trust remote code.
+        config_overrides: Optional config field overrides applied to the model config and
+            its ``text_config`` before instantiation (e.g. to correct dims that don't
+            propagate from a checkpoint's nested text config).
     """
+
+    def _warn_overrides_on_fake_base():
+        # FakeBaseModel.from_source re-reads the checkpoint config itself, so overrides applied
+        # here never reach it -- but it is not silently wrong: from_source resolves dims from the
+        # nested text_config/llm_config first (modeling_fakebase._VLM_CONFIG_ATTRS), which is the
+        # very problem config_overrides exists to work around, so this path is already correct
+        # without them. Warn rather than raise: main.py forwards config_overrides unconditionally,
+        # so hard-failing would leave a single recipe unable to run offline at all.
+        if config_overrides:
+            warnings.warn(
+                "config_overrides is ignored on the FakeBaseModel path: from_source rebuilds the "
+                "config from the checkpoint, reading dims from the nested text_config/llm_config "
+                "directly, so the overrides are not needed there.",
+                stacklevel=2,
+            )
+
     if use_offline_training and use_fake_base:
+        _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+
+    # Import the transformers-cosmos3 plugin if available: it registers the `cosmos3_omni`
+    # architecture with AutoConfig on import, so the from_pretrained below recognizes it.
+    with contextlib.suppress(ImportError):
+        import transformers_cosmos3  # noqa: F401
 
     model_config = transformers.AutoConfig.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
     )
 
+    # Apply caller-supplied config corrections to the parent config and every nested config
+    # (some checkpoints don't propagate the nested dims up to the parent).
+    if config_overrides:
+        # Cover every nested attribute VLM detection accepts, not just text_config: an
+        # llm_config-nesting checkpoint mirrors the fields on the parent as None, so an override
+        # would land on the parent, count as "applied", and never reach the real text tower.
+        targets = [
+            cfg
+            for cfg in (
+                model_config,
+                *(getattr(model_config, a, None) for a in NESTED_CONFIG_ATTRS),
+            )
+            if cfg is not None
+        ]
+        unmatched = []
+        for key, value in config_overrides.items():
+            applied = False
+            for cfg_obj in targets:
+                if hasattr(cfg_obj, key):
+                    setattr(cfg_obj, key, value)
+                    applied = True
+            if not applied:
+                unmatched.append(key)
+        if unmatched:
+            # Silently skipping a key would hand back a wrong-shaped model while appearing to
+            # have applied the override -- the exact failure this option exists to correct.
+            raise ValueError(
+                f"config_overrides key(s) {sorted(unmatched)} matched no field on the model "
+                f"config (model_type={getattr(model_config, 'model_type', None)!r}) or its "
+                "text_config. Check for typos."
+            )
+
     # Detect VLMs: either "vl" in model_type (e.g. "llava") or has a nested text config
     # (e.g. Mistral3Config with model_type="mistral3" and text_config attribute).
     _is_vlm = "vl" in model_config.model_type.lower() or any(
-        getattr(model_config, attr, None) is not None for attr in ["text_config", "llm_config"]
+        getattr(model_config, attr, None) is not None for attr in NESTED_CONFIG_ATTRS
     )
 
     if _is_vlm and use_offline_training:
         # For VLMs in offline training, FakeBaseModel loads only embed_tokens + lm_head
         # and auto-detects VLM weight key layouts (e.g. "language_model.model.embed_tokens").
+        _warn_overrides_on_fake_base()
         from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
 
         return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
@@ -641,13 +739,41 @@ def load_vlm_or_llm(
         model_cls = transformers.AutoModelForCausalLM
 
     extra = {}
+
+    # Cosmos3 omni checkpoints: the transformers-cosmos3 plugin registers only the config
+    # (cosmos3_omni) with AutoConfig, never a model under the Auto* maps, so dispatch to its
+    # Cosmos3ForConditionalGeneration (a Qwen3-VL subclass) directly. The unused vision
+    # tower has mismatched dims vs the text-only use, so ignore those on load.
+    if getattr(model_config, "model_type", None) == "cosmos3_omni":
+        from transformers_cosmos3 import Cosmos3ForConditionalGeneration
+
+        model_cls = Cosmos3ForConditionalGeneration
+        extra["ignore_mismatched_sizes"] = True
+
+    # Pass our config object only when we had to modify it (overrides) or when the model class
+    # needs the plugin-built config; otherwise let from_pretrained build its own, exactly as before.
+    pass_config = bool(config_overrides) or "ignore_mismatched_sizes" in extra
+
+    # Capture the true depth before any zeroing below, since it is restored after load.
+    orig_num_hidden_layers = getattr(model_config, "num_hidden_layers", None)
+
     if use_offline_training:
-        extra["num_hidden_layers"] = 0
-        if hasattr(model_config, "layer_types"):
-            extra["layer_types"] = []
+        if pass_config:
+            # from_pretrained only forwards unrecognized kwargs into the config when it builds
+            # that config itself. Given a PretrainedConfig instance it deep-copies it and leaves
+            # the rest in model_kwargs, so num_hidden_layers=0 would never reach the config and
+            # the full model would be materialized. Set the fields on the config directly.
+            model_config.num_hidden_layers = 0
+            if hasattr(model_config, "layer_types"):
+                model_config.layer_types = []
+        else:
+            extra["num_hidden_layers"] = 0
+            if hasattr(model_config, "layer_types"):
+                extra["layer_types"] = []
 
     model = model_cls.from_pretrained(
         model_name_or_path,
+        config=model_config if pass_config else None,
         trust_remote_code=trust_remote_code,
         torch_dtype=dtype,
         device_map=device_map,
@@ -656,7 +782,7 @@ def load_vlm_or_llm(
 
     if use_offline_training:
         # Preserve the original layer count since we loaded with num_hidden_layers=0
-        model.config.num_orig_hidden_layers = model_config.num_hidden_layers
+        model.config.num_orig_hidden_layers = orig_num_hidden_layers
 
     return model
 

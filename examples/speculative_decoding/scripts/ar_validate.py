@@ -28,7 +28,11 @@ from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.speculative.plugins.hf_eagle import HFARValidation
-from modelopt.torch.speculative.utils import load_vlm_or_llm
+from modelopt.torch.speculative.utils import (
+    CONFIG_OVERRIDES_HELP,
+    load_vlm_or_llm,
+    parse_config_overrides,
+)
 
 mto.enable_huggingface_checkpointing()
 
@@ -100,11 +104,22 @@ def main():
         default=None,
         help="Error if AR is below this threshold.",
     )
+    parser.add_argument(
+        "--config_overrides",
+        type=str,
+        default=None,
+        help=CONFIG_OVERRIDES_HELP,
+    )
     args = parser.parse_args()
+
+    config_overrides = parse_config_overrides(args.config_overrides)
 
     accelerator = Accelerator()
     model = load_vlm_or_llm(
-        args.model_path, device_map="auto", trust_remote_code=args.trust_remote_code
+        args.model_path,
+        device_map="auto",
+        trust_remote_code=args.trust_remote_code,
+        config_overrides=config_overrides,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
