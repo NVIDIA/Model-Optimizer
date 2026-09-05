@@ -20,6 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 
 from modelopt.recipe import load_recipe
@@ -55,6 +56,12 @@ def _parse_hf_ptq_args(monkeypatch, *args):
     return hf_ptq, parsed_args
 
 
+def _validated_autoquant_config(**updates):
+    config = load_recipe("general/auto_quantize/nvfp4_fp8_at_5p4bits").auto_quantize
+    values = {name: getattr(config, name) for name in type(config).model_fields}
+    return AutoQuantizeConfig.model_validate({**values, **updates})
+
+
 def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     """The recipe path maps an AutoQuantizeConfig to the expected mtq.auto_quantize inputs."""
     hf_ptq, args = _parse_hf_ptq_args(
@@ -72,6 +79,7 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     }
     assert inputs["kv_cache_quant_cfg"] is None
     assert inputs["method"] == "gradient"
+    assert inputs["method_options"] is None
     assert inputs["score_size"] == 128
     assert inputs["fixed_quantization_config"] is None
     assert inputs["module_search_spaces"] == []
@@ -81,6 +89,83 @@ def test_autoquant_recipe_builds_mtq_inputs(monkeypatch):
     # Candidates resolve to the exact preset dicts mtq expects (preset identity preserved).
     assert inputs["quantization_formats"][0] == QUANT_CFG_CHOICES["nvfp4"]
     assert inputs["quantization_formats"][1] == QUANT_CFG_CHOICES["fp8"]
+
+
+def test_autoquant_recipe_forwards_aumann_shapley_options(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = _validated_autoquant_config(
+        auto_quantize_method="aumann_shapley",
+        method_options={"num_path_nodes": 3, "damage_link": "additive"},
+    )
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"]["effective_bits"] == 5.4
+    assert inputs["method"] == "aumann_shapley"
+    assert inputs["method_options"] == {"num_path_nodes": 3, "damage_link": "additive"}
+
+
+def test_autoquant_recipe_damage_bound_omits_default_effective_bits(monkeypatch):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch, "--pyt_ckpt_path", "dummy", "--kv_cache_qformat", "none"
+    )
+    aq = _validated_autoquant_config(
+        constraints={},
+        cost_excluded_layers=[],
+        auto_quantize_method="aumann_shapley",
+        method_options={"max_predicted_damage": 0.05},
+    )
+    inputs = hf_ptq._mtq_inputs_from_auto_quantize_config(aq, args)
+
+    assert inputs["constraints"] == {"cost_model": "weight"}
+    assert inputs["method_options"] == {"max_predicted_damage": 0.05}
+
+
+@pytest.mark.parametrize(
+    ("method", "method_options", "loss_func_is_none"),
+    [
+        ("kl_div", None, False),
+        ("aumann_shapley", {"num_path_nodes": 3, "damage_link": "additive"}, True),
+    ],
+)
+def test_autoquant_label_free_recipe_calls_mtq(
+    monkeypatch, method, method_options, loss_func_is_none
+):
+    hf_ptq, args = _parse_hf_ptq_args(
+        monkeypatch,
+        "--pyt_ckpt_path",
+        "dummy",
+        "--kv_cache_qformat",
+        "none",
+        "--batch_size",
+        "1",
+    )
+    aq = _validated_autoquant_config(
+        auto_quantize_method=method,
+        method_options=method_options,
+    )
+    batch = {"input_ids": torch.tensor([[1.0, 2.0]])}
+
+    class LogitsModel(torch.nn.Module):
+        def forward(self, input_ids):
+            return SimpleNamespace(logits=input_ids + 1)
+
+    captured = {}
+
+    def fake_auto_quantize(model, **kwargs):
+        captured.update(kwargs)
+        assert torch.equal(kwargs["forward_step"](model, batch), batch["input_ids"] + 1)
+        return model, {}
+
+    monkeypatch.setattr(hf_ptq.mtq, "auto_quantize", fake_auto_quantize)
+    model = LogitsModel()
+
+    assert hf_ptq.auto_quantize(args, model, [batch], aq) is model
+    assert captured["method"] == method
+    assert captured["method_options"] == method_options
+    assert (captured["loss_func"] is None) is loss_func_is_none
+    assert captured["constraints"]["effective_bits"] == 5.4
 
 
 def test_autoquant_recipe_cost_excluded_layers_map_into_cost(monkeypatch):
