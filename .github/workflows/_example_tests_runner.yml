@@ -62,6 +62,13 @@ jobs:
           # Uninstall conflicting system-wide installed modelopt in nemo containers
           pip uninstall -y nvidia-modelopt || true
 
+          # nvcr.io/nvidia/tensorrt:26.05-py3 ships cuDNN 9.22 with no preinstalled torch, and
+          # torch 2.14 pins cuDNN 9.24: mixing them fails with CUDNN_SUBLIBRARY_LOADING_FAILED.
+          if [[ "${{ inputs.docker_image }}" == *"/tensorrt:"* ]]; then
+            echo "torch<2.14" > /tmp/pip-constraints.txt
+            export PIP_CONSTRAINT=/tmp/pip-constraints.txt
+          fi
+
           # Use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
           # Editable install so example scripts launched as subprocesses resolve modelopt to the same source path as the test process
           python -m pip install -e ".${{ inputs.pip_install_extras }}"

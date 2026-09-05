@@ -35,6 +35,15 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
 
+# TODO: re-enable once fixed upstream. On Blackwell (sm_120) with the nemo:26.08 TE/CUDA stack this
+# test's partially-frozen LoRA backward raises a CUDA "illegal memory access", which poisons the
+# process CUDA context and cascades into every test after it. Deterministic across CI runs; passes on
+# sm_89 with the same container and on nemo:26.06.
+skip_on_blackwell = pytest.mark.skipif(
+    torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 12,
+    reason="CUDA illegal memory access on Blackwell (nemo:26.08 TE/CUDA stack)",
+)
+
 NVFP4_DEFAULT_CONFIG = {
     "quant_cfg": [
         {"quantizer_name": "*", "enable": False},
@@ -596,6 +605,7 @@ def _test_adapter_gradient_flow_freeze_lora_with_api(lora_config, tmp_path, rank
         LARGE_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
+@skip_on_blackwell
 def test_adapter_gradient_flow_freeze_lora_with_api(dist_workers, lora_config, tmp_path):
     dist_workers.run(
         partial(_test_adapter_gradient_flow_freeze_lora_with_api, lora_config, str(tmp_path))

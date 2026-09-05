@@ -41,11 +41,11 @@ from safetensors import safe_open
         # Dense model (llama)
         ("fp8", "tiny_llama-fp8", True, False, True, True, False),
         ("nvfp4", "tiny_llama-nvfp4", True, False, True, True, False),
-        ("nvfp4_mse", "tiny_llama-nvfp4-mse", True, False, True, True, False),
-        ("nvfp4_awq", "tiny_llama-nvfp4-awq", True, False, True, True, False),
+        ("nvfp4_w4a4_weight_mse_fp8_sweep", "tiny_llama-nvfp4-mse", True, False, True, True, False),
+        ("nvfp4_awq_lite", "tiny_llama-nvfp4-awq", True, False, True, True, False),
         ("int4_awq", "tiny_llama-int4-awq", True, False, True, True, False),
-        ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True, False),
-        ("int8_wo", "tiny_llama-int8-wo", False, False, False, False, False),
+        ("w4a8_awq_beta", "tiny_llama-w4a8-awq", True, False, True, True, False),
+        ("int8_weight_only", "tiny_llama-int8-wo", False, False, False, False, False),
         ("nvfp4_svdquant", "tiny_llama-nvfp4-svdquant", True, False, True, True, True),
         ("w4a16_nvfp4", "tiny_llama-w4a16-nvfp4", False, False, False, False, False),
         # MoE models (fused experts: Qwen3 MoE, GPT-OSS)
@@ -84,7 +84,14 @@ def test_unified_hf_export_and_check_safetensors(
     elif expected_suffix.startswith("tiny_gpt_oss"):
         tiny_model_dir = create_tiny_gpt_oss_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
     else:
-        tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
+        model_dims = (
+            {"hidden_size": 128, "intermediate_size": 128}
+            if qformat in {"int4_awq", "w4a8_awq_beta"}
+            else {}
+        )
+        tiny_model_dir = create_tiny_llama_dir(
+            tmp_path, with_tokenizer=True, num_hidden_layers=1, **model_dims
+        )
 
     # Create an output directory in tmp_path
     # We'll replicate the naming convention, e.g. "tiny_llama-fp8"

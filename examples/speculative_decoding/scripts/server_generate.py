@@ -75,6 +75,7 @@ def generate_data(messages, idx, system_prompt):
 
         if args.chat:
             output_messages = []
+            truncated = False
 
             if system_prompt and len(messages) > 0:
                 system_message = {"role": "system", "content": system_prompt}
@@ -106,15 +107,17 @@ def generate_data(messages, idx, system_prompt):
                         max_tokens=args.max_tokens,
                         temperature=args.temperature,
                     )
-                    if response.choices[0].finish_reason == "length":
-                        break
-                    response = response.choices[0].message.content.strip()
+                    choice = response.choices[0]
+                    response = (choice.message.content or "").strip()
                     output_messages.append(
                         {
                             "role": "assistant",
                             "content": response,
                         }
                     )
+                    if choice.finish_reason == "length":
+                        truncated = True
+                        break
                 except Exception as e:
                     print(e)
                     break
@@ -124,6 +127,8 @@ def generate_data(messages, idx, system_prompt):
                 to_write = {"conversation_id": idx}
             else:
                 to_write = {"conversation_id": idx, "conversations": output_messages}
+            if truncated:
+                to_write["truncated"] = True
             with open(args.output_path, "a") as f:
                 # write in share gpt format
                 f.write(json.dumps(to_write) + "\n")

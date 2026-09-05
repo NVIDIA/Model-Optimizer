@@ -1,0 +1,38 @@
+{
+  "name": "modelopt",
+  "version": "0.1.0",
+  "description": "Skills for Model Optimizer development, quantization, deployment, and evaluation.",
+  "author": {
+    "name": "NVIDIA Corporation",
+    "url": "https://github.com/NVIDIA/Model-Optimizer"
+  },
+  "homepage": "https://github.com/NVIDIA/Model-Optimizer",
+  "repository": "https://github.com/NVIDIA/Model-Optimizer",
+  "license": "Apache-2.0",
+  "keywords": [
+    "modelopt",
+    "quantization",
+    "evaluation",
+    "deployment",
+    "llm"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "ModelOpt",
+    "shortDescription": "Optimize, deploy, and evaluate models.",
+    "longDescription": "Provides Model Optimizer workflows for post-training quantization, deployment, evaluation, result comparison, and release validation.",
+    "developerName": "NVIDIA",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Quantize this model with ModelOpt.",
+      "Deploy and evaluate this checkpoint.",
+      "Compare the baseline and quantized results."
+    ],
+    "brandColor": "#76B900"
+  }
+}

@@ -293,14 +293,14 @@ def test_sequential_checkpoint_resume_multi_offload(tmp_path):
 def _make_gptq_sequential_cfg(base_cfg):
     """Create a sequential GPTQ config from a base quantization config."""
     cfg = copy.deepcopy(base_cfg)
-    cfg["algorithm"] = {"method": "gptq", "layerwise": True}
+    cfg["algorithm"] = {"method": "gptq", "layerwise": {"enable": True}}
     return cfg
 
 
 def _make_gptq_sequential_checkpoint_cfg(base_cfg, checkpoint_dir):
     """Create a sequential GPTQ config with checkpoint dir."""
     cfg = _make_gptq_sequential_cfg(base_cfg)
-    cfg["algorithm"]["layerwise_checkpoint_dir"] = checkpoint_dir
+    cfg["algorithm"]["layerwise"]["checkpoint_dir"] = checkpoint_dir
     return cfg
 
 

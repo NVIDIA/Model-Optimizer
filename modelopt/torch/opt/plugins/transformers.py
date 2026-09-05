@@ -114,16 +114,34 @@ def _restore_qtensor_wrappers(model, model_path):
         q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
         if not q_tensor_state:
             continue
-        for name, module in model.named_modules():
-            if (
-                isinstance(module, RealQuantLinear)
-                and name in q_tensor_state
-                and not isinstance(module.weight, QTensorWrapper)
-            ):
-                module._parameters["weight"] = QTensorWrapper(
-                    qtensor=module.weight.data,
-                    metadata=q_tensor_state[name]["metadata"],
-                )
+        # PEFT nests the quantized linear as `<name>.base_layer`, and either the saved keys or the
+        # live names may carry that suffix. Normalize both so the lookup works in either direction.
+        q_tensor_state = {k.removesuffix(".base_layer"): v for k, v in q_tensor_state.items()}
+
+        pending = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, RealQuantLinear) and not isinstance(module.weight, QTensorWrapper)
+        ]
+        matched = 0
+        for name, module in pending:
+            key = name.removesuffix(".base_layer")
+            if key not in q_tensor_state:
+                continue
+            module._parameters["weight"] = QTensorWrapper(
+                qtensor=module.weight.data,
+                metadata=q_tensor_state[key]["metadata"],
+            )
+            matched += 1
+
+        # A total miss means some wrapper renamed the modules. Warn instead of letting it surface
+        # as an opaque shape error at dequantization.
+        if pending and not matched:
+            warnings.warn(
+                f"Found {len(q_tensor_state)} compressed weight(s) in {modelopt_state_path} but "
+                f"re-wrapped none of the {len(pending)} candidate module(s); their names may have "
+                "been remapped. The model will likely fail when the packed weights are used."
+            )
 
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
