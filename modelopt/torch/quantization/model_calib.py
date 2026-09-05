@@ -2048,6 +2048,63 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
+def _is_kv_cache(obj) -> bool:
+    """Duck-typed ``transformers.Cache``, so this stays framework-agnostic.
+
+    Tensors are by far the common argument, so they are rejected before the attribute
+    probes, which are comparatively slow.
+    """
+    if obj is None or isinstance(obj, torch.Tensor):
+        return False
+    return hasattr(obj, "update") and hasattr(obj, "get_seq_length")
+
+
+_KV_CACHE_WARNING = (
+    "Calibration ran with KV caching enabled. Calibration only gathers activation "
+    "statistics and never reads a cache, so it is wasted memory and compute; under "
+    "layerwise calibration it is also incorrect, because each layer's captured inputs "
+    "are replayed and a cache among them makes the layer attend over the keys and "
+    "values its own earlier replay wrote, corrupting everything downstream of "
+    "attention. Disable it in the calibration forward loop, for example "
+    "`model(**batch, use_cache=False)`, or set `model.config.use_cache = False` around "
+    "it. `modelopt.torch.utils.dataset_utils.create_forward_loop` already does this."
+)
+
+
+def _warn_on_kv_cache_during_calibration(forward_loop):
+    """Wrap *forward_loop* to warn once if a KV cache is live during calibration.
+
+    Checked on what modules receive rather than on what the model returns, because a
+    layerwise forward stops early and returns nothing.
+    """
+    if forward_loop is None:
+        return None
+
+    warned = False
+
+    def _check(module, args, kwargs):
+        nonlocal warned
+        if not warned and any(_is_kv_cache(v) for v in (*args, *kwargs.values())):
+            warned = True
+            warn_rank_0(_KV_CACHE_WARNING)
+
+    def checked_forward_loop(m):
+        # A cache is handed to composite blocks (the decoder layer, its attention), never
+        # to a leaf such as a Linear -- which is most of the module tree.
+        handles = [
+            mod.register_forward_pre_hook(_check, with_kwargs=True)
+            for mod in m.modules()
+            if next(mod.children(), None) is not None
+        ]
+        try:
+            return forward_loop(m)
+        finally:
+            for h in handles:
+                h.remove()
+
+    return checked_forward_loop
+
+
 @torch.no_grad()
 def layerwise_calibrate(
     model: nn.Module,
@@ -2137,21 +2194,6 @@ def layerwise_calibrate(
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
                 for args, kwargs_input in _inputs:
-                    # Reset past_key_values to prevent the KV cache from
-                    # accumulating across multiple forward replays (e.g.
-                    # max_calibrate then Hessian collection in GPTQ).
-                    # The layer doesn't need stale KV data — each replay
-                    # should start with a fresh cache.
-                    if (
-                        "past_key_values" in kwargs_input
-                        and kwargs_input["past_key_values"] is not None
-                    ):
-                        kwargs_input = dict(kwargs_input)
-                        cache = kwargs_input["past_key_values"]
-                        if hasattr(cache, "reset"):
-                            cache.reset()
-                        else:
-                            kwargs_input["past_key_values"] = None
                     m(*args, **kwargs_input)
 
             is_last = layer_idx + 1 >= num_layers
