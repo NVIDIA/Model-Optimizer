@@ -121,6 +121,42 @@ def test_get_experts_list_groups_by_spec_linear_names():
     assert groups[1][2] is module.experts[2].down_proj
 
 
+def test_get_experts_list_skips_fused_expert_containers():
+    """A fused experts container has nothing to group, and must not crash trying.
+
+    transformers 5 replaced several iterable expert ModuleLists with a single module
+    holding 3-D parameters (DeepseekV3Experts, MixtralExperts), while their specs still
+    describe the transformers 4 iterable layout -- the spec cannot tell the two apart,
+    only the module can. Without the structural guard, the AWQ/SVDQuant resmooth pass
+    in requantize_resmooth_fused_llm_layers reaches ``len(module.experts)`` on a module
+    with no ``__len__`` and dies with TypeError mid-export.
+    """
+
+    class FusedExperts(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate_up_proj = nn.Parameter(torch.zeros(4, 8, 16))
+            self.down_proj = nn.Parameter(torch.zeros(4, 16, 8))
+            # Present once modelopt quantizes fused experts; makes
+            # get_expert_linear_names take its structural shortcut.
+            self.gate_up_proj_weight_quantizers = nn.ModuleList()
+
+    class DeepseekV3MoE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.experts = FusedExperts()
+
+    assert get_experts_list(DeepseekV3MoE(), "deepseek_v3") == []
+
+    # Same shape under a model whose spec also claims iterable experts.
+    class MixtralSparseMoeBlockFused(MixtralSparseMoeBlock):
+        def __init__(self):
+            super().__init__()
+            self.experts = FusedExperts()
+
+    assert get_experts_list(MixtralSparseMoeBlockFused(), "mixtral") == []
+
+
 def test_get_experts_list_rejects_non_iterable_layouts():
     # DBRX matches a spec but is not an iterable-experts layout; grouped export
     # must keep rejecting it (legacy behavior).

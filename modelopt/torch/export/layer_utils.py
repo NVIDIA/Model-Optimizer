@@ -95,6 +95,17 @@ def get_experts_list(
     """
     experts_list = []
 
+    # A fused/stacked experts container holds 3-D parameters instead of per-expert
+    # sub-modules, so it has no per-expert linears to group and the fused export path
+    # handles it. Decided from the module rather than the spec: the same model type
+    # materializes both ways across transformers releases -- Mixtral and DeepSeek-V3
+    # are iterable on transformers 4 and fused on 5 -- so a spec cannot answer it.
+    # Narrow on purpose: a block with no experts at all is an unknown shape and still
+    # falls through to the loud failure below.
+    experts = getattr(module, "experts", None)
+    if experts is not None and not hasattr(experts, "__iter__"):
+        return experts_list
+
     # Only layouts with iterable per-expert sub-modules are supported here;
     # stacked/fused layouts (DBRX, GptOss, ...) are handled by other paths.
     variant = match_moe_block(module, model_type)
