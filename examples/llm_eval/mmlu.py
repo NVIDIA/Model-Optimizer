@@ -42,6 +42,7 @@ import os
 import random
 import warnings
 from argparse import Namespace
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -274,10 +275,19 @@ def main(
     # Enable automatic save/load of modelopt state huggingface checkpointing
     mto.enable_huggingface_checkpointing()
     model_path = kwargs["model_path"]
+    # Pop before the branch below: only the TensorRT-LLM path knows this key, and the
+    # HuggingFace models built by select_model() reject what they do not declare.
+    kv_cache_free_gpu_memory_fraction = kwargs.pop("kv_cache_free_gpu_memory_fraction", None)
     tokenizer = get_tokenizer(model_path, trust_remote_code=kwargs.get("trust_remote_code", False))
     if kwargs.get("checkpoint_dir"):
         assert LLM is not None, "tensorrt_llm APIs could not be imported."
         medusa_choices = kwargs.get("medusa_choices")
+        # Only override the wrapper's own default when the caller asked for a value.
+        llm_kwargs: dict[str, Any] = (
+            {}
+            if kv_cache_free_gpu_memory_fraction is None
+            else {"kv_cache_free_gpu_memory_fraction": float(kv_cache_free_gpu_memory_fraction)}
+        )
         model = LLM(
             checkpoint_dir=kwargs["checkpoint_dir"],
             tokenizer=tokenizer,
@@ -285,6 +295,7 @@ def main(
             max_seq_len=MAX_SEQ_LEN,
             max_batch_size=1,
             trust_remote_code=kwargs.get("trust_remote_code", False),
+            **llm_kwargs,
         )
     else:
         model = select_model(

@@ -63,6 +63,7 @@ class LLM(TRTLLM):
         max_seq_len: int = 0,
         max_batch_size: int = 0,
         enable_kv_cache_reuse: bool = True,
+        kv_cache_free_gpu_memory_fraction: float = 0.7,
     ):
         """Initializes the LLM runner class.
 
@@ -78,6 +79,10 @@ class LLM(TRTLLM):
                 requesting context logits (e.g. lm-eval loglikelihood tasks): with prefix block
                 reuse, shared-prefix requests only return logits for the recomputed suffix, which
                 breaks per-token logprob computation.
+            kv_cache_free_gpu_memory_fraction: fraction of the GPU memory left after loading the
+                model weights that the KV cache may use. Lower it when the engine runs out of
+                memory; TensorRT-LLM's own default of 0.9 is often too aggressive here, since
+                context logits and logprob buffers are allocated on top of the KV cache.
         """
         with open(Path(checkpoint_dir) / "config.json") as config_file:
             config = json.load(config_file)
@@ -124,8 +129,15 @@ class LLM(TRTLLM):
                 enable_attention_dp = True
                 break
 
-        # Sometimes 90% of the GPU memory is not enough for the TRT LLM torch engine.
-        trt_kv_cache_config = TRT_KvCacheConfig(free_gpu_memory_fraction=0.7)
+        # Sometimes 90% of the GPU memory is not enough for the TRT LLM torch engine, hence
+        # the lower default; callers can tune it further.
+        assert 0.0 < kv_cache_free_gpu_memory_fraction <= 1.0, (
+            "kv_cache_free_gpu_memory_fraction must be in (0, 1]; got "
+            f"{kv_cache_free_gpu_memory_fraction}."
+        )
+        trt_kv_cache_config = TRT_KvCacheConfig(
+            free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction
+        )
         trt_kv_cache_config.max_tokens = self._max_seq_len * (
             max_batch_size if max_batch_size > 0 else 8
         )

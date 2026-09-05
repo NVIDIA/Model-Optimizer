@@ -33,7 +33,7 @@ parse_options() {
     TASKS="quant"
 
     TRUST_REMOTE_CODE=false
-    KV_CACHE_FREE_GPU_MEMORY_FRACTION=0.8
+    KV_CACHE_FREE_GPU_MEMORY_FRACTION=0.7
     VERBOSE=true
     USE_SEQ_DEVICE_MAP=false
     CAST_MXFP4_TO_NVFP4=false
