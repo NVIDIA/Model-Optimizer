@@ -15,8 +15,7 @@
 
 """Mixtral specs (HF model type ``mixtral``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # Mixtral with iterable experts uses w1/w2/w3. Fused experts (transformers 5.0+) are
 # detected from their per-expert quantizer attributes and need no naming override here.

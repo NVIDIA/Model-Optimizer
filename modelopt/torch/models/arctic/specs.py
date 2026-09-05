@@ -15,8 +15,7 @@
 
 """Snowflake Arctic specs (trust-remote-code model type ``arctic``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(

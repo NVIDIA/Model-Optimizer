@@ -15,8 +15,7 @@
 
 """Nemotron specs (HF model type ``nemotron``); Nemotron-H lives in ``nemotron_h.py``."""
 
-from ..registry import register
-from ..specs import ExportSpec, ModelSpec
+from ..specs import ExportSpec, ModelSpec, register
 
 # LayerNorm1P stores weight - 1 (zero-centered gamma); both the Megatron-style class
 # name and the HF Nemotron port are listed.

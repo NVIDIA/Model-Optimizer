@@ -19,8 +19,7 @@ Gemma4RMSNorm is intentionally absent from ``weight_plus_one_norm_names`` until 
 +1 handling is validated on Gemma4.
 """
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # Gemma4 MoE experts are unfused into per-expert nn.Linear layers. The MoE block lives
 # in the text model, so ``gemma4_text`` reuses this exact layout -- see

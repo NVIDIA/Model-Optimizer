@@ -15,8 +15,7 @@
 
 """GPT-OSS specs (HF model type ``gpt_oss``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(

@@ -22,8 +22,7 @@ the two must not drift apart.
 """
 
 from ..gemma4.specs import GEMMA4_MOE_VARIANTS
-from ..registry import register
-from ..specs import ModelSpec, MoESpec
+from ..specs import ModelSpec, MoESpec, register
 
 register(
     ModelSpec(

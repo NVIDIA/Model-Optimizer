@@ -15,8 +15,7 @@
 
 """DeepSeek-V4 specs (HF model type ``deepseek_v4``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # DeepseekV4Experts is fused from the start: a single module holding 3-D gate_up_proj
 # and down_proj parameters rather than an iterable of per-expert modules. So there is no

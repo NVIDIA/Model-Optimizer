@@ -28,7 +28,6 @@ The per-model file is named for what it holds, not for who reads it: a model's s
 general model data, and export is only its first consumer.
 """
 
-from .registry import *
 from .specs import *
 
 # Importing the model packages registers every spec as a side effect.

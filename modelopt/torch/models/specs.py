@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-model descriptor classes.
+"""Per-model descriptors and the registry indexing them by HF model type.
 
 ``ModelSpec`` is the one global descriptor of a model: everything modelopt knows
 about a model type lives on a single instance, resolved by ``config.model_type``.
@@ -28,19 +28,37 @@ carries ``moe_spec=None`` rather than an empty ``MoESpec``, so "not an MoE model
 "an MoE model whose layout is not filled in yet" stay distinguishable.
 
 Sections hold per-model data plus trivial accessors over that data; subsystem logic
-never lives here. A model registers exactly one ``ModelSpec`` in its sibling
-``specs.py``, filling only the sections it customizes.
+never lives here. A model registers exactly one ``ModelSpec`` in its own ``specs.py``
+at import time; importing the package registers them all. Lookups return ``None`` (or
+an empty list) when nothing matches, so callers can fail loudly or fall back per their
+own policy.
+
+The registry lives here rather than beside these classes because it is not a separate
+concept: every lookup takes or returns a ``ModelSpec``, and it has to know how one is
+composed. Matching is by model-type and class-name strings only, so this module needs
+no torch import.
 """
 
-from dataclasses import dataclass
-from typing import Literal
+import functools
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING, Literal, get_args, get_type_hints
+
+if TYPE_CHECKING:
+    import torch.nn as nn
 
 __all__ = [
     "ExportSpec",
     "MoESpec",
     "MoEVariant",
     "ModelSpec",
+    "SpecSection",
+    "get_spec",
+    "get_specs",
+    "hf_model_type",
+    "list_all_possible",
     "match_class_names",
+    "match_moe_block",
+    "register",
 ]
 
 
@@ -87,7 +105,18 @@ class MoEVariant:
 
 
 @dataclass(kw_only=True)
-class MoESpec:
+class SpecSection:
+    """Base class for the sections composing a ``ModelSpec``.
+
+    Marks a class as a section so ``_spec_sections`` can find ``ModelSpec``'s section
+    fields from its annotations. Without it the lookups would need a hand-maintained
+    list of section names, which would silently fall out of date the first time a
+    section was added and the list was not.
+    """
+
+
+@dataclass(kw_only=True)
+class MoESpec(SpecSection):
     """Topic section: MoE architecture facts — the model's MoE-block layout(s).
 
     This describes what a model's MoE blocks *are* — which class, what the expert
@@ -131,7 +160,7 @@ class MoESpec:
 
 
 @dataclass(kw_only=True)
-class ExportSpec:
+class ExportSpec(SpecSection):
     """Subsystem section: per-model data of the unified HF export path.
 
     Architecture facts (MoE block classes, expert naming) live in ``MoESpec``; this
@@ -159,10 +188,10 @@ class ExportSpec:
 class ModelSpec:
     """The one global per-model descriptor, holding each section as an attribute.
 
-    Resolved by HF model type (see ``registry.get_spec``); a model registers exactly
-    one instance, filling only the sections it customizes and leaving the rest
-    ``None``. Consumers must handle an absent section; ``registry.match_moe_block``
-    and ``registry.list_all_possible`` already do for the lookups they cover.
+    Resolved by HF model type (see ``get_spec`` below); a model registers exactly one
+    instance, filling only the sections it customizes and leaving the rest ``None``.
+    Consumers must handle an absent section; ``match_moe_block`` and
+    ``list_all_possible`` already do for the lookups they cover.
     """
 
     model_type: str
@@ -193,3 +222,145 @@ class ModelSpec:
     export_spec: ExportSpec | None = None
     """Per-model data of the unified HF export path, or ``None`` when export needs
     nothing model-specific."""
+
+
+_SPECS: dict[str, ModelSpec] = {}
+
+
+def register(spec: ModelSpec) -> ModelSpec:
+    """Register a model spec and return it. One spec per model type."""
+    if spec.model_type in _SPECS:
+        raise ValueError(f"ModelSpec for model type {spec.model_type!r} already registered")
+    _SPECS[spec.model_type] = spec
+    return spec
+
+
+def get_spec(model_type: str) -> ModelSpec | None:
+    """Return the spec registered for ``model_type``, or ``None``."""
+    return _SPECS.get(model_type)
+
+
+def get_specs() -> list[ModelSpec]:
+    """Return all registered specs, in registration order."""
+    return list(_SPECS.values())
+
+
+@functools.cache
+def _spec_sections() -> tuple[tuple[str, type], ...]:
+    """(field name, section class) for every section field on ``ModelSpec``.
+
+    Read off ``ModelSpec``'s own annotations rather than restated here, so adding a
+    section is a single edit. A section field is one whose declared type includes a
+    ``SpecSection`` subclass.
+    """
+    hints = get_type_hints(ModelSpec)
+    sections: list[tuple[str, type]] = []
+    for field in fields(ModelSpec):
+        annotation = hints.get(field.name)
+        for candidate in get_args(annotation) or (annotation,):
+            if isinstance(candidate, type) and issubclass(candidate, SpecSection):
+                sections.append((field.name, candidate))
+                break
+    return tuple(sections)
+
+
+@functools.cache
+def _spec_attr_names() -> frozenset[str]:
+    """All field and property names readable off a ``ModelSpec`` or one of its sections."""
+    names = {f.name for f in fields(ModelSpec)}
+    for _, section_type in _spec_sections():
+        names.update(f.name for f in fields(section_type))
+        for klass in section_type.__mro__:
+            names.update(name for name, attr in vars(klass).items() if isinstance(attr, property))
+    return frozenset(names)
+
+
+def _read_spec_attr(spec: ModelSpec, attr: str):
+    """Read ``attr`` off ``spec`` or whichever section declares it.
+
+    Returns ``None`` when the declaring section is absent on this model, which is how
+    a dense model contributes nothing to an MoE vocabulary. That is distinct from a
+    present-but-empty section, which contributes an empty tuple; both end up adding
+    no values.
+    """
+    if hasattr(spec, attr):
+        return getattr(spec, attr)
+    for section_name, _ in _spec_sections():
+        section = getattr(spec, section_name)
+        if section is not None and hasattr(section, attr):
+            return getattr(section, attr)
+    return None
+
+
+def list_all_possible(attr: str) -> tuple:
+    """List a spec attribute's values across all registered specs, deduplicated in order.
+
+    E.g. ``list_all_possible("gate_up_pairs")``. Looks the name up on ``ModelSpec``
+    and then on its sections, so callers name the field (``"pqs_fuse_rules"``) without
+    naming the section that holds it. Models whose declaring section is ``None``
+    contribute nothing.
+
+    The result is a global vocabulary: consumers match it against any model's modules,
+    so adding a value to one spec affects all models the consumer walks — prefer
+    ``get_spec(model_type)`` / ``match_moe_block`` wherever the owning model is
+    identifiable.
+
+    ``attr`` must name a tuple-valued attribute. Scalars (``model_type``) would be
+    iterated character by character, so they are rejected rather than silently
+    producing nonsense.
+    """
+    if attr not in _spec_attr_names():
+        raise ValueError(
+            f"{attr!r} is not a ModelSpec attribute; available: {sorted(_spec_attr_names())}"
+        )
+    values: list = []
+    for spec in get_specs():
+        value = _read_spec_attr(spec, attr)
+        if value is None:
+            # This model does not declare the section that holds ``attr``.
+            continue
+        if not isinstance(value, tuple):
+            raise ValueError(
+                f"list_all_possible({attr!r}) expects a tuple-valued attribute, got "
+                f"{type(value).__name__} on model type {spec.model_type!r}."
+            )
+        # Deduplicate by equality: items need not be hashable (MoEVariant is not).
+        values.extend(item for item in value if item not in values)
+    return tuple(values)
+
+
+def hf_model_type(model) -> str | None:
+    """Return the root HF model type (``model.config.model_type``), or ``None``.
+
+    Accepts a model or a config object (duck-typed, no transformers import). This
+    is the key for ``get_spec`` / ``match_moe_block``.
+    """
+    config = getattr(model, "config", model)
+    model_type = getattr(config, "model_type", None)
+    return model_type if isinstance(model_type, str) else None
+
+
+def match_moe_block(module: "nn.Module", model_type: str | None = None) -> MoEVariant | None:
+    """Return the MoE layout variant for ``module``, resolved by model type.
+
+    ``model_type`` (the root ``model.config.model_type``) is a strict filter: only
+    that model's own spec is consulted, and an unregistered model type resolves to
+    ``None`` even if the module's class names coincide with another model's.
+    ``model_type=None`` searches all specs. A composite model whose MoE lives under
+    a sub-model type registers the root type too (see ``gemma4/specs.py``). Within the
+    spec, variant ``block_names`` matched against the module's MRO picks the layout.
+    """
+    if model_type:
+        return _match_in_spec(get_spec(model_type), module)
+    for spec in get_specs():
+        variant = _match_in_spec(spec, module)
+        if variant is not None:
+            return variant
+    return None
+
+
+def _match_in_spec(spec: ModelSpec | None, module: "nn.Module") -> MoEVariant | None:
+    """Match ``module`` against one spec's MoE section; ``None`` if either is absent."""
+    if spec is None or spec.moe_spec is None:
+        return None
+    return spec.moe_spec.match_moe_variant(module)

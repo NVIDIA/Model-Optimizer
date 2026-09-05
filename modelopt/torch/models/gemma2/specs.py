@@ -16,8 +16,7 @@
 
 """Gemma 2 specs (HF model type ``gemma2``)."""
 
-from ..registry import register
-from ..specs import ExportSpec, ModelSpec
+from ..specs import ExportSpec, ModelSpec, register
 
 # Gemma 2 RMSNorm stores weight - 1 (the effective scale is weight + 1).
 register(

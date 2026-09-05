@@ -15,8 +15,7 @@
 
 """DBRX specs (HF model type ``dbrx``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # Expert names refer to the quantized layout: _QuantDbrxExpertGLU rewrites the fused
 # w1/v1/w2 parameters into per-expert w1_linear/v1_linear/w2_linear ModuleLists on

@@ -15,8 +15,7 @@
 
 """Qwen3-MoE specs (HF model type ``qwen3_moe``)."""
 
-from ..registry import register
-from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant
+from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(

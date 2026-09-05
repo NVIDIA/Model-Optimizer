@@ -19,8 +19,7 @@ Matches the remote-code ``DeepseekMoE`` block, not the HF-native ``deepseek_v3``
 classes.
 """
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # has_iterable_experts stays False until the grouped export path is validated on
 # this model.

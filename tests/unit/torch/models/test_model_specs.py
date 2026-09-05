@@ -38,7 +38,7 @@ from modelopt.torch.models import (
     list_all_possible,
     match_moe_block,
 )
-from modelopt.torch.models.registry import _SPECS
+from modelopt.torch.models.specs import _SPECS
 
 
 def _variants(spec):

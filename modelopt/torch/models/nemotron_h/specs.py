@@ -15,8 +15,7 @@
 
 """Nemotron-H specs (HF model type ``nemotron_h``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(

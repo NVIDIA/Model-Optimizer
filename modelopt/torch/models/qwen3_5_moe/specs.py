@@ -15,8 +15,7 @@
 
 """Qwen3.5-MoE specs (HF model type ``qwen3_5_moe``)."""
 
-from ..registry import register
-from ..specs import ModelSpec, MoESpec, MoEVariant
+from ..specs import ModelSpec, MoESpec, MoEVariant, register
 
 # has_iterable_experts stays False to preserve pre-refactor behavior: the legacy
 # get_experts_list keyed off ``type(root_model).__name__.lower()``, and
