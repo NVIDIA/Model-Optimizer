@@ -46,3 +46,39 @@ def test_export_mapping_emits_kv_cache_scales(arch, prefix):
     rule = mapping["core_attention"]
     assert rule.func_name == "self_attention_scaling"
     assert rule.target_name_or_prefix == prefix
+
+
+# Routed experts must export one entry per expert: vLLM's quantized MoE loader has no parameter
+# for a packed `experts.down_proj_weight_scale_2`, so a packed layout cannot be served.
+PER_EXPERT_MOE_ARCHS = {
+    "Qwen3_5MoeForConditionalGeneration": "model.language_model.layers.{}.mlp.experts.{}",
+    "Qwen3MoeForCausalLM": "model.layers.{}.mlp.experts.{}",
+    "NemotronHForCausalLM": "backbone.layers.{}.mixer.experts.{}",
+}
+
+
+@pytest.mark.parametrize("arch", sorted(PER_EXPERT_MOE_ARCHS))
+def test_moe_export_is_per_expert(arch):
+    mapping = all_mcore_hf_export_mapping[arch]
+    assert not mapping.get("use_packed_local_experts"), (
+        f"{arch} packs routed experts; vLLM cannot load packed quantized expert scales"
+    )
+    for rule in ("experts.linear_fc1", "experts.linear_fc2", "local_experts.linear_fc1"):
+        if rule in mapping:
+            assert "pack_name_remapping" not in mapping[rule].func_name
+
+
+def test_qwen3_5_moe_expert_names_match_released_checkpoint():
+    """Layer 7 / expert 3 must match the released checkpoint's tensor names."""
+    mapping = all_mcore_hf_export_mapping["Qwen3_5MoeForConditionalGeneration"]
+
+    fc1 = mapping["experts.linear_fc1"]
+    assert fc1.func_kwargs["gate_proj_name"] == "gate_proj"
+    assert fc1.func_kwargs["up_proj_name"] == "up_proj"
+    # _grouped_mlp_slicing appends the trailing "." itself.
+    expert = fc1.target_name_or_prefix.format(7).format(3) + "."
+    assert expert == "model.language_model.layers.7.mlp.experts.3."
+    assert expert + "gate_proj." == "model.language_model.layers.7.mlp.experts.3.gate_proj."
+
+    fc2 = mapping["experts.linear_fc2"].target_name_or_prefix.format(7).format(3) + "."
+    assert fc2 == "model.language_model.layers.7.mlp.experts.3.down_proj."
