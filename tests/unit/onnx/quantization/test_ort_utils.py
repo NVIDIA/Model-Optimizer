@@ -172,20 +172,22 @@ def test_create_inference_session_filters_profile_with_disabled_ep(monkeypatch):
 
 def test_prepare_ep_list_registers_missing_trt_rtx_abi_provider(monkeypatch):
     register_calls = []
+    ep_devices = []
     fake_plugin = types.SimpleNamespace(
         get_ep_name=lambda: "nv_tensorrt_rtx",
         get_library_path=lambda: "trt_rtx.dll",
     )
     monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
-    monkeypatch.setattr(
-        ort_utils.ort,
-        "get_available_providers",
-        lambda: ["CPUExecutionProvider"],
-    )
+    monkeypatch.setattr(ort_utils.ort, "get_ep_devices", lambda: ep_devices)
+
+    def register_provider(*args):
+        register_calls.append(args)
+        ep_devices.append(types.SimpleNamespace(ep_name="nv_tensorrt_rtx"))
+
     monkeypatch.setattr(
         ort_utils.ort,
         "register_execution_provider_library",
-        lambda *args: register_calls.append(args),
+        register_provider,
     )
 
     providers = ort_utils._prepare_ep_list(
@@ -209,8 +211,8 @@ def test_prepare_ep_list_reuses_registered_trt_rtx_abi_provider(monkeypatch):
     monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
     monkeypatch.setattr(
         ort_utils.ort,
-        "get_available_providers",
-        lambda: ["CPUExecutionProvider", "nv_tensorrt_rtx"],
+        "get_ep_devices",
+        lambda: [types.SimpleNamespace(ep_name="nv_tensorrt_rtx")],
     )
     monkeypatch.setattr(
         ort_utils.ort,
@@ -223,6 +225,56 @@ def test_prepare_ep_list_reuses_registered_trt_rtx_abi_provider(monkeypatch):
     ]
 
 
+def test_create_inference_session_configures_trt_rtx_abi_devices(monkeypatch):
+    captured_kwargs = {}
+    provider_calls = []
+    trt_rtx_device = types.SimpleNamespace(ep_name="nv_tensorrt_rtx")
+    cpu_device = types.SimpleNamespace(ep_name="CPUExecutionProvider")
+    sess_options = types.SimpleNamespace(
+        add_provider_for_devices=lambda devices, options: provider_calls.append(
+            ("devices", devices, options)
+        ),
+        add_provider=lambda name, options: provider_calls.append(("provider", name, options)),
+    )
+    fake_plugin = types.SimpleNamespace(
+        get_ep_name=lambda: "nv_tensorrt_rtx",
+        get_library_path=lambda: "trt_rtx.dll",
+    )
+
+    monkeypatch.setattr(ort_utils, "import_module", lambda name: fake_plugin)
+    monkeypatch.setattr(ort_utils.ort, "SessionOptions", lambda: sess_options)
+    monkeypatch.setattr(ort_utils.ort, "get_ep_devices", lambda: [cpu_device, trt_rtx_device])
+    monkeypatch.setattr(ort_utils.ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "register_execution_provider_library",
+        lambda *args: pytest.fail("The registered ABI EP should not be registered again"),
+    )
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "InferenceSession",
+        lambda *args, **kwargs: captured_kwargs.update(kwargs),
+    )
+
+    ort_utils.create_inference_session(
+        "model.onnx",
+        ["NvTensorRtRtx", "cpu"],
+        [{"nv_profile_min_shapes": "input:1x1"}, {}],
+        trt_rtx_backend="abi",
+    )
+
+    assert "providers" not in captured_kwargs
+    assert provider_calls == [
+        ("devices", [trt_rtx_device], {"nv_profile_min_shapes": "input:1x1"}),
+        ("provider", "CPUExecutionProvider", {}),
+    ]
+
+
 def test_prepare_ep_list_rejects_unrecognized_trt_rtx_backend():
     with pytest.raises(NotImplementedError, match="Trt-rtx backend invalid not recognized!"):
         ort_utils._prepare_ep_list(["NvTensorRtRtx"], trt_rtx_backend="invalid")
+
+
+def test_configure_ort_rejects_unrecognized_trt_rtx_backend():
+    with pytest.raises(ValueError, match="trt_rtx_backend must be 'legacy' or 'abi'"):
+        ort_utils.configure_ort([], [], calibration_eps=["cpu"], trt_rtx_backend="invalid")

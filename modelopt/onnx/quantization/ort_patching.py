@@ -287,6 +287,42 @@ def _select_tensors_to_calibrate(calibrator, model: onnx.ModelProto):
     return tensors_to_calibrate, value_infos
 
 
+def _configure_session_providers(
+    sess_options: ort.SessionOptions,
+    providers: list[str | tuple[str, dict]],
+    trt_rtx_backend: str,
+) -> dict[str, list[str | tuple[str, dict]]]:
+    """Configure providers using the mechanism required by the selected EP.
+
+    ``providers`` contains provider names or ``(name, options)`` pairs in priority order.
+    ABI EPs are exposed as devices and must be added to ``sess_options``; passing them through
+    ``InferenceSession(providers=...)`` overrides that configuration. This helper preserves the
+    ABI device path while returning normal provider arguments for other EPs.
+    """
+    if trt_rtx_backend != "abi":
+        return {"providers": providers}
+
+    available_providers = set(ort.get_available_providers())
+    ep_devices = ort.get_ep_devices()
+    plugin_provider_names = {device.ep_name for device in ep_devices} - available_providers
+    provider_names = {
+        provider[0] if isinstance(provider, tuple) else provider for provider in providers
+    }
+    if not plugin_provider_names.intersection(provider_names):
+        return {"providers": providers}
+
+    for provider in providers:
+        provider_name, provider_options = (
+            provider if isinstance(provider, tuple) else (provider, {})
+        )
+        if provider_name in plugin_provider_names:
+            selected_devices = [device for device in ep_devices if device.ep_name == provider_name]
+            sess_options.add_provider_for_devices(selected_devices, provider_options)
+        else:
+            sess_options.add_provider(provider_name, provider_options)
+    return {}
+
+
 def _create_inference_session_with_ep_config(calibrator, **kwargs):
     """Create an ORT InferenceSession."""
     model_path = kwargs.get("model_path")
@@ -340,10 +376,11 @@ def _create_inference_session_with_ep_config(calibrator, **kwargs):
             )
 
     session_path = calibrator.augmented_model_path if model_path is None else model_path
+    provider_kwargs = _configure_session_providers(sess_options, providers, trt_rtx_backend)
     calibrator.infer_session = ort.InferenceSession(
         session_path,
         sess_options=sess_options,
-        providers=providers,
+        **provider_kwargs,
     )
 
     # Group qdq tensors will have the same scaling factor.

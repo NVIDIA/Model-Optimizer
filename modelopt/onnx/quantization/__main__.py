@@ -164,7 +164,8 @@ def get_parser() -> argparse.ArgumentParser:
         help=(
             "Priority order for the execution providers (EP) to calibrate the model. "
             "Any subset of ['NvTensorRtRtx', 'trt', 'cuda:x', dml:x, 'cpu'], where 'x' is "
-            "the device id."
+            "the device id. For TensorRT-RTX, pass 'NvTensorRtRtx' for either backend; "
+            "select the backend with --trt_rtx_backend. "
             "If a custom op is detected in the model, 'trt' will automatically be added to the EP list."
         ),
     )

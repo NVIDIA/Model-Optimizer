@@ -36,7 +36,7 @@ from packaging.version import InvalidVersion, Version
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.operators import QDQConvTranspose, QDQCustomOp, QDQNormalization
-from modelopt.onnx.quantization.ort_patching import patch_ort_modules
+from modelopt.onnx.quantization.ort_patching import _configure_session_providers, patch_ort_modules
 
 
 def _check_lib_in_ld_library_path(ld_library_path, lib_pattern):
@@ -374,10 +374,18 @@ def _prepare_ep_list(
                         "onnxruntime-ep-nv-tensorrt-rtx-cu13 is not installed."
                     ) from e
 
-                ep_name = trt_rtx_ep.get_ep_name()
-                if ep_name not in ort.get_available_providers():
+                ep_name = trt_rtx_ep.get_ep_name()  # "nv_tensorrt_rtx"
+                ep_devices = [
+                    device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                ]
+                if not ep_devices:
                     ort.register_execution_provider_library(ep_name, trt_rtx_ep.get_library_path())
                     logger.debug(f"Registered TensorRT-RTX ABI EP: {ep_name}")
+                    ep_devices = [
+                        device for device in ort.get_ep_devices() if device.ep_name == ep_name
+                    ]
+                if not ep_devices:
+                    raise RuntimeError(f"No devices found for TensorRT-RTX ABI EP {ep_name!r}")
                 _append_provider(providers, i, ep_name)
                 logger.debug(f"Added TensorRT-RTX ABI EP: {ep_name}")
                 continue
@@ -594,10 +602,11 @@ def create_inference_session(
                     )
     providers = _prepare_ep_list(calibration_eps, input_shapes_profile, trt_rtx_backend)
     logger.debug(f"Creating session with providers: {providers}")
+    provider_kwargs = _configure_session_providers(sess_options, providers, trt_rtx_backend)
     return ort.InferenceSession(
         onnx_path_or_model,
         sess_options=sess_options,
-        providers=providers,
+        **provider_kwargs,
     )
 
 
@@ -633,6 +642,8 @@ def configure_ort(
 ):
     """Configure and patches ORT to support ModelOpt ONNX quantization."""
     logger.info("Configuring ORT for ModelOpt ONNX quantization")
+    if trt_rtx_backend not in ("legacy", "abi"):
+        raise ValueError(f"trt_rtx_backend must be 'legacy' or 'abi', got {trt_rtx_backend!r}")
     if calibration_eps is None:
         calibration_eps = ["cpu", "cuda:0", "trt"]
 
