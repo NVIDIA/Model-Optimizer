@@ -275,7 +275,7 @@ def test_core3_full_teacher_profile_rejects_settings_override(monkeypatch, tmp_p
         evaluator.evaluate(args, settings_overrides={"model": "vllm"})
 
 
-def test_historical_short_profile_preserves_vllm_backend(monkeypatch, tmp_path):
+def test_deprecated_short_profile_preserves_vllm_backend(monkeypatch, tmp_path):
     model, hf_home = _full_inputs(monkeypatch, tmp_path)
     args = evaluation._build_parser().parse_args(
         [
@@ -290,7 +290,8 @@ def test_historical_short_profile_preserves_vllm_backend(monkeypatch, tmp_path):
         ]
     )
 
-    prepared = preflight.prepare(args)
+    with pytest.warns(FutureWarning, match="short-v1 is a deprecated compatibility profile"):
+        prepared = preflight.prepare(args)
     (tmp_path / "tasks").mkdir()
     settings = preflight.settings(
         args,
@@ -299,7 +300,7 @@ def test_historical_short_profile_preserves_vllm_backend(monkeypatch, tmp_path):
         prepared=prepared,
     )
 
-    assert prepared.report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_LEGACY_REVISION
+    assert prepared.report["lmms_eval_revision"] == checkpoint.LMMS_EVAL_REVISION
     assert settings["model"] == "vllm"
     assert settings["checkpoint_arg"] == "model"
     assert settings["reasoning_parser"] == "qwen3"

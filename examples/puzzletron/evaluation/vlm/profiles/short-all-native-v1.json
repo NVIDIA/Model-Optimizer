@@ -3,5 +3,5 @@
   "name": "short-all-native-v1",
   "sample_set": "judge-free-8_690-examples_legacy-r1",
   "backend_profile": "qwen-3.5-native_r1",
-  "evaluator_profile": "lmms-eval-qwen-3.5-native_r1"
+  "evaluator_profile": "lmms-eval-modelopt_r1"
 }

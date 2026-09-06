@@ -90,6 +90,8 @@ def _output_budget_contract(
 def prepare(args: argparse.Namespace) -> PreparedSuite:
     """Resolve and validate everything needed before model loading starts."""
     profile_name = getattr(args, "profile", None)
+    if profile_name is not None:
+        contracts.warn_deprecated_profile(profile_name)
     profile_contract = contracts.load_profile(profile_name) if profile_name is not None else None
     suite, source_tasks, profile_task_leaves = _resolve_task_selection(args, profile_contract)
     backend = _backend_policy(profile_contract)

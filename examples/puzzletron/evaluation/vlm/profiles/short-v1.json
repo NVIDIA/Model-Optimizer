@@ -3,5 +3,5 @@
   "name": "short-v1",
   "sample_set": "core-3_344-examples_legacy-r1",
   "backend_profile": "qwen-3.5-vllm_r1",
-  "evaluator_profile": "lmms-eval-legacy_r1"
+  "evaluator_profile": "lmms-eval-modelopt_r1"
 }

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -31,6 +32,7 @@ __all__ = [
     "SHORT_PROFILE_NAMES",
     "ProfileContract",
     "load_profile",
+    "warn_deprecated_profile",
 ]
 
 _PROFILE_SCHEMA = "modelopt.vlm-evaluation-profile/v2"
@@ -55,17 +57,17 @@ _PROFILE_COMPONENTS = {
     # short-v1, short-native-v1, short-all-native-v1, and full-v1 are temporary
     # compatibility compositions. They preserve the exact rows, backend, and
     # evaluator revision of names that predate component profiles. New runs
-    # should use descriptive profiles; remove these aliases only as an explicit
-    # breaking change after downstream users have migrated.
+    # should use descriptive profiles. Remove these entries and their legacy
+    # sample sets after downstream callers have migrated.
     "short-v1": (
         "core-3_344-examples_legacy-r1",
         "qwen-3.5-vllm_r1",
-        "lmms-eval-legacy_r1",
+        "lmms-eval-modelopt_r1",
     ),
     "short-native-v1": (
         "core-3_344-examples_legacy-r1",
         "qwen-3.5-native_r1",
-        "lmms-eval-qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
     ),
     "core-3_344-examples_r1-native": (
         "core-3_344-examples_r1",
@@ -90,7 +92,7 @@ _PROFILE_COMPONENTS = {
     "short-all-native-v1": (
         "judge-free-8_690-examples_legacy-r1",
         "qwen-3.5-native_r1",
-        "lmms-eval-qwen-3.5-native_r1",
+        "lmms-eval-modelopt_r1",
     ),
     "judge-free-8_690-examples_r1-native": (
         "judge-free-8_690-examples_r1",
@@ -100,7 +102,7 @@ _PROFILE_COMPONENTS = {
     "full-v1": (
         "judge-free-8_full_legacy-r1",
         "qwen-3.5-vllm_r1",
-        "lmms-eval-legacy_r1",
+        "lmms-eval-modelopt_r1",
     ),
     "core-3_full_r1-native": (
         "core-3_full_r1",
@@ -112,6 +114,12 @@ _PROFILE_COMPONENTS = {
         "qwen-3.5-vllm_r1",
         "lmms-eval-modelopt_r1",
     ),
+}
+_DEPRECATED_PROFILE_REPLACEMENTS = {
+    "short-v1": "core-3_344-examples_r1-vllm",
+    "short-native-v1": "core-3_344-examples_r1-native",
+    "short-all-native-v1": "judge-free-8_690-examples_r1-native",
+    "full-v1": None,
 }
 _CORE_3_TASKS = ("realworldqa", "mmmu_val", "mvbench")
 _JUDGE_FREE_8_TASKS = (
@@ -175,8 +183,6 @@ _BACKEND_SETTINGS = {
     },
 }
 _EVALUATOR_REVISIONS = {
-    "lmms-eval-legacy_r1": checkpoint.LMMS_EVAL_LEGACY_REVISION,
-    "lmms-eval-qwen-3.5-native_r1": checkpoint.LMMS_EVAL_QWEN35_NATIVE_REVISION,
     "lmms-eval-modelopt_r1": checkpoint.LMMS_EVAL_REVISION,
 }
 _SAMPLE_SET_MODELS = {
@@ -279,6 +285,23 @@ class ProfileContract:
         if "sampling" in self.manifest:
             exact_rows["selection"] = self.manifest["sampling"]
         return exact_rows
+
+
+def warn_deprecated_profile(name: str) -> None:
+    """Warn when a temporary compatibility profile is selected for execution."""
+    if name in _DEPRECATED_PROFILE_REPLACEMENTS:
+        replacement = _DEPRECATED_PROFILE_REPLACEMENTS[name]
+        guidance = (
+            f"use {replacement} for new runs"
+            if replacement is not None
+            else "choose a descriptive profile for new runs"
+        )
+        warnings.warn(
+            f"{name} is a deprecated compatibility profile; {guidance}. "
+            "It will be removed after downstream callers migrate.",
+            FutureWarning,
+            stacklevel=2,
+        )
 
 
 def load_profile(name: str) -> ProfileContract:
