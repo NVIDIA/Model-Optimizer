@@ -46,8 +46,8 @@ reviews:
     auto_incremental_review: true
     auto_pause_after_reviewed_commits: 0
     drafts: false
-    base_branches: ["main", "release/.*", "feature/.*"]
-    labels: ["puzzletron_v2"]
+    # Temporary for feature/puzzletron_v2 stacks. Revisit before merging this branch into main.
+    base_branches: [".*"]
   pre_merge_checks:
     custom_checks:
       - name: "Security anti-patterns"
