@@ -107,26 +107,27 @@ def prepare_dataset_stage(config: dict) -> StageResult:
     if evaluation_tasks:
         configured_hf_home = stage_config.get("evaluation_hf_home")
         runner_hf_home = os.environ.get("HF_HOME")
-        if not configured_hf_home or not runner_hf_home:
-            raise ValueError(
-                "prepare_dataset.evaluation_tasks requires configured and runner HF_HOME"
-            )
+        if not configured_hf_home:
+            raise ValueError("prepare_dataset.evaluation_tasks requires evaluation_hf_home")
         evaluation_hf_home = Path(str(configured_hf_home)).expanduser().absolute()
-        if evaluation_hf_home != Path(runner_hf_home).expanduser().absolute():
+        if runner_hf_home and evaluation_hf_home != Path(runner_hf_home).expanduser().absolute():
             raise ValueError("prepare_dataset.evaluation_hf_home differs from runner HF_HOME")
         raw_catalog = stage_config.get("evaluation_datasets")
-        if not isinstance(raw_catalog, dict):
+        if raw_catalog is not None and not isinstance(raw_catalog, dict):
             raise TypeError("prepare_dataset.evaluation_datasets must be a mapping")
-        evaluation_catalog = {
-            task: raw_catalog[task] for task in evaluation_tasks if task in raw_catalog
-        }
-        if len(evaluation_catalog) != len(evaluation_tasks):
-            raise ValueError("prepare_dataset.evaluation_datasets is missing a configured task")
+        evaluation_catalog = None
+        if isinstance(raw_catalog, dict):
+            evaluation_catalog = {
+                task: raw_catalog[task] for task in evaluation_tasks if task in raw_catalog
+            }
+            if len(evaluation_catalog) != len(evaluation_tasks):
+                raise ValueError("prepare_dataset.evaluation_datasets is missing a configured task")
         evaluation_data = prepare_benchmark_datasets(
             evaluation_hf_home,
             evaluation_tasks,
             max_workers=int(stage_config.get("evaluation_max_workers", 8)),
             range_resume=bool(stage_config.get("evaluation_range_resume", False)),
+            verify_content=bool(stage_config.get("verify_content", False)),
             expected_catalog=evaluation_catalog,
         )
     acquisition_path = output / ACQUISITION_MANIFEST

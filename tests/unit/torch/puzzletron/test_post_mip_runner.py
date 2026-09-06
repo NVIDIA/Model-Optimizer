@@ -872,7 +872,12 @@ def test_recorded_observation_differences_are_suppressed_on_identity_mismatch():
 
 @pytest.mark.parametrize(
     ("changed_identity", "expected_reference_calls"),
-    [(None, 1), ("evaluator_revision", 2), ("checkpoint_fingerprint", 2)],
+    [
+        (None, 1),
+        ("evaluator_revision", 2),
+        ("checkpoint_fingerprint", 2),
+        ("evaluator_contract", 2),
+    ],
 )
 def test_downstream_evaluation_reuses_only_matching_reference_cache(
     monkeypatch, tmp_path, changed_identity, expected_reference_calls
@@ -884,6 +889,7 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
         candidate.mkdir()
     calls = []
     fingerprints = {reference: "teacher-a"}
+    contract_revision = {"value": "contract-a"}
 
     def fake_evaluate(checkpoint_path, *, output_root, settings):
         calls.append(Path(checkpoint_path))
@@ -893,6 +899,10 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
         return {
             "metrics": {"accuracy": 0.5 if Path(checkpoint_path) == reference else 0.4},
             "result_path": str(result_path),
+            "contract": {
+                "schema": "fixture.evaluator-contract/v1",
+                "revision": contract_revision["value"],
+            },
         }
 
     def fake_fingerprint(checkpoint_path):
@@ -919,6 +929,8 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
             node.config["config"]["evaluator_revision"] = "revision-b"
         if index == 1 and changed_identity == "checkpoint_fingerprint":
             fingerprints[reference] = "teacher-b"
+        if index == 1 and changed_identity == "evaluator_contract":
+            contract_revision["value"] = "contract-b"
         source = SimpleNamespace(
             architecture_id=f"architecture-{index}",
             artifact_kind=ArtifactKind.CHECKPOINT,
@@ -928,6 +940,75 @@ def test_downstream_evaluation_reuses_only_matching_reference_cache(
         runner._downstream_evaluation(config, node, source, f"execution-{index}")
 
     assert calls.count(reference) == expected_reference_calls
+
+
+def test_downstream_evaluation_rejects_candidate_reference_contract_mismatch(
+    monkeypatch, tmp_path
+) -> None:
+    candidate = tmp_path / "candidate"
+    reference = tmp_path / "teacher"
+    candidate.mkdir()
+    reference.mkdir()
+
+    def fake_evaluate(checkpoint_path, *, output_root, settings):
+        del settings
+        result_path = Path(output_root) / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text("{}")
+        return {
+            "metrics": {"accuracy": 0.5},
+            "result_path": str(result_path),
+            "contract": {
+                "schema": "fixture.evaluator-contract/v1",
+                "revision": Path(checkpoint_path).name,
+            },
+        }
+
+    monkeypatch.setattr(runner, "run_lmms_eval_checkpoint", fake_evaluate)
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(candidate)},
+        producer_node="materialized",
+    )
+    node = SimpleNamespace(
+        node_id="evaluation",
+        config={"config": {"reference_checkpoint": str(reference)}},
+    )
+
+    with pytest.raises(RuntimeError, match="candidate and reference evaluator contracts differ"):
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
+
+
+def test_reference_cache_requires_evaluator_revision(monkeypatch, tmp_path) -> None:
+    candidate = tmp_path / "candidate"
+    reference = tmp_path / "teacher"
+    candidate.mkdir()
+    reference.mkdir()
+    monkeypatch.setattr(
+        runner,
+        "run_lmms_eval_checkpoint",
+        lambda checkpoint, **kwargs: {"metrics": {}, "result_path": str(checkpoint)},
+    )
+    source = SimpleNamespace(
+        architecture_id="architecture",
+        artifact_kind=ArtifactKind.CHECKPOINT,
+        artifact={"checkpoint": str(candidate)},
+        producer_node="materialized",
+    )
+    node = SimpleNamespace(
+        node_id="evaluation",
+        config={
+            "config": {
+                "reference_checkpoint": str(reference),
+                "reference_once": True,
+                "reference_cache_id": "teacher",
+            }
+        },
+    )
+
+    with pytest.raises(ValueError, match="reference_once requires evaluator_revision"):
+        runner._downstream_evaluation({"puzzle_dir": str(tmp_path)}, node, source, "execution")
 
 
 def test_global_kd_resume_reports_durable_incremental_gpu_hours(tmp_path):

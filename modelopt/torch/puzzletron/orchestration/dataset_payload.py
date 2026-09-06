@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,6 @@ from typing import Any
 __all__ = ["file_inventories_are_complete", "record_file_inventory"]
 
 _SCHEMA = "modelopt.puzzletron.file-inventories/v1"
-_VALIDATED_INVENTORIES: dict[Path, tuple[Any, ...]] = {}
 
 
 def _sha256(path: Path) -> str:
@@ -94,7 +92,7 @@ def record_file_inventory(
     }
 
 
-def _inventory_is_complete(inventory: object) -> bool:
+def _inventory_is_complete(inventory: object, *, verify_content: bool = False) -> bool:
     if not isinstance(inventory, Mapping):
         return False
     root_value = inventory.get("root")
@@ -119,8 +117,7 @@ def _inventory_is_complete(inventory: object) -> bool:
         return False
 
     expected_paths = []
-    inspected_files = []
-    signature_items = []
+    files_to_hash = []
     for entry in entries:
         if not isinstance(entry, Mapping):
             return False
@@ -153,10 +150,11 @@ def _inventory_is_complete(inventory: object) -> bool:
         except OSError:
             return False
         expected_paths.append(relative.as_posix())
-        inspected_files.append((inspected, digest))
-        signature_items.append(
-            (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        )
+        metadata_matches = stat.st_mtime_ns == entry.get(
+            "mtime_ns"
+        ) and stat.st_ctime_ns == entry.get("ctime_ns")
+        if verify_content or not metadata_matches:
+            files_to_hash.append((inspected, digest))
 
     observed_paths = sorted(
         path.relative_to(root).as_posix()
@@ -165,19 +163,12 @@ def _inventory_is_complete(inventory: object) -> bool:
     )
     if sorted(expected_paths) != observed_paths:
         return False
-    inventory_digest = hashlib.sha256(
-        json.dumps(inventory, separators=(",", ":"), sort_keys=True).encode()
-    ).hexdigest()
-    signature = (inventory_digest, *signature_items)
-    if _VALIDATED_INVENTORIES.get(root) == signature:
-        return True
-    if any(_sha256(path) != digest for path, digest in inspected_files):
+    if any(_sha256(path) != digest for path, digest in files_to_hash):
         return False
-    _VALIDATED_INVENTORIES[root] = signature
     return True
 
 
-def file_inventories_are_complete(payload: object) -> bool:
+def file_inventories_are_complete(payload: object, *, verify_content: bool = False) -> bool:
     """Return whether every file inventory emitted by a stage is still current."""
 
     if not isinstance(payload, Mapping) or payload.get("schema") != _SCHEMA:
@@ -186,5 +177,8 @@ def file_inventories_are_complete(payload: object) -> bool:
     return (
         isinstance(inventories, list)
         and bool(inventories)
-        and all(_inventory_is_complete(inventory) for inventory in inventories)
+        and all(
+            _inventory_is_complete(inventory, verify_content=verify_content)
+            for inventory in inventories
+        )
     )

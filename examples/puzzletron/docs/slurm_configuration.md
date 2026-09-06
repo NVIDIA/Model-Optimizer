@@ -24,10 +24,20 @@ examples use `runner.slurm.partition` with stage overrides instead.
 The production examples also avoid literal `interactive` and `batch` stage
 overrides because those partition names are not portable between Slurm sites.
 
-## CPU-only stages
+## Stage resource defaults
 
-Set `resource: cpu` with a CPU partition override for work that does not need a
-GPU. Other stages continue to use the runner default:
+Puzzletron defaults data preparation, checkpoint conversion, library building,
+MIP solving, filtering, and reporting to `resource: cpu`. Model execution stages
+default to `resource: gpu`. These values control the scheduler request, not
+where the orchestration command itself runs.
+
+An explicit stage resource overrides the default. This is useful when running
+locally on an interactive GPU node or when a site uses GPU nodes for CPU work.
+Choosing `resource: cpu` for code that actually calls CUDA leaves GPUs hidden and
+can fail at runtime; choosing `resource: gpu` for CPU work reserves a GPU that the
+stage may not use.
+
+Set a CPU partition override when CPU work should use a separate Slurm queue:
 
 ```yaml
 runner:
@@ -66,3 +76,13 @@ reason.
 
 Runner and execution files reject unknown fields and suggest the closest valid
 name when possible.
+
+## Worker setup hooks
+
+`runner.execution_contract.prerun_commands` and `postrun_commands` are copied
+into generated worker scripts and appear in dry-run output. Puzzletron rejects
+obvious literal assignments to credential-like variables so those values are
+not persisted. Inherit credentials from the launch environment, require an
+existing variable such as `${API_KEY:?set API_KEY}`, retrieve it from a secret
+command, or source a permission-protected `setup_env` file. This check catches
+common mistakes but is not a shell parser or a complete credential scanner.

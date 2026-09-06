@@ -30,6 +30,7 @@ __all__ = [
     "collect_kd_exposure",
     "downstream_evaluation_identity",
     "evaluation_contract",
+    "evaluator_result_contract",
     "exact_checkpoint_evidence",
     "kd_exposure_metrics",
 ]
@@ -194,6 +195,12 @@ def _versioned_payload(result: Mapping[str, Any], field: str) -> dict[str, Any] 
     if not isinstance(schema, str) or not schema:
         raise ValueError(f"downstream evaluator {field} must declare a non-empty schema")
     return canonicalize(value)
+
+
+def evaluator_result_contract(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the evaluator-owned comparison contract declared by one result."""
+
+    return _versioned_payload(result, "contract")
 
 
 def _selected_json(path: Any, fields: tuple[str, ...]) -> dict[str, Any] | None:

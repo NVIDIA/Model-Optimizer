@@ -17,11 +17,13 @@
 
 import hashlib
 import json
+import os
 
 import pytest
 
 from examples.puzzletron import prepare_dataset as module
 from examples.puzzletron.evaluation.vlm.preparation import benchmark_data
+from puzzletron_orchestrator import dataset_payload
 from puzzletron_orchestrator.adapters.stage_compat import stage_is_complete
 
 
@@ -50,7 +52,6 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
             "max_shards_per_subset": 1,
             "evaluation_tasks": ["realworldqa"],
             "evaluation_hf_home": str(hf_home),
-            "evaluation_datasets": catalog,
         },
     }
 
@@ -80,8 +81,10 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
 
     monkeypatch.setattr(module, "materialize_nemotron_vlm_dataset", materialize)
 
-    def prepare_benchmarks(root, tasks, **_kwargs):
+    def prepare_benchmarks(root, tasks, **kwargs):
         assert tuple(tasks) == ("realworldqa",)
+        assert kwargs["verify_content"] is False
+        assert kwargs["expected_catalog"] is None
         task = "realworldqa"
         repository = catalog[task]["repository"]
         revision = catalog[task]["revision"]
@@ -107,13 +110,12 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
             }
         ]
 
-    monkeypatch.setenv("HF_HOME", str(hf_home))
+    monkeypatch.delenv("HF_HOME", raising=False)
     monkeypatch.setattr(module, "prepare_benchmark_datasets", prepare_benchmarks)
 
     result = module.prepare_dataset_stage(config)
 
     assert result.status == "success"
-    monkeypatch.delenv("HF_HOME")
     assert stage_is_complete(config, "prepare_dataset")
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["outputs"]["sample_count"] == 8
@@ -125,7 +127,7 @@ def test_prepare_dataset_stage_materializes_and_seals_completion(tmp_path, monke
     assert not stage_is_complete(config, "prepare_dataset")
 
 
-def test_prepare_dataset_stage_requires_runner_hf_home_for_evaluations(tmp_path, monkeypatch):
+def test_prepare_dataset_stage_requires_configured_hf_home_for_evaluations(tmp_path, monkeypatch):
     monkeypatch.delenv("HF_HOME", raising=False)
     config = {
         "puzzle_dir": str(tmp_path),
@@ -142,5 +144,82 @@ def test_prepare_dataset_stage_requires_runner_hf_home_for_evaluations(tmp_path,
         lambda _spec: {"sample_count": 1, "acquisition": {}},
     )
 
-    with pytest.raises(ValueError, match="runner HF_HOME"):
+    with pytest.raises(ValueError, match="requires evaluation_hf_home"):
         module.prepare_dataset_stage(config)
+
+
+def test_prepare_dataset_stage_rejects_mismatched_runner_hf_home(tmp_path, monkeypatch):
+    configured = tmp_path / "configured-hf-home"
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "runner-hf-home"))
+    config = {
+        "puzzle_dir": str(tmp_path),
+        "dataset_path": str(tmp_path / "dataset"),
+        "prepare_dataset": {
+            "enabled": True,
+            "output": str(tmp_path / "dataset"),
+            "evaluation_tasks": ["realworldqa"],
+            "evaluation_hf_home": str(configured),
+        },
+    }
+    monkeypatch.setattr(
+        module,
+        "materialize_nemotron_vlm_dataset",
+        lambda _spec: {"sample_count": 1, "acquisition": {}},
+    )
+
+    with pytest.raises(ValueError, match="differs from runner HF_HOME"):
+        module.prepare_dataset_stage(config)
+
+
+def test_inventory_uses_metadata_fast_path_and_hashes_changed_files(tmp_path, monkeypatch):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    payload_path = root / "samples.json"
+    payload_path.write_bytes(b"abc")
+    inventory = dataset_payload.record_file_inventory(root)
+    completion = {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": [inventory],
+    }
+    original_sha256 = dataset_payload._sha256
+    hashed = []
+
+    def observed_sha256(path):
+        hashed.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(dataset_payload, "_sha256", observed_sha256)
+
+    assert dataset_payload.file_inventories_are_complete(completion)
+    assert hashed == []
+
+    stat = payload_path.stat()
+    os.utime(payload_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert dataset_payload.file_inventories_are_complete(completion)
+    assert hashed == [payload_path]
+
+    hashed.clear()
+    payload_path.write_bytes(b"xyz")
+    assert not dataset_payload.file_inventories_are_complete(completion)
+    assert hashed == [payload_path]
+
+
+def test_inventory_explicit_content_verification_hashes_unchanged_files(tmp_path, monkeypatch):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    payload_path = root / "samples.json"
+    payload_path.write_bytes(b"abc")
+    completion = {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": [dataset_payload.record_file_inventory(root)],
+    }
+    original_sha256 = dataset_payload._sha256
+    hashed = []
+    monkeypatch.setattr(
+        dataset_payload,
+        "_sha256",
+        lambda path: (hashed.append(path), original_sha256(path))[1],
+    )
+
+    assert dataset_payload.file_inventories_are_complete(completion, verify_content=True)
+    assert hashed == [payload_path]

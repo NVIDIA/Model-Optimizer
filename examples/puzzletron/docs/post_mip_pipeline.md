@@ -211,6 +211,15 @@ the selected candidates need teacher-relative metrics. Without
 `reference_checkpoint`, evaluate the teacher separately under the same contract
 before comparing results.
 
+Set `reference_once: true`, `reference_cache_id`, and an explicit
+`evaluator_revision` to reuse one teacher evaluation across candidates. The
+cache key includes the teacher checkpoint, evaluator revision, raw settings,
+and the resolved evaluator contract. That contract is the evaluator's record of
+the profile, dataset and selected rows, model backend, generation settings,
+sample limit, and repetitions. If a candidate and teacher result declare
+different contracts, the comparison fails before publishing deltas. Exact
+sample counts and parser outcomes remain attached as result evidence.
+
 ## Filters
 
 `top_k` accepts one integer or separate homogeneous/heterogeneous quotas.

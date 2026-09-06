@@ -606,7 +606,9 @@ def _prepared_dataset_is_complete(config: Mapping[str, Any], manifest: Mapping[s
     if output is None or not isinstance(outputs, Mapping):
         return False
     completion = outputs.get("completion")
-    if not isinstance(completion, Mapping) or not file_inventories_are_complete(completion):
+    if not isinstance(completion, Mapping) or not file_inventories_are_complete(
+        completion, verify_content=bool(stage_config.get("verify_content", False))
+    ):
         return False
     inventories = completion.get("inventories")
     return isinstance(inventories, list) and any(

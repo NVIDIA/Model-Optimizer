@@ -37,24 +37,9 @@ __all__ = [
 
 _SUPPORTED_GROUPED_ATTENTION_TYPES = {
     ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5Attention"),
-    ("nemo_automodel.components.models.qwen3_next.layers", "Qwen3NextAttention"),
 }
 _SUPPORTED_GDN_TYPES = {
     ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5GatedDeltaNet"),
-    (
-        "nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn",
-        "CPAwareGatedDeltaNet",
-    ),
-}
-
-_NATIVE_GROUPED_ATTENTION_TYPES = {
-    ("nemo_automodel.components.models.qwen3_next.layers", "Qwen3NextAttention"),
-}
-_NATIVE_GDN_TYPES = {
-    (
-        "nemo_automodel.components.models.qwen3_5_moe.cp_linear_attn",
-        "CPAwareGatedDeltaNet",
-    ),
 }
 
 
@@ -71,30 +56,6 @@ def _index_select(tensor: torch.Tensor | None, dim: int, indices: torch.Tensor):
     if tensor is None:
         return None
     return tensor.index_select(dim, _indices_on(indices, tensor)).contiguous()
-
-
-def _is_dtensor(tensor: torch.Tensor) -> bool:
-    return (
-        type(tensor).__module__.startswith("torch.distributed")
-        and type(tensor).__name__ == "DTensor"
-    )
-
-
-def _native_sdpa_attention(attention_module) -> bool:
-    if _type_key(attention_module) not in _NATIVE_GROUPED_ATTENTION_TYPES:
-        return True
-    projection_modules = tuple(
-        getattr(attention_module, name, None) for name in ("q_proj", "k_proj", "v_proj", "o_proj")
-    )
-    if any(module is None or not hasattr(module, "weight") for module in projection_modules):
-        return False
-    backend = getattr(attention_module, "backend", None)
-    projections = tuple(getattr(module, "weight") for module in projection_modules)
-    return (
-        getattr(backend, "attn", None) == "sdpa"
-        and getattr(attention_module, "attn_module", None) is None
-        and not any(_is_dtensor(weight) for weight in projections)
-    )
 
 
 @contextmanager
@@ -184,7 +145,6 @@ def supports_compact_grouped_attention(
         and orig_num_kv > 0
         and head_dim > 0
         and orig_num_q % orig_num_kv == 0
-        and _native_sdpa_attention(attention_module)
         and _has_compact_grouped_attention_layout(
             attention_module,
             orig_num_q=orig_num_q,
@@ -243,21 +203,18 @@ def resolve_compact_grouped_attention_target(layer, teacher_attention, child_att
         orig_num_kv=orig_num_kv,
         head_dim=head_dim,
     )
-    supported = supports_compact_grouped_attention(
-        attention_module,
-        orig_num_q=orig_num_q,
-        orig_num_kv=orig_num_kv,
-        head_dim=head_dim,
-    )
-    if (
-        has_compact_layout or _type_key(attention_module) in _SUPPORTED_GROUPED_ATTENTION_TYPES
-    ) and not supported:
+    if has_compact_layout and _type_key(attention_module) not in _SUPPORTED_GROUPED_ATTENTION_TYPES:
         module_name, type_name = _type_key(attention_module)
         raise RuntimeError(
             "Compact grouped-attention scoring is unsupported for "
             f"{module_name}.{type_name}; refusing to score reduced geometry"
         )
-    if not supported:
+    if not supports_compact_grouped_attention(
+        attention_module,
+        orig_num_q=orig_num_q,
+        orig_num_kv=orig_num_kv,
+        head_dim=head_dim,
+    ):
         return None
     return {
         "module": attention_module,
@@ -343,73 +300,14 @@ def _compact_gdn_norm(norm, hidden_states, gate, value_dim_indices: torch.Tensor
     )
 
 
-def _gdn_gate_module(gdn_module):
-    holder = getattr(gdn_module, "_modules", {}).get("_fp32_params")
-    if holder is not None:
-        parameters = getattr(holder, "_parameters", {})
-        if {"A_log", "dt_bias"}.issubset(parameters):
-            return holder
-    parameters = getattr(gdn_module, "_parameters", {})
-    if {"A_log", "dt_bias"}.issubset(parameters):
-        return gdn_module
-    return None
-
-
-def _gdn_gate_parameters(gdn_module) -> tuple[torch.Tensor, torch.Tensor] | None:
-    gate_module = _gdn_gate_module(gdn_module)
-    if gate_module is None:
-        return None
-    return gate_module._parameters["A_log"], gate_module._parameters["dt_bias"]
-
-
-def _compact_gdn_gate(gdn_module, a: torch.Tensor, head_indices: torch.Tensor) -> torch.Tensor:
-    gate_module = _gdn_gate_module(gdn_module)
-    if gate_module is None:
-        raise RuntimeError(f"{type(gdn_module).__name__} has no supported GDN gate parameters")
-    a_log = _index_select(gate_module._parameters["A_log"], 0, head_indices)
-    dt_bias = _index_select(gate_module._parameters["dt_bias"], 0, head_indices)
-    if gate_module is gdn_module:
-        return -a_log.float().exp() * F.softplus(a.float() + dt_bias)
-    return torch.func.functional_call(
-        gate_module,
-        {"A_log": a_log, "dt_bias": dt_bias},
-        (a,),
-        strict=False,
-    )
-
-
-def _native_gdn_single_device(gdn_module) -> bool:
-    if _type_key(gdn_module) not in _NATIVE_GDN_TYPES:
-        return True
-    cp_mesh = getattr(gdn_module, "_cp_mesh", None)
-    if cp_mesh is not None:
-        try:
-            if int(cp_mesh.size()) > 1:
-                return False
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            return False
-    tensors = (
-        gdn_module.in_proj_qkv.weight,
-        gdn_module.in_proj_z.weight,
-        gdn_module.in_proj_a.weight,
-        gdn_module.in_proj_b.weight,
-        gdn_module.conv1d.weight,
-        gdn_module.norm.weight,
-        gdn_module.out_proj.weight,
-    )
-    gate_parameters = _gdn_gate_parameters(gdn_module)
-    return gate_parameters is not None and not any(
-        _is_dtensor(tensor) for tensor in (*tensors, *gate_parameters)
-    )
-
-
 def supports_compact_gated_delta_net(gdn_module, *, teacher_shape: GDNShape) -> bool:
     """Return whether this exact tested Qwen GDN layout supports compact execution."""
 
     if _type_key(gdn_module) not in _SUPPORTED_GDN_TYPES:
         return False
-    gate_parameters = _gdn_gate_parameters(gdn_module)
-    if gate_parameters is None:
+    if "_fp32_params" in getattr(gdn_module, "_modules", {}):
+        return False
+    if not {"A_log", "dt_bias"}.issubset(getattr(gdn_module, "_parameters", {})):
         return False
     required = (
         "in_proj_qkv",
@@ -436,7 +334,6 @@ def supports_compact_gated_delta_net(gdn_module, *, teacher_shape: GDNShape) -> 
     value_width = teacher_shape.num_value_heads * teacher_shape.value_head_dim
     return (
         GDNShape.from_module(gdn_module) == teacher_shape
-        and _native_gdn_single_device(gdn_module)
         and int(gdn_module.in_proj_qkv.weight.shape[0]) == projection_width
         and int(gdn_module.in_proj_z.weight.shape[0]) == value_width
         and int(gdn_module.in_proj_a.weight.shape[0]) == teacher_shape.num_value_heads
@@ -444,8 +341,8 @@ def supports_compact_gated_delta_net(gdn_module, *, teacher_shape: GDNShape) -> 
         and int(gdn_module.conv1d.weight.shape[0]) == projection_width
         and int(gdn_module.norm.weight.shape[0]) == teacher_shape.value_head_dim
         and int(gdn_module.out_proj.weight.shape[1]) == value_width
-        and int(gate_parameters[0].shape[0]) == teacher_shape.num_value_heads
-        and int(gate_parameters[1].shape[0]) == teacher_shape.num_value_heads
+        and int(gdn_module.A_log.shape[0]) == teacher_shape.num_value_heads
+        and int(gdn_module.dt_bias.shape[0]) == teacher_shape.num_value_heads
     )
 
 
@@ -483,29 +380,10 @@ def compact_gated_delta_net_forward(
         cache_position=None,
         attention_mask: torch.Tensor | None = None,
         seq_idx=None,
-        position_ids=None,
-        qkv_format=None,
-        cu_seqlens=None,
-        cu_seqlens_cpu=None,
-        indices=None,
-        seq_index=None,
         **kwargs,
     ):
-        del cache_position, position_ids
         if kwargs:
             raise TypeError(f"Unsupported compact GDN forward arguments: {sorted(kwargs)}")
-        if (
-            qkv_format not in (None, "bshd")
-            or seq_idx is not None
-            or seq_index is not None
-            or cu_seqlens is not None
-            or cu_seqlens_cpu is not None
-            or indices is not None
-        ):
-            raise RuntimeError(
-                "Compact native GDN packed execution is not supported; refusing to score "
-                "reduced geometry"
-            )
         if (
             attention_mask is not None
             and attention_mask.shape[1] > 1
@@ -581,7 +459,7 @@ def compact_gated_delta_net_forward(
                     weight=conv_weight.squeeze(1),
                     bias=conv_bias,
                     activation=self.activation,
-                    seq_idx=None,
+                    seq_idx=seq_idx,
                 )
             else:
                 mixed_qkv = F.silu(
@@ -620,7 +498,9 @@ def compact_gated_delta_net_forward(
         )
 
         beta = b.sigmoid()
-        g = _compact_gdn_gate(self, a, hidx)
+        g = -_index_select(self.A_log, 0, hidx).float().exp() * F.softplus(
+            a.float() + _index_select(self.dt_bias, 0, hidx)
+        )
         repeats = target_shape.num_value_heads // target_shape.num_key_heads
         if repeats > 1:
             query = query.repeat_interleave(repeats, dim=2)

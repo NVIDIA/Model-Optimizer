@@ -40,6 +40,7 @@ from .evidence import checkpoint_fingerprint as _checkpoint_fingerprint
 from .evidence import collect_kd_exposure, kd_exposure_metrics
 from .evidence import downstream_evaluation_identity as _downstream_evaluation_identity
 from .evidence import evaluation_contract as _evaluation_contract
+from .evidence import evaluator_result_contract as _evaluator_result_contract
 from .evidence import exact_checkpoint_evidence as _exact_checkpoint_evidence
 from .filters import apply_filter
 from .identity import (
@@ -602,27 +603,33 @@ def _downstream_evaluation(
             raise ValueError(f"unsupported downstream evaluation profile: {profile}")
     if recorded_observation is not None and reference_checkpoint is None:
         raise ValueError("recorded_observation requires reference_checkpoint")
+    if reference_checkpoint is not None and reference_once:
+        if not reference_cache_id:
+            raise ValueError("reference_once requires reference_cache_id")
+        if not isinstance(evaluator_revision, str) or not evaluator_revision.strip():
+            raise ValueError("reference_once requires evaluator_revision")
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        if any(character not in allowed for character in str(reference_cache_id)):
+            raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
     candidate = evaluator(
         source.artifact["checkpoint"],
         output_root=output_root,
         settings=settings,
     )
+    candidate_contract = _evaluator_result_contract(candidate)
     if reference_checkpoint is None:
         return candidate
 
     reference_checkpoint_fingerprint = _checkpoint_fingerprint(reference_checkpoint)
     if reference_once:
-        if not reference_cache_id:
-            raise ValueError("reference_once requires reference_cache_id")
-        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-        if any(character not in allowed for character in str(reference_cache_id)):
-            raise ValueError("reference_cache_id must contain only letters, digits, '_' and '-'")
+        assert reference_cache_id is not None
         cache_identity = stable_hash(
             {
                 "checkpoint_fingerprint": reference_checkpoint_fingerprint,
                 "profile": profile,
                 "evaluator_revision": evaluator_revision,
                 "settings": settings,
+                "evaluator_contract": candidate_contract,
             },
             prefix="post_mip_reference_evaluation",
         )
@@ -651,6 +658,8 @@ def _downstream_evaluation(
             output_root=output_root.parent / "reference",
             settings=settings,
         )
+    if candidate_contract != _evaluator_result_contract(reference):
+        raise RuntimeError("candidate and reference evaluator contracts differ")
     candidate_metrics = dict(candidate["metrics"])
     reference_metrics = dict(reference["metrics"])
     if candidate_metrics.keys() != reference_metrics.keys():

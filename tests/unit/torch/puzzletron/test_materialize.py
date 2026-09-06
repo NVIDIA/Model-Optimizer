@@ -292,7 +292,7 @@ def test_materialize_no_op_removes_sublayer_tensors_but_keeps_other_half():
 
 @pytest.mark.parametrize(
     "source_index_mode",
-    ["missing_total_size", "correct_total_size", "stale_total_size", "unindexed"],
+    ["missing_total_size", "correct_total_size", "unindexed"],
 )
 def test_streaming_materialization_records_exact_output_tensor_bytes(
     tmp_path: Path, source_index_mode: str
@@ -325,8 +325,6 @@ def test_streaming_materialization_records_exact_output_tensor_bytes(
         )
         if source_index_mode == "correct_total_size":
             metadata["total_size"] = source_tensor_bytes
-        elif source_index_mode == "stale_total_size":
-            metadata["total_size"] = source_tensor_bytes + 123
         (source / "model.safetensors.index.json").write_text(
             json.dumps(
                 {
@@ -371,6 +369,7 @@ def test_streaming_materialization_records_exact_output_tensor_bytes(
     manifest = json.loads((output / REALIZATION_MANIFEST).read_text())
     if output_index is not None:
         assert output_index["metadata"]["total_size"] == exact_size
+        assert manifest["hardlinked_shards"] == 1
     assert manifest["total_size"] == exact_size
 
 

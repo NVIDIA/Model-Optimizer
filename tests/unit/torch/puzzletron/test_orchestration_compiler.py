@@ -198,7 +198,7 @@ def test_named_mip_plan_uses_the_public_worker_on_the_cpu_route(tmp_configs) -> 
     plan = compile_campaign_plan(
         experiment_config_path=experiment_path,
         runner=load_runner_config(runner_path),
-        execution={"stages": {"mip": {"resource": "cpu"}}},
+        execution={},
         stage_filter="mip",
     )
     submission = dry_run_plan(plan)[0]
@@ -369,7 +369,7 @@ def test_compile_routes_mip_model_validation_to_gpu_mesh(tmp_configs) -> None:
     plan = compile_campaign_plan(
         experiment_config_path=experiment_path,
         runner=load_runner_config(runner_path),
-        execution={"stages": {"mip": {"resource": "gpu"}}},
+        execution={},
         stage_filter="mip",
     )
     mip = plan.stages[0]
@@ -387,26 +387,9 @@ def test_compile_routes_mip_model_validation_to_gpu_mesh(tmp_configs) -> None:
     assert "--gpus-per-task=8" in submission.scheduler_script
 
 
-@pytest.mark.parametrize(
-    ("skip_validation", "execution", "message"),
-    [
-        (
-            False,
-            {"stages": {"mip": {"resource": "cpu"}}},
-            "execution.stages.mip.resource cannot be 'cpu' because "
-            "realize_model.skip_validation=false runs realized-checkpoint validation on GPUs; "
-            "set it to 'gpu' or disable realization validation",
-        ),
-        (
-            True,
-            {"defaults": {"resource": "gpu"}},
-            "execution.defaults.resource cannot be 'gpu' because the effective MIP path is "
-            "CPU-only; remove that setting or set it to 'cpu'",
-        ),
-    ],
-)
-def test_compile_rejects_mip_resource_mismatch(
-    tmp_configs, skip_validation: bool, execution: dict, message: str
+@pytest.mark.parametrize(("skip_validation", "resource"), [(False, "cpu"), (True, "gpu")])
+def test_compile_respects_explicit_mip_resource_override(
+    tmp_configs, skip_validation: bool, resource: str
 ) -> None:
     experiment_path, runner_path, _execution_path = tmp_configs
     experiment = yaml.safe_load(experiment_path.read_text())
@@ -414,14 +397,15 @@ def test_compile_rejects_mip_resource_mismatch(
     experiment["realize_model"] = {"skip_validation": skip_validation}
     experiment_path.write_text(yaml.safe_dump(experiment))
 
-    with pytest.raises(ValueError) as error:
-        compile_campaign_plan(
-            experiment_config_path=experiment_path,
-            runner=load_runner_config(runner_path),
-            execution=execution,
-            stage_filter="mip",
-        )
-    assert str(error.value) == message
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={"stages": {"mip": {"resource": resource}}},
+        stage_filter="mip",
+    )
+
+    assert plan.stages[0].resource == resource
+    assert (plan.stages[0].total_gpus > 0) is (resource == "gpu")
 
 
 def test_runner_config_rejects_unknown_field_with_suggestion(tmp_configs) -> None:
@@ -662,12 +646,16 @@ def test_runner_config_allows_nonsecret_tokenizer_setting_and_inherited_secret(
     payload["runner"]["execution_contract"]["prerun_commands"] = [
         "export TOKENIZERS_PARALLELISM=false",
         "export API_KEY=${API_KEY}",
+        "export SERVICE_API_KEY=${SERVICE_API_KEY:?set SERVICE_API_KEY}",
+        "export ACCESS_TOKEN=$(secret-tool lookup service modelopt)",
     ]
     runner_path.write_text(yaml.safe_dump(payload))
 
     assert load_runner_config(runner_path).contract.prerun_commands == (
         "export TOKENIZERS_PARALLELISM=false",
         "export API_KEY=${API_KEY}",
+        "export SERVICE_API_KEY=${SERVICE_API_KEY:?set SERVICE_API_KEY}",
+        "export ACCESS_TOKEN=$(secret-tool lookup service modelopt)",
     )
 
 

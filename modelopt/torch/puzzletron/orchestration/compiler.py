@@ -224,7 +224,11 @@ def _command_sequence(value: Any, *, path: str) -> tuple[str, ...]:
 
 _ENV_ASSIGNMENT = re.compile(r"\b(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*([^\s;]+)", re.IGNORECASE)
 _SECRET_VARIABLE_SUFFIXES = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY")
-_INHERITED_VARIABLE = re.compile(r"\$(?:[A-Z_][A-Z0-9_]*|\{[A-Z_][A-Z0-9_]*\})", re.IGNORECASE)
+_INHERITED_VARIABLE = re.compile(
+    r"\$(?:[A-Z_][A-Z0-9_]*|\{[A-Z_][A-Z0-9_]*(?::?\?[^}]*)?\})",
+    re.IGNORECASE,
+)
+_REQUIRED_VARIABLE = re.compile(r"^\$\{[A-Z_][A-Z0-9_]*:?\?", re.IGNORECASE)
 
 
 def _reject_inline_secret_assignments(commands: Sequence[str], *, path: str) -> None:
@@ -239,7 +243,11 @@ def _reject_inline_secret_assignments(commands: Sequence[str], *, path: str) -> 
             ):
                 continue
             value = match.group(2).strip("\"'")
-            if _INHERITED_VARIABLE.fullmatch(value):
+            if (
+                _INHERITED_VARIABLE.fullmatch(value)
+                or _REQUIRED_VARIABLE.match(value)
+                or value.startswith("$(")
+            ):
                 continue
             raise ValueError(
                 f"{path} assigns a literal value to {match.group(1)!r}; inherit it from the "
@@ -666,7 +674,7 @@ def resolve_stage_execution_specs(
 
 
 def mip_resource(experiment_config: Mapping[str, Any]) -> str:
-    """Return the resource required by the effective MIP/realization behavior."""
+    """Return the default resource for the effective MIP/realization behavior."""
 
     mip_runs = _mapping(experiment_config.get("mip")).get("runs")
     if isinstance(mip_runs, Mapping) and mip_runs:
@@ -678,36 +686,6 @@ def mip_resource(experiment_config: Mapping[str, Any]) -> str:
         return "cpu"
     realize_model = _mapping(raw_realize_model)
     return "cpu" if bool(realize_model.get("skip_validation", False)) else "gpu"
-
-
-def _validate_mip_resource_override(
-    execution: Mapping[str, Any], *, required_resource: str
-) -> None:
-    """Reject a MIP resource that contradicts the effective experiment behavior."""
-
-    stages = _mapping(execution.get("stages"))
-    mip = _mapping(stages.get("mip"))
-    defaults = _mapping(execution.get("defaults"))
-    if "resource" in mip:
-        path = "execution.stages.mip.resource"
-        configured = str(mip["resource"])
-    elif "resource" in defaults:
-        path = "execution.defaults.resource"
-        configured = str(defaults["resource"])
-    else:
-        return
-    if configured == required_resource:
-        return
-    if required_resource == "gpu":
-        raise ValueError(
-            f"{path} cannot be {configured!r} because realize_model.skip_validation=false "
-            "runs realized-checkpoint validation on GPUs; set it to 'gpu' or disable "
-            "realization validation"
-        )
-    raise ValueError(
-        f"{path} cannot be {configured!r} because the effective MIP path is CPU-only; remove "
-        "that setting or set it to 'cpu'"
-    )
 
 
 def _named_mip_validation_error(path: str, message: str) -> ValueError:
@@ -858,7 +836,7 @@ def compile_campaign_plan(
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
     _validate_named_mip_geometry(experiment_config)
-    required_mip_resource = mip_resource(experiment_config)
+    default_mip_resource = mip_resource(experiment_config)
     puzzle_dir = Path(
         experiment_config.get("puzzle_dir")
         or (experiment_config.get("experiment") or {}).get("dir")
@@ -877,15 +855,13 @@ def compile_campaign_plan(
         if stage_filter not in enabled:
             raise ValueError(f"Stage {stage_filter!r} is not enabled in the experiment config")
         enabled = (stage_filter,)
-    if "mip" in enabled:
-        _validate_mip_resource_override(execution, required_resource=required_mip_resource)
     dynamic_execution_defaults = {
         row["stage_id"]: row["default_strategy"] for row in post_mip_stages
     }
     dynamic_resource_defaults = {
         row["stage_id"]: row["default_resource"] for row in post_mip_stages
     }
-    dynamic_resource_defaults["mip"] = required_mip_resource
+    dynamic_resource_defaults["mip"] = default_mip_resource
     execution_specs = resolve_stage_execution_specs(
         execution,
         enabled,

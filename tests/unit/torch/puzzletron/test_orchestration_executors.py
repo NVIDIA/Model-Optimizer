@@ -136,6 +136,34 @@ def test_baremetal_submit_uses_one_execution_contract_on_every_host(
     assert [task["hostname"] for task in handle.metadata["tasks"]] == ["node-a", "node-b"]
 
 
+def test_baremetal_submit_runs_cpu_task_without_gpu_lease(tmp_path: Path, monkeypatch) -> None:
+    calls = []
+
+    def _fake_run(argv):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("puzzletron_orchestrator.executors.baremetal._run_command", _fake_run)
+    executor = BareMetalSSHExecutor(_baremetal_runner(), state_dir=tmp_path)
+    attempt = AttemptSpec(
+        attempt_id="cpu-1",
+        work_id="convert:0",
+        stage_id="convert",
+        command=CommandSpec(argv=("python", "worker.py")),
+        allocation_nodes=1,
+        allocation_gpus=0,
+        metadata={"gpus_per_node": 0},
+        task_topology=TaskTopology(task_count=1, gpus_per_task=0),
+    )
+
+    handle = executor.submit(attempt)
+
+    assert len(calls) == 1
+    assert calls[0][3] == "node-a"
+    assert "export CUDA_VISIBLE_DEVICES='';" in calls[0][-1]
+    assert handle.metadata["tasks"][0]["gpu_ids"] == ()
+
+
 # Slurm script rendering and AIPerf aggregation
 
 
