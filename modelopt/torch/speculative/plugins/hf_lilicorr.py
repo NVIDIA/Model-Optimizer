@@ -419,7 +419,9 @@ class HFLiLiCorrModel(HFDFlashModel):
         loss = self.dflash_lilicorr_w_ce * ce_loss
 
         margin_loss = ce_loss.new_zeros(())
-        if self.dflash_lilicorr_w_margin > 0.0:
+        if self.dflash_lilicorr_w_margin > 0.0 and topk > 1:
+            # topk == 1: no competing candidate exists, so gap is zero and the hinge
+            # would fire at full strength on every slot with zero gradient. Skip it.
             hinge = torch.relu(self.dflash_lilicorr_margin - gap)
             margin_loss = (hinge * supervised).sum() / denominator
             loss = loss + self.dflash_lilicorr_w_margin * margin_loss
