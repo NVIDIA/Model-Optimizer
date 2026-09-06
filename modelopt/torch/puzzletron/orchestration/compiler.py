@@ -644,7 +644,9 @@ def resolve_stage_execution_specs(
         )
         default_resource = dynamic_resources.get(stage_id)
         if default_resource is None:
-            default_resource = default_stage_resource(stage_id)
+            default_resource = (
+                "gpu" if stage_id.startswith("post.") else default_stage_resource(stage_id)
+            )
         if "resource" in payload:
             resource_path = f"execution.stages.{stage_id}.resource"
             resource = str(payload["resource"])
@@ -655,9 +657,8 @@ def resolve_stage_execution_specs(
             resource_path = None
             resource = default_resource
         if resource not in {"cpu", "gpu"}:
-            raise ValueError(
-                f"stage {stage_id!r} resource must be 'cpu' or 'gpu', got {resource!r}"
-            )
+            location = resource_path or f"stage {stage_id!r}"
+            raise ValueError(f"{location} resource must be 'cpu' or 'gpu', got {resource!r}")
         resolved[stage_id] = StageExecutionSpec(
             stage_id=stage_id,
             strategy=strategy,
@@ -835,7 +836,6 @@ def compile_campaign_plan(
     _validate_execution_payload(execution)
     experiment_path = Path(experiment_config_path)
     experiment_config = load_experiment_config(experiment_path, overrides=overrides or [])
-    _validate_named_mip_geometry(experiment_config)
     default_mip_resource = mip_resource(experiment_config)
     puzzle_dir = Path(
         experiment_config.get("puzzle_dir")
@@ -855,6 +855,8 @@ def compile_campaign_plan(
         if stage_filter not in enabled:
             raise ValueError(f"Stage {stage_filter!r} is not enabled in the experiment config")
         enabled = (stage_filter,)
+    if "mip" in enabled:
+        _validate_named_mip_geometry(experiment_config)
     dynamic_execution_defaults = {
         row["stage_id"]: row["default_strategy"] for row in post_mip_stages
     }

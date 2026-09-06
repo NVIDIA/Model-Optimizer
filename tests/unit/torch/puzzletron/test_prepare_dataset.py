@@ -223,3 +223,33 @@ def test_inventory_explicit_content_verification_hashes_unchanged_files(tmp_path
 
     assert dataset_payload.file_inventories_are_complete(completion, verify_content=True)
     assert hashed == [payload_path]
+
+
+def test_inventory_rejects_symlinks_to_directories(tmp_path):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    allowed = tmp_path / "allowed"
+    target = allowed / "target"
+    target.mkdir(parents=True)
+    (root / "entry").symlink_to(target)
+
+    with pytest.raises(ValueError, match="regular file"):
+        dataset_payload.record_file_inventory(root, allowed_symlink_root=allowed)
+
+
+def test_inventory_becomes_incomplete_when_symlink_target_becomes_directory(tmp_path):
+    root = tmp_path / "dataset"
+    root.mkdir()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    target = allowed / "target"
+    target.write_text("payload")
+    (root / "entry").symlink_to(target)
+    completion = {
+        "schema": "modelopt.puzzletron.file-inventories/v1",
+        "inventories": [dataset_payload.record_file_inventory(root, allowed_symlink_root=allowed)],
+    }
+    target.unlink()
+    target.mkdir()
+
+    assert not dataset_payload.file_inventories_are_complete(completion)

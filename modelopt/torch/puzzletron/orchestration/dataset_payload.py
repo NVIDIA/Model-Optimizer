@@ -62,6 +62,8 @@ def record_file_inventory(
                 raise ValueError(f"inventory symlink is invalid: {path}") from error
             if symlink_root is None or not inspected.is_relative_to(symlink_root):
                 raise ValueError(f"inventory symlink escapes its allowed root: {path}")
+            if not inspected.is_file():
+                raise ValueError(f"inventory symlink target must be a regular file: {path}")
             kind = "symlink"
             target = inspected.relative_to(symlink_root).as_posix()
         elif path.is_file():
@@ -134,9 +136,11 @@ def _inventory_is_complete(inventory: object, *, verify_content: bool = False) -
                 if symlink_root is None or not path.is_symlink():
                     return False
                 inspected = path.resolve(strict=True)
-                if not inspected.is_relative_to(symlink_root) or inspected.relative_to(
-                    symlink_root
-                ).as_posix() != entry.get("target"):
+                if (
+                    not inspected.is_relative_to(symlink_root)
+                    or not inspected.is_file()
+                    or inspected.relative_to(symlink_root).as_posix() != entry.get("target")
+                ):
                     return False
             elif entry.get("kind") == "file":
                 if path.is_symlink() or not path.is_file():

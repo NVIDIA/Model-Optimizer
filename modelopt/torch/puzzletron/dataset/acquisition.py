@@ -183,9 +183,11 @@ def _load_existing_manifest(output_dir: Path) -> dict[str, Any] | None:
     for path in candidates:
         if path.is_file():
             try:
-                return json.loads(path.read_text())
+                manifest = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
+            if isinstance(manifest, dict):
+                return manifest
     return None
 
 

@@ -138,21 +138,24 @@ def execution_contract_hash(runner: RunnerEnvironment) -> str:
         "task_topology_contract": 1,
     }
     if runner.slurm is not None:
-        payload["slurm"] = {
+        slurm_payload = {
             "account": runner.slurm.account,
             "job_name_prefix": runner.slurm.job_name_prefix,
             "partition": runner.slurm.partition,
             "partition_interactive": runner.slurm.partition_interactive,
             "partition_batch": runner.slurm.partition_batch,
             "partition_cpu": runner.slurm.partition_cpu,
-            "cpu_cpus_per_task": runner.slurm.cpu_cpus_per_task,
-            "cpu_memory_mb": runner.slurm.cpu_memory_mb,
             "interactive_max_nodes": runner.slurm.interactive_max_nodes,
             "max_nodes": runner.slurm.max_nodes,
             "time_limit": runner.slurm.time_limit,
             "qos": runner.slurm.qos,
             "log_dir": runner.slurm.log_dir,
         }
+        if runner.slurm.cpu_cpus_per_task is not None:
+            slurm_payload["cpu_cpus_per_task"] = runner.slurm.cpu_cpus_per_task
+        if runner.slurm.cpu_memory_mb is not None:
+            slurm_payload["cpu_memory_mb"] = runner.slurm.cpu_memory_mb
+        payload["slurm"] = slurm_payload
     if runner.baremetal is not None:
         payload["baremetal"] = {
             "hosts": [(host.hostname, host.gpus) for host in runner.baremetal.hosts],

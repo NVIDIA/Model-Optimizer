@@ -131,6 +131,17 @@ def test_resolve_stage_execution_specs_assigns_default_strategies(tmp_configs):
     configured = resolve_stage_execution_specs(execution, ("vllm_stats",))
     assert configured["vllm_stats"].instances == 16
 
+    dynamic = resolve_stage_execution_specs({}, ("post.flow.evaluate",))
+    assert dynamic["post.flow.evaluate"].resource == "gpu"
+
+
+def test_resolve_stage_execution_specs_reports_invalid_resource_path() -> None:
+    with pytest.raises(ValueError, match=r"execution\.defaults\.resource"):
+        resolve_stage_execution_specs(
+            {"defaults": {"resource": "invalid"}},
+            ("vllm_stats",),
+        )
+
 
 @pytest.mark.parametrize("schema_version", [True, 1.0, "1", 2])
 def test_compile_rejects_incompatible_execution_schema(tmp_configs, schema_version) -> None:
@@ -222,7 +233,7 @@ def test_compile_accepts_named_mip_ranges_that_select_available_geometry(tmp_con
     plan = compile_campaign_plan(
         experiment_config_path=experiment_path,
         runner=load_runner_config(runner_path),
-        execution={"stages": {"mip": {"resource": "cpu"}}},
+        execution={},
         stage_filter="mip",
     )
 
@@ -317,6 +328,22 @@ def test_compile_rejects_stale_named_mip_geometry(tmp_configs, case: str, error_
     assert "update the named-MIP configuration" in str(error.value)
 
 
+def test_compile_skips_named_mip_validation_when_mip_is_not_selected(tmp_configs) -> None:
+    experiment_path, runner_path, _execution_path = tmp_configs
+    experiment = _write_named_mip_experiment(experiment_path)
+    experiment["embedding_pruning"]["widths"] = [768]
+    experiment_path.write_text(yaml.safe_dump(experiment))
+
+    plan = compile_campaign_plan(
+        experiment_config_path=experiment_path,
+        runner=load_runner_config(runner_path),
+        execution={},
+        stage_filter="width_importance",
+    )
+
+    assert plan.stages[0].stage_id == "width_importance"
+
+
 @pytest.mark.parametrize(
     ("skip_realize_model", "skip_validation"),
     [(True, False), (False, True)],
@@ -337,7 +364,7 @@ def test_compile_routes_mip_without_model_validation_to_cpu(
     plan = compile_campaign_plan(
         experiment_config_path=experiment_path,
         runner=load_runner_config(runner_path),
-        execution={"stages": {"mip": {"resource": "cpu"}}},
+        execution={},
         stage_filter="mip",
     )
     mip = plan.stages[0]
@@ -523,6 +550,40 @@ def test_cpu_resources_change_slurm_execution_contract_identity() -> None:
     )
 
     assert execution_contract_hash(baseline) != execution_contract_hash(more_cpus)
+
+
+def test_unset_cpu_resources_preserve_slurm_execution_contract_identity() -> None:
+    runner = RunnerEnvironment(
+        kind="slurm",
+        contract=ExecutionContract(repository="/repo", venv="/venv"),
+        slurm=SlurmRunnerConfig(account="acct"),
+    )
+    previous_payload = {
+        "repository": "/repo",
+        "venv": "/venv",
+        "container": None,
+        "container_mounts": None,
+        "setup_env": None,
+        "prerun_commands": [],
+        "postrun_commands": [],
+        "runner_kind": "slurm",
+        "task_topology_contract": 1,
+        "slurm": {
+            "account": "acct",
+            "job_name_prefix": "pt",
+            "partition": None,
+            "partition_interactive": None,
+            "partition_batch": None,
+            "partition_cpu": None,
+            "interactive_max_nodes": 2,
+            "max_nodes": None,
+            "time_limit": "4:00:00",
+            "qos": None,
+            "log_dir": None,
+        },
+    }
+
+    assert execution_contract_hash(runner) == hash_payload(previous_payload)
 
 
 def test_partition_schema_migration_changes_slurm_execution_contract_identity() -> None:
