@@ -11,16 +11,24 @@ Callers still select one profile. Keeping the components separate makes it
 clear that native and vLLM runs can use identical examples while changing only
 the backend. Use the same runnable profile for every model being compared.
 
-The common choices are:
+Choose a profile by the checkpoint and the amount of coverage needed:
 
-- `core-3_344-examples_r1-native` for the maintained three-benchmark campaign screen;
-- `core-3_344-examples_r1-vllm` for materialized heterogeneous campaign checkpoints;
-- `core-3_24-examples_r1-native` and `core-3_24-examples_r1-vllm` for lifecycle smoke checks;
-- `judge-free-8_690-examples_r1-native` for a broader eight-benchmark regression screen;
-- `core-3_full_r1-native` and `core-3_full_r1-vllm` for paired full-dataset
-  teacher references on RealWorldQA, MMMU validation, and MVBench;
-- `short-v1`, `short-native-v1`, `short-all-native-v1`, and `full-v1` with an
-  environment that matches each profile's pinned evaluator revision.
+| Profile | What it evaluates | Use it for |
+| --- | --- | --- |
+| `core-3_24-examples_r1-native` | The same eight examples from each of RealWorldQA, MMMU validation, and one MVBench task (24 total), loaded with the native Qwen backend | A fast loading, prompt, and scoring smoke check for a Qwen checkpoint |
+| `core-3_24-examples_r1-vllm` | The same 24 examples, served through vLLM | A fast smoke check for a materialized heterogeneous checkpoint |
+| `core-3_344-examples_r1-native` | 64 RealWorldQA, 120 MMMU validation, and 160 MVBench examples (344 total), loaded with the native Qwen backend | Routine teacher-versus-candidate campaign comparisons |
+| `core-3_344-examples_r1-vllm` | The same 344 examples, served through vLLM | Routine comparisons of materialized heterogeneous checkpoints |
+| `judge-free-8_690-examples_r1-native` | 690 fixed examples across the eight benchmarks that require no external judge | A broader image-and-video regression screen |
+| `core-3_full_r1-native` | All 5,665 RealWorldQA, MMMU validation, and MVBench examples, loaded with the native Qwen backend | A full-dataset reference for the pinned Qwen 3.5 0.8B teacher |
+| `core-3_full_r1-vllm` | The same 5,665 examples, served through vLLM | A separate full-dataset vLLM reference for the pinned teacher |
+
+The four older names `short-v1`, `short-native-v1`, `short-all-native-v1`, and
+`full-v1` are temporary compatibility profiles. They preserve the exact rows,
+backend settings, and evaluator revisions of commands that existed before
+component profiles. Keep them only for reproducing those earlier runs; use the
+descriptive profiles above for new work. Removing the compatibility names will
+be an explicit breaking cleanup after downstream users have migrated.
 
 For text-only IFEval and GSM8K evaluation, use the separate
 [text checkpoint evaluator](checkpoint_evaluation.md).
@@ -33,8 +41,18 @@ Run evaluation in the default Puzzletron worker image described in the
 `examples/puzzletron/ci_environment.json`, includes the native Qwen 3.5 image
 and video backend, and preserves each task's output-token budget for vLLM. No
 evaluator overlay or separate VLM requirements install is needed. Do not modify
-the evaluator checkout inside the image. Preflight rejects evaluator revisions
-that do not match the selected profile.
+the evaluator checkout inside the image.
+
+The evaluator revision is part of a profile's result contract: task definitions,
+prompt adapters, parsers, and scoring can change between `lmms-eval` commits.
+Preflight therefore rejects any revision other than the one selected by the
+profile instead of producing a score that only appears comparable.
+
+The pinned `lmms_eval_compat_3e675904.patch` also prevents the vLLM adapter from
+overwriting each task's output-token budget. The patch and its checksum are
+build inputs in `ci_environment.json`; rebuild the worker image from this
+repository revision before using these profiles. An image built from an older
+revision does not contain the fix.
 
 ## Understand the two execution paths
 
@@ -75,9 +93,6 @@ examples are 64 of 765 RealWorldQA examples, 120 of 900 MMMU examples, and 160
 of 4,000 MVBench examples. The 690-example set contains those 344 plus 346
 examples selected from VideoMMMU, Video-MME, LongVideoBench, MLVU, and
 PerceptionTest.
-
-The historical `short-v1`, `short-native-v1`, `short-all-native-v1`, and
-`full-v1` names remain available because they pin older evaluator contracts.
 
 Use `core-3_344-examples_r1-native` for campaign comparisons. Use
 `judge-free-8_690-examples_r1-native` when broader image and video regression coverage is more

@@ -52,6 +52,11 @@ PROFILE_NAMES = (
     "core-3_full_r1-vllm",
 )
 _PROFILE_COMPONENTS = {
+    # short-v1, short-native-v1, short-all-native-v1, and full-v1 are temporary
+    # compatibility compositions. They preserve the exact rows, backend, and
+    # evaluator revision of names that predate component profiles. New runs
+    # should use descriptive profiles; remove these aliases only as an explicit
+    # breaking change after downstream users have migrated.
     "short-v1": (
         "core-3_344-examples_legacy-r1",
         "qwen-3.5-vllm_r1",

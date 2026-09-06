@@ -4,6 +4,9 @@ The [`Dockerfile`](../Dockerfile) contains the worker installation steps.
 [`ci_environment.json`](../ci_environment.json) stores the versions, source
 revisions, CUDA targets, and downloaded-file checksums used by those steps.
 The Dockerfile reads the same file for installation and its build-time checks.
+Rebuild the image whenever the Dockerfile, `ci_environment.json`, or a patch
+referenced by that manifest changes. Patches are applied while the image is
+built, so an existing image does not acquire a later patch automatically.
 
 ## Build
 
