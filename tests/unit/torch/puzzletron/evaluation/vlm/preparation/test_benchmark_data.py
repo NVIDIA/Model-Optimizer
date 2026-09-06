@@ -18,6 +18,7 @@
 import hashlib
 import io
 import json
+import stat
 import tarfile
 import threading
 import zipfile
@@ -81,6 +82,21 @@ def _emulate_atomic_exchange(first: Path, second: Path) -> bool:
     first.rename(second)
     displaced.rename(first)
     return True
+
+
+def test_atomic_exchange_directories_when_supported(tmp_path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "identity").write_text("first")
+    (second / "identity").write_text("second")
+
+    if not preparation._atomic_exchange_directories(first, second):
+        pytest.skip("atomic directory exchange is unavailable on this host")
+
+    assert (first / "identity").read_text() == "second"
+    assert (second / "identity").read_text() == "first"
 
 
 @pytest.mark.parametrize(
@@ -151,6 +167,14 @@ def test_prepare_benchmark_datasets_rejects_symlinked_hf_home(tmp_path):
         preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
 
 
+def test_prepare_benchmark_datasets_rejects_dangling_symlinked_hf_home(tmp_path):
+    alias = tmp_path / "hf-home"
+    alias.symlink_to(tmp_path / "missing", target_is_directory=True)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        preparation.prepare_benchmark_datasets(alias, ("realworldqa",))
+
+
 def test_zip_preparation_is_revision_bound_idempotent_and_byte_verified(tmp_path):
     hf_home = tmp_path / "hf-home"
     snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
@@ -163,6 +187,7 @@ def test_zip_preparation_is_revision_bound_idempotent_and_byte_verified(tmp_path
     assert second == first
     assert first["status"] == "complete"
     assert first["files"] == 1
+    assert stat.S_IMODE((hf_home / "mmvu").stat().st_mode) == 0o755
     marker = json.loads((hf_home / "mmvu" / preparation._MARKER_NAME).read_text())
     assert marker["revision"] == _EXPECTED_DATASETS["mmvu_val"][1]
 
@@ -405,6 +430,20 @@ def test_interrupted_initialization_leaves_target_retryable(monkeypatch, tmp_pat
     report = preparation._prepare(hf_home, "mmvu_val", snapshot)
     assert report["status"] == "complete"
     assert (target / "videos/sample.mp4").read_bytes() == b"video"
+
+
+def test_task_lock_can_be_reacquired_after_body_failure(tmp_path):
+    hf_home = tmp_path / "hf-home"
+    hf_home.mkdir()
+
+    with (
+        pytest.raises(RuntimeError, match="failed while locked"),
+        preparation._task_lock(hf_home, "mmvu_val"),
+    ):
+        raise RuntimeError("failed while locked")
+
+    with preparation._task_lock(hf_home, "mmvu_val"):
+        pass
 
 
 def test_concurrent_media_preparation_is_task_locked_and_publishes_only_complete_root(

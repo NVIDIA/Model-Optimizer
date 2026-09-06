@@ -95,7 +95,7 @@ def _run_profile(
             "frozen 344-row campaign profile requires row_manifest and row_manifest_sha256"
         )
     if require_manifest and evaluation_profile is not None and not expected_manifest_sha256:
-        raise ValueError("frozen 344-row campaign evaluation profile requires row_manifest_sha256")
+        raise ValueError("pinned VLM evaluation profile requires row_manifest_sha256")
     if row_manifest is not None and evaluation_profile is not None:
         raise ValueError("an embedded evaluation profile cannot be overridden by row_manifest")
     if expected_manifest_sha256 is not None and (
@@ -103,15 +103,13 @@ def _run_profile(
         or len(expected_manifest_sha256) != 64
         or any(character not in "0123456789abcdef" for character in expected_manifest_sha256)
     ):
-        raise ValueError(
-            "frozen 344-row campaign manifest SHA256 must be 64 lowercase hex characters"
-        )
+        raise ValueError("pinned VLM manifest SHA256 must be 64 lowercase hex characters")
     quick_manifest = Path(row_manifest).expanduser().absolute() if row_manifest else None
     if quick_manifest is not None:
         actual_manifest_sha256 = suites.manifest_sha256(suites.load_quick_manifest(quick_manifest))
         if actual_manifest_sha256 != expected_manifest_sha256:
             raise ValueError(
-                "frozen 344-row campaign manifest SHA256 differs from the campaign identity: "
+                "pinned VLM manifest SHA256 differs from the profile identity: "
                 f"{actual_manifest_sha256} != {expected_manifest_sha256}"
             )
     args = argparse.Namespace(
@@ -235,17 +233,34 @@ def evaluate_frozen_campaign_v2_checkpoint(
 ) -> dict[str, Any]:
     """Evaluate one checkpoint on the current-image frozen campaign profile."""
 
+    return _evaluate_single_run_profile(
+        checkpoint_path,
+        output_root=output_root,
+        settings=settings,
+        evaluation_profile="core-3_344-examples_r1-native",
+    )
+
+
+def _evaluate_single_run_profile(
+    checkpoint_path: str | Path,
+    *,
+    output_root: str | Path,
+    settings: Mapping[str, Any],
+    evaluation_profile: str,
+) -> dict[str, Any]:
+    """Evaluate one checkpoint with an embedded single-run profile."""
+
     args, result, profile_path = _run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
         suite="short",
-        evaluation_profile="core-3_344-examples_r1-native",
+        evaluation_profile=evaluation_profile,
         require_manifest=True,
     )
     runs = result["runs"]
     if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
-        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
+        raise RuntimeError(f"pinned VLM profile {evaluation_profile} returned an invalid run count")
     return {
         **runs[0],
         "profile_path": str(profile_path),
@@ -261,22 +276,12 @@ def evaluate_frozen_campaign_v3_checkpoint(
 ) -> dict[str, Any]:
     """Evaluate heterogeneous materialized checkpoints with the current vLLM profile."""
 
-    args, result, profile_path = _run_profile(
+    return _evaluate_single_run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
-        suite="short",
         evaluation_profile="core-3_344-examples_r1-vllm",
-        require_manifest=True,
     )
-    runs = result["runs"]
-    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
-        raise RuntimeError("pinned VLM frozen 344-row profile returned an invalid run count")
-    return {
-        **runs[0],
-        "profile_path": str(profile_path),
-        "checkpoint": str(args.checkpoint),
-    }
 
 
 def evaluate_reproducibility_smoke_checkpoint(
@@ -287,22 +292,12 @@ def evaluate_reproducibility_smoke_checkpoint(
 ) -> dict[str, Any]:
     """Evaluate one checkpoint on the immutable 24-row lifecycle smoke."""
 
-    args, result, profile_path = _run_profile(
+    return _evaluate_single_run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
-        suite="short",
         evaluation_profile="core-3_24-examples_r1-native",
-        require_manifest=True,
     )
-    runs = result["runs"]
-    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
-        raise RuntimeError("pinned VLM 24-row smoke returned an invalid run count")
-    return {
-        **runs[0],
-        "profile_path": str(profile_path),
-        "checkpoint": str(args.checkpoint),
-    }
 
 
 def evaluate_reproducibility_smoke_v2_checkpoint(
@@ -313,22 +308,12 @@ def evaluate_reproducibility_smoke_v2_checkpoint(
 ) -> dict[str, Any]:
     """Evaluate a heterogeneous materialized checkpoint on the 24-row smoke."""
 
-    args, result, profile_path = _run_profile(
+    return _evaluate_single_run_profile(
         checkpoint_path,
         output_root=output_root,
         settings=settings,
-        suite="short",
         evaluation_profile="core-3_24-examples_r1-vllm",
-        require_manifest=True,
     )
-    runs = result["runs"]
-    if not isinstance(runs, list) or len(runs) != 1 or not isinstance(runs[0], dict):
-        raise RuntimeError("pinned VLM 24-row smoke returned an invalid run count")
-    return {
-        **runs[0],
-        "profile_path": str(profile_path),
-        "checkpoint": str(args.checkpoint),
-    }
 
 
 def evaluate_short_v1_checkpoint(

@@ -25,6 +25,15 @@ from examples.puzzletron.evaluation.vlm import contracts, profile, suites
 from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import _quick_manifest
 
 
+def test_manifest_task_denominators_rejects_non_mapping_selection():
+    manifest = contracts.load_profile("core-3_344-examples_r1-native").exact_rows
+    assert manifest is not None
+    manifest["tasks"]["realworldqa"]["selection"] = "invalid"
+
+    with pytest.raises(ValueError, match="task selection must be an object"):
+        suites.manifest_task_denominators(manifest)
+
+
 def test_versioned_profile_contracts_pin_backends_and_fingerprints():
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {

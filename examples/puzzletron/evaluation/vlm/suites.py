@@ -347,7 +347,9 @@ def manifest_task_denominators(
     manifest_tasks = cast("dict[str, dict[str, object]]", manifest["tasks"])
     denominators = {}
     for task, entry in manifest_tasks.items():
-        selection = cast("dict[str, object]", entry.get("selection", {}))
+        selection = entry.get("selection", {})
+        if not isinstance(selection, dict):
+            raise ValueError(f"exact-row manifest task selection must be an object: {task}")
         population_rows = selection.get("population_rows", entry.get("population_rows"))
         denominators[task] = {
             "selected_rows": len(cast("list[object]", entry["rows"])),

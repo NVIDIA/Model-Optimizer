@@ -182,7 +182,9 @@ def _resolve_task_selection(
             "judge-free-8_690-examples_r1-native",
         }:
             raise ValueError(
-                "--profile-task is supported only for full-data and short-all-native profiles"
+                "--profile-task is supported only for full-v1, core-3_full_r1-native, "
+                "core-3_full_r1-vllm, short-all-native-v1, and "
+                "judge-free-8_690-examples_r1-native"
             )
     if profile_task_shard is not None and profile_task is None:
         raise ValueError("--profile-task-shard requires --profile-task")
@@ -280,6 +282,8 @@ def _shard_exact_row_task(
         if stratum.get("name") in leaves
     ]
     indices = sorted(cast("int", row["source_row_index"]) for row in rows)
+    if not indices:
+        return {**entry, "rows": rows}
     quantiles = {
         "method": "lower-order-statistic",
         **{

@@ -92,6 +92,7 @@ def verify_checkpoint(checkpoint: Path, *, profile: str, model_backend: str = "q
     if not isinstance(text_config, dict) or text_config.get("model_type") != "qwen3_5_text":
         raise ValueError(f"{profile} checkpoint text_config.model_type must be qwen3_5_text")
     if model_backend == "qwen3_5" and realized_checkpoint:
+        # Keep torch-dependent Puzzletron imports out of the lightweight preflight import path.
         from modelopt.torch.puzzletron.block_config import maybe_cast_block_configs
         from modelopt.torch.puzzletron.utils.vllm_adapter import (
             convert_block_configs_to_per_layer_config,

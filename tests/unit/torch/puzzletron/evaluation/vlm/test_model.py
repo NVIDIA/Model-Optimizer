@@ -129,6 +129,15 @@ def test_checkpoint_contract_routes_heterogeneous_anymodel_to_vllm(tmp_path):
             model_backend="qwen3_5",
         )
 
+    config["text_config"].pop("per_layer_config")
+    config_path.write_text(json.dumps(config) + "\n")
+    with pytest.raises(ValueError, match="native qwen3_5 backend cannot load"):
+        vlm_model.verify_checkpoint(
+            checkpoint_path,
+            profile="VLM benchmark",
+            model_backend="qwen3_5",
+        )
+
     vlm_model.verify_checkpoint(
         checkpoint_path,
         profile="VLM benchmark",

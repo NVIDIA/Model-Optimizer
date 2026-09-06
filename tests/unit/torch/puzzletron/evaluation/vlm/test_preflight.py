@@ -438,6 +438,27 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
     assert group["task"] == [f"modelopt_vlm_benchmark_mvbench_{leaf}" for leaf in expected_leaves]
 
 
+def test_empty_exact_row_leaf_filter_reaches_manifest_validation():
+    contract = contracts.load_profile("core-3_344-examples_r1-native")
+    manifest = contract.exact_rows
+    assert manifest is not None
+    entry = manifest["tasks"]["mvbench"]
+    manifest["tasks"] = {
+        "mvbench": preflight._shard_exact_row_task(
+            entry,
+            task="mvbench",
+            leaves=("not-selected",),
+        )
+    }
+
+    with pytest.raises(ValueError, match="must select at least one row"):
+        suites.validate_exact_rows_manifest(
+            manifest,
+            expected_revision=str(contract.manifest["lmms_eval_revision"]),
+            expected_tasks=("mvbench",),
+        )
+
+
 @pytest.mark.parametrize(
     ("selection", "message"),
     [
@@ -528,8 +549,12 @@ def test_native_backend_validation_requires_qwen_vision_utilities(monkeypatch):
 
 
 def test_credential_scope_restores_inherited_values(monkeypatch):
-    for index, name in enumerate(checkpoint.HUGGINGFACE_CREDENTIAL_NAMES):
-        monkeypatch.setenv(name, f"secret-{index}")
+    expected = {
+        name: f"secret-{index}"
+        for index, name in enumerate(checkpoint.HUGGINGFACE_CREDENTIAL_NAMES)
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
     with checkpoint.without_huggingface_credentials():
         assert all(name not in os.environ for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES)
-    assert all(name in os.environ for name in checkpoint.HUGGINGFACE_CREDENTIAL_NAMES)
+    assert {name: os.environ.get(name) for name in expected} == expected

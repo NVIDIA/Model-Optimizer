@@ -101,7 +101,7 @@ def _task_selection(value: str) -> tuple[str, ...]:
 
 
 def _path_traverses_symlink(path: Path) -> bool:
-    return any(candidate.is_symlink() for candidate in (path, *path.parents) if candidate.exists())
+    return any(candidate.is_symlink() for candidate in (path, *path.parents))
 
 
 def _hub_snapshot(hf_home: Path, task: str) -> Path:
@@ -529,14 +529,16 @@ def _task_lock(hf_home: Path, task: str) -> Iterator[None]:
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ValueError(f"benchmark preparation lock must be a regular file: {lock_path}")
-        with os.fdopen(descriptor, "r+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-            yield
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        stream = os.fdopen(descriptor, "r+")
     except BaseException:
-        with suppress(OSError):
-            os.close(descriptor)
+        os.close(descriptor)
         raise
+    with stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _cleanup_temporary_directory(target: Path) -> None:
@@ -910,6 +912,7 @@ def _prepare(hf_home: Path, task: str, snapshot: Path) -> dict[str, object]:
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.modelopt-staging.", dir=target.parent)
         )
+        staging.chmod(0o755)
         try:
             _write_marker(staging, _marker_payload(task, status="in_progress"))
             archives = _extract(task, snapshot, staging)
