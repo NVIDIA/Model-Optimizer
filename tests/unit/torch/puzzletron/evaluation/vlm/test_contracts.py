@@ -22,7 +22,7 @@ import pytest
 
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import contracts, profile, suites
-from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import _quick_manifest
+from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import _quick_manifest
 
 
 def test_manifest_task_denominators_rejects_non_mapping_selection():

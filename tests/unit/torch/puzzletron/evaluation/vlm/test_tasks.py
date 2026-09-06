@@ -27,7 +27,10 @@ import pytest
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import contracts, preflight, profile, suites, tasks
 from examples.puzzletron.evaluation.vlm import run as evaluation
-from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import _full_inputs, _write_lmms_tasks
+from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import (
+    _full_inputs,
+    _write_lmms_tasks,
+)
 
 
 def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):

@@ -23,7 +23,7 @@ import pytest
 from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import evaluator, preflight, profile, suites
 from examples.puzzletron.evaluation.vlm import run as evaluation
-from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import (
+from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import (
     _use_offline_fakes,
     _write_checkpoint,
     _write_fake_mmmu_artifacts,

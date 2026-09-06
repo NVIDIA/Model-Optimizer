@@ -33,7 +33,7 @@ from examples.puzzletron.evaluation.vlm import (
 )
 from examples.puzzletron.evaluation.vlm import run as evaluation
 from modelopt.torch.puzzletron.evaluation import lmms
-from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import (
+from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import (
     _full_inputs,
     _use_offline_fakes,
     _write_checkpoint,

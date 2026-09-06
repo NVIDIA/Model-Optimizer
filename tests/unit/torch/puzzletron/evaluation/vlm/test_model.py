@@ -20,7 +20,7 @@ import json
 import pytest
 
 from examples.puzzletron.evaluation.vlm import model as vlm_model
-from tests.unit.torch.puzzletron.evaluation.vlm._test_utils import _write_checkpoint
+from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import _write_checkpoint
 
 
 def _homogeneous_qwen_block_configs() -> list[dict[str, object]]:

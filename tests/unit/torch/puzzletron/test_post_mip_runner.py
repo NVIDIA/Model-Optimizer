@@ -527,7 +527,7 @@ def test_short_v1_profile_binds_the_exact_row_manifest_digest(monkeypatch, tmp_p
     assert captured["settings"] == {}
     assert result["checkpoint"] == str(checkpoint)
 
-    with pytest.raises(ValueError, match="differs from the campaign identity"):
+    with pytest.raises(ValueError, match="differs from the profile identity"):
         post_mip.evaluate_short_v1_checkpoint(
             checkpoint,
             output_root=tmp_path / "mismatch",

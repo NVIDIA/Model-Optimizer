@@ -212,6 +212,7 @@ def _inventory_is_current(
     entries: object,
     *,
     repository_cache: Path | None = None,
+    verify_content: bool = False,
 ) -> bool:
     if root.is_symlink() or not root.is_dir() or not isinstance(entries, list) or not entries:
         return False
@@ -249,10 +250,16 @@ def _inventory_is_current(
         else:
             return False
         stat_result = inspected.stat()
-        if stat_result.st_size != entry.get("bytes"):
+        if (
+            stat_result.st_size != entry.get("bytes")
+            or stat_result.st_mtime_ns != entry.get("mtime_ns")
+            or stat_result.st_ctime_ns != entry.get("ctime_ns")
+        ):
             return False
         expected_sha256 = entry.get("sha256")
-        if not isinstance(expected_sha256, str) or _sha256(inspected) != expected_sha256:
+        if not isinstance(expected_sha256, str) or (
+            verify_content and _sha256(inspected) != expected_sha256
+        ):
             return False
     observed_paths = sorted(
         path.relative_to(root).as_posix()
@@ -284,16 +291,42 @@ def _snapshot_inventory_marker(hf_home: Path, task: str) -> Path:
     return snapshot.parent.parent / f"{_SNAPSHOT_MARKER_PREFIX}{DATASETS[task].revision}.json"
 
 
-def _snapshot_inventory_report(hf_home: Path, task: str, snapshot: Path) -> dict[str, object]:
+def _snapshot_inventory_report(
+    hf_home: Path,
+    task: str,
+    snapshot: Path,
+    *,
+    verify_content: bool = False,
+) -> dict[str, object]:
     repository_cache = snapshot.parent.parent.resolve()
-    entries = _inventory(snapshot, repository_cache=repository_cache)
     marker = _snapshot_inventory_marker(hf_home, task)
-    report = {
+    try:
+        cached = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        cached = None
+    expected_identity = {
         "schema": "modelopt.vlm-benchmark-snapshot-inventory/v1",
         "task": task,
         "repository": DATASETS[task].repository,
         "revision": DATASETS[task].revision,
         "snapshot": str(snapshot),
+    }
+    if (
+        isinstance(cached, dict)
+        and all(cached.get(key) == value for key, value in expected_identity.items())
+        and _inventory_summary_is_valid(cached, cached.get("files"))
+        and _inventory_is_current(
+            snapshot,
+            cached.get("files"),
+            repository_cache=repository_cache,
+            verify_content=verify_content,
+        )
+    ):
+        return {**cached, "manifest": str(marker)}
+
+    entries = _inventory(snapshot, repository_cache=repository_cache)
+    report = {
+        **expected_identity,
         "files": entries,
         "file_count": len(entries),
         "bytes": sum(cast("int", entry["bytes"]) for entry in entries),
@@ -303,7 +336,7 @@ def _snapshot_inventory_report(hf_home: Path, task: str, snapshot: Path) -> dict
     return {**report, "manifest": str(marker)}
 
 
-def _snapshot_inventory_is_current(report: object) -> bool:
+def _snapshot_inventory_is_current(report: object, *, verify_content: bool = True) -> bool:
     if not isinstance(report, dict):
         return False
     snapshot_value = report.get("snapshot")
@@ -322,7 +355,12 @@ def _snapshot_inventory_is_current(report: object) -> bool:
     return (
         recorded == expected
         and _inventory_summary_is_valid(report, entries)
-        and _inventory_is_current(snapshot, entries, repository_cache=repository_cache)
+        and _inventory_is_current(
+            snapshot,
+            entries,
+            repository_cache=repository_cache,
+            verify_content=verify_content,
+        )
     )
 
 
@@ -597,7 +635,13 @@ def _atomic_exchange_directories(first: Path, second: Path) -> bool:
     raise OSError(error_number, os.strerror(error_number))
 
 
-def _media_marker_is_current(target: Path, task: str, observed: object) -> bool:
+def _media_marker_is_current(
+    target: Path,
+    task: str,
+    observed: object,
+    *,
+    verify_content: bool = False,
+) -> bool:
     if not isinstance(observed, dict):
         return False
     expected = _marker_payload(task, status="complete")
@@ -605,11 +649,16 @@ def _media_marker_is_current(target: Path, task: str, observed: object) -> bool:
         return False
     inventory = observed.get("inventory")
     return _inventory_summary_is_valid(observed, inventory) and _inventory_is_current(
-        target, inventory
+        target, inventory, verify_content=verify_content
     )
 
 
-def _inspect_prepare_target(hf_home: Path, task: str) -> tuple[Path, dict[str, object] | None]:
+def _inspect_prepare_target(
+    hf_home: Path,
+    task: str,
+    *,
+    verify_content: bool = False,
+) -> tuple[Path, dict[str, object] | None]:
     preparation_dir = DATASETS[task].preparation_dir
     if preparation_dir is None:
         raise AssertionError(f"video dataset has no preparation directory: {task}")
@@ -626,7 +675,7 @@ def _inspect_prepare_target(hf_home: Path, task: str) -> tuple[Path, dict[str, o
             raise FileExistsError(
                 f"refusing to repair a media root without a readable ownership marker: {target}"
             ) from error
-        if _media_marker_is_current(target, task, observed):
+        if _media_marker_is_current(target, task, observed, verify_content=verify_content):
             return target, observed
         if not isinstance(observed, dict):
             raise FileExistsError(f"media root ownership marker must be an object: {marker}")
@@ -904,9 +953,15 @@ def _extract(task: str, snapshot: Path, target: Path) -> list[dict[str, object]]
     raise ValueError(f"unsupported VLM benchmark data task: {task}")
 
 
-def _prepare(hf_home: Path, task: str, snapshot: Path) -> dict[str, object]:
+def _prepare(
+    hf_home: Path,
+    task: str,
+    snapshot: Path,
+    *,
+    verify_content: bool = False,
+) -> dict[str, object]:
     with _task_lock(hf_home, task):
-        target, complete = _inspect_prepare_target(hf_home, task)
+        target, complete = _inspect_prepare_target(hf_home, task, verify_content=verify_content)
         if complete is not None:
             return complete
         staging = Path(
@@ -962,6 +1017,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use a deterministic single-writer HTTP range download that resumes across jobs",
     )
+    parser.add_argument(
+        "--verify-content",
+        action="store_true",
+        help="Re-hash cached snapshot and prepared-media files instead of trusting unchanged metadata",
+    )
     return parser
 
 
@@ -971,6 +1031,7 @@ def prepare_benchmark_datasets(
     *,
     max_workers: int = 8,
     range_resume: bool = False,
+    verify_content: bool = False,
     expected_catalog: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     """Download pinned benchmark snapshots and prepare media when required."""
@@ -1008,7 +1069,9 @@ def prepare_benchmark_datasets(
         if not snapshot.is_dir():
             raise FileNotFoundError(f"pinned dataset snapshot is missing: {snapshot}")
         spec = DATASETS[task]
-        snapshot_inventory = _snapshot_inventory_report(hf_home, task, snapshot)
+        snapshot_inventory = _snapshot_inventory_report(
+            hf_home, task, snapshot, verify_content=verify_content
+        )
         report: dict[str, object] = {
             "task": task,
             "repository": spec.repository,
@@ -1020,7 +1083,10 @@ def prepare_benchmark_datasets(
             "status": "downloaded",
         }
         if spec.preparation_dir is not None:
-            report = {**report, **_prepare(hf_home, task, snapshot)}
+            report = {
+                **report,
+                **_prepare(hf_home, task, snapshot, verify_content=verify_content),
+            }
         reports.append(report)
     return reports
 
@@ -1047,7 +1113,10 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "downloaded",
             }
             if spec.preparation_dir is not None:
-                report = {**report, **_prepare(hf_home, task, snapshot)}
+                report = {
+                    **report,
+                    **_prepare(hf_home, task, snapshot, verify_content=args.verify_content),
+                }
             reports.append(report)
     elif args.download_only:
         reports = []
@@ -1074,6 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
             args.tasks,
             max_workers=args.max_workers,
             range_resume=args.range_resume,
+            verify_content=args.verify_content,
         )
     print(json.dumps({"hf_home": str(hf_home), "tasks": reports}, indent=2, sort_keys=True))
     return 0

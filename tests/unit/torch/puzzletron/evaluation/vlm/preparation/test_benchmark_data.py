@@ -130,7 +130,8 @@ def test_prepare_benchmark_datasets_dispatches_media_only_for_media_tasks(tmp_pa
         (snapshot / "dataset-info.json").write_text("{}")
         return snapshot
 
-    def prepare(root, task, snapshot):
+    def prepare(root, task, snapshot, *, verify_content=False):
+        assert not verify_content
         prepared.append(task)
         media_root = root / preparation.DATASETS[task].preparation_dir
         media_root.mkdir(parents=True)
@@ -200,6 +201,29 @@ def test_zip_preparation_is_revision_bound_idempotent_and_byte_verified(tmp_path
     (target / "sample.mp4").write_bytes(b"differed")
     with pytest.raises(ValueError, match="differs from the archive"):
         preparation._extract_zip(archive, target)
+
+
+def test_prepared_media_reuses_metadata_unless_content_verification_is_requested(
+    tmp_path, monkeypatch
+):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "mmvu_val")
+    snapshot.mkdir(parents=True)
+    _write_zip(snapshot / "videos.zip", {"videos/sample.mp4": b"video"})
+    expected = preparation._prepare(hf_home, "mmvu_val", snapshot)
+    original_sha256 = preparation._sha256
+    hashed = []
+
+    def record_hash(path):
+        hashed.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(preparation, "_sha256", record_hash)
+    assert preparation._prepare(hf_home, "mmvu_val", snapshot) == expected
+    assert not hashed
+
+    assert preparation._prepare(hf_home, "mmvu_val", snapshot, verify_content=True) == expected
+    assert hashed == [hf_home / "mmvu/videos/sample.mp4"]
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt", "unexpected"])
@@ -317,9 +341,45 @@ def test_snapshot_inventory_rejects_partial_and_same_size_corruption(tmp_path):
     second.unlink()
     assert not preparation._snapshot_inventory_is_current(report)
     second.write_bytes(b"two")
+    report = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
     assert preparation._snapshot_inventory_is_current(report)
     first.write_bytes(b"bad")
     assert not preparation._snapshot_inventory_is_current(report)
+
+
+def test_snapshot_inventory_reuses_metadata_unless_content_verification_is_requested(
+    tmp_path, monkeypatch
+):
+    hf_home = tmp_path / "hf-home"
+    snapshot = preparation._hub_snapshot(hf_home, "realworldqa")
+    snapshot.mkdir(parents=True)
+    sample = snapshot / "sample.json"
+    sample.write_bytes(b"one")
+    expected = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
+    original_sha256 = preparation._sha256
+    hashed = []
+
+    def record_hash(path):
+        hashed.append(path)
+        return original_sha256(path)
+
+    monkeypatch.setattr(preparation, "_sha256", record_hash)
+    assert preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot) == expected
+    assert not hashed
+
+    assert (
+        preparation._snapshot_inventory_report(
+            hf_home, "realworldqa", snapshot, verify_content=True
+        )
+        == expected
+    )
+    assert hashed == [sample]
+
+    hashed.clear()
+    sample.write_bytes(b"two")
+    refreshed = preparation._snapshot_inventory_report(hf_home, "realworldqa", snapshot)
+    assert hashed == [sample]
+    assert refreshed["files"][0]["sha256"] == hashlib.sha256(b"two").hexdigest()
 
 
 def test_snapshot_inventory_seals_and_validates_hub_blob_symlink(tmp_path):

@@ -186,11 +186,12 @@ prepare `realworldqa`, `mmmu_val`, and `mvbench`. Use `--download-only` and
 `--extract-only` to split transfer and extraction across jobs, or
 `--range-resume` for a resumable single-writer download. Run the command with
 `--help` to list all supported dataset task names. Preparation records exact
-snapshot and media inventories. Preparation verifies the recorded snapshot and
-media hashes on reuse, which can read the complete cached content. Incomplete
-owned media is rebuilt from the pinned snapshot only when the host supports
-atomic directory exchange. Otherwise the existing root is preserved and
-preparation fails.
+snapshot and media inventories. Routine reuse checks the recorded paths, sizes,
+and timestamps without rereading all cached content. Add `--verify-content` to
+recompute and compare every recorded SHA-256 digest. Changed or incomplete owned
+media is rebuilt from the pinned snapshot only when the host supports atomic
+directory exchange. Otherwise the existing root is preserved and preparation
+fails.
 
 Video suites also require an installed `decord`-compatible reader. The
 Puzzletron requirements select the supported reader for the current platform
