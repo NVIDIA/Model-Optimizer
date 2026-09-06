@@ -1,10 +1,9 @@
 # Qwen 3.5 0.8B VLM pruning example
 
-The Qwen 3.5 0.8B VLM example has three experiment files with distinct jobs:
+The Qwen 3.5 0.8B VLM example has two experiment files with distinct jobs:
 
 | Experiment | Purpose | Execution profile |
 | --- | --- | --- |
-| `mip_vlm_smoke.yaml` | Stop after the small MIP check | `execution.single_gpu.yaml` |
 | `full_vlm_smoke.yaml` | Check the complete lifecycle on one GPU | `execution.single_gpu.yaml` |
 | `vlm_campaign.yaml` | Run an illustrative multi-axis campaign | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
 

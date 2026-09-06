@@ -1,12 +1,12 @@
 # @package _global_
 
 defaults:
-  - mip_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/smoke_base@_global_
   - _self_
 
-# Bounded one-GPU VLM smoke for the same pinned public checkpoint and MIP search
-# as mip_smoke. Images and conversations are read through the native
-# AutoModel processor path; no text token cache is created or consumed.
+# Shared multimodal settings for the maintained VLM lifecycle and campaign.
+# Images and conversations are read through the native AutoModel processor
+# path; no text token cache is created or consumed.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 dataset_path: ${puzzle_dir}/datasets/nemotron_vlm_v2
 display_name: Qwen3p5_0p8B_VLM

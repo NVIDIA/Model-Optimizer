@@ -79,16 +79,14 @@ results without enforcing a minimum score. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
-The checked-in Qwen 3.5 0.8B recipes provide small integration checks for both
-modalities and one illustrative multi-axis VLM campaign:
+The checked-in Qwen 3.5 0.8B recipes provide one complete integration check per
+modality and one illustrative VLM campaign:
 
 | Scope | Recipe |
 | --- | --- |
-| Text MIP-only integration check | `mip_smoke.yaml` |
 | Text lifecycle smoke | `full_smoke.yaml` |
-| VLM MIP-only integration check | `mip_vlm_smoke.yaml` |
 | VLM lifecycle smoke | `full_vlm_smoke.yaml` |
-| Multi-axis VLM campaign | `vlm_campaign.yaml` |
+| VLM campaign | `vlm_campaign.yaml` |
 
 The smoke recipes use the shared `execution.single_gpu.yaml` profile. The VLM
 campaign uses its model-specific execution profile. See the

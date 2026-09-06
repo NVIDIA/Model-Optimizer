@@ -1,14 +1,14 @@
 # @package _global_
 
 defaults:
-  - mip_vlm_smoke
+  - /families/qwen3_5/qwen3p5_0p8b/vlm_base@_global_
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Extend the bounded image-text MIP smoke through evaluation, physical
-# materialization, comparative multimodal serving, VLM distillation, and final
-# image-text evaluation. The inherited recipe owns the pinned public checkpoint,
-# native multimodal data contract, and bounded search.
+# Complete bounded image-text lifecycle through evaluation, physical
+# materialization, multimodal serving, VLM distillation, and final image-text
+# evaluation. The shared base owns the pinned public checkpoint, native
+# multimodal data contract, and bounded search.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 data:
   # Tested public snapshot; callers may override with another immutable SHA.
