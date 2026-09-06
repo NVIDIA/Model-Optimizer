@@ -428,6 +428,7 @@ class TestLiLiCorrOptimization:
     """
 
     def test_single_batch_overfit(self):
+        torch.manual_seed(0)
         model = _converted().float()
         model.train()
         batch = _make_batch(model.dflash_config.vocab_size)
@@ -436,7 +437,7 @@ class TestLiLiCorrOptimization:
         optimizer = torch.optim.Adam(trainable, lr=1e-2)
 
         losses = []
-        for _ in range(15):
+        for _ in range(40):
             optimizer.zero_grad()
             out = model(**batch)
             out.loss.backward()
@@ -444,7 +445,11 @@ class TestLiLiCorrOptimization:
             losses.append(out.lilicorr_metrics["lilicorr_loss"])
 
         assert all(math.isfinite(loss) for loss in losses), losses
-        assert losses[-1] < losses[0], losses
+        # A trend, not two endpoints. The DFlash forward draws its own masks, so successive
+        # steps see different supervision and a single first-vs-last comparison is noise as
+        # much as signal.
+        head, tail = sum(losses[:5]) / 5, sum(losses[-5:]) / 5
+        assert tail < head, (head, tail, losses)
 
 
 class TestLiLiCorrExporter:

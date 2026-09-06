@@ -381,7 +381,14 @@ class DFlashDecoderLayer(GradientCheckpointingLayer):
 
 
 class DFlashModule(nn.Module):
-    """DFlash draft module using Qwen3 components (MLP, RMSNorm, RotaryEmbedding)."""
+    """DFlash draft module using Qwen3 components (MLP, RMSNorm, RotaryEmbedding).
+
+    Activation checkpointing applies to this module and not to the frozen target, which
+    runs under ``no_grad`` and stores nothing: ``DFlashDecoderLayer`` inherits
+    ``GradientCheckpointingLayer``, so ``PreTrainedModel._set_gradient_checkpointing``
+    reaches the draft layers directly, and ``ModelOptTrainer`` forces ``use_reentrant=False``
+    before ``gradient_checkpointing_enable`` runs.
+    """
 
     def __init__(self, config):
         """Initialize DFlash module with feature fusion, decoder layers, and rotary embeddings."""
@@ -400,12 +407,6 @@ class DFlashModule(nn.Module):
         )
         self.norm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
         self._rotary_config = config  # Used by _maybe_init_rotary_emb
-
-        # Activation checkpointing for the DRAFT, which is the only trainable part of a
-        # DFlash setup. DFlashDecoderLayer inherits GradientCheckpointingLayer, so
-        # PreTrainedModel._set_gradient_checkpointing reaches the draft layers directly.
-        # ModelOptTrainer._apply_gradient_checkpointing_defaults forces use_reentrant=False
-        # before gradient_checkpointing_enable is called, covering the normal Trainer path.
 
         # Explicit weight init is needed because DFlashModule is instantiated via
         # mtsp.convert() AFTER the base model's post_init() has already run, so HF's

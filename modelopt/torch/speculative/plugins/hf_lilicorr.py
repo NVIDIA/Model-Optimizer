@@ -232,6 +232,7 @@ class HFLiLiCorrModel(HFDFlashModel):
         loss_mask,
         base_logits=None,
         draft_hidden=None,
+        base_outputs=None,
     ):
         """Add the LiLiCorr lattice terms to the DFlash block loss.
 
@@ -239,14 +240,13 @@ class HFLiLiCorrModel(HFDFlashModel):
         quantity that tracks acceptance length — rather than the backbone's per-token
         accuracy, which is reported as ``origin_accuracy`` in the metrics instead.
 
-        The two tensors this needs beyond the shared signature -- the target-layer
-        hidden states it anchors on, and the target's logits its distractor penalty
-        weights by -- are read off the instance, where ``HFDFlashModel.forward``
-        publishes them for the duration of this call. They are not parameters because
-        this signature is shared with every other draft variant.
+        The two tensors this needs beyond the shared signature -- the target-layer hidden
+        states it anchors on, and the target's logits its distractor penalty weights by --
+        both come from ``base_outputs``, the container ``HFDFlashModel.forward`` already
+        builds for them.
         """
-        target_hidden = getattr(self, "_dflash_loss_target_hidden", None)
-        target_logits = getattr(self, "_dflash_loss_target_logits", None)
+        target_hidden = base_outputs.target_hidden if base_outputs is not None else None
+        target_logits = base_outputs.logits if base_outputs is not None else None
         if draft_hidden is None or target_hidden is None:
             raise ValueError(
                 "LiLiCorr requires draft_hidden and target_hidden in _compute_loss: the "
@@ -606,10 +606,15 @@ class HFLiLiCorrModel(HFDFlashModel):
         )
         oracle_prefix = prefix_length(gt_in_slot.view(bsz, n_blocks, num_slots))
 
+        # Every weight carries `valid_block`, matching the loss mask. A partially masked
+        # trailing block is excluded from the objective but can still hold a forced prefix,
+        # because the target ids are clamped; without this the slot and gap diagnostics
+        # would average over a population the model was never trained on.
         block_weight = valid_block.reshape(bsz, n_blocks).float()
         block_count = block_weight.sum().clamp_min(1.0)
-        slot_weight = slot_mask.float()
-        supervised_weight = forced_prefix.reshape(bsz, n_blocks, num_slots).float()
+        block_gate = block_weight.reshape(bsz, n_blocks, 1)
+        slot_weight = slot_mask.reshape(bsz, n_blocks, num_slots).float() * block_gate
+        supervised_weight = forced_prefix.reshape(bsz, n_blocks, num_slots).float() * block_gate
         supervised_count = supervised_weight.sum().clamp_min(1.0)
 
         def block_mean(values):
