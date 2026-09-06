@@ -60,20 +60,9 @@ same campaign command.
 
 ## Change the search dimensions
 
-The default campaign changes only `ffn.intermediate_size`. The opt-in
-`campaign_extended.yaml` variant additionally enables hidden width and depth.
-Grouped-attention and GDN axes remain exclusive to the all-axis VLM campaign.
-Each enabled axis requires compatible measurement and checkpoint-slicing support.
-
-Run the extended variant with the same two-GPU KD execution profile:
-
-```bash
-EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/campaign_extended.yaml
-EXECUTION=examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml
-```
-
-To create another variant, copy a run config and make each new dimension
-explicit in three places:
+The text campaign changes only `ffn.intermediate_size`. To create another
+experiment, copy the campaign config and make each new dimension explicit in
+three places:
 
 1. Declare its legal candidate values in the model config.
 2. Enable its measurement, sanity, and replacement-scoring stages in the run
@@ -83,12 +72,10 @@ explicit in three places:
 Keep `axes_default: teacher` so omitted dimensions retain the teacher value.
 The [configuration guide](configuration_overrides.md) explains where model and
 run settings live, and [MIP profiles](mip_profiles.md#search-space) documents
-the search-space syntax. The
-[advanced Qwen overlay](../configs/families/qwen3_5/qwen3p5_0p8b/advanced.yaml)
-shows the configuration shape for the additional Qwen axes. Include only axes
-whose measurement and slicing implementations support the selected checkpoint.
-Compile the resulting campaign with `--dry-run`, then run its smoke recipe
-before using the full campaign budgets.
+the search-space syntax. The VLM campaign shows a concrete multi-axis search.
+Include only axes whose measurement and slicing implementations support the
+selected checkpoint. Compile the resulting campaign with `--dry-run`, then run
+the lifecycle smoke before using larger budgets.
 
 ## Interpret the final quality comparison
 
@@ -99,6 +86,4 @@ student and teacher on the complete task splits using the same evaluator
 version, generation settings, seed, batch size, and task definitions. Final
 results contain student, teacher, and student-minus-teacher metrics plus
 generated samples for qualitative inspection.
-The [opt-in quality comparison](qwen3p5_0p8b_smoke.md#run-the-opt-in-end-to-end-quality-comparison)
-uses smaller search and distillation budgets with the same downstream
-evaluation settings. Neither route defines quality acceptance thresholds.
+The campaign records comparisons but defines no quality acceptance threshold.

@@ -12,17 +12,16 @@ evaluate, benchmark, materialize, or distill those candidates.
 - [Evaluate a checkpoint](#evaluate-a-checkpoint)
 - [Configure a campaign](#configure-a-campaign)
 - [Operate and recover a campaign](#operate-and-recover-a-campaign)
-- [Run maintainer integration tests](#run-maintainer-integration-tests)
 - [Extend Puzzletron](#extend-puzzletron)
 
 ## Start here: first campaign
 
-This is the canonical path for a first Puzzletron run: prepare the environments,
-generate a campaign, prepare its data, inspect a dry run, launch it, and use the
-same command to resume.
+A first Puzzletron run consists of preparing the environments, generating a
+campaign, preparing its data, inspecting a dry run, and launching it. The same
+launch command resumes compatible work.
 
-For an image-text walkthrough using Qwen 3.5 0.8B and the recommended
-Nemotron-VLM dataset, follow the
+For a maintained image-text example using Qwen 3.5 0.8B and Nemotron-VLM,
+follow the
 [Qwen VLM pruning smoke](docs/qwen3p5_0p8b_vlm_smoke.md).
 For a larger, FFN-only example that keeps evaluation and distillation opt-in,
 see the [Qwen 3.5 4B VLM example](docs/qwen3p5_4b_vlm_example.md).
@@ -59,9 +58,9 @@ python examples/puzzletron/puzzletron_setup_v2.py \
 ```
 
 Choose **Balanced pruning** for a first-generated text campaign. For the
-maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the recommended
-Puzzle-KD v2 text dataset or an existing worker-visible dataset. For VLM,
-select the same model and the recommended Nemotron-VLM v2 image-text dataset.
+maintained Qwen text route, select `Qwen/Qwen3.5-0.8B` and the Puzzle-KD v2
+text dataset or an existing worker-visible dataset. For VLM, select the same
+model and the Nemotron-VLM v2 image-text dataset.
 The generated post-MIP flow follows the detected modality, including image
 serving, VLM distillation, and the pinned RealWorldQA/MMMU comparison.
 Review the detected model, data modality, worker and scheduler settings, and
@@ -80,13 +79,19 @@ results without enforcing a minimum score. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
-For a Qwen 3.5 0.8B text pruning example, see the
-[Qwen 3.5 0.8B campaign](docs/qwen3p5_0p8b_campaign.md). It searches two FFN
-intermediate sizes, increases the scoring, serving, and distillation budgets,
-and reuses the same downstream evaluation settings as the opt-in quality
-comparison. The same guide includes an opt-in extended variant with hidden
-width, embedding-width, and depth pruning. Attention and GDN pruning are covered
-by the all-axis VLM campaign.
+The maintained Qwen 3.5 0.8B recipes use the same three-level structure for
+text and VLM workloads:
+
+| Scope | Text | VLM |
+| --- | --- | --- |
+| MIP-only integration check | `mip_smoke.yaml` | `mip_vlm_smoke.yaml` |
+| Complete lifecycle smoke | `full_smoke.yaml` | `full_vlm_smoke.yaml` |
+| Illustrative campaign | `campaign.yaml` | `vlm_campaign.yaml` |
+
+The smoke recipes use the shared `execution.single_gpu.yaml` profile. The two
+campaigns use their model-specific execution profiles. See the
+[text campaign](docs/qwen3p5_0p8b_campaign.md) and
+[VLM example](docs/qwen3p5_0p8b_vlm_smoke.md) for the runnable commands.
 
 ### 3. Prepare datasets and caches
 
@@ -252,14 +257,6 @@ To run with an agent, ask it to use
 [`running-puzzletron`](../../.agents/skills/running-puzzletron/SKILL.md) and
 provide the model, dataset, compute environment, search space, resource
 constraints, and required downstream stages.
-
-## Run maintainer integration tests
-
-The two opt-in Qwen 3.5 0.8B tests download or load the real model and exercise
-the complete local Puzzletron lifecycle on one GPU. See
-[real-model manual integration tests](docs/manual_integration_tests.md) for the
-worker-image setup, cache preparation, exact pytest commands, expected runtime,
-scratch-space guidance, result checks, and troubleshooting.
 
 ## Extend Puzzletron
 

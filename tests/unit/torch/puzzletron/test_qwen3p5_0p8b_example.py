@@ -19,8 +19,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yaml
-from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
 
 from modelopt.torch.puzzletron.anymodel.models.qwen3_5.qwen3_5_model_descriptor import (
     Qwen3P5VLModelDescriptor,
@@ -34,12 +32,12 @@ from modelopt.torch.puzzletron.block_config import (
 from modelopt.torch.puzzletron.candidates import build_candidate_library
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-CONFIG_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs"
 MODEL_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/model.yaml"
 )
-ADVANCED_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/advanced.yaml"
+CAMPAIGN_PATH = (
+    REPOSITORY_ROOT
+    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
 
 
@@ -87,9 +85,9 @@ def test_qwen3p5_0p8b_default_search_matches_tracked_runtime_campaign() -> None:
     }
 
 
-def test_qwen3p5_0p8b_advanced_search_keeps_mild_domains_explicit() -> None:
-    advanced = yaml.safe_load(ADVANCED_PATH.read_text())
-    axes = advanced["search_space"]["axes"]
+def test_qwen3p5_0p8b_vlm_campaign_keeps_mild_domains_explicit() -> None:
+    campaign = yaml.safe_load(CAMPAIGN_PATH.read_text())
+    axes = campaign["search_space"]["axes"]
 
     expected_enabled_domains = {
         "hidden_width": (1024, [960, 896]),
@@ -106,32 +104,30 @@ def test_qwen3p5_0p8b_advanced_search_keeps_mild_domains_explicit() -> None:
         if axis["enabled"]
     }
 
-    assert advanced["embedding_pruning"]["widths"] == [1024, 960, 896]
+    assert campaign["embedding_pruning"]["widths"] == [1024, 960, 896]
     spec = Qwen3P5VLModelDescriptor.embedding_pruning_spec(
         SimpleNamespace(
             text_config=SimpleNamespace(hidden_size=1024, tie_word_embeddings=True),
         ),
-        widths=advanced["embedding_pruning"]["widths"],
-        alignment=advanced["embedding_pruning"]["alignment"],
+        widths=campaign["embedding_pruning"]["widths"],
+        alignment=campaign["embedding_pruning"]["alignment"],
     )
     assert [spec.validate_width(width) for width in spec.legal_widths] == [1024, 960, 896]
-    assert advanced["pruning"]["intermediate_size_list"] == [3328, 3072]
-    assert advanced["pruning"]["attn_heads_list"] == [[8, 2], [6, 2], [4, 1], [3, 1]]
-    assert advanced["pruning"]["attention_scored_axes"] == [
+    assert campaign["pruning"]["intermediate_size_list"] == [3328, 3072]
+    assert campaign["pruning"]["attn_heads_list"] == [[8, 2], [6, 2], [4, 1], [3, 1]]
+    assert campaign["pruning"]["attention_scored_axes"] == [
         "kv_groups",
         "q_heads_per_group",
     ]
-    assert advanced["pruning"]["gdn_scored_axes"] == [
+    assert campaign["pruning"]["gdn_scored_axes"] == [
         "gdn_key_groups",
         "gdn_key_head_dim",
         "gdn_value_head_dim",
     ]
-    assert advanced["depth_importance"] == {
-        "enabled": True,
-        "max_removals": 2,
-        "max_subblocks_to_remove": 2,
-    }
-    assert advanced["mip"]["runs"]["params-90"]["search_space"] == {
+    assert campaign["depth_importance"]["enabled"] is True
+    assert campaign["depth_importance"]["max_removals"] == 2
+    assert campaign["depth_importance"]["max_subblocks_to_remove"] == 2
+    assert campaign["mip"]["runs"]["params-90"]["search_space"] == {
         "depth": [0, 1, 2],
         "embedding": [1024, 960, 896],
         "axes_default": "all",
@@ -156,19 +152,8 @@ def test_qwen3p5_0p8b_advanced_search_keeps_mild_domains_explicit() -> None:
     }
 
 
-def test_qwen3p5_0p8b_advanced_search_composes_the_pinned_model() -> None:
-    with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
-        config = compose(config_name="families/qwen3_5/qwen3p5_0p8b/advanced")
-    config = OmegaConf.to_container(config, resolve=True)
-
-    assert config["input_hf_model_path"] == "Qwen/Qwen3.5-0.8B"
-    assert config["model_info"]["hf_revision"] == "2fc06364715b967f1860aea9cf38778875588b17"
-    assert config["model"]["revision"] == config["model_info"]["hf_revision"]
-    assert config["search_space"]["axes"]["ffn_intermediate"]["values"] == [3328, 3072]
-
-
-def test_qwen3p5_0p8b_advanced_search_generates_every_eligible_axis_value() -> None:
-    advanced = yaml.safe_load(ADVANCED_PATH.read_text())
+def test_qwen3p5_0p8b_vlm_campaign_generates_every_eligible_axis_value() -> None:
+    campaign = yaml.safe_load(CAMPAIGN_PATH.read_text())
     linear_block = BlockConfig(
         subblock_configs=(
             MambaConfig(
@@ -200,7 +185,7 @@ def test_qwen3p5_0p8b_advanced_search_generates_every_eligible_axis_value() -> N
     for hidden_width in (1024, 960, 896):
         candidates = build_candidate_library(
             block_configs,
-            search_space={"axes": advanced["search_space"]["axes"]},
+            search_space={"axes": campaign["search_space"]["axes"]},
             parent_checkpoint_identity="qwen3p5-0p8b-teacher",
             include_self=True,
             include_noops=False,

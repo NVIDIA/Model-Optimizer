@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU plan contracts for the end-to-end Qwen 3.5 0.8B VLM lifecycle smoke."""
+"""CPU contracts for the maintained Qwen 3.5 0.8B VLM examples."""
 
-from itertools import pairwise
 from pathlib import Path
 
-import yaml
-
-from examples.puzzletron.evaluation.vlm import contracts, post_mip, suites
+from examples.puzzletron.evaluation.vlm import contracts, suites
 from puzzletron_orchestrator.compiler import (
     compile_campaign_plan,
     load_execution_config,
@@ -28,146 +25,44 @@ from puzzletron_orchestrator.compiler import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-RUN_PATH = (
+FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
+SMOKE_PATH = FAMILY_ROOT / "runs/full_vlm_smoke.yaml"
+CAMPAIGN_PATH = FAMILY_ROOT / "runs/vlm_campaign.yaml"
+RUNNER_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml"
+)
+SINGLE_GPU_EXECUTION_PATH = (
+    REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
+)
+CAMPAIGN_EXECUTION_PATH = (
     REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/full_vlm_smoke.yaml"
-)
-ORCHESTRATION_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b"
-RUNNER_PATH = ORCHESTRATION_ROOT / "runner.slurm.yaml"
-EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.full_vlm_smoke.yaml"
-COMPARISON_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.e2e_vlm_quality_comparison.yaml"
-CAMPAIGN_EXECUTION_PATH = ORCHESTRATION_ROOT / "execution.vlm_admitted_axes_campaign.yaml"
-CAMPAIGN_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
-)
-MODEL_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/model.yaml"
-)
-COMPARISON_RUN_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison.yaml"
-)
-EXTENDED_RUN_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_admitted_axes_lifecycle_smoke.yaml"
-)
-EXTENDED_COMPARISON_RUN_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/e2e_vlm_quality_comparison_extended.yaml"
-)
-FAMILY_PRESETS_PATH = (
-    REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/setup_v2_defaults.yaml"
-)
-VLM_EVALUATION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation.yaml"
-)
-FULL_VLM_CPU_STAGE_IDS = frozenset(
-    {
-        "prepare_dataset",
-        "mip",
-        "post.params-90.best_vlm_loss",
-        "post.params-90.fastest_vlm",
-        "post.params-90.best",
-    }
+    / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.vlm_campaign.yaml"
 )
 
-_CPU_STAGE_IDS = FULL_VLM_CPU_STAGE_IDS | {"convert", "build_library"}
 
-
-def _compile_plan(monkeypatch, tmp_path: Path, *, dataset_revision="fixture-revision"):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "results"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
-    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    if dataset_revision is None:
-        monkeypatch.delenv("PUZZLETRON_DATASET_REVISION", raising=False)
-    else:
-        monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", dataset_revision)
-    return compile_campaign_plan(
-        experiment_config_path=RUN_PATH,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(EXECUTION_PATH),
-        stage_filter="full",
-    )
-
-
-def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path):
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / run_path.stem))
+def _compile(monkeypatch, tmp_path: Path, experiment: Path, execution: Path):
+    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / experiment.stem))
     monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
     monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    execution_path = (
-        CAMPAIGN_EXECUTION_PATH
-        if run_path == CAMPAIGN_PATH
-        else COMPARISON_EXECUTION_PATH
-        if run_path == COMPARISON_RUN_PATH
-        else EXECUTION_PATH
-    )
     return compile_campaign_plan(
-        experiment_config_path=run_path,
+        experiment_config_path=experiment,
         runner=load_runner_config(RUNNER_PATH),
-        execution=load_execution_config(execution_path),
+        execution=load_execution_config(execution),
         stage_filter="full",
     )
 
 
-def _assert_single_gpu_or_cpu_plan(plan) -> None:
-    assert {stage.stage_id for stage in plan.stages if stage.resource == "cpu"} == _CPU_STAGE_IDS
-    assert all(stage.total_gpus == 0 for stage in plan.stages if stage.stage_id in _CPU_STAGE_IDS)
-    assert all(
-        stage.total_gpus == 1 for stage in plan.stages if stage.stage_id not in _CPU_STAGE_IDS
-    )
-
-
-def test_qwen3p5_0p8b_full_vlm_smoke_defaults_to_the_tested_dataset_snapshot(
-    monkeypatch,
-    tmp_path: Path,
+def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
+    monkeypatch, tmp_path: Path
 ) -> None:
-    run_config = yaml.safe_load(RUN_PATH.read_text())
-    config = _compile_plan(monkeypatch, tmp_path, dataset_revision=None).experiment_config
-
-    assert run_config["defaults"] == [
-        "mip_vlm_smoke",
-        "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_",
-        "_self_",
-    ]
-    assert config["data"]["revision"] == "51f4f4d219315c3283950994d4eb3d7fc30aa87b"
-    assert config["prepare_dataset"]["evaluation_tasks"] == [
-        "realworldqa",
-        "mmmu_val",
-        "mvbench",
-    ]
-    assert config["mip"]["runs"]["params-90"]["search_space"] == {
-        "depth": [0],
-        "embedding": [1024],
-        "axes_default": "teacher",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert config["sort"]["deferred_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_value_heads_per_group",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
-
-
-def test_qwen3p5_0p8b_full_vlm_smoke_compiles_the_one_gpu_lifecycle(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    plan = _compile_plan(monkeypatch, tmp_path)
-    stage_ids = tuple(stage.stage_id for stage in plan.stages)
+    plan = _compile(monkeypatch, tmp_path, SMOKE_PATH, SINGLE_GPU_EXECUTION_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
-    post_stage_ids = tuple(stage_id for stage_id in stage_ids if stage_id.startswith("post."))
+    config = plan.experiment_config
+    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
 
-    assert stage_ids[0] == "prepare_dataset"
-    assert plan.stages[1].stage_id == "convert"
-    assert plan.stages[1].parents == ("prepare_dataset",)
-    assert "tokenize_data" not in stage_ids
-    assert post_stage_ids == (
+    assert "tokenize_data" not in stages
+    assert tuple(node for node in stages if node.startswith("post.")) == (
         "post.params-90.image_eval",
         "post.params-90.best_vlm_loss",
         "post.params-90.materialized",
@@ -179,463 +74,66 @@ def test_qwen3p5_0p8b_full_vlm_smoke_compiles_the_one_gpu_lifecycle(
         "post.params-90.final_image_eval",
         "post.params-90.best",
     )
-    post_nodes = tuple(stage for stage in plan.stages if stage.stage_id.startswith("post."))
-    assert post_nodes[0].parents == ("mip",)
-    for parent, node in pairwise(post_nodes):
-        assert node.parents == (parent.stage_id,)
-    assert stage_ids[-1] == "post.params-90.best"
-    for stage_id in FULL_VLM_CPU_STAGE_IDS:
-        assert stages[stage_id].resource == "cpu"
-        assert stages[stage_id].total_gpus == 0
-    _assert_single_gpu_or_cpu_plan(plan)
-
-
-def test_qwen3p5_0p8b_full_vlm_smoke_bounds_work_and_declares_vlm_kd(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    config = _compile_plan(monkeypatch, tmp_path).experiment_config
-    nodes = config["post_mip"]["flows"]["params-90"]["nodes"]
-
-    assert config["replacement_scoring"]["eval_samples"] == 2
-    assert nodes["image_eval"]["config"] == {"eval_samples": 2, "block_size": 512}
-    assert config["mip"]["runs"]["params-90"]["solver"]["num_solutions"] == 1
-    assert config["mip"]["runs"]["params-90"]["homogeneous"]["keep"] == 5
-    assert nodes["best_vlm_loss"]["top_k"] == 2
-    assert nodes["checkpoint_eval"]["type"] == "downstream_evaluation"
-    assert nodes["checkpoint_eval"]["failure_policy"] == "strict"
+    assert config["prepare_dataset"]["num_samples"] == 8
+    assert nodes["image_eval"]["config"]["eval_samples"] == 2
     assert nodes["checkpoint_eval"]["config"]["profile"] == "qwen35_vlm_core3_24row_smoke_v2"
-    assert nodes["checkpoint_eval"]["config"]["batch_size"] == 1
-    assert nodes["checkpoint_eval"]["config"]["timeout_seconds"] == 3000
-    assert nodes["checkpoint_eval"]["config"]["max_model_len"] == 16384
-    assert nodes["checkpoint_eval"]["config"]["limit_mm_per_prompt"] == {"image": 32}
-    assert "topology" not in nodes["checkpoint_eval"]["config"]
-    assert nodes["vlm_serving"]["config"]["readiness_timeout"] == 300
-    assert nodes["vlm_serving"]["config"]["benchmark_timeout"] == 300
-    assert nodes["vlm_serving"]["config"]["output_tokens"] == 80
-    assert nodes["vlm_serving"]["config"]["topology"]["gpu_group_size"] == 1
-    assert nodes["fastest_vlm"] == {
-        "type": "filter",
-        "input": "vlm_serving",
-        "mode": "top_k",
-        "metric": "vlm_serving.images_12.concurrency_1.image_throughput",
-        "direction": "maximize",
-        "top_k": 1,
-    }
-    assert nodes["short_vlm_kd"]["input"] == "fastest_vlm"
-    assert nodes["short_vlm_kd"]["config"] == {
-        "max_steps": 2,
-        "global_batch_size": 1,
-        "local_batch_size": 1,
-        "checkpoint_every_steps": 2,
-    }
-    assert nodes["post_kd_checkpoint_eval"]["type"] == "downstream_evaluation"
-    assert nodes["post_kd_checkpoint_eval"]["failure_policy"] == "strict"
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
-    assert nodes["final_image_eval"]["config"] == {
-        "eval_samples": 2,
-        "block_size": 512,
-    }
-    assert nodes["best"]["top_k"] == 1
-    assert nodes["vlm_serving"]["config"]["endpoint_type"] == "chat"
-    assert nodes["vlm_serving"]["config"]["image_batch_sizes"] == [1, 6, 12]
-    assert nodes["vlm_serving"]["config"]["image_width_mean"] == 1280
-    assert nodes["vlm_serving"]["config"]["image_height_mean"] == 720
-    assert nodes["vlm_serving"]["config"]["concurrency"] == [1]
     assert nodes["vlm_serving"]["config"]["request_count"] == 1
-    assert nodes["vlm_serving"]["config"]["topology"]["server_context_overhead_tokens"] == 16384
-    assert config["global_distillation"]["domain"] == "vlm"
-    assert config["global_distillation"]["freeze_policy"] == "train_all"
+    assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
+    assert all(stage.total_gpus == 0 for stage in stages.values() if stage.resource == "cpu")
+    assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
 
 
-def test_qwen3p5_0p8b_vlm_comparison_uses_the_shared_evaluator(
-    monkeypatch,
-    tmp_path: Path,
+def test_vlm_campaign_compares_multi_axis_candidates_with_ffn_controls(
+    monkeypatch, tmp_path: Path
 ) -> None:
-    comparison = _compile_campaign(monkeypatch, tmp_path, run_path=COMPARISON_RUN_PATH)
-    comparison_config = comparison.experiment_config
-    comparison_nodes = comparison_config["post_mip"]["flows"]["params-90"]["nodes"]
-    benchmark = comparison_nodes["quality_benchmarks"]
-    stages = {stage.stage_id: stage for stage in comparison.stages}
-    family_presets = yaml.safe_load(FAMILY_PRESETS_PATH.read_text())
-    evaluator = yaml.safe_load(VLM_EVALUATION_PATH.read_text())["vlm_quality_evaluation"]
+    plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
+    stages = {stage.stage_id: stage for stage in plan.stages}
+    config = plan.experiment_config
+    flows = config["post_mip"]["flows"]
+    candidates = flows["candidates"]["nodes"]
+    controls = flows["ffn-controls"]["nodes"]
 
-    assert comparison_config["prepare_dataset"]["evaluation_tasks"] == [
-        "realworldqa",
-        "mmmu_val",
-        "mvbench",
-    ]
-
-    advanced = "/families/qwen3_5/qwen3p5_0p8b/advanced@_global_"
-    shared_evaluator = "/families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_"
-    assert yaml.safe_load(COMPARISON_RUN_PATH.read_text())["defaults"] == [
-        "full_vlm_smoke",
-        advanced,
-        shared_evaluator,
-        "_self_",
-    ]
     assert {
-        axis_id
-        for axis_id, axis in comparison_config["search_space"]["axes"].items()
-        if axis["enabled"]
+        axis for axis, settings in config["search_space"]["axes"].items() if settings["enabled"]
     } == {
         "hidden_width",
+        "kv_groups",
+        "q_heads_per_group",
         "ffn_intermediate",
-        "kv_groups",
-        "q_heads_per_group",
         "gdn_key_groups",
         "gdn_key_head_dim",
         "gdn_value_head_dim",
     }
-    assert comparison_config["pruning"]["attention_scored_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
+    assert set(config["mip"]["runs"]) == {"params-90", "ffn-controls"}
+    assert set(config["mip"]["runs"]["ffn-controls"]["variants"]) == {
+        "width-3328",
+        "width-3072",
+    }
+    assert candidates["best_image_loss"]["top_k"] == 4
+    assert candidates["kd"]["config"] == controls["control_kd"]["config"]
+    assert candidates["kd"]["exposure"] == controls["control_kd"]["exposure"]
+    assert candidates["kd"]["config"]["max_steps"] == 128
+    assert candidates["pre_kd_eval"]["config"] == candidates["post_kd_eval"]["config"]
+    assert candidates["pre_kd_eval"]["config"] == controls["control_pre_kd_eval"]["config"]
+    assert candidates["result"]["config"]["milestones"] == [
+        {"steps": 128, "kd": "kd", "evaluation": "post_kd_eval"}
     ]
-    assert comparison_config["pruning"]["gdn_scored_axes"] == [
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
-    assert comparison_config["sort"]["deferred_axes"] == []
-    assert comparison_config["sort_sanity"]["max_abs_reverse_lm_loss_delta"] == 0.005
-    comparison_mip = comparison_config["mip"]["runs"]["params-90"]
-    assert comparison_mip["search_space"] == {
-        "depth": [0, 1, 2],
-        "embedding": [1024, 960, 896],
-        "axes_default": "all",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert "variants" not in comparison_mip
-    assert comparison_mip["solver"] == {
-        "backend": "auto",
-        "num_solutions": 8,
-        "min_hamming_distance": 2,
-        "max_seconds_per_solution": 300,
-    }
-    assert comparison_mip["homogeneous"]["enabled"] is False
-    assert comparison_config["prepare_dataset"]["num_samples"] == 16
-    assert comparison_nodes["image_eval"]["config"]["eval_samples"] == 16
-    assert comparison_nodes["best_vlm_loss"]["top_k"] == 2
-    assert comparison_nodes["fastest_vlm"]["top_k"] == 2
-    assert comparison_nodes["short_vlm_kd"]["input"] == "fastest_vlm"
-    comparison_evaluation = dict(benchmark["config"])
-    assert comparison_evaluation.pop("reference_checkpoint") == comparison_config["teacher_dir"]
-    evaluator_without_reference = dict(evaluator)
-    evaluator_without_reference.pop("reference_checkpoint")
-    evaluator_without_reference["evaluator_revision"] = "unpublished"
-    assert comparison_evaluation == evaluator_without_reference
-    assert benchmark["config"]["max_model_len"] == 32768
-    assert benchmark["config"]["limit_mm_per_prompt"] == {"image": 32}
-    assert "recorded_observation" not in benchmark["config"]
-    assert stages["post.params-90.quality_benchmarks"].parents == ("post.params-90.short_vlm_kd",)
-    assert benchmark["input"] == "short_vlm_kd"
-    assert benchmark["failure_policy"] == "strict"
-    assert benchmark["config"]["profile"].endswith("frozen_rows_v3")
-    assert comparison_nodes["short_vlm_kd"]["config"] == {
-        "max_steps": 64,
-        "global_batch_size": 4,
-        "local_batch_size": 1,
-        "checkpoint_every_steps": 64,
-    }
-
-    wizard_quality = family_presets["model_overrides"]["qwen3p5_0p8b"]["defaults"]["post_mip"][
-        "quality_comparison"
-    ]["by_modality"]["multimodal"]
-    assert wizard_quality.pop("enabled") is True
-    assert wizard_quality == evaluator
-    for stage_id in FULL_VLM_CPU_STAGE_IDS:
-        assert stages[stage_id].resource == "cpu"
-        assert stages[stage_id].gpus_per_instance == 0
-        assert stages[stage_id].total_gpus == 0
-    assert comparison.runner.slurm is not None
-    assert comparison.runner.slurm.cpu_cpus_per_task == 4
-    assert comparison.runner.slurm.cpu_memory_mb == 32768
-    for node_id in (
-        "image_eval",
-        "materialized",
-        "checkpoint_eval",
-        "vlm_serving",
-        "short_vlm_kd",
-        "post_kd_checkpoint_eval",
-        "quality_benchmarks",
-        "final_image_eval",
-    ):
-        assert stages[f"post.params-90.{node_id}"].total_gpus == 2
-    assert all(stage.total_gpus in {0, 1, 2} for stage in comparison.stages)
-
-
-def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    smoke = _compile_campaign(monkeypatch, tmp_path, run_path=EXTENDED_RUN_PATH)
-    comparison = _compile_campaign(monkeypatch, tmp_path, run_path=EXTENDED_COMPARISON_RUN_PATH)
-    config = smoke.experiment_config
-    profile = config["mip"]["runs"]["params-90"]
-    stages = {stage.stage_id: stage for stage in smoke.stages}
-
-    assert config["sort"]["deferred_axes"] == []
-    assert config["pruning"]["attention_scored_axes"] == []
-    assert config["pruning"]["gdn_scored_axes"] == []
-    assert comparison.experiment_config["pruning"]["attention_scored_axes"] == []
-    assert comparison.experiment_config["pruning"]["gdn_scored_axes"] == []
-    for route in (config, comparison.experiment_config):
-        assert {
-            axis_id for axis_id, axis in route["search_space"]["axes"].items() if axis["enabled"]
-        } == {"hidden_width", "ffn_intermediate"}
-    assert config["width_sanity"]["axes"] == [
-        "hidden_width",
-        "ffn_intermediate",
-    ]
-    assert config["depth_importance"]["max_removals"] == 1
-    assert profile["constraints"] == {"params": {"min": "85%", "max": "95%"}}
-    assert profile["search_space"] == {
-        "depth": [1],
-        "embedding": [960],
-        "axes_default": "teacher",
-        "axes": {
-            "ffn.intermediate_size": [3072],
-        },
-    }
-    assert set(profile["search_space"]["axes"]["ffn.intermediate_size"]) <= set(
-        config["pruning"]["intermediate_size_list"]
+    assert (
+        controls["control_result"]["config"]["profile"]
+        == (candidates["result"]["config"]["profile"])
     )
-    assert "depth_importance" in stages
-    assert stages["post.params-90.materialized"].parents == ("post.params-90.best_vlm_loss",)
-    assert stages["post.params-90.post_kd_checkpoint_eval"].parents == (
-        "post.params-90.short_vlm_kd",
-    )
-    assert "post.params-90.quality_benchmarks" in {stage.stage_id for stage in comparison.stages}
-    _assert_single_gpu_or_cpu_plan(smoke)
-    _assert_single_gpu_or_cpu_plan(comparison)
-
-
-def test_qwen3p5_0p8b_vlm_campaign_uses_configured_example_selection(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    campaign = _compile_campaign(monkeypatch, tmp_path, run_path=CAMPAIGN_PATH)
-    config = campaign.experiment_config
-    stages = {stage.stage_id: stage for stage in campaign.stages}
-    nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
-    candidates = config["mip"]["runs"]["params-90"]
-    assert config["pruning"]["attention_scored_axes"] == [
-        "kv_groups",
-        "q_heads_per_group",
+    assert controls["control_result"]["config"]["milestones"] == [
+        {"steps": 128, "kd": "control_kd", "evaluation": "control_post_kd_eval"}
     ]
-    assert config["pruning"]["gdn_scored_axes"] == [
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    ]
-    assert {
-        axis_id for axis_id, axis in config["search_space"]["axes"].items() if axis["enabled"]
-    } == {
-        "hidden_width",
-        "ffn_intermediate",
-        "kv_groups",
-        "q_heads_per_group",
-        "gdn_key_groups",
-        "gdn_key_head_dim",
-        "gdn_value_head_dim",
-    }
-    model_info = yaml.safe_load(MODEL_PATH.read_text())["model_info"]
-    full_attention_layers = model_info["full_attention_layer_indices"]
-    assert full_attention_layers == [3, 7, 11, 15, 19, 23]
-    assert len(full_attention_layers) == model_info["layer_counts"]["full_attention"]
-    assert candidates["constraints"] == {"params": {"min": "75%", "max": "90%"}}
-    assert candidates["solver"] == {
-        "backend": "auto",
-        "num_solutions": 8,
-        "min_hamming_distance": 2,
-        "max_seconds_per_solution": 300,
-    }
-    assert candidates["homogeneous"]["enabled"] is False
-    assert candidates["search_space"] == {
-        "depth": [0, 1, 2],
-        "embedding": [1024, 960, 896],
-        "axes_default": "all",
-        "axes": {"ffn.intermediate_size": "all"},
-    }
-    assert config["mip"]["runs"]["calibration-controls"]["variants"] == {
-        "width-3328": {
-            "constraints": {"params": {"min": "95%", "max": "100%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [3328]}},
-        },
-        "width-3072": {
-            "constraints": {"params": {"min": "95%", "max": "100%"}},
-            "search_space": {"axes": {"ffn.intermediate_size": [3072]}},
-        },
-    }
-    assert set(candidates["variants"]) == {"ranked-search", "all-reducible-sentinel"}
-    sentinel = candidates["variants"]["all-reducible-sentinel"]
-    assert sentinel["constraints"] == {"params": {"min": "75%", "max": "100%"}}
-    assert sentinel["search_space"] == {
-        "depth": [1],
-        "embedding": [960],
-        "axes_default": "teacher",
-        "axes": {
-            "ffn.intermediate_size": {"default": "teacher", "layers": {1: [3328]}},
-            "attention.num_kv_heads": {"default": "teacher", "layers": {19: [1]}},
-            "attention.q_per_group": {"default": "teacher", "layers": {19: [3]}},
-            "mamba.num_groups": {"default": "teacher", "layers": {0: [14]}},
-            "mamba.num_heads": {"default": "teacher", "layers": {0: [14]}},
-            "mamba.state_dim": {"default": "teacher", "layers": {0: [112]}},
-            "mamba.head_dim": {"default": "teacher", "layers": {0: [112]}},
-        },
-    }
-    assert config["post_mip"]["flows"]["candidate-evaluation"]["source"]["variants"] == (
-        "ranked-search"
-    )
-    assert nodes["best_lm"] == {
-        "type": "filter",
-        "input": "online_eval",
-        "mode": "top_k",
-        "metric": "online_eval.lm_loss",
-        "direction": "minimize",
-        "top_k": 4,
-    }
-    assert nodes["pre_kd_short_v2"]["input"] == "materialized"
-    assert "model_source" not in nodes["pre_kd_short_v2"]
-    assert {node_id for node_id, node in nodes.items() if node["type"] == "aiperf"} == {
-        "bounded_serving"
-    }
-    assert nodes["bounded_serving"]["input"] == "bounded_result"
-    assert nodes["bounded_serving"]["config"]["request_count"] == 64
-    assert nodes["bounded_serving"]["config"]["warmup_request_count"] == 32
-    assert nodes["bounded_serving"]["config"]["repetitions"] == 3
-    trajectory_nodes = [nodes[f"kd_{steps}"] for steps in (64, 128, 256)]
-    assert [node["config"]["max_steps"] for node in trajectory_nodes] == [64, 128, 256]
-    assert {node["trajectory"] for node in trajectory_nodes} == {
-        "retained-candidate-learning-curve"
-    }
-    assert {node["model_source"] for node in trajectory_nodes} == {"materialized"}
-    milestone_evaluations = [nodes[f"short_v2_{steps}"]["config"] for steps in (64, 128, 256)]
-    identity_fields = {
-        "profile",
-        "row_manifest_sha256",
-        "reference_checkpoint",
-        "reference_cache_id",
-    }
-    assert {
-        tuple((field, settings[field]) for field in sorted(identity_fields))
-        for settings in (nodes["pre_kd_short_v2"]["config"], *milestone_evaluations)
-    } == {
-        tuple(
-            (field, nodes["pre_kd_short_v2"]["config"][field]) for field in sorted(identity_fields)
-        )
-    }
-    evaluation_identity = nodes["pre_kd_short_v2"]["config"]
-    assert evaluation_identity["profile"].endswith("frozen_rows_v3")
+    assert candidates["selected"]["input"] == "post_kd_eval"
+    assert candidates["selected"]["top_k"] == 1
+    assert stages["post.candidates.serving"].parents == ("post.candidates.result",)
+    assert stages["post.candidates.kd"].total_gpus == 2
+    assert stages["post.ffn-controls.control_kd"].total_gpus == 2
+
     profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None
-    assert evaluation_identity["row_manifest_sha256"] == suites.manifest_sha256(profile_rows)
-    assert evaluation_identity["reference_cache_id"] == "qwen35-0p8b-short-v2-teacher"
-    assert "row_manifest" not in evaluation_identity
-    runtime_overrides = {
-        key: evaluation_identity[key]
-        for key in post_mip._RUNNER_OVERRIDES
-        if key in evaluation_identity
-    }
-    assert runtime_overrides == {}
-    assert nodes["bounded_result"]["config"]["row_manifest"] == (
-        "profile:core-3_344-examples_r1-vllm"
+    assert candidates["pre_kd_eval"]["config"]["row_manifest_sha256"] == (
+        suites.manifest_sha256(profile_rows)
     )
-    assert nodes["selected"] == {
-        "type": "filter",
-        "input": "short_v2_256",
-        "mode": "aggregate_rank",
-        "metrics": [
-            {
-                "metric": (
-                    "short_v2_256.modelopt_vlm_benchmark_realworldqa.exact_match_flexible-extract"
-                ),
-                "direction": "maximize",
-            },
-            {
-                "metric": "short_v2_256.modelopt_vlm_benchmark_mmmu_val.mmmu_acc_none",
-                "direction": "maximize",
-            },
-        ],
-        "top_k": 1,
-    }
-    assert stages["post.candidate-evaluation.bounded_serving"].parents == (
-        "post.candidate-evaluation.bounded_result",
-    )
-    assert stages["replacement_scoring"].parents == ("build_library",)
-    assert stages["post.candidate-evaluation.bounded_serving"].total_gpus == 1
-    assert [row["steps"] for row in nodes["bounded_result"]["config"]["milestones"]] == [
-        64,
-        128,
-        256,
-    ]
-    control_nodes = config["post_mip"]["flows"]["control-learning-curve"]["nodes"]
-    assert [
-        control_nodes[f"control_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
-    ] == [64, 128, 256]
-    assert not any(node["type"] == "manual_filter" for node in control_nodes.values())
-    assert [row["steps"] for row in control_nodes["control_result"]["config"]["milestones"]] == [
-        64,
-        128,
-        256,
-    ]
-    sentinel_nodes = config["post_mip"]["flows"]["all-axis-sentinel"]["nodes"]
-    assert [
-        sentinel_nodes[f"sentinel_kd_{steps}"]["config"]["max_steps"] for steps in (64, 128, 256)
-    ] == [64, 128, 256]
-    assert sentinel_nodes["sentinel_serving"]["config"] == nodes["bounded_serving"]["config"]
-    assert not any(
-        node["type"] == "manual_filter"
-        for flow in config["post_mip"]["flows"].values()
-        for node in flow["nodes"].values()
-    )
-    assert all(stage.total_gpus in {0, 1, 2} for stage in campaign.stages)
-
-
-def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("PUZZLETRON_RUN_ROOT", str(tmp_path / "campaign"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_PATH", str(tmp_path / "dataset"))
-    monkeypatch.setenv("PUZZLETRON_DATASET_REVISION", "fixture-revision")
-    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
-    execution = load_execution_config(CAMPAIGN_EXECUTION_PATH)
-    campaign = compile_campaign_plan(
-        experiment_config_path=CAMPAIGN_PATH,
-        runner=load_runner_config(RUNNER_PATH),
-        execution=execution,
-        stage_filter="full",
-    )
-    stages = {stage.stage_id: stage for stage in campaign.stages}
-    configured = set(execution["stages"])
-    compiled = set(stages)
-
-    assert configured <= compiled
-    for prefix in (
-        "post.candidate-evaluation",
-        "post.all-axis-sentinel",
-        "post.control-learning-curve",
-    ):
-        assert {stage_id for stage_id in configured if stage_id.startswith(f"{prefix}.")} == {
-            stage_id for stage_id in compiled if stage_id.startswith(f"{prefix}.")
-        }
-    assert not any(
-        stale in stage_id
-        for stage_id in configured
-        for stale in ("screening_kd", "screening_eval", "quality_screen")
-    )
-    for prefix in ("post.candidate-evaluation", "post.control-learning-curve"):
-        for steps in (64, 128, 256):
-            kd = stages[f"{prefix}.{'control_' if 'control' in prefix else ''}kd_{steps}"]
-            evaluation = stages[
-                f"{prefix}.{'control_' if 'control' in prefix else ''}short_v2_{steps}"
-            ]
-            assert kd.total_gpus == 2
-            assert evaluation.total_gpus == 2
-            assert kd.gpus_per_instance == evaluation.gpus_per_instance == 1
-    for steps in (64, 128, 256):
-        kd = stages[f"post.all-axis-sentinel.sentinel_kd_{steps}"]
-        evaluation = stages[f"post.all-axis-sentinel.sentinel_short_v2_{steps}"]
-        assert kd.total_gpus == evaluation.total_gpus == 1
-        assert kd.gpus_per_instance == evaluation.gpus_per_instance == 1

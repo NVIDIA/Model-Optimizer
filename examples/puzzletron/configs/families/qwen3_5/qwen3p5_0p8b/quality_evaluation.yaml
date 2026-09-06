@@ -40,13 +40,6 @@ quality_evaluation:
   <<: *quality_evaluation_common
   limit: 256
 
-# The opt-in single-student comparison evaluates the same bounded prefix for
-# the student and teacher.
-quality_evaluation_reference:
-  <<: *quality_evaluation_common
-  reference_checkpoint: ${teacher_dir}
-  limit: 256
-
 # Omitting the limit runs each complete benchmark for the final student and
 # teacher with exactly the same evaluator contract used by the screen.
 quality_evaluation_full:
