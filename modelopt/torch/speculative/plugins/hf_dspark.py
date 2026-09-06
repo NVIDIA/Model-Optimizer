@@ -461,23 +461,30 @@ class HFDSparkModel(HFDFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        draft_hidden = self.dflash_module(
-            noise_embedding=noise_embedding,
-            target_hidden=target_hidden,
-            position_ids=pos_ids,
-            attention_mask=self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device),
-        )
-        backbone_logits = self._base_model_lm_head(draft_hidden)  # [B, block_size, V]
+        # Wrapped for the same reason as the DFlash base's: generation is called directly
+        # rather than through `__call__`, so it does not inherit the autocast installed
+        # there, and an fp32 draft under a bf16 target would raise here. The Markov head
+        # is inside the loop because its parameters are promoted alongside the backbone.
+        with self._draft_autocast():
+            draft_hidden = self.dflash_module(
+                noise_embedding=noise_embedding,
+                target_hidden=target_hidden,
+                position_ids=pos_ids,
+                attention_mask=self._build_generate_swa_mask(
+                    ctx_len, bsz, target_hidden.dtype, device
+                ),
+            )
+            backbone_logits = self._base_model_lm_head(draft_hidden)  # [B, block_size, V]
 
-        # Autoregressive Markov sampling over the block.
-        m = self.dflash_module
-        num_tokens = min(steps, block_size)
-        prev_token = base_token.squeeze(-1)  # anchor precedes block position 0
-        state = None
-        draft_tokens = []
-        for k in range(num_tokens):
-            bias, state = m.markov_step(prev_token, draft_hidden[:, k, :], state)
-            tok = (backbone_logits[:, k, :] + bias).argmax(dim=-1)
-            draft_tokens.append(tok)
-            prev_token = tok
+            # Autoregressive Markov sampling over the block.
+            m = self.dflash_module
+            num_tokens = min(steps, block_size)
+            prev_token = base_token.squeeze(-1)  # anchor precedes block position 0
+            state = None
+            draft_tokens = []
+            for k in range(num_tokens):
+                bias, state = m.markov_step(prev_token, draft_hidden[:, k, :], state)
+                tok = (backbone_logits[:, k, :] + bias).argmax(dim=-1)
+                draft_tokens.append(tok)
+                prev_token = tok
         return base_token, torch.stack(draft_tokens, dim=1)

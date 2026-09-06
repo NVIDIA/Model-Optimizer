@@ -277,10 +277,12 @@ class HFLiLiCorrModel(HFDFlashModel):
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
         # Batched into one device-to-host sync rather than two per-step float() calls.
-        origin_scalars = torch.stack([
-            origin_loss.detach().reshape(()).float(),
-            torch.as_tensor(origin_accuracy, dtype=torch.float32, device=origin_loss.device),
-        ]).tolist()
+        origin_scalars = torch.stack(
+            [
+                origin_loss.detach().reshape(()).float(),
+                torch.as_tensor(origin_accuracy, dtype=torch.float32, device=origin_loss.device),
+            ]
+        ).tolist()
         metrics["origin_loss"], metrics["origin_accuracy"] = origin_scalars
         self._lilicorr_metrics = metrics
         return origin_loss + lilicorr_loss, accuracy

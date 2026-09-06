@@ -928,3 +928,178 @@ class TestEnsureGenerationTags:
         # User/system content should NOT appear in unmasked tokens
         assert "You are helpful" not in decoded
         assert "How are you?" not in decoded
+
+
+def _dflash_batch(vocab_size, bsz=2, seq_len=SEQ_LEN):
+    torch.manual_seed(0)
+    input_ids = torch.randint(1, vocab_size, (bsz, seq_len))
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def _converted(fp32_master_weights=None, num_hidden_layers=4):
+    model = get_tiny_llama(num_hidden_layers=num_hidden_layers)
+    config = get_dflash_config()
+    if fp32_master_weights is not None:
+        config["dflash_fp32_master_weights"] = fp32_master_weights
+    mtsp.convert(model, [("dflash", config)])
+    return model
+
+
+class TestDFlashFp32MasterWeights:
+    """``dflash_fp32_master_weights``: what is promoted, and what the optimizer inherits.
+
+    The parameter dtype is the visible half; the OPTIMIZER's dtype is the point of the
+    change, and it is not decided until AdamW allocates its moments with ``zeros_like(p)``
+    inside the first step. A test that looked only at parameters would pass while the
+    feature was broken.
+    """
+
+    def test_flag_off_leaves_the_draft_in_the_base_dtype(self):
+        model = _converted(fp32_master_weights=False)
+        assert model._base_model.dtype == torch.bfloat16
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.bfloat16}
+
+    def test_flag_on_promotes_only_the_draft(self):
+        model = _converted(fp32_master_weights=True)
+        assert {p.dtype for p in model.dflash_module.parameters()} == {torch.float32}
+        # The frozen base is deliberately left alone: no trainable parameters, no
+        # optimizer state, and promoting it would change the hidden states the draft
+        # is trained against.
+        assert model._base_model.dtype == torch.bfloat16
+
+    def test_adam_moments_follow_the_parameters(self):
+        """The half that actually matters, and the one a parameter check would miss."""
+        moments = {}
+        for flag, expected in ((False, torch.bfloat16), (True, torch.float32)):
+            model = _converted(fp32_master_weights=flag)
+            model.train()
+            trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            optimizer.step()
+
+            seen = {
+                state[key].dtype
+                for state in optimizer.state.values()
+                for key in ("exp_avg", "exp_avg_sq")
+            }
+            assert seen == {expected}, f"flag={flag}: moment dtypes {seen}"
+            moments[flag] = seen
+        assert moments[False] != moments[True]
+
+    def test_promotion_preserves_the_unpromoted_initialisation(self):
+        """The bf16 pass in the dtype move is load-bearing, not a redundant round trip.
+
+        The draft is drawn in fp32, rounded to the base model's bf16 and promoted back,
+        so a promoted run and an unpromoted run of the same seed start from bit-identical
+        weights and differ only in the precision they train at. Collapsing the two casts
+        into a single fp32 move silently gives the promoted arm a different draw, which
+        makes a bf16-vs-fp32 comparison a comparison of two initialisations as well.
+        """
+        torch.manual_seed(1234)
+        bf16_model = _converted(fp32_master_weights=False)
+        torch.manual_seed(1234)
+        fp32_model = _converted(fp32_master_weights=True)
+
+        bf16_params = dict(bf16_model.dflash_module.named_parameters())
+        fp32_params = dict(fp32_model.dflash_module.named_parameters())
+        assert bf16_params.keys() == fp32_params.keys()
+        for name, bf16_param in bf16_params.items():
+            promoted = fp32_params[name]
+            assert promoted.dtype == torch.float32
+            assert torch.equal(promoted, bf16_param.float()), name
+
+    def test_forward_needs_no_autocast_from_the_caller(self):
+        """A promoted draft is fed bf16 hidden states by the frozen bf16 target.
+
+        The model supplies the autocast that reconciles them, so this works without the
+        caller wrapping anything -- which is what evaluation, generation and any direct
+        ``convert()`` + forward rely on.
+        """
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        out = model(**_dflash_batch(model.dflash_config.vocab_size))
+        assert torch.isfinite(out.loss)
+
+    def test_supplied_autocast_matches_the_trainers(self):
+        """Nesting inside HF Trainer's own autocast changes nothing.
+
+        The published training path runs under ``TrainingArguments.bf16``, so the model's
+        context must be inert there rather than merely harmless.
+        """
+        batch = _dflash_batch(_converted().dflash_config.vocab_size)
+
+        torch.manual_seed(7)
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        torch.manual_seed(7)
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            wrapped = model(**batch).loss
+
+        torch.manual_seed(7)
+        model = _converted(fp32_master_weights=True)
+        model.train()
+        torch.manual_seed(7)
+        bare = model(**batch).loss
+
+        assert torch.equal(wrapped.detach(), bare.detach())
+
+    def test_generation_needs_no_autocast_either(self):
+        """``pseudo_speculative_generate`` is called directly, not through ``__call__``."""
+        model = _converted(fp32_master_weights=True)
+        model.eval()
+        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
+        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
+        assert draft_tokens.shape[0] == 1
+
+
+class TestDFlashDraftActivationCheckpointing:
+    """``training.gradient_checkpointing`` has to reach the draft, and be inert when it does.
+
+    The draft is the only trainable part of a DFlash setup, so it is the only part where
+    checkpointing saves anything: the frozen target runs under ``no_grad`` and stores no
+    activations, and a flag that landed only there would report the feature as enabled
+    while saving nothing.
+    """
+
+    def test_the_flag_reaches_the_draft_layers(self):
+        from transformers.modeling_layers import GradientCheckpointingLayer
+
+        model = _converted()
+        layers = list(model.dflash_module.layers)
+        assert layers
+        # Inheriting the supported base class is what makes HF's own recursion find them.
+        assert all(isinstance(layer, GradientCheckpointingLayer) for layer in layers)
+        assert all(layer.gradient_checkpointing is False for layer in layers)
+
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        assert all(layer.gradient_checkpointing for layer in layers)
+
+    def test_gradients_are_bit_identical_with_and_without(self):
+        """Recompute is mathematically neutral; it trades step time for memory only."""
+        grads = {}
+        for enabled in (False, True):
+            torch.manual_seed(99)
+            model = _converted()
+            model.train()
+            if enabled:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            torch.manual_seed(99)
+            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            out.loss.backward()
+            grads[enabled] = {
+                name: param.grad.detach().clone()
+                for name, param in model.dflash_module.named_parameters()
+                if param.grad is not None
+            }
+
+        assert grads[False] and grads[False].keys() == grads[True].keys()
+        for name, grad in grads[False].items():
+            assert torch.equal(grad, grads[True][name]), name

@@ -283,10 +283,18 @@ class DFlashConfig(ModeloptBaseConfig):
     dflash_fp32_master_weights: bool = ModeloptField(
         default=True,
         description=(
-            "Keep the draft's parameters in fp32 while training under bf16 autocast, i.e. "
-            "classic mixed precision with fp32 master weights. Matmuls still run in bf16, "
-            "so the cost is memory (about 12 bytes per parameter for the weight plus Adam's "
-            "two moments, instead of 6), not speed.\n\n"
+            "Keep the draft's parameters in fp32 while its matmuls still run in the base "
+            "model's dtype, i.e. classic mixed precision with fp32 master weights.\n\n"
+            "The bf16 half is supplied by the model, not by the caller: the draft enters "
+            "an autocast to the frozen base's dtype around its own forward, so the flag "
+            "behaves the same under HF Trainer's `bf16`, under evaluation, and under a "
+            "plain convert-and-forward. Where the Trainer's autocast is already active "
+            "this nests with the same dtype and changes nothing.\n\n"
+            "The cost is memory: about 12 bytes per parameter for the weight plus Adam's "
+            "two moments, instead of 6. Compute is unchanged, but note that fp32 "
+            "parameters also mean fp32 gradients, so under DDP the gradient all-reduce "
+            "moves twice the bytes it would for a bf16 draft. Under FSDP2 that is what "
+            "`MixedPrecisionPolicy(reduce_dtype=...)` exists to control.\n\n"
             "The parameter dtype decides the OPTIMIZER's dtype, because AdamW allocates its "
             "moments with `zeros_like(p)`, and that is where bf16 hurts most. Adam's second "
             "moment `v` is a running average of the squared gradient. At beta2=0.999 a "
