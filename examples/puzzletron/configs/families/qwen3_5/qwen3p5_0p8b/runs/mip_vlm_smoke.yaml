@@ -4,8 +4,8 @@ defaults:
   - mip_smoke
   - _self_
 
-# Bounded one-GPU VLM smoke for the same pinned public checkpoint and FFN-only
-# MIP search as mip_smoke. Images and conversations are read through the native
+# Bounded one-GPU VLM smoke for the same pinned public checkpoint and MIP search
+# as mip_smoke. Images and conversations are read through the native
 # AutoModel processor path; no text token cache is created or consumed.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 dataset_path: ${puzzle_dir}/datasets/nemotron_vlm_v2
@@ -102,7 +102,7 @@ global_distillation:
     mtp_kd: {weight: 1.0, chunk_size: 512}
 
 sort:
-  # The search is FFN-only; preserve unrelated attention and GDN ordering.
+  # Preserve ordering for axes outside this bounded smoke search.
   deferred_axes:
     - kv_groups
     - q_heads_per_group

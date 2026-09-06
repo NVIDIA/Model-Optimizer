@@ -8,7 +8,7 @@ defaults:
 # Extend the bounded image-text MIP smoke through evaluation, physical
 # materialization, comparative multimodal serving, VLM distillation, and final
 # image-text evaluation. The inherited recipe owns the pinned public checkpoint,
-# native multimodal data contract, and FFN-only search.
+# native multimodal data contract, and bounded search.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT}
 data:
   # Tested public snapshot; callers may override with another immutable SHA.
