@@ -22,8 +22,3 @@ execution:
     post.candidates.selected: {strategy: single, resource: cpu}
     post.candidates.result: {strategy: single, resource: cpu}
     post.candidates.serving: {instances: 1}
-    post.ffn-controls.control_materialized: &controls {instances: 2}
-    post.ffn-controls.control_pre_kd_eval: *controls
-    post.ffn-controls.control_kd: *controls
-    post.ffn-controls.control_post_kd_eval: *controls
-    post.ffn-controls.control_result: {strategy: single, resource: cpu}

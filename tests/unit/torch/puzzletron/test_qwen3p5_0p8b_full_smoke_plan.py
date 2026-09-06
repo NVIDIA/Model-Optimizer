@@ -26,16 +26,11 @@ from puzzletron_orchestrator.compiler import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 FAMILY_ROOT = REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b"
 RUN_PATH = FAMILY_ROOT / "runs/full_smoke.yaml"
-CAMPAIGN_PATH = FAMILY_ROOT / "runs/campaign.yaml"
 RUNNER_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/runner.slurm.yaml"
 )
 SINGLE_GPU_EXECUTION_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/orchestration/execution.single_gpu.yaml"
-)
-CAMPAIGN_EXECUTION_PATH = (
-    REPOSITORY_ROOT
-    / "examples/puzzletron/configs/orchestration/qwen3p5_0p8b/execution.campaign.yaml"
 )
 
 
@@ -74,32 +69,3 @@ def test_full_smoke_compiles_one_complete_bounded_lifecycle(monkeypatch, tmp_pat
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert all(stage.total_gpus == 0 for stage in stages.values() if stage.resource == "cpu")
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
-
-
-def test_campaign_keeps_a_matched_ffn_only_comparison(monkeypatch, tmp_path: Path) -> None:
-    plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
-    config = plan.experiment_config
-    nodes = config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
-
-    assert config["search_space"]["axes"] == {
-        "ffn_intermediate": {
-            "enabled": True,
-            "teacher_value": 3584,
-            "values": [3328, 3072],
-        }
-    }
-    assert set(config["mip"]["runs"]) == {"params-90", "ffn-candidates"}
-    assert config["mip"]["runs"]["params-90"] is False
-    assert set(config["mip"]["runs"]["ffn-candidates"]["variants"]) == {
-        "width-3328",
-        "width-3072",
-    }
-    assert nodes["screening_kd"]["config"]["max_steps"] == 128
-    assert nodes["global_kd"]["config"]["max_steps"] == 256
-    assert "reference_checkpoint" not in nodes["quality_screen"]["config"]
-    assert nodes["quality_benchmarks"]["config"]["reference_checkpoint"] == config["teacher_dir"]
-    assert nodes["selected"]["input"] == "quality_screen"
-    assert nodes["selected"]["top_k"] == 1
-    assert "post.candidate-evaluation.quality_benchmarks" in {
-        stage.stage_id for stage in plan.stages
-    }

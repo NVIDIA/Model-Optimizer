@@ -6,7 +6,7 @@ The Qwen 3.5 0.8B VLM example has three experiment files with distinct jobs:
 | --- | --- | --- |
 | `mip_vlm_smoke.yaml` | Stop after the small FFN-only MIP check | `execution.single_gpu.yaml` |
 | `full_vlm_smoke.yaml` | Check the complete FFN-only lifecycle on one GPU | `execution.single_gpu.yaml` |
-| `vlm_campaign.yaml` | Compare a multi-axis search with FFN-only controls | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
+| `vlm_campaign.yaml` | Run an illustrative multi-axis campaign | `qwen3p5_0p8b/execution.vlm_campaign.yaml` |
 
 Start with `full_vlm_smoke.yaml`. It uses small workloads to check dataset
 preparation, pruning, MIP, materialization, checkpoint evaluation, serving,
@@ -16,6 +16,10 @@ performance results.
 
 The campaign is a larger illustrative experiment. It is not a recommended
 pruning recipe, training duration, or candidate-selection policy.
+
+Unit tests compile these recipes and verify their stage and resource contracts.
+They do not replace an end-to-end GPU run against the current model, data,
+evaluator, and runtime dependencies.
 
 ## Prerequisites
 
@@ -87,14 +91,12 @@ representative requests before drawing performance conclusions.
 ## Inspect the illustrative campaign
 
 The campaign enables hidden width, heterogeneous FFN width, depth,
-grouped-attention geometry, and GDN geometry. It also creates two homogeneous
-FFN controls. All retained candidates use the same frozen evaluator rows,
-teacher checkpoint, and 128-step example KD budget so the resulting comparison
-does not confound architecture with training exposure.
+grouped-attention geometry, and GDN geometry. All retained candidates use the
+same frozen evaluator rows, teacher checkpoint, and 128-step example KD budget.
 
 The flow is intentionally compact:
 
-1. Generate parameter-constrained candidates and the two FFN controls.
+1. Generate parameter-constrained multi-axis candidates.
 2. Retain four searched candidates by image-text LM loss.
 3. Materialize and evaluate every retained checkpoint before KD.
 4. Run 128 KD steps and evaluate again on the same 344 rows.

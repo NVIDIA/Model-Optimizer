@@ -5,9 +5,8 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Illustrative comparison between a multi-axis search and two FFN-only
-# controls. The search, evaluation, KD, and selection budgets are example
-# choices rather than recommended defaults.
+# Illustrative multi-axis campaign. The search, evaluation, KD, and selection
+# budgets are example choices rather than recommended defaults.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B multi-axis VLM pruning campaign
 
@@ -118,28 +117,6 @@ mip:
         min_hamming_distance: 2
         max_seconds_per_solution: 300
       homogeneous: {enabled: false}
-    ffn-controls:
-      search_space:
-        depth: [0]
-        embedding: [1024]
-        axes_default: teacher
-        axes: {ffn.intermediate_size: all}
-      variants:
-        width-3328:
-          constraints: {params: {min: 95%, max: 100%}}
-          search_space:
-            axes: {ffn.intermediate_size: [3328]}
-        width-3072:
-          constraints: {params: {min: 95%, max: 100%}}
-          search_space:
-            axes: {ffn.intermediate_size: [3072]}
-      solver:
-        backend: auto
-        num_solutions: 1
-        min_hamming_distance: 1
-        max_seconds_per_solution: 300
-      homogeneous: {enabled: false}
-
 post_mip:
   flows:
     candidates:
@@ -168,7 +145,7 @@ post_mip:
           input: pre_kd_eval
           failure_policy: strict
           model_source: materialized
-          config: &campaign_kd
+          config:
             seed: 1111
             validation_seed: 445
             shuffle_training_data: true
@@ -177,7 +154,7 @@ post_mip:
             global_batch_size: 4
             local_batch_size: 1
             checkpoint_every_steps: 128
-          exposure: &campaign_exposure
+          exposure:
             cumulative_steps: 128
             global_batch_size: 4
             cumulative_examples: 512
@@ -201,7 +178,7 @@ post_mip:
         result:
           type: result_manifest
           input: selected
-          config: &campaign_result
+          config:
             pre_kd_source: materialized
             pre_kd_evaluation: pre_kd_eval
             profile: ${vlm_campaign_evaluation.profile}
@@ -214,34 +191,3 @@ post_mip:
           type: aiperf
           input: result
           config: ${vlm_campaign_aiperf}
-
-    ffn-controls:
-      source: {run: ffn-controls, variants: all, objectives: all}
-      nodes:
-        control_materialized:
-          type: materialize
-        control_pre_kd_eval:
-          type: downstream_evaluation
-          input: control_materialized
-          failure_policy: strict
-          config: ${vlm_campaign_evaluation}
-        control_kd:
-          type: global_kd
-          input: control_pre_kd_eval
-          failure_policy: strict
-          model_source: control_materialized
-          config: *campaign_kd
-          exposure: *campaign_exposure
-        control_post_kd_eval:
-          type: downstream_evaluation
-          input: control_kd
-          failure_policy: strict
-          config: ${vlm_campaign_evaluation}
-        control_result:
-          type: result_manifest
-          input: control_post_kd_eval
-          config:
-            <<: *campaign_result
-            pre_kd_source: control_materialized
-            pre_kd_evaluation: control_pre_kd_eval
-            milestones: [{steps: 128, kd: control_kd, evaluation: control_post_kd_eval}]

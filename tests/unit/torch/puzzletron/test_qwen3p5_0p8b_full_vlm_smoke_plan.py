@@ -84,15 +84,12 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
 
 
-def test_vlm_campaign_compares_multi_axis_candidates_with_ffn_controls(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) -> None:
     plan = _compile(monkeypatch, tmp_path, CAMPAIGN_PATH, CAMPAIGN_EXECUTION_PATH)
     stages = {stage.stage_id: stage for stage in plan.stages}
     config = plan.experiment_config
-    flows = config["post_mip"]["flows"]
-    candidates = flows["candidates"]["nodes"]
-    controls = flows["ffn-controls"]["nodes"]
+    assert set(config["post_mip"]["flows"]) == {"candidates"}
+    candidates = config["post_mip"]["flows"]["candidates"]["nodes"]
 
     assert {
         axis for axis, settings in config["search_space"]["axes"].items() if settings["enabled"]
@@ -105,32 +102,17 @@ def test_vlm_campaign_compares_multi_axis_candidates_with_ffn_controls(
         "gdn_key_head_dim",
         "gdn_value_head_dim",
     }
-    assert set(config["mip"]["runs"]) == {"params-90", "ffn-controls"}
-    assert set(config["mip"]["runs"]["ffn-controls"]["variants"]) == {
-        "width-3328",
-        "width-3072",
-    }
+    assert set(config["mip"]["runs"]) == {"params-90"}
     assert candidates["best_image_loss"]["top_k"] == 4
-    assert candidates["kd"]["config"] == controls["control_kd"]["config"]
-    assert candidates["kd"]["exposure"] == controls["control_kd"]["exposure"]
     assert candidates["kd"]["config"]["max_steps"] == 128
     assert candidates["pre_kd_eval"]["config"] == candidates["post_kd_eval"]["config"]
-    assert candidates["pre_kd_eval"]["config"] == controls["control_pre_kd_eval"]["config"]
     assert candidates["result"]["config"]["milestones"] == [
         {"steps": 128, "kd": "kd", "evaluation": "post_kd_eval"}
-    ]
-    assert (
-        controls["control_result"]["config"]["profile"]
-        == (candidates["result"]["config"]["profile"])
-    )
-    assert controls["control_result"]["config"]["milestones"] == [
-        {"steps": 128, "kd": "control_kd", "evaluation": "control_post_kd_eval"}
     ]
     assert candidates["selected"]["input"] == "post_kd_eval"
     assert candidates["selected"]["top_k"] == 1
     assert stages["post.candidates.serving"].parents == ("post.candidates.result",)
     assert stages["post.candidates.kd"].total_gpus == 2
-    assert stages["post.ffn-controls.control_kd"].total_gpus == 2
 
     profile_rows = contracts.load_profile("core-3_344-examples_r1-vllm").exact_rows
     assert profile_rows is not None

@@ -79,19 +79,27 @@ results without enforcing a minimum score. See the
 [setup wizard guide](docs/setup_wizard.md) for profiles, hosted datasets, full
 configuration mode, generated files, and setup resume.
 
-The maintained Qwen 3.5 0.8B recipes use the same three-level structure for
-text and VLM workloads:
+The checked-in Qwen 3.5 0.8B recipes provide small integration checks for both
+modalities and one illustrative multi-axis VLM campaign:
 
-| Scope | Text | VLM |
-| --- | --- | --- |
-| MIP-only integration check | `mip_smoke.yaml` | `mip_vlm_smoke.yaml` |
-| Complete lifecycle smoke | `full_smoke.yaml` | `full_vlm_smoke.yaml` |
-| Illustrative campaign | `campaign.yaml` | `vlm_campaign.yaml` |
+| Scope | Recipe |
+| --- | --- |
+| Text MIP-only integration check | `mip_smoke.yaml` |
+| Text lifecycle smoke | `full_smoke.yaml` |
+| VLM MIP-only integration check | `mip_vlm_smoke.yaml` |
+| VLM lifecycle smoke | `full_vlm_smoke.yaml` |
+| Multi-axis VLM campaign | `vlm_campaign.yaml` |
 
-The smoke recipes use the shared `execution.single_gpu.yaml` profile. The two
-campaigns use their model-specific execution profiles. See the
-[text campaign](docs/qwen3p5_0p8b_campaign.md) and
-[VLM example](docs/qwen3p5_0p8b_vlm_smoke.md) for the runnable commands.
+The smoke recipes use the shared `execution.single_gpu.yaml` profile. The VLM
+campaign uses its model-specific execution profile. See the
+[Qwen VLM example](docs/qwen3p5_0p8b_vlm_smoke.md) for the runnable commands.
+
+Unit tests compile every listed recipe and verify its stage and resource
+contract. This is plan-level validation: it detects configuration and
+orchestration drift, but it does not prove that the current model, data,
+evaluator, and GPU runtime complete successfully together. Treat a recipe as
+runtime-validated only when a recent end-to-end run is available for the same
+dependencies.
 
 ### 3. Prepare datasets and caches
 
@@ -230,9 +238,8 @@ and infrastructure.
 - Use [configuration and overrides](docs/configuration_overrides.md) to find
   the built-in configuration files, choose where campaign outputs are stored,
   or temporarily change experiment settings.
-- Use the
-  [Qwen campaign extension steps](docs/qwen3p5_0p8b_campaign.md#change-the-search-dimensions)
-  to add a measured architecture dimension while keeping omitted dimensions
+- Use the [Qwen VLM example](docs/qwen3p5_0p8b_vlm_smoke.md#change-the-example)
+  to change measured architecture dimensions while keeping omitted dimensions
   at their teacher values.
 - Use [Slurm configuration](docs/slurm_configuration.md) to change partitions,
   CPU-routed stages, log locations, and accepted compatibility fields.
