@@ -276,8 +276,12 @@ class HFLiLiCorrModel(HFDFlashModel):
         )
         # The identity `loss == origin_loss + lilicorr_loss` is the cheap parity check
         # on this objective, so both halves are reported next to the total.
-        metrics["origin_loss"] = float(origin_loss.detach())
-        metrics["origin_accuracy"] = float(origin_accuracy)
+        # Batched into one device-to-host sync rather than two per-step float() calls.
+        origin_scalars = torch.stack([
+            origin_loss.detach().reshape(()).float(),
+            torch.as_tensor(origin_accuracy, dtype=torch.float32, device=origin_loss.device),
+        ]).tolist()
+        metrics["origin_loss"], metrics["origin_accuracy"] = origin_scalars
         self._lilicorr_metrics = metrics
         return origin_loss + lilicorr_loss, accuracy
 
@@ -397,8 +401,12 @@ class HFLiLiCorrModel(HFDFlashModel):
             # -inf, so the max over it is the best competing candidate; `node` stays
             # intact for the CE above and the penalty below.
             z_gt = torch.gather(node, 1, gt_column).squeeze(-1)
-            z_runner_up = node.scatter(1, gt_column, neg_inf).max(dim=-1).values
-            gap_slots.append(z_gt - z_runner_up)
+            if topk == 1:
+                # No competing candidate exists; the gap is defined as zero.
+                gap_slots.append(torch.zeros_like(z_gt))
+            else:
+                z_runner_up = node.scatter(1, gt_column, neg_inf).max(dim=-1).values
+                gap_slots.append(z_gt - z_runner_up)
 
         cross_entropy = torch.stack(ce_slots, dim=-1)
         gap = torch.stack(gap_slots, dim=-1)

@@ -281,7 +281,7 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_fp32_master_weights: bool = ModeloptField(
-        default=False,
+        default=True,
         description=(
             "Keep the draft's parameters in fp32 while training under bf16 autocast, i.e. "
             "classic mixed precision with fp32 master weights. Matmuls still run in bf16, "
@@ -294,12 +294,14 @@ class DFlashConfig(ModeloptBaseConfig):
             "represent near `v` is about 0.4%. Every DECREASE therefore rounds back to the "
             "same number, `v` can only grow, and since the update is divided by `sqrt(v)` "
             "the effective step size only shrinks -- from step 1, at any learning rate.\n\n"
-            "Applies to every projector_type. Off by default because of the memory cost."
+            "Applies to every projector_type. On by default; set to False to reduce "
+            "optimizer memory when training at the limit of a node's capacity."
         ),
     )
 
     dflash_lilicorr_w_ce: float = ModeloptField(
         default=-1.0,
+        allow_inf_nan=False,
         description=(
             "LiLiCorr only: absolute weight of the cross-entropy term on the reranker's "
             "per-slot conditional. The objective is "
@@ -319,6 +321,7 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_lilicorr_w_margin: float = ModeloptField(
         default=-1.0,
+        allow_inf_nan=False,
         description=(
             "LiLiCorr only: absolute weight of the per-slot max-margin (hinge) term, which "
             "pushes the ground-truth candidate's node potential above the best competing "
@@ -330,6 +333,7 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_lilicorr_margin: float = ModeloptField(
         default=-1.0,
+        allow_inf_nan=False,
         description=(
             "LiLiCorr only: hinge width for the max-margin term, in units of the log-potential "
             "(itself bounded by lilicorr_logit_scale). Required when "
@@ -342,6 +346,7 @@ class DFlashConfig(ModeloptBaseConfig):
 
     dflash_lilicorr_w_pen: float = ModeloptField(
         default=-1.0,
+        allow_inf_nan=False,
         description=(
             "LiLiCorr only: absolute weight of the target-weighted distractor penalty, the "
             "reranker's expected target-rejection over its own candidate distribution. Each "
