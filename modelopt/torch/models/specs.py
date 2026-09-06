@@ -58,6 +58,7 @@ __all__ = [
     "list_all_possible",
     "match_class_names",
     "match_moe_block",
+    "match_moe_model",
     "register",
 ]
 
@@ -91,21 +92,13 @@ class MoEVariant:
     For layouts modelopt rewrites (e.g. quantized DBRX), these are the names on the
     rewritten module."""
 
-    has_iterable_experts: bool = False
-    """True when experts are per-expert iterable sub-modules that
-    ``get_experts_list`` can group (Mixtral, Qwen MoE, ...); False for stacked or
-    fused layouts (DBRX, GptOss) and for layouts not yet validated on the grouped
-    export path."""
-
     fused_expert_names: bool = False
     """True when ``expert_linear_names`` name a fused container's own 3-D parameters
     (``gate_up_proj``/``down_proj``) rather than per-expert sub-modules.
 
-    Separate from ``has_iterable_experts``, which says whether ``get_experts_list`` may
-    group the experts: ``qwen3_5_moe`` declares per-expert naming with grouping off,
-    while ``gpt_oss`` declares fused naming. Consumers need the distinction because the
-    same model type materializes both ways across transformers releases, and naming
-    that describes the wrong layout does not apply."""
+    The same model type materializes both ways across transformers releases, so a
+    consumer must know which layout a naming describes: applied to the other one it is
+    wrong, not merely generic."""
 
     gate_up_pair: tuple[str, str] | None = None
     """The (gate, up) pair among ``expert_linear_names`` that serving engines fuse
@@ -185,6 +178,20 @@ class ExportSpec(SpecSection):
     Architecture facts (MoE block classes, expert naming) live in ``MoESpec``; this
     section holds data consumed by the export algorithms only.
     """
+
+    grouped_expert_export: bool = False
+    """Whether ``get_experts_list`` may group this model's experts for the AWQ /
+    NVFP4-SVDQuant resmoothing pass.
+
+    A statement about what modelopt has validated, not about the model: ``qwen3_5_moe``
+    is architecturally identical to ``qwen3_moe`` here and is still ``False``, because
+    the pre-registry code keyed off the root class name and ``"qwen3_5moeforcausallm"``
+    matched none of its qwen substrings. That is why it lives in the export section
+    rather than on ``MoEVariant``, which holds only facts about the architecture.
+
+    Whether the experts are *actually* iterable is separate again, and read off the
+    module: a model listed here still exports fine when a newer transformers fuses its
+    experts, because there is then simply nothing to group."""
 
     pqs_fuse_rules: tuple[tuple[tuple[str, ...], str, str], ...] = ()
     """AWQ ``pre_quant_scale`` fusion rules, each a ``(module_class_substrings,
@@ -375,6 +382,22 @@ def match_moe_block(module: "nn.Module", model_type: str | None = None) -> MoEVa
         variant = _match_in_spec(spec, module)
         if variant is not None:
             return variant
+    return None
+
+
+def match_moe_model(module: "nn.Module", model_type: str | None = None) -> ModelSpec | None:
+    """Return the spec whose MoE section matches ``module``, or None.
+
+    Same scoping as ``match_moe_block``, which returns only the variant; use this when a
+    consumer also needs the model's other sections, such as the export policy that says
+    whether its experts may be grouped.
+    """
+    if model_type:
+        spec = get_spec(model_type)
+        return spec if _match_in_spec(spec, module) is not None else None
+    for spec in get_specs():
+        if _match_in_spec(spec, module) is not None:
+            return spec
     return None
 
 

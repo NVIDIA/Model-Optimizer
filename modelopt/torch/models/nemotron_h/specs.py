@@ -15,19 +15,19 @@
 
 """Nemotron-H specs (HF model type ``nemotron_h``)."""
 
-from ..specs import ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(
         model_type="nemotron_h",
         min_transformers_version="5.3",
+        export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(
                     # NemotronHMOE experts (NemotronHMLP) use up_proj and down_proj only (no gate).
                     block_names=("NemotronHMOE",),
                     expert_linear_names=("up_proj", "down_proj"),
-                    has_iterable_experts=True,
                 ),
             ),
         ),

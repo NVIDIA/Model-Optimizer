@@ -27,11 +27,11 @@ register(
                     block_names=("Qwen3MoeSparseMoeBlock",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),
-                    has_iterable_experts=True,
                 ),
             ),
         ),
         export_spec=ExportSpec(
+            grouped_expert_export=True,
             # AWQ pre_quant_scale fusion: fold o_proj into v_proj, down_proj into up_proj.
             pqs_fuse_rules=(
                 (("Qwen3MoeAttention",), "v_proj", "o_proj"),

@@ -28,7 +28,13 @@ try:
 except Exception:
     warn("Cannot find transformers package. Hugginface modules cannot be exported.")
 
-from modelopt.torch.models import get_spec, hf_model_type, list_all_possible, match_moe_block
+from modelopt.torch.models import (
+    get_spec,
+    hf_model_type,
+    list_all_possible,
+    match_moe_block,
+    match_moe_model,
+)
 from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import import_plugin
 
@@ -95,21 +101,22 @@ def get_experts_list(
     """
     experts_list = []
 
-    # Only layouts with iterable per-expert sub-modules are supported here;
-    # stacked/fused layouts (DBRX, GptOss, ...) are handled by other paths.
-    variant = match_moe_block(module, model_type)
-    if variant is None or not variant.has_iterable_experts:
+    # Per-model data first: the owning spec has to allow grouped export for this model.
+    # That is modelopt's own validation state (ExportSpec.grouped_expert_export), kept
+    # apart from the architecture the variant describes -- qwen3_5_moe is built exactly
+    # like qwen3_moe and is still excluded.
+    spec = match_moe_model(module, model_type)
+    export_spec = spec.export_spec if spec is not None else None
+    if export_spec is None or not export_spec.grouped_expert_export:
         raise NotImplementedError(
             f"MoE block {type(module).__name__!r} (model type: {model_type!r}) not supported"
         )
 
-    # The spec says this model's experts are iterable, but the installed transformers
-    # may have fused them: transformers 5 replaced several expert ModuleLists with a
-    # single module holding 3-D parameters (Mixtral, DeepSeek-V3). A fused container has
-    # no per-expert linears to group and the fused export path handles it, so grouping
-    # is empty rather than an error. Checked after the spec, not before, so a layout the
-    # spec calls unsupported (DBRX, whose per-expert linears live under experts.mlp)
-    # keeps failing loudly instead of silently skipping resmoothing.
+    # Allowed, but this transformers release may have fused the experts: 5 replaced
+    # several expert ModuleLists with a single module holding 3-D parameters (Mixtral,
+    # DeepSeek-V3). A fused container has no per-expert linears to group and the fused
+    # export path handles it, so grouping is empty rather than an error. Read off the
+    # module, since neither the spec nor the policy can know how it materialized.
     if not hasattr(getattr(module, "experts", None), "__iter__"):
         return experts_list
     linear_names = get_expert_linear_names(module, model_type)

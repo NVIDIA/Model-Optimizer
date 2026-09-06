@@ -66,7 +66,7 @@ def test_match_moe_block_by_class_name():
     variant = match_moe_block(Qwen3MoeSparseMoeBlock())
     assert variant is not None
     assert variant.expert_linear_names == ("gate_proj", "down_proj", "up_proj")
-    assert variant.has_iterable_experts
+    assert not variant.fused_expert_names
 
 
 def test_match_moe_block_matches_quantized_class_via_mro():
@@ -161,21 +161,6 @@ def test_spec_declines_when_its_naming_describes_another_layout():
         "gate_up_proj",
         "down_proj",
     ]
-
-
-def test_fused_expert_names_flag_is_exhaustive():
-    """Fails when a variant starts or stops describing fused naming without review."""
-    declared = {
-        (spec.model_type, variant.block_names)
-        for spec in get_specs()
-        if spec.moe_spec is not None
-        for variant in spec.moe_spec.moe_variants
-        if variant.fused_expert_names
-    }
-    assert declared == {
-        ("gpt_oss", ("GptOssMLP", "GptOssMoE")),
-        ("deepseek_v4", ("DeepseekV4SparseMoeBlock",)),
-    }
 
 
 def test_get_experts_list_skips_fused_expert_containers():
@@ -587,7 +572,7 @@ def test_fused_experts_shortcut_ignores_unrelated_attributes():
 # fails here instead of at export time.
 # ---------------------------------------------------------------------------
 
-# (model_type, block_names, expert_linear_names, has_iterable_experts, gate_up_pair)
+# (model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair)
 EXPECTED_MOE_VARIANTS = [
     ("arctic", ("ArcticMoE",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("dbrx", ("DbrxFFN",), ("w1_linear", "w2_linear", "v1_linear"), False, None),
@@ -602,46 +587,36 @@ EXPECTED_MOE_VARIANTS = [
         "deepseek_v3",
         ("DeepseekV3MoE",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
-    (
-        "deepseek_v4",
-        ("DeepseekV4SparseMoeBlock",),
-        ("gate_up_proj", "down_proj"),
-        False,
-        None,
-    ),
+    ("deepseek_v4", ("DeepseekV4SparseMoeBlock",), ("gate_up_proj", "down_proj"), True, None),
     (
         "gemma4",
         ("Gemma4TextDecoderLayer",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
     (
         "gemma4_text",
         ("Gemma4TextDecoderLayer",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
-    # transformers names the block GptOssMLP; GptOssMoE is the legacy name.
-    ("gpt_oss", ("GptOssMLP", "GptOssMoE"), ("gate_up_proj", "down_proj"), False, None),
-    ("mixtral", ("MixtralSparseMoeBlock",), ("w1", "w2", "w3"), True, ("w1", "w3")),
+    ("gpt_oss", ("GptOssMLP", "GptOssMoE"), ("gate_up_proj", "down_proj"), True, None),
+    ("mixtral", ("MixtralSparseMoeBlock",), ("w1", "w2", "w3"), False, ("w1", "w3")),
     ("mixtral", ("MixtralMoeSparseMoeBlock",), ("linear_fc1", "linear_fc2"), False, None),
-    ("nemotron_h", ("NemotronHMOE",), ("up_proj", "down_proj"), True, None),
+    ("nemotron_h", ("NemotronHMOE",), ("up_proj", "down_proj"), False, None),
     (
         "qwen2_moe",
         ("Qwen2MoeSparseMoeBlock",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
     (
-        # has_iterable_experts is False to match pre-refactor behavior: the legacy
-        # get_experts_list keyed off the root class name and "qwen3_5moeforcausallm"
-        # matched none of its qwen substrings. See modelopt/torch/models/qwen3_5_moe.py.
         "qwen3_5_moe",
         ("Qwen3_5MoeSparseMoeBlock",),
         ("gate_proj", "down_proj", "up_proj"),
@@ -652,26 +627,26 @@ EXPECTED_MOE_VARIANTS = [
         "qwen3_moe",
         ("Qwen3MoeSparseMoeBlock",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
     (
         "qwen3_next",
         ("Qwen3NextSparseMoeBlock",),
         ("gate_proj", "down_proj", "up_proj"),
-        True,
+        False,
         ("gate_proj", "up_proj"),
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("model_type", "block_names", "expert_linear_names", "has_iterable_experts", "gate_up_pair"),
+    ("model_type", "block_names", "expert_linear_names", "fused_expert_names", "gate_up_pair"),
     EXPECTED_MOE_VARIANTS,
     ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS],
 )
 def test_moe_variant_values(
-    model_type, block_names, expert_linear_names, has_iterable_experts, gate_up_pair
+    model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair
 ):
     spec = get_spec(model_type)
     assert spec is not None, f"no spec registered for {model_type!r}"
@@ -679,8 +654,42 @@ def test_moe_variant_values(
     assert len(matching) == 1, f"expected exactly one {block_names} variant on {model_type!r}"
     variant = matching[0]
     assert variant.expert_linear_names == expert_linear_names
-    assert variant.has_iterable_experts is has_iterable_experts
+    assert variant.fused_expert_names is fused_expert_names
     assert variant.gate_up_pair == gate_up_pair
+
+
+def test_grouped_expert_export_is_exhaustive():
+    """Pins which models modelopt has validated for the grouped expert-export path.
+
+    Policy, not architecture, so it lives on ``ExportSpec`` and is listed here rather
+    than derived: enabling a new model must be a deliberate edit in both places.
+
+    Note the granularity. The flag is per model, while the support set it replaced was
+    per variant, and mixtral is the only model with more than one variant. Its second,
+    ``MixtralMoeSparseMoeBlock`` with MCore ``linear_fc1``/``linear_fc2`` naming, was
+    excluded before and is now allowed. That variant matches no class in any
+    transformers release from 4.57 to 5.14, so nothing reaches it.
+    """
+    allowed = {
+        spec.model_type
+        for spec in get_specs()
+        if spec.export_spec is not None and spec.export_spec.grouped_expert_export
+    }
+    assert allowed == {
+        "deepseek_v3",
+        "gemma4",
+        "gemma4_text",
+        "mixtral",
+        "nemotron_h",
+        "qwen2_moe",
+        "qwen3_moe",
+        "qwen3_next",
+    }
+
+
+def test_moe_variant_carries_no_export_policy():
+    """``MoEVariant`` holds architecture only; grouped-export policy is not its business."""
+    assert not hasattr(MoEVariant(), "has_iterable_experts")
 
 
 def test_moe_variant_table_is_exhaustive():
@@ -692,12 +701,12 @@ def test_moe_variant_table_is_exhaustive():
 
 
 @pytest.mark.parametrize(
-    ("model_type", "block_names", "expert_linear_names", "has_iterable_experts", "gate_up_pair"),
+    ("model_type", "block_names", "expert_linear_names", "fused_expert_names", "gate_up_pair"),
     EXPECTED_MOE_VARIANTS,
     ids=[f"{mt}:{bn[0]}" for mt, bn, _, _, _ in EXPECTED_MOE_VARIANTS],
 )
 def test_expert_linear_names_resolve_for_every_registered_block(
-    model_type, block_names, expert_linear_names, has_iterable_experts, gate_up_pair
+    model_type, block_names, expert_linear_names, fused_expert_names, gate_up_pair
 ):
     # End-to-end through the public accessor, with a stand-in module of the real
     # block class name -- covers the block classes no hand-written test names.
@@ -733,7 +742,7 @@ def test_gate_up_pair_is_a_subset_of_expert_linear_names():
 
 
 def test_iterable_experts_matches_pre_refactor_support():
-    """``has_iterable_experts`` must reproduce the legacy get_experts_list support set.
+    """``grouped_expert_export`` must reproduce the legacy get_experts_list support set.
 
     Legacy keyed off ``type(root_model).__name__.lower()`` and supported exactly the
     substrings below; everything else raised NotImplementedError. This pins the
@@ -781,7 +790,8 @@ def test_iterable_experts_matches_pre_refactor_support():
             continue
         root = root_class_names[spec.model_type].lower()
         legacy_supported = any(sub in root for sub in legacy_substrings)
-        spec_supported = any(v.has_iterable_experts for v in _variants(spec))
+        export_spec = spec.export_spec
+        spec_supported = export_spec is not None and export_spec.grouped_expert_export
         assert spec_supported is legacy_supported, (
             f"{spec.model_type}: grouped-export support changed "
             f"(legacy={legacy_supported}, spec={spec_supported})"

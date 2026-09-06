@@ -14,18 +14,20 @@ from . import specs
 and `<model_type>/specs.py`:
 
 ```python
-from ..specs import ModelSpec, MoESpec, MoEVariant, register
+from ..specs import ExportSpec, ModelSpec, MoESpec, MoEVariant, register
 
 register(
     ModelSpec(
         model_type="qwen3_moe",
+        min_transformers_version="4.57",
+        # modelopt policy, not a model fact: this model is validated for grouped export.
+        export_spec=ExportSpec(grouped_expert_export=True),
         moe_spec=MoESpec(
             moe_variants=(
                 MoEVariant(
                     block_names=("Qwen3MoeSparseMoeBlock",),
                     expert_linear_names=("gate_proj", "down_proj", "up_proj"),
                     gate_up_pair=("gate_proj", "up_proj"),
-                    has_iterable_experts=True,
                 ),
             )
         ),
@@ -50,8 +52,8 @@ A `ModelSpec` holds one attribute per section, each `None` unless the model fill
 
 | Section | Holds | Leave `None` when |
 |---|---|---|
-| `moe_spec` (`MoESpec`) | MoE architecture facts — block classes, expert projection naming | the model is dense |
-| `export_spec` (`ExportSpec`) | Per-model data of the unified HF export path | export needs nothing model-specific |
+| `moe_spec` (`MoESpec`) | MoE architecture facts only — block classes, expert projection naming, which layout that naming describes | the model is dense |
+| `export_spec` (`ExportSpec`) | Per-model data *and policy* of the unified HF export path, e.g. whether grouped expert export is validated for this model | export needs nothing model-specific |
 
 `None` means "the model has nothing to say about this", which stays distinct from a
 filled-in-but-empty section.
