@@ -25,10 +25,10 @@ Choose a profile by the checkpoint and the amount of coverage needed:
 
 The four older names `short-v1`, `short-native-v1`, `short-all-native-v1`, and
 `full-v1` are temporary compatibility profiles. They preserve the exact rows,
-backend settings, and evaluator revisions of commands that existed before
-component profiles. Keep them only for reproducing those earlier runs; use the
-descriptive profiles above for new work. Removing the compatibility names will
-be an explicit breaking cleanup after downstream users have migrated.
+backend settings, and maintained evaluator revision of commands that existed
+before component profiles. They emit a deprecation warning and will be removed
+after downstream callers migrate. Keep them only for reproducing earlier runs;
+use the descriptive profiles above for new work.
 
 For text-only IFEval and GSM8K evaluation, use the separate
 [text checkpoint evaluator](checkpoint_evaluation.md).

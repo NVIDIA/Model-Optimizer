@@ -37,15 +37,15 @@ def test_manifest_task_denominators_rejects_non_mapping_selection():
 def test_versioned_profile_contracts_pin_backends_and_fingerprints():
     profiles = {name: contracts.load_profile(name) for name in contracts.PROFILE_NAMES}
     assert {name: contract.fingerprint for name, contract in profiles.items()} == {
-        "short-v1": "8286a094c3cfb5c2608a6e1469d6525bb1c4be11a7ab8789ed97dd249d7bea71",
-        "short-native-v1": "b15054c251af54a5298233b1c01a3babf76c4281d055469fd26b76129c34f258",
+        "short-v1": "f111b49238fd5a1843a22afb6ea7da02c2562e198e6401217b7d41d69b3df49f",
+        "short-native-v1": "578358d3644fe5d71ee26f8c5a2e8a03f2fad662e40ae8e4eefe19e316185aee",
         "core-3_344-examples_r1-native": "2017656d093de7d95d25c7e34241b1d708150157f0c4e6a0bf6bd48649c2191a",
         "core-3_344-examples_r1-vllm": "859908fdb32b6bcaddb5400cd4430f4c9026264db38c7a8b56a98f42109c1f78",
         "core-3_24-examples_r1-native": "0e51e27d57e27f0c5e4943d077308766387fa739b2d1c413b7b951327358cefc",
         "core-3_24-examples_r1-vllm": "9c68168f05003e695258dc119351610b4e98bafb3e4f3e773c4e64ce5d17835a",
-        "short-all-native-v1": "9d7334371316a2a7774ee7e520ce0fc57e3c42ecfd7749ccd217e02ab59b6ee3",
+        "short-all-native-v1": "91a0ec543e9ddf055502ff42fbe98e15125d1174d9133f8e60317fdb1b7b77e0",
         "judge-free-8_690-examples_r1-native": "78457702288ba2d9d7b903366f7030302936377690b0ec37a0704e3eda8fd851",
-        "full-v1": "680483a7e2eceeab82a5e0b2767cc751f1951f58ffedc0aa190481d6ec978307",
+        "full-v1": "544a5c5cd5d91248ccf2d2fbe92df5f99f7c4e93a8741a2de8e6bba91aaea5a4",
         "core-3_full_r1-native": "976efbd056fecb686e64b912ed50251b1c16e5efe1d3ae3d179f208cc587c0a7",
         "core-3_full_r1-vllm": "40fd44fbb4812bd927d3f82e33d6eddec5b4641736c65c48250b8ea77acaec81",
     }
@@ -71,6 +71,15 @@ def test_versioned_profile_contracts_pin_backends_and_fingerprints():
         == 690
     )
     assert profiles["full-v1"].exact_rows is None
+
+
+def test_compatibility_profiles_warn_until_downstream_callers_migrate():
+    for name in ("short-v1", "short-native-v1", "short-all-native-v1", "full-v1"):
+        with pytest.warns(FutureWarning, match=rf"{name} is a deprecated compatibility profile"):
+            contracts.warn_deprecated_profile(name)
+        assert contracts.load_profile(name).manifest["lmms_eval_revision"] == (
+            checkpoint.LMMS_EVAL_REVISION
+        )
 
 
 @pytest.mark.parametrize(
