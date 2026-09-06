@@ -35,7 +35,7 @@ from puzzletron_orchestrator.controller import dry_run_plan
 from puzzletron_setup import SetupError
 from puzzletron_setup.inspection import InspectedModel
 from puzzletron_setup.profiles import AxisInventory, ModelInventory
-from puzzletron_setup.v2.defaults import DefaultsResolver
+from puzzletron_setup.v2.defaults import DefaultsResolver, validate_defaults
 from puzzletron_setup.v2.presets import get_setup_preset
 from puzzletron_setup.v2.prompts import NonInteractiveBackend, PromptChoice, ScriptedBackend
 from puzzletron_setup.v2.session import WizardSession
@@ -49,6 +49,24 @@ from puzzletron_setup.v2.wizard import (
 
 _QWEN_FAMILY_CONFIG = "examples/puzzletron/configs/families/qwen3_5/family.yaml"
 _NEMOTRON_FAMILY_CONFIG = "examples/puzzletron/configs/families/nemotron3/family.yaml"
+
+
+def test_only_cpu_slurm_integer_defaults_accept_null() -> None:
+    defaults = validate_defaults(
+        {
+            "schema_version": 1,
+            "infrastructure": {
+                "runner": {"slurm": {"cpu_cpus_per_task": None, "cpu_memory_mb": None}}
+            },
+        }
+    )
+
+    assert defaults["infrastructure"]["runner"]["slurm"] == {
+        "cpu_cpus_per_task": None,
+        "cpu_memory_mb": None,
+    }
+    with pytest.raises(SetupError, match="data.sequence_length must be an integer"):
+        validate_defaults({"schema_version": 1, "data": {"sequence_length": None}})
 
 
 # Public facade and guided-profile defaults

@@ -67,5 +67,7 @@ def test_full_smoke_compiles_one_complete_bounded_lifecycle(monkeypatch, tmp_pat
     assert nodes["serving"]["config"]["request_count"] == 4
     assert nodes["short_kd"]["config"]["max_steps"] == 2
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
-    assert all(stage.total_gpus == 0 for stage in stages.values() if stage.resource == "cpu")
+    cpu_stages = [stage for stage in stages.values() if stage.resource == "cpu"]
+    assert cpu_stages
+    assert all(stage.total_gpus == 0 for stage in cpu_stages)
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")

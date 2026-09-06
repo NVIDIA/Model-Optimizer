@@ -148,6 +148,10 @@ _INTEGER_MINIMUMS = {
     "vllm.topology.decode_context_parallel_size": 1,
     "mip.num_solutions": 1,
 }
+_OPTIONAL_INTEGER_PATHS = {
+    "infrastructure.runner.slurm.cpu_cpus_per_task",
+    "infrastructure.runner.slurm.cpu_memory_mb",
+}
 _BOOLEAN_PATHS = {
     "campaign.generate_smoke",
     "campaign.generate_production",
@@ -253,6 +257,8 @@ def _validate_leaf(value: Any, path: str) -> None:
     if len(parts) == 3 and parts[0] == "stages" and parts[2] in _STAGE_INTEGER_FIELDS:
         minimum = 1
     if minimum is not None:
+        if value is None and path in _OPTIONAL_INTEGER_PATHS:
+            return
         if isinstance(value, bool) or not isinstance(value, int):
             raise SetupError(f"Defaults field {path} must be an integer.")
         if value < minimum:

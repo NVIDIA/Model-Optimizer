@@ -37,6 +37,11 @@ vlm_campaign_evaluation:
   reference_cache_id: ${vlm_quality_evaluation.reference_cache_id}
   batch_size: ${vlm_quality_evaluation.batch_size}
   timeout_seconds: ${vlm_quality_evaluation.timeout_seconds}
+  dtype: ${vlm_quality_evaluation.dtype}
+  gpu_memory_utilization: ${vlm_quality_evaluation.gpu_memory_utilization}
+  max_model_len: ${vlm_quality_evaluation.max_model_len}
+  limit_mm_per_prompt: ${vlm_quality_evaluation.limit_mm_per_prompt}
+  topology: ${vlm_quality_evaluation.topology}
 
 vlm_smoke_evaluation:
   profile: qwen35_vlm_core3_24row_smoke_v2

@@ -91,13 +91,14 @@ def test_qwen_slurm_runner_preserves_portable_environment_contract() -> None:
 
 
 @pytest.mark.parametrize("relative_path", SLURM_RUNNER_CONFIGS)
-def test_checked_in_slurm_runners_only_emit_generic_partition(
+def test_checked_in_slurm_runners_only_emit_generic_partitions(
     relative_path: str,
 ) -> None:
     payload = yaml.safe_load((REPOSITORY_ROOT / relative_path).read_text())
+    partition_keys = {key for key in payload["runner"]["slurm"] if key.startswith("partition")}
 
     assert "partition" in payload["runner"]["slurm"]
-    assert not any(key.startswith("partition_") for key in payload["runner"]["slurm"])
+    assert partition_keys <= {"partition", "partition_cpu"}
 
 
 @pytest.mark.parametrize("relative_path", NAMED_SLURM_RUNNER_CONFIGS)

@@ -80,7 +80,9 @@ def test_full_vlm_smoke_compiles_one_complete_bounded_lifecycle(
     assert nodes["post_kd_checkpoint_eval"]["config"] == nodes["checkpoint_eval"]["config"]
     assert nodes["vlm_serving"]["config"]["request_count"] == 1
     assert nodes["short_vlm_kd"]["config"]["max_steps"] == 2
-    assert all(stage.total_gpus == 0 for stage in stages.values() if stage.resource == "cpu")
+    cpu_stages = [stage for stage in stages.values() if stage.resource == "cpu"]
+    assert cpu_stages
+    assert all(stage.total_gpus == 0 for stage in cpu_stages)
     assert all(stage.total_gpus == 1 for stage in stages.values() if stage.resource != "cpu")
 
 
@@ -105,6 +107,7 @@ def test_vlm_campaign_compiles_the_multi_axis_flow(monkeypatch, tmp_path: Path) 
     assert set(config["mip"]["runs"]) == {"params-90"}
     assert candidates["best_image_loss"]["top_k"] == 4
     assert candidates["kd"]["config"]["max_steps"] == 128
+    assert candidates["pre_kd_eval"]["config"] == config["vlm_quality_evaluation"]
     assert candidates["pre_kd_eval"]["config"] == candidates["post_kd_eval"]["config"]
     assert candidates["result"]["config"]["milestones"] == [
         {"steps": 128, "kd": "kd", "evaluation": "post_kd_eval"}

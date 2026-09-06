@@ -12,16 +12,15 @@ profile is `qwen35_vlm_realworldqa64_mmmu120_mvbench160_frozen_rows_v1`.
 
 The measured run used an early campaign prototype with bespoke shortlist and
 diversity heuristics. Those measurements remain valid observations of the
-recorded checkpoints, but that selection policy is superseded. The integrated
-campaign now uses the established Puzzletron selection flow: the existing
-`params-90` run, LM-loss selection with `top_k: 2`, and observational serving
-metrics that do not affect candidate selection. A new execution may therefore
-retain different students.
+recorded checkpoints, but that selection policy is superseded and is not
+reproduced by the maintained
+[campaign config](../../../../configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml).
+A new execution may therefore retain different students.
 
-The current admitted-axis recipe searches hidden width, heterogeneous FFN width,
-and depth, with exact FFN-3328 and FFN-3072 controls. It does not claim a full
-Qwen 3.5 axis search. Native NeMo attention and GDN pruning remain disabled
-until compact and physically sliced reload equivalence is admitted.
+This historical run varied hidden width, heterogeneous FFN width, and depth and
+included exact FFN-3328 and FFN-3072 controls. Attention and GDN remained at
+teacher geometry. Consult the maintained campaign config for the current search
+space and candidate-selection behavior.
 
 ## Runs
 
