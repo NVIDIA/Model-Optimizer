@@ -41,7 +41,6 @@ CAMPAIGN_PATH = (
     REPOSITORY_ROOT
     / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml"
 )
-CAMPAIGN_EXTENDED_PATH = CAMPAIGN_PATH.with_name("vlm_campaign_extended.yaml")
 MODEL_PATH = (
     REPOSITORY_ROOT / "examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/model.yaml"
 )
@@ -100,7 +99,7 @@ def _compile_campaign(monkeypatch, tmp_path: Path, *, run_path: Path):
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf-home"))
     execution_path = (
         CAMPAIGN_EXECUTION_PATH
-        if run_path in {CAMPAIGN_PATH, CAMPAIGN_EXTENDED_PATH}
+        if run_path == CAMPAIGN_PATH
         else COMPARISON_EXECUTION_PATH
         if run_path == COMPARISON_RUN_PATH
         else EXECUTION_PATH
@@ -411,7 +410,7 @@ def test_qwen3p5_0p8b_extended_vlm_smoke_realizes_one_in_band_mixed_candidate(
     _assert_single_gpu_or_cpu_plan(comparison)
 
 
-def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
+def test_qwen3p5_0p8b_vlm_campaign_uses_configured_example_selection(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -591,30 +590,6 @@ def test_qwen3p5_0p8b_vlm_campaign_uses_default_candidate_selection(
         for node in flow["nodes"].values()
     )
     assert all(stage.total_gpus in {0, 1, 2} for stage in campaign.stages)
-
-
-def test_qwen3p5_0p8b_vlm_campaign_extensions_are_separate_and_review_gated(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    extended = _compile_campaign(monkeypatch, tmp_path, run_path=CAMPAIGN_EXTENDED_PATH)
-    nodes = extended.experiment_config["post_mip"]["flows"]["candidate-evaluation"]["nodes"]
-
-    assert {node_id for node_id, node in nodes.items() if node["type"] == "manual_filter"} == {
-        "approve_512",
-        "approve_1024",
-    }
-    assert nodes["approve_512"]["input"] == "bounded_serving"
-    assert nodes["approve_1024"]["input"] == "extended_result"
-    assert "best" not in nodes
-    assert nodes["extension_serving"]["input"] == "final_result"
-    assert [row["steps"] for row in nodes["final_result"]["config"]["milestones"]] == [
-        64,
-        128,
-        256,
-        512,
-        1024,
-    ]
 
 
 def test_qwen3p5_0p8b_vlm_campaign_execution_names_every_learning_curve_stage(

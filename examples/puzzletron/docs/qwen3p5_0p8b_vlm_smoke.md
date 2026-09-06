@@ -1,6 +1,6 @@
 # Qwen 3.5 0.8B VLM pruning smoke
 
-This guide provides two supported end-to-end checks for Qwen 3.5 0.8B:
+This guide provides two runnable end-to-end examples for Qwen 3.5 0.8B:
 
 - The [all-axis reproducibility smoke](#run-the-reproducibility-smoke) prepares
   pinned data, exercises every reducible axis, materializes and reloads three
@@ -8,8 +8,8 @@ This guide provides two supported end-to-end checks for Qwen 3.5 0.8B:
   serving cell, verifies stable result fields, and resumes with the same command.
 - The [quick quality comparison](#run-a-quick-quality-comparison) prepares
   its pinned data, screens the all-axis search globally, materializes two
-  finalists, gives both the same 64-step KD exposure, and evaluates and serves
-  both before final selection.
+  candidates, gives both the same 64-step KD exposure, and evaluates and serves
+  both before its configured rule retains one.
 
 Both routes use deterministic evaluation rows and produce a cumulative report.
 Their small evaluation sets and serving workloads test the pipeline; use larger
@@ -119,11 +119,11 @@ timing without requiring those values to match exactly.
 
 ## Run a quick quality comparison
 
-The `e2e_vlm_quality_comparison.yaml` route is the compact end-to-end test. The
+The `e2e_vlm_quality_comparison.yaml` route is a compact end-to-end example. The
 grid has eight feasible width/depth scenarios; with
 `num_solutions: 8` per scenario it can emit up to 64 solutions. The route scores
 every solution on the same 16 image-text samples, globally retains two, and
-gives both finalists the same 64-step KD exposure with global batch size four.
+gives both candidates the same 64-step KD exposure with global batch size four.
 It then compares the students with the pinned teacher on deterministic
 RealWorldQA, MMMU, and MVBench rows. Evaluations are resumable and are reused
 only when checkpoint identity and evaluator artifacts still match. Results
@@ -152,7 +152,7 @@ python examples/puzzletron/orchestrate.py \
 ```
 
 Inspect the compiled stage order and one-GPU-per-worker allocation before
-launch. The two finalist workers may run concurrently. Then launch or resume
+launch. The two candidate workers may run concurrently. Then launch or resume
 the exact same three-input campaign with:
 
 ```bash
@@ -186,22 +186,26 @@ throughput measurements.
 
 ## Understand the broader campaign example
 
-`vlm_campaign.yaml` searches hidden width,
+`vlm_campaign.yaml` is an illustrative campaign definition. It is not a
+recommended KD recipe, convergence schedule, or default candidate-selection
+policy. It searches hidden width,
 heterogeneous FFN width, depth, grouped-attention geometry, and GDN key groups
 and head dimensions. It uses the `params-90` MIP profile and an image-text
 LM-loss screen. It requests up to eight
 heterogeneous MIP solutions for each feasible width/depth scenario and retains
-four comparable finalists for matched KD. Candidate generation,
+four candidates for matched KD. Candidate generation,
 physical materialization, reload validation, and serving all fail closed when a
 requested geometry is unsupported. The `3328` and `3072` FFN widths are
 separate controls.
 
 Every LM-loss-retained candidate follows one resumable trajectory from the same
-immutable pre-KD materialized checkpoint. AutoModel optimizer state is
-preserved while the cumulative step limit advances through 64, 128, and 256
-updates. Candidate selection happens automatically after all three checkpoints
-have been evaluated, using equal-rank aggregation of the configured 256-step
-RealWorldQA and MMMU scores. The
+immutable pre-KD materialized checkpoint. The 64, 128, and 256 values are
+example observation points on that single trajectory, not three independent KD
+runs. They demonstrate resume and evaluation at increasing exposure; they do
+not establish an appropriate training duration for another campaign. The
+configured rule retains one candidate after all three checkpoints have been
+evaluated, using equal-rank aggregation of the 256-step RealWorldQA and MMMU
+scores. The
 placement-bound all-axis sentinel follows an independent trajectory, so it
 cannot be removed by the LM-loss top-k screen.
 
@@ -215,11 +219,8 @@ effective tokens, a padded-token upper bound, and GPU time. The learning-curve
 manifest records the pre-KD checkpoint, each KD checkpoint, metrics, training
 exposure, teacher identity, and selected evaluation rows.
 
-The separate `vlm_campaign_extended.yaml` recipe adds 512- and 1024-step
-milestones for the selected finalist. Each milestone requires manual approval
-and resumes the same optimizer trajectory. Use the
-`qwen35-vlm-judge-free8-all-rows-v1` profile separately for an eight-task,
-all-rows evaluation.
+Use the `qwen35-vlm-judge-free8-all-rows-v1` profile separately for an
+eight-task, all-rows evaluation.
 
 Grouped-attention and GDN reductions use a limited native runtime.
 Compact execution supports only unsharded SDPA `Qwen3NextAttention` and the
@@ -235,13 +236,12 @@ already one.
 Dry-run `vlm_campaign.yaml` with the site-specific runner and a distinct output
 root before launch.
 
-The route evaluates four ranked candidates,
-selects one automatically at 256 steps, and runs matched 64/128/256-step
-trajectories for the selected candidate, the placement-bound all-axis sentinel,
-and the two FFN controls. Candidate and sentinel checkpoints each receive a
+The route evaluates four ranked candidates and applies its aggregate-rank rule
+at 256 steps. It runs matched 64/128/256-step example trajectories for those
+candidates, the placement-bound all-axis sentinel, and the two FFN controls.
+Candidate and sentinel checkpoints each receive a
 three-repetition AIPerf cell; every repetition uses 32 warmup requests followed
-by 64 measured requests. The 512/1024 milestones are available only through the
-separate extended recipe.
+by 64 measured requests.
 
 ```bash
 EXPERIMENT=examples/puzzletron/configs/families/qwen3_5/qwen3p5_0p8b/runs/vlm_campaign.yaml
@@ -259,9 +259,9 @@ python examples/puzzletron/orchestrate.py \
 Inspect the compiled stage order, input identities, supported runtime modes, and
 one-GPU-per-worker allocation; up to four candidate workers may run
 concurrently. Then omit `--dry-run`; rerunning that command resumes the
-campaign. Use `vlm_campaign_extended.yaml` when you want the additional
-512/1024 milestones. This campaign does not include an expected-result
-baseline.
+campaign. This campaign does not include an expected-result baseline. Change
+or remove the KD milestones and selection rule when adapting the example to a
+different experimental question.
 
 ## Evaluate a saved checkpoint separately
 

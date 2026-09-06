@@ -6,12 +6,13 @@ defaults:
   - /families/qwen3_5/qwen3p5_0p8b/vlm_quality_evaluation@_global_
   - _self_
 
-# Bounded mild all-reducible-axis Qwen 3.5 0.8B VLM
-# campaign. It requests up to eight diverse params-90 MIP solutions per feasible
-# width/depth scenario, retains four globally by LM-loss screening, runs matched
-# resumable KD curves, frozen-row evaluation, and a serving benchmark for the
-# selected bounded checkpoints. Every
-# reducible axis is represented with conservative targets for this small model.
+# Illustrative all-reducible-axis Qwen 3.5 0.8B VLM campaign. It requests up to
+# eight diverse params-90 MIP solutions per feasible width/depth scenario,
+# retains four globally by LM-loss screening, and demonstrates resumed KD with
+# evaluation at 64, 128, and 256 steps. These budgets and the aggregate-rank
+# selection rule are example choices, not recommended defaults or convergence
+# criteria. Every reducible axis is represented with conservative targets for
+# this small model.
 puzzle_dir: ${oc.env:PUZZLETRON_RUN_ROOT,puzzle_runs/qwen3p5_0p8b_vlm_campaign}
 display_name: Qwen3p5 0.8B mild all-reducible-axis VLM pruning campaign
 
