@@ -163,7 +163,7 @@ def test_native_automodel_gdn_executes_compact_geometry_and_rejects_context_para
     kernel_shapes = []
 
     def compact_conv(*, x, weight, bias, **kwargs):
-        conv_shapes.append((x.shape, weight.shape, bias.shape))
+        conv_shapes.append((x.shape, weight.shape, None if bias is None else bias.shape))
         return x
 
     def compact_kernel(query, key, value, *, g, beta, **kwargs):
@@ -197,7 +197,7 @@ def test_native_automodel_gdn_executes_compact_geometry_and_rejects_context_para
         (
             torch.Size((1, target_projection_width, 4)),
             torch.Size((target_projection_width, config.linear_conv_kernel_dim)),
-            torch.Size((target_projection_width,)),
+            None,
         )
     ]
     assert kernel_shapes == [
