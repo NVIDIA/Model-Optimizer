@@ -33,7 +33,7 @@ from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import (
 )
 
 
-def test_short_all_native_profile_builds_grouped_and_single_selectors(tmp_path):
+def test_judge_free_profile_builds_grouped_and_single_selectors(tmp_path):
     contract = contracts.load_profile("judge-free-8_690-examples_r1-native")
     exact_rows = contract.exact_rows
     assert exact_rows is not None

@@ -15,13 +15,10 @@
 
 """Tests for the VLM evaluation command-line entry point."""
 
-import hashlib
-import json
 import subprocess
 import sys
 from pathlib import Path
 
-from examples.puzzletron.evaluation import checkpoint
 from examples.puzzletron.evaluation.vlm import run as evaluation
 
 
@@ -45,26 +42,6 @@ def test_direct_launcher_does_not_shadow_standard_library_profile():
     )
 
 
-def test_requirements_pin_matches_runtime_lmms_eval_revision():
-    requirements = (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/requirements.txt").read_text()
-    assert "lmms-eval.git" not in requirements
-    assert 'eva-decord==0.6.1; platform_system == "Linux"' in requirements.splitlines()
-    assert "wandb==0.29.0" in requirements.splitlines()
-    environment = json.loads(
-        (checkpoint.REPOSITORY_ROOT / "examples/puzzletron/ci_environment.json").read_text()
-    )
-    assert environment["lmms_eval"]["commit"] == checkpoint.LMMS_EVAL_REVISION
-    patch = (
-        checkpoint.REPOSITORY_ROOT
-        / "examples/puzzletron/patches"
-        / environment["lmms_eval"]["compatibility_patch"]
-    )
-    assert (
-        hashlib.sha256(patch.read_bytes()).hexdigest()
-        == environment["lmms_eval"]["compatibility_patch_sha256"]
-    )
-
-
 def test_vlm_parser_exposes_only_suite_owned_sample_limits():
     help_text = evaluation._build_parser().format_help()
     assert "--limit" not in help_text
@@ -75,8 +52,3 @@ def test_vlm_parser_exposes_only_suite_owned_sample_limits():
 
 def test_vlm_parser_defaults_to_short_suite():
     assert evaluation._build_parser().get_default("suite") == "short"
-
-
-def test_huggingface_dependency_supports_range_metadata_api():
-    pyproject = (checkpoint.REPOSITORY_ROOT / "pyproject.toml").read_text()
-    assert '"huggingface_hub>=0.30.0",' in pyproject

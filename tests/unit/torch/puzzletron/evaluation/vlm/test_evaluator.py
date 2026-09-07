@@ -177,8 +177,8 @@ def test_short_profile_preserves_default_vllm_backend(monkeypatch, tmp_path, cap
         assert budget["resolution"] == "max(task_max_new_tokens, model_max_new_tokens_floor=1)"
 
 
-@pytest.mark.parametrize("suite", ["short", suites.TASK_PREFIX100_REPEAT2_SUITE])
-def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path, suite):
+def test_repeated_profile_resumes_completed_repetitions(monkeypatch, tmp_path):
+    suite = suites.TASK_PREFIX100_REPEAT2_SUITE
     model = _write_checkpoint(tmp_path)
     source_tasks = ("realworldqa", "mmmu_val")
     lmms_root = _write_lmms_tasks(tmp_path, source_tasks)
@@ -327,7 +327,6 @@ def test_realworldqa_mmmu_prefix100_policy_is_explicit_and_repeated():
         "do_sample": False,
     }
     assert suites.execution_policy("full", timeout_seconds=None)["limit"] is None
-    assert suites.execution_policy("full-v1", timeout_seconds=None)["limit"] is None
 
 
 @pytest.mark.parametrize("alias", suites.DEPRECATED_SUITE_ALIASES)

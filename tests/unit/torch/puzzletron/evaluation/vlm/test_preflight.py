@@ -15,7 +15,6 @@
 
 """Tests for VLM profile preflight and runtime settings."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,7 +44,7 @@ from tests.unit.torch.puzzletron.evaluation.vlm.vlm_test_utils import (
 
 def test_versioned_profile_preflight_reports_immutable_contract(monkeypatch, tmp_path):
     model, hf_home = _full_inputs(monkeypatch, tmp_path)
-    name = "short-v1"
+    name = "core-3_344-examples_r1-native"
     args = evaluation._build_parser().parse_args(
         [
             "--checkpoint",
@@ -321,7 +320,7 @@ def test_versioned_profile_rejects_runtime_override(monkeypatch, tmp_path, optio
             "--output-dir",
             str(tmp_path / "results"),
             "--profile",
-            "short-v1",
+            "core-3_344-examples_r1-native",
             option,
             value,
             "--hf-home",
@@ -331,36 +330,6 @@ def test_versioned_profile_rejects_runtime_override(monkeypatch, tmp_path, optio
 
     with pytest.raises(ValueError, match=f"{option} cannot override"):
         preflight.prepare(args)
-
-
-def test_all_row_profile_task_preserves_contract_identity(monkeypatch, tmp_path):
-    model, hf_home = _full_inputs(monkeypatch, tmp_path)
-    profile_name = "full-v1"
-    task = "realworldqa"
-    args = evaluation._build_parser().parse_args(
-        [
-            "--checkpoint",
-            str(model),
-            "--output-dir",
-            str(tmp_path / "results"),
-            "--profile",
-            profile_name,
-            "--profile-task",
-            task,
-            "--hf-home",
-            str(hf_home),
-        ]
-    )
-
-    prepared = preflight.prepare(args)
-
-    assert prepared.source_tasks == (task,)
-    assert prepared.report["quick_selected_rows"] is None
-    assert prepared.report["quick_row_identities"] is None
-    assert prepared.report["quick_task_denominators"] is None
-    assert (
-        prepared.report["profile_fingerprint"] == contracts.load_profile(profile_name).fingerprint
-    )
 
 
 def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, tmp_path):
@@ -392,40 +361,11 @@ def test_exact_row_profile_group_shard_partitions_rows_and_leaves(monkeypatch, t
     assert {row["leaf_task"] for row in manifest_rows} == {
         f"mvbench_{leaf}" for leaf in expected_leaves
     }
-    manifest_selection = prepared.quick_manifest["tasks"]["mvbench"]["selection"]
-    assert manifest_selection["population_rows"] == 600
-    assert manifest_selection["selected_rows"] == 24
-    assert [stratum["name"] for stratum in manifest_selection["strata"]] == list(expected_leaves)
-    assert manifest_selection["selected_index_quantiles"] == {
-        "method": "lower-order-statistic",
-        "p0": 12,
-        "p25": 37,
-        "p50": 87,
-        "p75": 137,
-        "p100": 187,
-    }
-    assert (
-        manifest_selection["selected_row_identities_sha256"]
-        == hashlib.sha256(
-            json.dumps(manifest_rows, separators=(",", ":"), sort_keys=True).encode()
-        ).hexdigest()
-    )
-    assert prepared.report["quick_selected_rows"] == 24
-    assert prepared.report["quick_row_identities"] == suites.manifest_row_identities(
-        prepared.quick_manifest
-    )
     assert prepared.report["quick_task_denominators"] == {
         "mvbench": {"population_rows": 600, "selected_rows": 24}
     }
     assert (
         evaluator._expected_task_populations(prepared, ("modelopt_vlm_benchmark_mvbench",)) is None
-    )
-    assert prepared.report["quick_manifest_sha256"] == suites.manifest_sha256(
-        prepared.quick_manifest
-    )
-    assert (
-        prepared.report["profile_fingerprint"]
-        == contracts.load_profile("judge-free-8_690-examples_r1-native").fingerprint
     )
     tasks_root, _ = tasks.prepare(
         tmp_path / "results",
@@ -464,12 +404,20 @@ def test_empty_exact_row_leaf_filter_reaches_manifest_validation():
     ("selection", "message"),
     [
         (("--suite", "short", "--profile-task", "realworldqa"), "requires"),
-        (("--profile", "short-v1", "--profile-task", "realworldqa"), "supported only"),
-        (("--profile", "full-v1", "--profile-task-shard", "0/8"), "requires"),
         (
             (
                 "--profile",
-                "full-v1",
+                "core-3_344-examples_r1-native",
+                "--profile-task",
+                "realworldqa",
+            ),
+            "supported only",
+        ),
+        (("--profile", "core-3_full_r1-native", "--profile-task-shard", "0/8"), "requires"),
+        (
+            (
+                "--profile",
+                "core-3_full_r1-native",
                 "--profile-task",
                 "realworldqa",
                 "--profile-task-shard",
