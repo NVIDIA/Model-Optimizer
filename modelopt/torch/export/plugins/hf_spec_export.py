@@ -533,14 +533,10 @@ class LiLiCorrExporter(DFlashExporter):
 
     Same z-lab-compatible format as DFlash, plus the reranker weights (``lilicorr.*``,
     already captured by the inherited ``dflash_module.`` stripping) and the config fields
-    the serving loader rebuilds the head from.
-
-    ``architectures`` is the serving router: a checkpoint that declares
-    ``DFlashDraftModel`` loads as plain DFlash and silently ignores the head, which reads
-    as a small believable acceptance delta rather than as an error. Every geometry field
-    is emitted for the same reason — ``lilicorr_logit_scale`` and ``lilicorr_vector_eps``
-    change the score without changing any tensor shape, so a serving default guessed in
-    their absence would build a head that loads cleanly and scores a different function.
+    the serving loader rebuilds the head from. Every geometry field must be emitted:
+    ``lilicorr_logit_scale`` and ``lilicorr_vector_eps`` change the score without changing
+    any tensor shape, so a default guessed in their absence loads cleanly and scores a
+    different function.
     """
 
     def _export_config(self):
@@ -567,13 +563,8 @@ class LiLiCorrExporter(DFlashExporter):
             }
         )
 
-        # A conv-bearing draft carries 20 extra tensors (2 per sublayer wrapper, 2
-        # wrappers per layer), and they ride out on the inherited `dflash_module.`
-        # stripping. But the serving loader builds the wrappers from GEOMETRY, not from
-        # the tensors: with these two keys absent it defaults both to 0, builds no
-        # convolution modules, and then drops all 20 tensors in silence, so the draft
-        # serves as its conv-free parent and reports a believable acceptance length.
-        # Read off the built modules for the same reason as the head fields above.
+        # The serving loader builds the conv wrappers from geometry, not from the tensors:
+        # without these two keys it defaults both to 0 and drops the conv tensors silently.
         conv = getattr(self.model.dflash_module.layers[0], "attention_conv", None)
         if getattr(conv, "taps", None):
             config["dflash_config"].update(

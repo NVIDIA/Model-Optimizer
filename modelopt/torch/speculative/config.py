@@ -281,15 +281,15 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_fp32_master_weights: bool = ModeloptField(
-        default=True,
+        default=False,
         description=(
-            "Keep the draft's parameters in fp32 while its matmuls still run in the base "
-            "model's dtype, i.e. classic mixed precision with fp32 master weights.\n\n"
-            "The bf16 half is supplied by the model, not by the caller: the draft enters "
-            "an autocast to the frozen base's dtype around its own forward, so the flag "
-            "behaves the same under HF Trainer's `bf16`, under evaluation, and under a "
-            "plain convert-and-forward. Where the Trainer's autocast is already active "
-            "this nests with the same dtype and changes nothing.\n\n"
+            "Keep the draft's parameters in fp32 while its matmuls run in bf16, i.e. "
+            "classic mixed precision with fp32 master weights.\n\n"
+            "Requires a bf16 autocast around the forward, which HF Trainer supplies under "
+            "TrainingArguments.bf16. Paths that do not go through the Trainer -- "
+            "evaluation, pseudo_speculative_generate, a plain convert() and forward -- "
+            "currently need the caller to supply it. No shipped recipe exercises those "
+            "(estimate_ar: false, do_eval: false).\n\n"
             "The cost is memory: about 12 bytes per parameter for the weight plus Adam's "
             "two moments, instead of 6. Compute is unchanged, but note that fp32 "
             "parameters also mean fp32 gradients, so under DDP the gradient all-reduce "
@@ -302,8 +302,8 @@ class DFlashConfig(ModeloptBaseConfig):
             "represent near `v` is about 0.4%. Every DECREASE therefore rounds back to the "
             "same number, `v` can only grow, and since the update is divided by `sqrt(v)` "
             "the effective step size only shrinks -- from step 1, at any learning rate.\n\n"
-            "Applies to every projector_type. On by default; set to False to reduce "
-            "optimizer memory when training at the limit of a node's capacity."
+            "Applies to every projector_type. Off by default; both LiLiCorr recipes set it "
+            "to true, which is the arithmetic their published results were trained with."
         ),
     )
 

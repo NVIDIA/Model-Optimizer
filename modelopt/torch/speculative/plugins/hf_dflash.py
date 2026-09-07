@@ -71,7 +71,6 @@ Draft model components:
            lazy rope pattern needed for MLA models.
 """
 
-import contextlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -554,8 +553,7 @@ class HFDFlashModel(DFlashModel):
         cannot represent its own updates. Only the draft takes fp32 under
         ``dflash_fp32_master_weights`` -- the frozen base has no trainable parameters and no
         optimizer state, so promoting it would double its memory for nothing and change the
-        hidden states the draft is trained against. The matmuls still run in the base dtype;
-        that comes from ``_draft_autocast``, not from whoever calls the model.
+        hidden states the draft is trained against.
 
         The rotary buffer is built here rather than on the draft's first forward.
         ``_maybe_init_rotary_emb`` creates the non-persistent ``inv_freq`` lazily, and the
@@ -598,7 +596,9 @@ class HFDFlashModel(DFlashModel):
         ``from_pretrained(dtype="auto")`` gives every tensor a single dtype -- the base
         model's -- which discards the extra mantissa bits an fp32 draft wrote to disk.
         Reloading those tensors at their stored dtype is the only way to get them back, and
-        without it a resume silently costs the run one rounding of its master weights.
+        without it a resume silently costs the run one rounding of its master weights. Pass
+        it only for an HF-format checkpoint; it raises if there are no safetensors there,
+        which is better than silently keeping the wrong precision.
         """
         base_device = self._base_device()
         if base_device.type == "meta":
@@ -609,79 +609,29 @@ class HFDFlashModel(DFlashModel):
 
     def _reload_draft_weights_at_stored_precision(self, checkpoint_dir):
         """Copy the draft's tensors back out of the checkpoint at the dtype they were saved in."""
-        from safetensors.torch import load_file
+        # Imported here rather than at module scope: that module pulls in accelerate,
+        # huggingface_hub and torch.distributed.tensor.
+        from modelopt.torch.utils.plugins.model_load_utils import (
+            read_safetensors_subset,
+            weight_map_for,
+        )
 
         prefix = "dflash_module."
+        stored = read_safetensors_subset(
+            checkpoint_dir, weight_map_for(checkpoint_dir), lambda k: k.startswith(prefix)
+        )
         own = dict(self.dflash_module.named_parameters())
-        shards = sorted(Path(checkpoint_dir).glob("*.safetensors"))
-        if not shards:
-            logger.warning(
-                "DFlash draft precision restore: no safetensors under %s; the draft keeps "
-                "the dtype it was loaded at.",
-                checkpoint_dir,
-            )
-            return
-
-        restored, refined = 0, 0
-        for shard in shards:
-            for key, saved in load_file(str(shard)).items():
-                if not key.startswith(prefix):
-                    continue
+        with torch.no_grad():
+            for key, saved in stored.items():
                 param = own.get(key[len(prefix) :])
-                if param is None or param.shape != saved.shape:
-                    continue
-                with torch.no_grad():
-                    refined += not torch.equal(param.detach().cpu(), saved.to(param.dtype))
+                if param is not None and param.shape == saved.shape:
                     param.copy_(saved.to(param.dtype))
-                restored += 1
         logger.info(
-            "DFlash draft precision restore: %d/%d tensors reloaded from %s, %d recovered "
-            "precision the load had dropped.",
-            restored,
+            "DFlash draft precision restore: %d/%d tensors reloaded from %s.",
+            len(stored),
             len(own),
             checkpoint_dir,
-            refined,
         )
-
-    def _draft_autocast(self):
-        """Autocast for a promoted draft, so the flag does not depend on its caller.
-
-        ``dflash_fp32_master_weights`` is only mixed precision if something casts the
-        matmuls back down to the base model's dtype; on its own it is fp32 parameters
-        being fed bf16 hidden states by the frozen target, which raises on the first
-        matmul. Nothing in this package used to supply that cast. HF ``Trainer`` supplies
-        one around ``compute_loss`` when ``TrainingArguments.bf16`` is set, which is why
-        training works, but evaluation, ``pseudo_speculative_generate`` and a plain
-        ``convert()`` followed by a forward get no such wrapper.
-
-        This is the same context the Trainer would install, entered by the model itself.
-        When the Trainer's is already active this nests with the same device type and
-        dtype and changes nothing; when it is not, it is the difference between bf16
-        matmuls and a dtype mismatch. Disabled whenever there is nothing to reconcile:
-        an unpromoted draft, or a base model that is already fp32.
-        """
-        draft = getattr(self, "dflash_module", None)
-        base_dtype = getattr(getattr(self, "_base_model", None), "dtype", None)
-        enabled = (
-            getattr(self, "dflash_fp32_master_weights", False)
-            and draft is not None
-            and base_dtype in (torch.float16, torch.bfloat16)
-        )
-        if not enabled:
-            return contextlib.nullcontext()
-        return torch.autocast(device_type=next(draft.parameters()).device.type, dtype=base_dtype)
-
-    def __call__(self, *args, **kwargs):
-        """Enter the draft's autocast around every forward, whoever calls it.
-
-        Placed on ``__call__`` rather than on ``forward`` deliberately: Domino, DSpark and
-        any future variant override ``forward`` and would each have to remember to wrap
-        it, and the one that forgot would not fail on a bf16 base until someone ran it
-        outside the Trainer. Overriding here covers them all, including the heads they
-        apply after the draft backbone, which live outside ``dflash_module``.
-        """
-        with self._draft_autocast():
-            return super().__call__(*args, **kwargs)
 
     # Draft-module entries that legitimately come from the base model rather than the
     # exported draft checkpoint, so their absence (or presence) is not an error.
@@ -1216,11 +1166,6 @@ class HFDFlashModel(DFlashModel):
 
         # 6. Compute loss and accuracy
         logits = self._base_model_lm_head(hidden)
-        # `base_outputs` carries the target's hidden states and logits, which a variant may
-        # need outside the KD term: the `base_logits` argument below has already narrowed to
-        # the self-logit-distillation switch, so a variant cannot recover the distribution
-        # from it. Passing the container rather than its fields keeps this signature stable
-        # when the next variant wants a third tensor.
         loss, accuracy = self._compute_loss(
             logits,
             input_ids,
@@ -1340,18 +1285,16 @@ class HFDFlashModel(DFlashModel):
 
         attn_mask = self._build_generate_swa_mask(ctx_len, bsz, target_hidden.dtype, device)
 
-        # Draft forward. Wrapped explicitly because this method is called directly rather
-        # than through `__call__`, so it does not inherit the autocast installed there.
-        with self._draft_autocast():
-            draft_hidden = self.dflash_module(
-                noise_embedding=noise_embedding,
-                target_hidden=target_hidden,
-                position_ids=pos_ids,
-                attention_mask=attn_mask,
-            )
+        # Draft forward
+        draft_hidden = self.dflash_module(
+            noise_embedding=noise_embedding,
+            target_hidden=target_hidden,
+            position_ids=pos_ids,
+            attention_mask=attn_mask,
+        )
 
-            # Logits on positions 1..block_size-1 (skip anchor at position 0)
-            draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
+        # Logits on positions 1..block_size-1 (skip anchor at position 0)
+        draft_logits = self._base_model_lm_head(draft_hidden[:, 1:, :])
         draft_tokens = draft_logits.argmax(dim=-1)  # [B, block_size-1]
 
         # Return up to `steps` tokens

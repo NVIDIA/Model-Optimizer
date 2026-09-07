@@ -974,14 +974,20 @@ class TestDFlashFp32MasterWeights:
         assert model._base_model.dtype == torch.bfloat16
 
     def test_adam_moments_follow_the_parameters(self):
-        """The half that actually matters, and the one a parameter check would miss."""
+        """The half that actually matters, and the one a parameter check would miss.
+
+        The forward runs under ``torch.autocast`` because the flag needs one: a promoted
+        fp32 draft is fed bf16 hidden states by the frozen target. HF Trainer supplies it
+        under ``TrainingArguments.bf16``, so this mirrors the training path.
+        """
         moments = {}
         for flag, expected in ((False, torch.bfloat16), (True, torch.float32)):
             model = _converted(fp32_master_weights=flag)
             model.train()
             trainable = [p for p in model.dflash_module.parameters() if p.requires_grad]
             optimizer = torch.optim.AdamW(trainable, lr=1e-4)
-            out = model(**_dflash_batch(model.dflash_config.vocab_size))
+            with torch.autocast("cpu", dtype=torch.bfloat16):
+                out = model(**_dflash_batch(model.dflash_config.vocab_size))
             out.loss.backward()
             optimizer.step()
 
@@ -1051,7 +1057,8 @@ class TestDFlashFp32MasterWeights:
         optimizer = torch.optim.AdamW(
             [p for p in restored.dflash_module.parameters() if p.requires_grad], lr=1e-4
         )
-        out = restored(**_dflash_batch(restored.dflash_config.vocab_size))
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            out = restored(**_dflash_batch(restored.dflash_config.vocab_size))
         out.loss.backward()
         optimizer.step()
         assert {
@@ -1059,49 +1066,6 @@ class TestDFlashFp32MasterWeights:
             for state in optimizer.state.values()
             for key in ("exp_avg", "exp_avg_sq")
         } == {torch.float32}
-
-    def test_forward_needs_no_autocast_from_the_caller(self):
-        """A promoted draft is fed bf16 hidden states by the frozen bf16 target.
-
-        The model supplies the autocast that reconciles them, so this works without the
-        caller wrapping anything -- which is what evaluation, generation and any direct
-        ``convert()`` + forward rely on.
-        """
-        model = _converted(fp32_master_weights=True)
-        model.train()
-        out = model(**_dflash_batch(model.dflash_config.vocab_size))
-        assert torch.isfinite(out.loss)
-
-    def test_supplied_autocast_matches_the_trainers(self):
-        """Nesting inside HF Trainer's own autocast changes nothing.
-
-        The published training path runs under ``TrainingArguments.bf16``, so the model's
-        context must be inert there rather than merely harmless.
-        """
-        batch = _dflash_batch(_converted().dflash_config.vocab_size)
-
-        torch.manual_seed(7)
-        model = _converted(fp32_master_weights=True)
-        model.train()
-        torch.manual_seed(7)
-        with torch.autocast("cpu", dtype=torch.bfloat16):
-            wrapped = model(**batch).loss
-
-        torch.manual_seed(7)
-        model = _converted(fp32_master_weights=True)
-        model.train()
-        torch.manual_seed(7)
-        bare = model(**batch).loss
-
-        assert torch.equal(wrapped.detach(), bare.detach())
-
-    def test_generation_needs_no_autocast_either(self):
-        """``pseudo_speculative_generate`` is called directly, not through ``__call__``."""
-        model = _converted(fp32_master_weights=True)
-        model.eval()
-        input_ids = _dflash_batch(model.dflash_config.vocab_size, bsz=1)["input_ids"]
-        _, draft_tokens = model.pseudo_speculative_generate(input_ids, steps=2)
-        assert draft_tokens.shape[0] == 1
 
 
 class TestDFlashDraftActivationCheckpointing:
